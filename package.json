@@ -1,0 +1,16 @@
+{
+  "name": "agentdb",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "bun@1.2.19",
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "scripts": {
+    "build": "bun run --filter '*' --if-present build",
+    "check": "bun run --filter '*' --if-present check"
+  }
+}
