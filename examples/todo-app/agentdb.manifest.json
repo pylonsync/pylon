@@ -1,0 +1,31 @@
+{
+  "name": "todo-app",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        { "name": "email", "type": "string", "optional": false, "unique": true },
+        { "name": "displayName", "type": "string", "optional": false, "unique": false },
+        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Todo",
+      "fields": [
+        { "name": "title", "type": "string", "optional": false, "unique": false },
+        { "name": "done", "type": "bool", "optional": false, "unique": false },
+        { "name": "authorId", "type": "id(User)", "optional": false, "unique": false },
+        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+      ],
+      "indexes": [
+        { "name": "by_author", "fields": ["authorId"], "unique": false }
+      ]
+    }
+  ],
+  "routes": [
+    { "path": "/", "mode": "server" },
+    { "path": "/todos", "mode": "live" }
+  ]
+}

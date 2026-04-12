@@ -7,9 +7,9 @@
 /target/
 
 # JavaScript / Bun
-/node_modules/
-/dist/
-/.bun/
+node_modules/
+dist/
+.bun/
 
 # Environment / local overrides
 .env

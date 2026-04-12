@@ -10,4 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 agentdb-core = { path = "../core" }
+agentdb-schema = { path = "../schema" }
 

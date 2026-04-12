@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "packageManager": "bun@1.2.19",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "examples/*"
   ],
   "devDependencies": {
     "typescript": "^5.8.3"
