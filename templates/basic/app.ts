@@ -1,24 +1,14 @@
-import { entity, field, defineRoute, buildManifest } from "@agentdb/sdk";
+import { entity, field, defineRoute, buildManifest } from "./sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
 
-const User = entity("User", {
-  email: field.string().unique(),
-  displayName: field.string(),
-  createdAt: field.datetime(),
-});
-
-const Todo = entity("Todo", {
+const Post = entity("Post", {
   title: field.string(),
-  done: field.bool(),
-  authorId: field.id("User"),
-  createdAt: field.datetime(),
-}, {
-  indexes: [
-    { name: "by_author", fields: ["authorId"], unique: false },
-  ],
+  slug: field.string().unique(),
+  body: field.richtext(),
+  publishedAt: field.datetime().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -30,9 +20,9 @@ const home = defineRoute({
   mode: "server",
 });
 
-const todoList = defineRoute({
-  path: "/todos",
-  mode: "live",
+const postBySlug = defineRoute({
+  path: "/posts/:slug",
+  mode: "static",
 });
 
 // ---------------------------------------------------------------------------
@@ -40,12 +30,12 @@ const todoList = defineRoute({
 // ---------------------------------------------------------------------------
 
 const manifest = buildManifest({
-  name: "todo-app",
+  name: "__APP_NAME__",
   version: "0.1.0",
-  entities: [User, Todo],
-  routes: [home, todoList],
+  entities: [Post],
+  routes: [home, postBySlug],
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: agentdb codegen examples/todo-app/app.ts
+// Used by: agentdb codegen app.ts
 console.log(JSON.stringify(manifest, null, 2));
