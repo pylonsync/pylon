@@ -7,6 +7,13 @@
         "typescript": "^5.8.3",
       },
     },
+    "examples/todo-app": {
+      "name": "@agentdb/example-todo-app",
+      "version": "0.1.0",
+      "dependencies": {
+        "@agentdb/sdk": "workspace:*",
+      },
+    },
     "packages/react": {
       "name": "@agentdb/react",
       "version": "0.1.0",
@@ -27,6 +34,8 @@
     },
   },
   "packages": {
+    "@agentdb/example-todo-app": ["@agentdb/example-todo-app@workspace:examples/todo-app"],
+
     "@agentdb/react": ["@agentdb/react@workspace:packages/react"],
 
     "@agentdb/react-native": ["@agentdb/react-native@workspace:packages/react-native"],

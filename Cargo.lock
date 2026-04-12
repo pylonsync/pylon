@@ -15,6 +15,7 @@ name = "agentdb-cli"
 version = "0.1.0"
 dependencies = [
  "agentdb-core",
+ "agentdb-schema",
 ]
 
 [[package]]
@@ -36,6 +37,9 @@ version = "0.1.0"
 [[package]]
 name = "agentdb-schema"
 version = "0.1.0"
+dependencies = [
+ "agentdb-core",
+]
 
 [[package]]
 name = "agentdb-staticgen"

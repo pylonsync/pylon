@@ -1,0 +1,13 @@
+{
+  "name": "@agentdb/example-todo-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentdb/sdk": "workspace:*"
+  },
+  "scripts": {
+    "generate-manifest": "bun run app.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
+  }
+}
