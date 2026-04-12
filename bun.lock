@@ -1,0 +1,42 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "agentdb",
+      "devDependencies": {
+        "typescript": "^5.8.3",
+      },
+    },
+    "packages/react": {
+      "name": "@agentdb/react",
+      "version": "0.1.0",
+      "dependencies": {
+        "@agentdb/sdk": "file:../sdk",
+      },
+    },
+    "packages/react-native": {
+      "name": "@agentdb/react-native",
+      "version": "0.1.0",
+      "dependencies": {
+        "@agentdb/sdk": "file:../sdk",
+      },
+    },
+    "packages/sdk": {
+      "name": "@agentdb/sdk",
+      "version": "0.1.0",
+    },
+  },
+  "packages": {
+    "@agentdb/react": ["@agentdb/react@workspace:packages/react"],
+
+    "@agentdb/react-native": ["@agentdb/react-native@workspace:packages/react-native"],
+
+    "@agentdb/sdk": ["@agentdb/sdk@workspace:packages/sdk"],
+
+    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "@agentdb/react/@agentdb/sdk": ["@agentdb/sdk@file:packages/sdk", {}],
+
+    "@agentdb/react-native/@agentdb/sdk": ["@agentdb/sdk@file:packages/sdk", {}],
+  }
+}

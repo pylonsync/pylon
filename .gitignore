@@ -1,0 +1,24 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Rust
+/target/
+
+# JavaScript / Bun
+/node_modules/
+/dist/
+/.bun/
+
+# Environment / local overrides
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs / coverage / temp
+*.log
+coverage/
+tmp/
+temp/

@@ -1,0 +1,13 @@
+[package]
+name = "agentdb-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "agentdb"
+path = "src/main.rs"
+
+[dependencies]
+agentdb-core = { path = "../core" }
+
