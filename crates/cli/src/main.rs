@@ -4,6 +4,13 @@ use agentdb_core::{
 };
 use agentdb_schema::{Entity, Field, FieldType, Index, Schema};
 
+use std::path::Path;
+
+// Embed template files and SDK source at compile time.
+const TEMPLATE_BASIC_APP: &str = include_str!("../../../templates/basic/app.ts");
+const TEMPLATE_BASIC_TSCONFIG: &str = include_str!("../../../templates/basic/tsconfig.json");
+const SDK_SOURCE: &str = include_str!("../../../packages/sdk/src/index.ts");
+
 fn main() {
     std::process::exit(run().as_i32());
 }
@@ -14,8 +21,10 @@ fn run() -> ExitCode {
     let command = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
 
     match command {
+        Some("codegen") => cmd_codegen(&args, json_mode),
         Some("doctor") => cmd_doctor(&args, json_mode),
         Some("explain") => cmd_explain(&args, json_mode),
+        Some("init") => cmd_init(&args, json_mode),
         Some("version") => cmd_version(json_mode),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
@@ -29,6 +38,363 @@ fn run() -> ExitCode {
                 print_usage();
                 ExitCode::Ok
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// init — scaffold a new app from a template
+// ---------------------------------------------------------------------------
+
+fn cmd_init(args: &[String], json_mode: bool) -> ExitCode {
+    // Parse positional args, excluding flags and their values.
+    let flag_values: std::collections::HashSet<&str> = args
+        .windows(2)
+        .filter(|w| w[0] == "--template")
+        .map(|w| w[1].as_str())
+        .collect();
+
+    let positional: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-') && *a != "init" && !flag_values.contains(a.as_str()))
+        .map(|s| s.as_str())
+        .collect();
+
+    let template = args
+        .windows(2)
+        .find(|w| w[0] == "--template")
+        .map(|w| w[1].as_str())
+        .unwrap_or("basic");
+
+    let app_name = match positional.first() {
+        Some(n) => *n,
+        None => {
+            let diag = Diagnostic {
+                severity: Severity::Error,
+                code: "INIT_NO_NAME".into(),
+                message: "No app name provided".into(),
+                span: None,
+                hint: Some("Usage: agentdb init <name> [--template basic]".into()),
+            };
+            print_diagnostics(&[diag], json_mode);
+            return ExitCode::Usage;
+        }
+    };
+
+    // Validate app name: no path separators, no empty, no leading dot.
+    if app_name.is_empty()
+        || app_name.contains('/')
+        || app_name.contains('\\')
+        || app_name.starts_with('.')
+    {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: "INIT_INVALID_NAME".into(),
+            message: format!("Invalid app name: \"{app_name}\""),
+            span: None,
+            hint: Some("App name must be a simple directory name (no slashes, no leading dot)".into()),
+        };
+        print_diagnostics(&[diag], json_mode);
+        return ExitCode::Usage;
+    }
+
+    if template != "basic" {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: "INIT_UNKNOWN_TEMPLATE".into(),
+            message: format!("Unknown template: \"{template}\""),
+            span: None,
+            hint: Some("Available templates: basic".into()),
+        };
+        print_diagnostics(&[diag], json_mode);
+        return ExitCode::Usage;
+    }
+
+    let target = Path::new(app_name);
+
+    // Refuse to overwrite non-empty directories.
+    if target.exists() {
+        let is_empty = match std::fs::read_dir(target) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        };
+        if !is_empty {
+            let diag = Diagnostic {
+                severity: Severity::Error,
+                code: "INIT_DIR_EXISTS".into(),
+                message: format!("Directory \"{}\" already exists and is not empty", target.display()),
+                span: None,
+                hint: Some("Choose a different name or remove the existing directory".into()),
+            };
+            print_diagnostics(&[diag], json_mode);
+            return ExitCode::Error;
+        }
+    }
+
+    // Create directory.
+    if let Err(e) = std::fs::create_dir_all(target) {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: "INIT_MKDIR_FAILED".into(),
+            message: format!("Could not create directory \"{}\": {e}", target.display()),
+            span: None,
+            hint: None,
+        };
+        print_diagnostics(&[diag], json_mode);
+        return ExitCode::Error;
+    }
+
+    // Write template files.
+    let app_ts = TEMPLATE_BASIC_APP.replace("__APP_NAME__", app_name);
+    let package_json = format!(
+        "{{\n  \"name\": \"{app_name}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"codegen\": \"agentdb codegen app.ts --out agentdb.manifest.json\",\n    \"doctor\": \"agentdb doctor agentdb.manifest.json\",\n    \"check\": \"tsc -p tsconfig.json --noEmit\"\n  }}\n}}\n"
+    );
+
+    let files: &[(&str, &str)] = &[
+        ("sdk.ts", SDK_SOURCE),
+        ("app.ts", &app_ts),
+        ("tsconfig.json", TEMPLATE_BASIC_TSCONFIG),
+        ("package.json", &package_json),
+    ];
+
+    for (name, contents) in files {
+        let path = target.join(name);
+        if let Err(e) = std::fs::write(&path, contents) {
+            let diag = Diagnostic {
+                severity: Severity::Error,
+                code: "INIT_WRITE_FAILED".into(),
+                message: format!("Could not write {}: {e}", path.display()),
+                span: None,
+                hint: None,
+            };
+            print_diagnostics(&[diag], json_mode);
+            return ExitCode::Error;
+        }
+    }
+
+    // Run codegen: execute bun on the new app.ts to generate the manifest.
+    let entry_path = target.join("app.ts");
+    let manifest_path = target.join("agentdb.manifest.json");
+    let entry_str = entry_path.to_string_lossy().to_string();
+
+    match run_bun_codegen(&entry_str) {
+        Ok(manifest_json) => {
+            let contents = format!("{manifest_json}\n");
+            if let Err(e) = std::fs::write(&manifest_path, &contents) {
+                let diag = Diagnostic {
+                    severity: Severity::Warning,
+                    code: "INIT_CODEGEN_WRITE_FAILED".into(),
+                    message: format!(
+                        "Files created but could not write manifest: {e}"
+                    ),
+                    span: None,
+                    hint: Some("Run 'agentdb codegen app.ts --out agentdb.manifest.json' manually".into()),
+                };
+                print_diagnostics(&[diag], json_mode);
+            }
+        }
+        Err(diag) => {
+            // Codegen failed — warn but don't fail the whole init.
+            let warning = Diagnostic {
+                severity: Severity::Warning,
+                code: "INIT_CODEGEN_FAILED".into(),
+                message: format!(
+                    "Files created but manifest generation failed: {}",
+                    diag.message
+                ),
+                span: None,
+                hint: Some("Run 'agentdb codegen app.ts --out agentdb.manifest.json' manually".into()),
+            };
+            print_diagnostics(&[warning], json_mode);
+        }
+    }
+
+    // Success output.
+    if json_mode {
+        let files_json: Vec<String> = files
+            .iter()
+            .map(|(name, _)| format!("\"{app_name}/{name}\""))
+            .collect();
+        let has_manifest = manifest_path.exists();
+        if has_manifest {
+            let mut fj = files_json;
+            fj.push(format!("\"{app_name}/agentdb.manifest.json\""));
+            println!(
+                "{{\"code\":\"INIT_OK\",\"name\":\"{app_name}\",\"template\":\"{template}\",\"files\":[{}]}}",
+                fj.join(",")
+            );
+        } else {
+            println!(
+                "{{\"code\":\"INIT_OK\",\"name\":\"{app_name}\",\"template\":\"{template}\",\"files\":[{}]}}",
+                files_json.join(",")
+            );
+        }
+    } else {
+        println!("Created {app_name}/");
+        for (name, _) in files {
+            println!("  {name}");
+        }
+        if manifest_path.exists() {
+            println!("  agentdb.manifest.json");
+        }
+        println!();
+        println!("Next steps:");
+        println!("  cd {app_name}");
+        println!("  agentdb doctor agentdb.manifest.json");
+        println!("  agentdb explain agentdb.manifest.json");
+    }
+
+    ExitCode::Ok
+}
+
+/// Run a TS entry file with Bun and return the trimmed stdout as manifest JSON.
+fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
+    let output = std::process::Command::new("bun")
+        .arg("run")
+        .arg(entry_file)
+        .output()
+        .map_err(|e| Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_EXEC_FAILED".into(),
+            message: format!("Failed to execute bun: {e}"),
+            span: None,
+            hint: Some("Ensure bun is installed and available on PATH".into()),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.is_empty() {
+            stderr.trim().to_string()
+        } else {
+            stdout.trim().to_string()
+        };
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_EXIT".into(),
+            message: format!(
+                "bun run {entry_file} exited with status {}",
+                output.status.code().unwrap_or(-1)
+            ),
+            span: None,
+            hint: if detail.is_empty() { None } else { Some(detail) },
+        });
+    }
+
+    let manifest_json = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Validate it parses as a manifest.
+    parse_manifest(&manifest_json, entry_file).map_err(|diags| {
+        Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_INVALID_OUTPUT".into(),
+            message: "Output is not a valid manifest".into(),
+            span: None,
+            hint: diags.first().map(|d| d.message.clone()),
+        }
+    })?;
+
+    Ok(manifest_json)
+}
+
+// ---------------------------------------------------------------------------
+// codegen — run a TS entry file with Bun, capture the canonical manifest
+// ---------------------------------------------------------------------------
+
+fn cmd_codegen(args: &[String], json_mode: bool) -> ExitCode {
+    let positional: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-') && *a != "codegen")
+        .map(|s| s.as_str())
+        .collect();
+
+    let out_path = args
+        .windows(2)
+        .find(|w| w[0] == "--out")
+        .map(|w| w[1].as_str());
+
+    let entry_file = match positional.first() {
+        Some(f) => *f,
+        None => {
+            let diag = Diagnostic {
+                severity: Severity::Error,
+                code: "CODEGEN_NO_ENTRY".into(),
+                message: "No entry file provided".into(),
+                span: None,
+                hint: Some("Usage: agentdb codegen <entry-file> [--out <path>]".into()),
+            };
+            print_diagnostics(&[diag], json_mode);
+            return ExitCode::Usage;
+        }
+    };
+
+    if !Path::new(entry_file).exists() {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: "CODEGEN_ENTRY_NOT_FOUND".into(),
+            message: format!("Entry file not found: {entry_file}"),
+            span: None,
+            hint: Some("Provide a path to a .ts file that exports a manifest via buildManifest".into()),
+        };
+        print_diagnostics(&[diag], json_mode);
+        return ExitCode::Error;
+    }
+
+    let manifest_json = match run_bun_codegen(entry_file) {
+        Ok(json) => json,
+        Err(diag) => {
+            print_diagnostics(&[diag], json_mode);
+            return ExitCode::Error;
+        }
+    };
+
+    match out_path {
+        Some(path) => {
+            if let Some(parent) = Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        let diag = Diagnostic {
+                            severity: Severity::Error,
+                            code: "CODEGEN_WRITE_FAILED".into(),
+                            message: format!("Could not create directory {}: {e}", parent.display()),
+                            span: None,
+                            hint: None,
+                        };
+                        print_diagnostics(&[diag], json_mode);
+                        return ExitCode::Error;
+                    }
+                }
+            }
+
+            let contents = format!("{manifest_json}\n");
+            match std::fs::write(path, &contents) {
+                Ok(()) => {
+                    let diag = Diagnostic {
+                        severity: Severity::Info,
+                        code: "CODEGEN_OK".into(),
+                        message: format!("Manifest written to {path}"),
+                        span: None,
+                        hint: None,
+                    };
+                    print_diagnostics(&[diag], json_mode);
+                    ExitCode::Ok
+                }
+                Err(e) => {
+                    let diag = Diagnostic {
+                        severity: Severity::Error,
+                        code: "CODEGEN_WRITE_FAILED".into(),
+                        message: format!("Could not write manifest to {path}: {e}"),
+                        span: None,
+                        hint: None,
+                    };
+                    print_diagnostics(&[diag], json_mode);
+                    ExitCode::Error
+                }
+            }
+        }
+        None => {
+            println!("{manifest_json}");
+            ExitCode::Ok
         }
     }
 }
@@ -128,7 +494,6 @@ fn cmd_explain(args: &[String], json_mode: bool) -> ExitCode {
     };
 
     if json_mode {
-        // Re-serialize as structured JSON output
         println!("{contents}");
     } else {
         println!("App: {} v{}", manifest.name, manifest.version);
@@ -184,10 +549,6 @@ fn cmd_version(json_mode: bool) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn parse_manifest(contents: &str, path: &str) -> Result<AppManifest, Vec<Diagnostic>> {
-    // Minimal hand-rolled JSON parser for the canonical manifest shape.
-    // This avoids pulling in serde/serde_json for the first slice.
-    // It's intentionally limited to the exact shape we produce.
-
     let trimmed = contents.trim();
     let err = |msg: String| -> Vec<Diagnostic> {
         vec![Diagnostic {
@@ -203,8 +564,6 @@ fn parse_manifest(contents: &str, path: &str) -> Result<AppManifest, Vec<Diagnos
         }]
     };
 
-    // We'll use a very simple approach: find known keys and extract values.
-    // This is NOT a general JSON parser — it only handles our canonical shape.
     let get_string = |key: &str| -> Option<String> {
         let pattern = format!("\"{}\"", key);
         let idx = trimmed.find(&pattern)?;
@@ -222,10 +581,7 @@ fn parse_manifest(contents: &str, path: &str) -> Result<AppManifest, Vec<Diagnos
     let name = get_string("name").ok_or_else(|| err("Missing \"name\" field".into()))?;
     let version = get_string("version").ok_or_else(|| err("Missing \"version\" field".into()))?;
 
-    // Parse entities array
     let entities = parse_entities_array(trimmed).map_err(|msg| err(msg))?;
-
-    // Parse routes array
     let routes = parse_routes_array(trimmed).map_err(|msg| err(msg))?;
 
     Ok(AppManifest {
@@ -584,10 +940,14 @@ fn print_usage() {
     println!("agentdb <command>");
     println!();
     println!("Commands:");
+    println!("  init <name>              Create a new app");
+    println!("  codegen <entry.ts>       Generate manifest from TS app definition");
     println!("  doctor [manifest-path]   Validate an app manifest");
     println!("  explain [manifest-path]  Print a structured summary");
     println!("  version                  Print version");
     println!();
     println!("Flags:");
-    println!("  --json    Machine-readable JSON output");
+    println!("  --json                Machine-readable JSON output");
+    println!("  --out <path>          Write codegen output to file (codegen only)");
+    println!("  --template <name>     Template for init (default: basic)");
 }
