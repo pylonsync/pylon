@@ -17,9 +17,12 @@ dist/
 !.env.example
 !.env.*.example
 
+# Generated files
+agentdb.client.ts
+agentdb.dev.db
+
 # Logs / coverage / temp
 *.log
 coverage/
 tmp/
 temp/
-tmp-init-app/

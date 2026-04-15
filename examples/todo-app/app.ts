@@ -1,4 +1,4 @@
-import { entity, field, defineRoute, buildManifest } from "@agentdb/sdk";
+import { entity, field, defineRoute, query, action, policy, buildManifest } from "@agentdb/sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -22,17 +22,81 @@ const Todo = entity("Todo", {
 });
 
 // ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+const todosByAuthor = query("todosByAuthor", {
+  input: [{ name: "authorId", type: "id(User)" }],
+});
+
+const allTodos = query("allTodos", {
+  input: [{ name: "done", type: "bool", optional: true }],
+});
+
+const todoById = query("todoById", {
+  input: [{ name: "todoId", type: "id(Todo)" }],
+});
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+const createTodo = action("createTodo", {
+  input: [
+    { name: "title", type: "string" },
+    { name: "authorId", type: "id(User)" },
+  ],
+});
+
+const toggleTodo = action("toggleTodo", {
+  input: [{ name: "todoId", type: "id(Todo)" }],
+});
+
+// ---------------------------------------------------------------------------
+// Policies
+// ---------------------------------------------------------------------------
+
+const authenticatedCreate = policy({
+  name: "authenticatedCreate",
+  action: "createTodo",
+  allow: "auth.userId != null",
+});
+
+const ownerToggle = policy({
+  name: "ownerToggle",
+  action: "toggleTodo",
+  allow: "auth.userId == input.authorId",
+});
+
+const ownerReadTodos = policy({
+  name: "ownerReadTodos",
+  entity: "Todo",
+  allow: "auth.userId == data.authorId",
+});
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 const home = defineRoute({
   path: "/",
   mode: "server",
+  query: "allTodos",
+  auth: "public",
 });
 
 const todoList = defineRoute({
   path: "/todos",
   mode: "live",
+  query: "todosByAuthor",
+  auth: "user",
+});
+
+const todoDetail = defineRoute({
+  path: "/todos/:todoId",
+  mode: "server",
+  query: "todoById",
+  auth: "user",
 });
 
 // ---------------------------------------------------------------------------
@@ -43,7 +107,10 @@ const manifest = buildManifest({
   name: "todo-app",
   version: "0.1.0",
   entities: [User, Todo],
-  routes: [home, todoList],
+  queries: [todosByAuthor, allTodos, todoById],
+  actions: [createTodo, toggleTodo],
+  policies: [authenticatedCreate, ownerToggle, ownerReadTodos],
+  routes: [home, todoList, todoDetail],
 });
 
 // Emit canonical manifest JSON to stdout.

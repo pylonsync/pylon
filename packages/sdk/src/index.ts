@@ -69,31 +69,121 @@ export interface IndexDefinition {
   unique: boolean;
 }
 
+export interface RelationDefinition {
+  name: string;
+  target: string;
+  field: string;
+  many?: boolean;
+}
+
 export interface EntityDefinition {
   name: string;
   fields: Record<string, FieldBuilder>;
   indexes?: IndexDefinition[];
+  relations?: RelationDefinition[];
 }
 
 export function entity(
   name: string,
   fields: Record<string, FieldBuilder>,
-  options?: { indexes?: IndexDefinition[] }
+  options?: { indexes?: IndexDefinition[]; relations?: RelationDefinition[] }
 ): EntityDefinition {
-  return { name, fields, indexes: options?.indexes };
+  return { name, fields, indexes: options?.indexes, relations: options?.relations };
+}
+
+export function relation(def: RelationDefinition): RelationDefinition {
+  return def;
 }
 
 // ---------------------------------------------------------------------------
 // Route definition
 // ---------------------------------------------------------------------------
 
+export type AuthMode = "public" | "user";
+
 export interface RouteDefinition {
   path: string;
   mode: RouteMode;
+  query?: string;
+  auth?: AuthMode;
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
   return route;
+}
+
+// ---------------------------------------------------------------------------
+// Query definition
+// ---------------------------------------------------------------------------
+
+export interface InputFieldDefinition {
+  name: string;
+  type: FieldType;
+  optional?: boolean;
+}
+
+export interface QueryDefinition {
+  name: string;
+  input?: InputFieldDefinition[];
+}
+
+export function query(
+  name: string,
+  options?: { input?: InputFieldDefinition[] }
+): QueryDefinition {
+  return { name, input: options?.input };
+}
+
+// ---------------------------------------------------------------------------
+// Action definition
+// ---------------------------------------------------------------------------
+
+export interface ActionDefinition {
+  name: string;
+  input?: InputFieldDefinition[];
+}
+
+export function action(
+  name: string,
+  options?: { input?: InputFieldDefinition[] }
+): ActionDefinition {
+  return { name, input: options?.input };
+}
+
+// ---------------------------------------------------------------------------
+// Policy definition
+// ---------------------------------------------------------------------------
+
+export interface PolicyDefinition {
+  name: string;
+  entity?: string;
+  action?: string;
+  allow: string;
+}
+
+export function policy(def: PolicyDefinition): PolicyDefinition {
+  return def;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin definition
+// ---------------------------------------------------------------------------
+
+export interface PluginDefinition {
+  name: string;
+  entities?: EntityDefinition[];
+  hooks?: {
+    beforeInsert?: (entity: string, data: Record<string, unknown>) => Record<string, unknown> | null;
+    afterInsert?: (entity: string, id: string, data: Record<string, unknown>) => void;
+    beforeUpdate?: (entity: string, id: string, data: Record<string, unknown>) => Record<string, unknown> | null;
+    afterUpdate?: (entity: string, id: string, data: Record<string, unknown>) => void;
+    beforeDelete?: (entity: string, id: string) => boolean;
+    afterDelete?: (entity: string, id: string) => void;
+  };
+}
+
+export function definePlugin(def: PluginDefinition): PluginDefinition {
+  return def;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,45 +203,144 @@ export interface ManifestIndex {
   unique: boolean;
 }
 
+export interface ManifestRelation {
+  name: string;
+  target: string;
+  field: string;
+  many?: boolean;
+}
+
 export interface ManifestEntity {
   name: string;
   fields: ManifestField[];
   indexes: ManifestIndex[];
+  relations?: ManifestRelation[];
 }
 
 export interface ManifestRoute {
   path: string;
   mode: string;
+  query?: string;
+  auth?: string;
 }
 
+export interface ManifestInputField {
+  name: string;
+  type: FieldType;
+  optional: boolean;
+  unique: false;
+}
+
+export interface ManifestQuery {
+  name: string;
+  input?: ManifestInputField[];
+}
+
+export interface ManifestAction {
+  name: string;
+  input?: ManifestInputField[];
+}
+
+export interface ManifestPolicy {
+  name: string;
+  entity?: string;
+  action?: string;
+  allow: string;
+}
+
+export const MANIFEST_VERSION = 1;
+
 export interface AppManifest {
+  manifest_version: number;
   name: string;
   version: string;
   entities: ManifestEntity[];
   routes: ManifestRoute[];
+  queries: ManifestQuery[];
+  actions: ManifestAction[];
+  policies: ManifestPolicy[];
 }
 
 export function entitiesToManifest(
   entities: EntityDefinition[]
 ): ManifestEntity[] {
-  return entities.map((e) => ({
-    name: e.name,
-    fields: Object.entries(e.fields).map(([name, fb]) => ({
-      name,
-      type: fb._def.type,
-      optional: fb._def.optional,
-      unique: fb._def.unique,
-    })),
-    indexes: (e.indexes ?? []).map((idx) => ({
-      name: idx.name,
-      fields: idx.fields,
-      unique: idx.unique,
-    })),
-  }));
+  return entities.map((e) => {
+    const result: ManifestEntity = {
+      name: e.name,
+      fields: Object.entries(e.fields).map(([name, fb]) => ({
+        name,
+        type: fb._def.type,
+        optional: fb._def.optional,
+        unique: fb._def.unique,
+      })),
+      indexes: (e.indexes ?? []).map((idx) => ({
+        name: idx.name,
+        fields: idx.fields,
+        unique: idx.unique,
+      })),
+    };
+    if (e.relations && e.relations.length > 0) {
+      result.relations = e.relations.map((r) => ({
+        name: r.name,
+        target: r.target,
+        field: r.field,
+        many: r.many,
+      }));
+    }
+    return result;
+  });
 }
 
 export function routesToManifest(routes: RouteDefinition[]): ManifestRoute[] {
-  return routes.map((r) => ({ path: r.path, mode: r.mode }));
+  return routes.map((r) => {
+    const result: ManifestRoute = { path: r.path, mode: r.mode };
+    if (r.query) result.query = r.query;
+    if (r.auth) result.auth = r.auth;
+    return result;
+  });
+}
+
+export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
+  return queries.map((q) => {
+    const result: ManifestQuery = { name: q.name };
+    if (q.input && q.input.length > 0) {
+      result.input = q.input.map((f) => ({
+        name: f.name,
+        type: f.type,
+        optional: f.optional ?? false,
+        unique: false as const,
+      }));
+    }
+    return result;
+  });
+}
+
+export function actionsToManifest(
+  actions: ActionDefinition[]
+): ManifestAction[] {
+  return actions.map((a) => {
+    const result: ManifestAction = { name: a.name };
+    if (a.input && a.input.length > 0) {
+      result.input = a.input.map((f) => ({
+        name: f.name,
+        type: f.type,
+        optional: f.optional ?? false,
+        unique: false as const,
+      }));
+    }
+    return result;
+  });
+}
+
+export function policiesToManifest(
+  policies: PolicyDefinition[]
+): ManifestPolicy[] {
+  return policies.map((p) => {
+    const result: ManifestPolicy = { name: p.name, allow: p.allow };
+    if (p.entity) result.entity = p.entity;
+    if (p.action) result.action = p.action;
+    return result;
+  });
 }
 
 export function buildManifest(options: {
@@ -159,11 +348,18 @@ export function buildManifest(options: {
   version: string;
   entities: EntityDefinition[];
   routes: RouteDefinition[];
+  queries?: QueryDefinition[];
+  actions?: ActionDefinition[];
+  policies?: PolicyDefinition[];
 }): AppManifest {
   return {
+    manifest_version: MANIFEST_VERSION,
     name: options.name,
     version: options.version,
     entities: entitiesToManifest(options.entities),
     routes: routesToManifest(options.routes),
+    queries: queriesToManifest(options.queries ?? []),
+    actions: actionsToManifest(options.actions ?? []),
+    policies: policiesToManifest(options.policies ?? []),
   };
 }

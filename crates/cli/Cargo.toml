@@ -10,5 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 agentdb-core = { path = "../core" }
+agentdb-plugin = { path = "../plugin" }
 agentdb-schema = { path = "../schema" }
-
+agentdb-storage = { path = "../storage", features = ["postgres-live"] }
+agentdb-runtime = { path = "../runtime" }
+agentdb-staticgen = { path = "../staticgen" }
+serde = { workspace = true }
+serde_json = { workspace = true }
