@@ -10,6 +10,13 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentdb/sdk": "file:../sdk"
+    "@agentdb/sdk": "file:../sdk",
+    "@agentdb/sync": "file:../sync"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0"
   }
 }

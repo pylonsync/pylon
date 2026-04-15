@@ -1,0 +1,19 @@
+[package]
+name = "agentdb-plugin"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+agentdb-core = { path = "../core" }
+agentdb-auth = { path = "../auth" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+rand = { workspace = true }
+argon2 = { workspace = true }

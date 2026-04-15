@@ -1,4 +1,5 @@
 {
+  "manifest_version": 1,
   "name": "todo-app",
   "version": "0.1.0",
   "entities": [
@@ -68,11 +69,103 @@
   "routes": [
     {
       "path": "/",
-      "mode": "server"
+      "mode": "server",
+      "query": "allTodos",
+      "auth": "public"
     },
     {
       "path": "/todos",
-      "mode": "live"
+      "mode": "live",
+      "query": "todosByAuthor",
+      "auth": "user"
+    },
+    {
+      "path": "/todos/:todoId",
+      "mode": "server",
+      "query": "todoById",
+      "auth": "user"
+    }
+  ],
+  "queries": [
+    {
+      "name": "todosByAuthor",
+      "input": [
+        {
+          "name": "authorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "allTodos",
+      "input": [
+        {
+          "name": "done",
+          "type": "bool",
+          "optional": true,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "todoById",
+      "input": [
+        {
+          "name": "todoId",
+          "type": "id(Todo)",
+          "optional": false,
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "name": "createTodo",
+      "input": [
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "authorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "toggleTodo",
+      "input": [
+        {
+          "name": "todoId",
+          "type": "id(Todo)",
+          "optional": false,
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "policies": [
+    {
+      "name": "authenticatedCreate",
+      "allow": "auth.userId != null",
+      "action": "createTodo"
+    },
+    {
+      "name": "ownerToggle",
+      "allow": "auth.userId == input.authorId",
+      "action": "toggleTodo"
+    },
+    {
+      "name": "ownerReadTodos",
+      "allow": "auth.userId == data.authorId",
+      "entity": "Todo"
     }
   ]
 }

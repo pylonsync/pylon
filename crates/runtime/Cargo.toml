@@ -7,3 +7,29 @@ version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+agentdb-core = { path = "../core" }
+agentdb-auth = { path = "../auth" }
+agentdb-policy = { path = "../policy" }
+agentdb-plugin = { path = "../plugin" }
+agentdb-sync = { path = "../sync" }
+agentdb-studio-api = { path = "../studio_api" }
+agentdb-storage = { path = "../storage" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tiny_http = { workspace = true }
+tungstenite = { workspace = true }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[[bench]]
+name = "sync_bench"
+harness = false
+
+[[bench]]
+name = "cache_bench"
+harness = false
+
