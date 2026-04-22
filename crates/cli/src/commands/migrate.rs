@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use agentdb_core::ExitCode;
+use statecraft_core::ExitCode;
 
 use crate::output;
 
@@ -10,7 +10,9 @@ use crate::output;
 
 const MIGRATIONS_DIR: &str = "migrations";
 
-const MIGRATE_SUBCOMMANDS: [&str; 3] = ["create", "list", "status"];
+const MIGRATE_SUBCOMMANDS: [&str; 6] = ["create", "list", "status", "plan", "apply", "auto"];
+
+const MIGRATIONS_TABLE: &str = "_statecraft_migrations";
 
 // ---------------------------------------------------------------------------
 // Entry point — dispatches to subcommands
@@ -23,10 +25,17 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
+    let confirm_flag = args.iter().any(|a| a == "--yes" || a == "-y");
+    let allow_destructive = args.iter().any(|a| a == "--allow-destructive");
+    let hints = parse_rename_hints(args);
+
     match positional.get(1).copied() {
         Some("create") => run_create(&positional, json_mode),
         Some("list") => run_list(json_mode),
         Some("status") => run_status(json_mode),
+        Some("plan") => run_plan(&hints, json_mode),
+        Some("apply") => run_apply(&hints, confirm_flag, allow_destructive, json_mode),
+        Some("auto") => run_apply(&hints, true, allow_destructive, json_mode),
         Some(sub) => {
             output::print_error(&format!("unknown migrate subcommand: \"{sub}\""));
             if let Some(suggestion) = suggest_subcommand(sub) {
@@ -54,7 +63,7 @@ fn run_create(positional: &[&str], json_mode: bool) -> ExitCode {
         Some(n) => *n,
         None => {
             output::print_error("migrate create requires a migration name");
-            eprintln!("  Usage: agentdb migrate create <name>");
+            eprintln!("  Usage: statecraft migrate create <name>");
             return ExitCode::Usage;
         }
     };
@@ -137,7 +146,7 @@ fn run_list(json_mode: bool) -> ExitCode {
             println!("{}", "-".repeat(40));
             for m in &migrations {
                 // Without a DB connection we mark everything as pending.
-                // A future enhancement can check _agentdb_migrations table.
+                // A future enhancement can check _statecraft_migrations table.
                 println!("{:04}   {:<12} {}", m.number, "pending", m.name);
             }
         }
@@ -260,12 +269,271 @@ fn parse_migration_filename(filename: &str) -> Option<MigrationInfo> {
 }
 
 fn print_migrate_usage() {
-    eprintln!("Usage: agentdb migrate <subcommand>");
+    eprintln!("Usage: statecraft migrate <subcommand>");
     eprintln!();
     eprintln!("Subcommands:");
-    eprintln!("  create <name>   Create a new migration file");
-    eprintln!("  list            List all migrations and their status");
-    eprintln!("  status          Show current migration state");
+    eprintln!("  create <name>           Create a new SQL migration file");
+    eprintln!("  list                    List all migrations and their status");
+    eprintln!("  status                  Show current migration state");
+    eprintln!("  plan                    Show diff between manifest and DB schema");
+    eprintln!("  apply [--yes]           Apply pending schema changes");
+    eprintln!("  auto                    Apply without prompting (alias for apply --yes)");
+    eprintln!();
+    eprintln!("Flags:");
+    eprintln!("  --allow-destructive     Allow DROP TABLE and DROP COLUMN");
+    eprintln!("  --yes, -y               Skip confirmation prompts");
+    eprintln!("  --rename-table OLD:NEW  Treat a missing OLD entity as a rename to NEW");
+    eprintln!("  --rename-column TBL.OLD:NEW  Treat a missing column as a rename");
+}
+
+// ---------------------------------------------------------------------------
+// --rename-table and --rename-column flag parsing
+// ---------------------------------------------------------------------------
+
+fn parse_rename_hints(args: &[String]) -> statecraft_migrate::RenameHints {
+    let mut hints = statecraft_migrate::RenameHints::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--rename-table" => {
+                if let Some(spec) = args.get(i + 1) {
+                    if let Some((from, to)) = spec.split_once(':') {
+                        hints = hints.rename_table(from, to);
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            "--rename-column" => {
+                if let Some(spec) = args.get(i + 1) {
+                    if let Some((tbl_field, to)) = spec.split_once(':') {
+                        if let Some((tbl, from)) = tbl_field.split_once('.') {
+                            hints = hints.rename_column(tbl, from, to);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    hints
+}
+
+// ---------------------------------------------------------------------------
+// migrate plan — diff current manifest against DB
+// ---------------------------------------------------------------------------
+
+fn run_plan(hints: &statecraft_migrate::RenameHints, json_mode: bool) -> ExitCode {
+    let (old, new) = match load_manifests() {
+        Ok(x) => x,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
+
+    let plan = statecraft_migrate::diff_with_renames(&old, &new, hints);
+
+    if json_mode {
+        output::print_json(&serde_json::to_value(&plan).unwrap_or(serde_json::json!({})));
+    } else if plan.is_empty() {
+        eprintln!("No schema changes.");
+    } else {
+        eprintln!("Migration plan ({} steps):", plan.steps.len());
+        for step in &plan.steps {
+            let marker = if step.is_destructive() { " [DESTRUCTIVE]" } else { "" };
+            eprintln!("  {}{marker}", step.sql());
+        }
+        if plan.has_destructive {
+            eprintln!();
+            eprintln!("Note: plan includes destructive operations. Use --allow-destructive with apply.");
+        }
+    }
+
+    ExitCode::Ok
+}
+
+// ---------------------------------------------------------------------------
+// migrate apply — execute the plan
+// ---------------------------------------------------------------------------
+
+fn run_apply(
+    hints: &statecraft_migrate::RenameHints,
+    skip_confirm: bool,
+    allow_destructive: bool,
+    json_mode: bool,
+) -> ExitCode {
+    let (old, new) = match load_manifests() {
+        Ok(x) => x,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
+
+    let plan = statecraft_migrate::diff_with_renames(&old, &new, hints);
+
+    if plan.is_empty() {
+        if json_mode {
+            output::print_json(&serde_json::json!({"applied": 0, "up_to_date": true}));
+        } else {
+            eprintln!("Already up to date.");
+        }
+        return ExitCode::Ok;
+    }
+
+    if plan.has_destructive && !allow_destructive {
+        output::print_error("Plan contains destructive operations. Re-run with --allow-destructive to proceed.");
+        for step in &plan.steps {
+            if step.is_destructive() {
+                eprintln!("  [DESTRUCTIVE] {}", step.sql());
+            }
+        }
+        return ExitCode::Error;
+    }
+
+    if !skip_confirm {
+        eprintln!("About to apply {} migration step(s):", plan.steps.len());
+        for step in &plan.steps {
+            eprintln!("  {}", step.sql());
+        }
+        eprintln!();
+        eprint!("Continue? [y/N] ");
+        use std::io::{self, BufRead, Write};
+        let _ = io::stderr().flush();
+        let stdin = io::stdin();
+        let mut line = String::new();
+        let _ = stdin.lock().read_line(&mut line);
+        let answer = line.trim().to_lowercase();
+        if answer != "y" && answer != "yes" {
+            eprintln!("Aborted.");
+            return ExitCode::Ok;
+        }
+    }
+
+    let db_path = std::env::var("STATECRAFT_DB_PATH").unwrap_or_else(|_| "statecraft.db".into());
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            output::print_error(&format!("Failed to open database {db_path}: {e}"));
+            return ExitCode::Error;
+        }
+    };
+
+    if let Err(e) = ensure_migrations_table(&conn) {
+        output::print_error(&e);
+        return ExitCode::Error;
+    }
+
+    let mut applied: Vec<String> = Vec::new();
+    for step in &plan.steps {
+        if let Err(e) = conn.execute(step.sql(), []) {
+            output::print_error(&format!("Step failed: {}\nSQL: {}", e, step.sql()));
+            return ExitCode::Error;
+        }
+        applied.push(step.sql().to_string());
+    }
+
+    // Record the new manifest snapshot.
+    let manifest_json = serde_json::to_string(&new).unwrap_or_default();
+    let _ = conn.execute(
+        &format!(
+            "INSERT INTO {MIGRATIONS_TABLE} (applied_at, manifest) VALUES (?1, ?2)"
+        ),
+        rusqlite::params![
+            chrono_now_iso(),
+            manifest_json,
+        ],
+    );
+
+    if json_mode {
+        output::print_json(&serde_json::json!({
+            "applied": applied.len(),
+            "steps": applied,
+        }));
+    } else {
+        eprintln!("Applied {} migration step(s).", applied.len());
+    }
+
+    ExitCode::Ok
+}
+
+// ---------------------------------------------------------------------------
+// Manifest loading and DB state
+// ---------------------------------------------------------------------------
+
+fn load_manifests() -> Result<(statecraft_core::AppManifest, statecraft_core::AppManifest), String> {
+    // Current (on-disk) manifest.
+    let manifest_path = std::env::var("STATECRAFT_MANIFEST")
+        .unwrap_or_else(|_| "statecraft.manifest.json".into());
+    let current = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Cannot read manifest {manifest_path}: {e}"))?;
+    let new: statecraft_core::AppManifest = serde_json::from_str(&current)
+        .map_err(|e| format!("Invalid manifest JSON: {e}"))?;
+
+    // Previously-applied manifest (from DB). Empty if fresh DB.
+    let db_path = std::env::var("STATECRAFT_DB_PATH").unwrap_or_else(|_| "statecraft.db".into());
+    let old = if std::path::Path::new(&db_path).exists() {
+        match rusqlite::Connection::open(&db_path) {
+            Ok(conn) => load_applied_manifest(&conn).unwrap_or_else(|_| empty_manifest()),
+            Err(_) => empty_manifest(),
+        }
+    } else {
+        empty_manifest()
+    };
+
+    Ok((old, new))
+}
+
+fn load_applied_manifest(conn: &rusqlite::Connection) -> Result<statecraft_core::AppManifest, String> {
+    ensure_migrations_table(conn)?;
+
+    let query = format!(
+        "SELECT manifest FROM {MIGRATIONS_TABLE} ORDER BY applied_at DESC LIMIT 1"
+    );
+    let manifest_json: Option<String> = conn
+        .query_row(&query, [], |row| row.get(0))
+        .ok();
+
+    match manifest_json {
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|e| format!("Corrupted migration state: {e}")),
+        None => Ok(empty_manifest()),
+    }
+}
+
+fn ensure_migrations_table(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
+            applied_at TEXT NOT NULL,
+            manifest TEXT NOT NULL
+        )"
+    ))
+    .map_err(|e| format!("Failed to create migrations table: {e}"))
+}
+
+fn empty_manifest() -> statecraft_core::AppManifest {
+    statecraft_core::AppManifest {
+        manifest_version: statecraft_core::MANIFEST_VERSION,
+        name: "".into(),
+        version: "".into(),
+        entities: vec![],
+        routes: vec![],
+        queries: vec![],
+        actions: vec![],
+        policies: vec![],
+    }
+}
+
+fn chrono_now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
 
 /// Simple Levenshtein-based suggestion for migrate subcommands.
@@ -339,7 +607,7 @@ mod tests {
 
     #[test]
     fn count_migrations_empty_dir() {
-        let dir = std::env::temp_dir().join("agentdb_test_empty_migrations");
+        let dir = std::env::temp_dir().join("statecraft_test_empty_migrations");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -353,7 +621,7 @@ mod tests {
 
     #[test]
     fn count_migrations_with_files() {
-        let dir = std::env::temp_dir().join("agentdb_test_count_migrations");
+        let dir = std::env::temp_dir().join("statecraft_test_count_migrations");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -386,7 +654,7 @@ mod tests {
 
     #[test]
     fn create_migration_file() {
-        let dir = std::env::temp_dir().join("agentdb_test_create_migration");
+        let dir = std::env::temp_dir().join("statecraft_test_create_migration");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {

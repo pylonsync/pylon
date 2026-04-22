@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Static site generation
@@ -44,15 +44,52 @@ pub fn generate_static_pages(manifest: &AppManifest) -> Vec<StaticPage> {
 }
 
 /// Write generated pages to an output directory.
+///
+/// Rejects any page whose computed path would escape `out_dir`. The page
+/// paths come from `route.path` in the manifest, which is user-authored —
+/// a route of `/../../tmp/pwn` would previously write outside `out_dir`
+/// because schema validation only checks "starts with `/`" and uniqueness.
+/// We canonicalize `out_dir`, then canonicalize the write target's parent,
+/// and refuse the write if it doesn't sit under `out_dir`.
 pub fn write_pages(pages: &[StaticPage], out_dir: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
 
+    let out_canonical = std::fs::canonicalize(out_dir).map_err(|e| {
+        format!("Failed to canonicalize output directory {}: {e}", out_dir.display())
+    })?;
+
     for page in pages {
-        let full_path = out_dir.join(&page.path);
+        // Reject obviously bad paths up front — `..` anywhere in the
+        // components, absolute paths, or Windows drive prefixes.
+        let pp = Path::new(&page.path);
+        if page.path.is_empty() || pp.is_absolute() {
+            return Err(format!(
+                "refusing page with absolute or empty path: {:?}",
+                page.path
+            ));
+        }
+        if pp.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(format!(
+                "refusing page path with `..` component: {:?}",
+                page.path
+            ));
+        }
+
+        let full_path = out_canonical.join(&page.path);
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+            // Canonicalize the parent (it exists now) and check containment.
+            let parent_canonical = std::fs::canonicalize(parent).map_err(|e| {
+                format!("Failed to canonicalize {}: {e}", parent.display())
+            })?;
+            if !parent_canonical.starts_with(&out_canonical) {
+                return Err(format!(
+                    "page path {:?} would write outside the output directory",
+                    page.path
+                ));
+            }
         }
         std::fs::write(&full_path, &page.html)
             .map_err(|e| format!("Failed to write {}: {e}", full_path.display()))?;
@@ -84,7 +121,7 @@ fn render_page(manifest: &AppManifest, route_path: &str, query_name: Option<&str
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{title}</title>
-  <script>window.__AGENTDB_MANIFEST__ = {manifest_json};</script>
+  <script>window.__STATECRAFT_MANIFEST__ = {manifest_json};</script>
 </head>
 <body>
   <h1>{app_name}</h1>
@@ -109,10 +146,10 @@ fn render_page(manifest: &AppManifest, route_path: &str, query_name: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::*;
+    use statecraft_core::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
             .unwrap()
     }
 
@@ -217,9 +254,35 @@ mod tests {
 
         let pages = generate_static_pages(&m);
         assert_eq!(pages.len(), 1);
-        assert!(pages[0].html.contains("__AGENTDB_MANIFEST__"));
+        assert!(pages[0].html.contains("__STATECRAFT_MANIFEST__"));
         assert!(pages[0].html.contains("myapp"));
         assert!(pages[0].html.contains("allPosts"));
+    }
+
+    #[test]
+    fn write_pages_rejects_parent_dir_traversal() {
+        let dir = std::env::temp_dir().join("statecraft-staticgen-traversal-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pages = vec![StaticPage {
+            path: "../../tmp/pwn.html".into(),
+            html: "<h1>x</h1>".into(),
+        }];
+        let err = write_pages(&pages, &dir).unwrap_err();
+        assert!(err.contains("..") || err.contains("outside"), "unexpected: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_pages_rejects_absolute_path() {
+        let dir = std::env::temp_dir().join("statecraft-staticgen-abs-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pages = vec![StaticPage {
+            path: "/tmp/pwn.html".into(),
+            html: "<h1>x</h1>".into(),
+        }];
+        let err = write_pages(&pages, &dir).unwrap_err();
+        assert!(err.contains("absolute") || err.contains("outside"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -241,7 +304,7 @@ mod tests {
         };
 
         let pages = generate_static_pages(&m);
-        let dir = std::env::temp_dir().join("agentdb-staticgen-test");
+        let dir = std::env::temp_dir().join("statecraft-staticgen-test");
         let _ = std::fs::remove_dir_all(&dir);
 
         let count = write_pages(&pages, &dir).unwrap();

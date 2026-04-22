@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::Plugin;
-use agentdb_auth::AuthContext;
 use serde_json::Value;
 
 /// A computed field definition.

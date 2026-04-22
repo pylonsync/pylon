@@ -1,4 +1,4 @@
-//! Integration tests for the agentdb HTTP server.
+//! Integration tests for the statecraft HTTP server.
 //!
 //! Each test starts a real in-memory server on a random port and exercises
 //! the API over plain HTTP using a minimal `TcpStream`-based client.
@@ -9,8 +9,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentdb_core::*;
-use agentdb_runtime::Runtime;
+use statecraft_core::*;
+use statecraft_runtime::Runtime;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -29,8 +29,11 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
 
     let body_str = body.unwrap_or("");
     let content_length = body_str.len();
+    // Origin is mandatory on state-changing methods — the CSRF plugin
+    // rejects POST/PATCH/DELETE without it. Dev mode's allowlist is `*`,
+    // so echoing the host back always passes.
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body_str}"
+        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nOrigin: http://{host_port}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body_str}"
     );
 
     let mut stream = TcpStream::connect(host_port).expect("Failed to connect");
@@ -115,26 +118,57 @@ fn test_manifest() -> AppManifest {
     }
 }
 
-/// Find 3 contiguous available TCP ports (needed because the server uses
-/// port, port+1 for WS, port+2 for SSE).
+/// Find 4 contiguous available TCP ports (server uses port, port+1 WS,
+/// port+2 SSE, port+3 shard-WS).
+///
+/// To avoid TOCTOU races between tests picking the same "free" port, we:
+/// 1. Walk forward from a per-process random offset in the ephemeral range.
+/// 2. Use a process-wide atomic counter so parallel tests never ask for
+///    the same base port.
+/// 3. Trial-bind all 4 ports in one shot; if any fails, advance and retry.
+///
+/// This is bulletproof as long as no other process on the box is also
+/// walking the same range, which is fine for `cargo test` on a dev box or
+/// in CI.
 fn available_port() -> u16 {
-    // Bind 3 ports to ensure they're all free.
-    loop {
-        let l1 = match std::net::TcpListener::bind("127.0.0.1:0") {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let p = l1.local_addr().unwrap().port();
-        let l2 = std::net::TcpListener::bind(format!("127.0.0.1:{}", p + 1));
-        let l3 = std::net::TcpListener::bind(format!("127.0.0.1:{}", p + 2));
-        if l2.is_ok() && l3.is_ok() {
-            // Drop all listeners before returning so the server can bind.
-            drop(l1);
-            drop(l2);
-            drop(l3);
+    use std::sync::atomic::{AtomicU16, Ordering};
+    // Start high in the ephemeral range with a random offset so two parallel
+    // `cargo test` invocations (e.g. one local, one triggered by a watcher)
+    // don't stomp each other immediately.
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
+    // Initialize on first use with a random offset in [30000, 40000).
+    let seed = NEXT_PORT.load(Ordering::Relaxed);
+    if seed == 0 {
+        let off: u16 = rand::random::<u16>() % 10_000 + 30_000;
+        let _ = NEXT_PORT.compare_exchange(0, off, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    for _ in 0..200 {
+        // Allocate a 4-port block per test (WS is port+1, SSE port+2, shard-WS port+3).
+        let base = NEXT_PORT.fetch_add(4, Ordering::Relaxed);
+        if base == 0 {
+            continue;
+        }
+        if let Some(p) = try_bind_block(base) {
             return p;
         }
     }
+    panic!("could not find 4 free contiguous ports after 200 attempts");
+}
+
+/// Try to bind 4 contiguous ports starting at `base`. Returns the base port
+/// if all bind, or None otherwise. All listeners are dropped before returning
+/// so the actual server can bind immediately afterwards.
+fn try_bind_block(base: u16) -> Option<u16> {
+    let mut listeners = Vec::with_capacity(4);
+    for offset in 0..4 {
+        match std::net::TcpListener::bind(format!("127.0.0.1:{}", base + offset)) {
+            Ok(l) => listeners.push(l),
+            Err(_) => return None,
+        }
+    }
+    drop(listeners);
+    Some(base)
 }
 
 /// Start a test server in a background thread. Returns the base URL
@@ -148,7 +182,7 @@ fn start_test_server() -> String {
 
     let rt = Arc::clone(&runtime);
     std::thread::spawn(move || {
-        let _ = agentdb_runtime::server::start(rt, port);
+        let _ = statecraft_runtime::server::start(rt, port);
     });
 
     // Poll until the server is accepting connections.

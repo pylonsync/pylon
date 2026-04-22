@@ -1,0 +1,92 @@
+{
+  "manifest_version": 1,
+  "name": "auction-house",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        { "name": "email", "type": "string", "optional": false, "unique": true },
+        { "name": "displayName", "type": "string", "optional": false, "unique": false },
+        { "name": "balanceCents", "type": "int", "optional": false, "unique": false },
+        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Listing",
+      "fields": [
+        { "name": "title", "type": "string", "optional": false, "unique": false },
+        { "name": "description", "type": "string", "optional": false, "unique": false },
+        { "name": "sellerId", "type": "id(User)", "optional": false, "unique": false },
+        { "name": "startingCents", "type": "int", "optional": false, "unique": false },
+        { "name": "currentCents", "type": "int", "optional": false, "unique": false },
+        { "name": "winningBidId", "type": "id(Bid)", "optional": true, "unique": false },
+        { "name": "endsAt", "type": "datetime", "optional": false, "unique": false },
+        { "name": "settledAt", "type": "datetime", "optional": true, "unique": false },
+        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+      ],
+      "indexes": [
+        { "name": "by_seller", "fields": ["sellerId"], "unique": false },
+        { "name": "by_ends_at", "fields": ["endsAt"], "unique": false }
+      ]
+    },
+    {
+      "name": "Bid",
+      "fields": [
+        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false },
+        { "name": "bidderId", "type": "id(User)", "optional": false, "unique": false },
+        { "name": "amountCents", "type": "int", "optional": false, "unique": false },
+        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+      ],
+      "indexes": [
+        { "name": "by_listing", "fields": ["listingId"], "unique": false },
+        { "name": "by_bidder", "fields": ["bidderId"], "unique": false }
+      ]
+    }
+  ],
+  "routes": [
+    { "path": "/", "mode": "server", "query": "activeListings", "auth": "public" },
+    { "path": "/listing/:listingId", "mode": "live", "query": "listingDetail", "auth": "public" },
+    { "path": "/me/bids", "mode": "live", "query": "myBids", "auth": "user" }
+  ],
+  "queries": [
+    { "name": "activeListings", "input": [] },
+    {
+      "name": "listingDetail",
+      "input": [
+        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false }
+      ]
+    },
+    { "name": "myBids", "input": [] }
+  ],
+  "actions": [
+    {
+      "name": "createListing",
+      "input": [
+        { "name": "title", "type": "string", "optional": false, "unique": false },
+        { "name": "description", "type": "string", "optional": false, "unique": false },
+        { "name": "startingCents", "type": "int", "optional": false, "unique": false },
+        { "name": "durationSecs", "type": "int", "optional": false, "unique": false }
+      ]
+    },
+    {
+      "name": "placeBid",
+      "input": [
+        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false },
+        { "name": "amountCents", "type": "int", "optional": false, "unique": false }
+      ]
+    },
+    {
+      "name": "settleListing",
+      "input": [
+        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false }
+      ]
+    }
+  ],
+  "policies": [
+    { "name": "loggedInCreate", "allow": "auth.userId != null", "action": "createListing" },
+    { "name": "loggedInBid", "allow": "auth.userId != null", "action": "placeBid" },
+    { "name": "adminSettle", "allow": "auth.isAdmin", "action": "settleListing" }
+  ]
+}

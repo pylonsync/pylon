@@ -1,13 +1,23 @@
-import type { Row, ChangeEvent, SyncCursor } from "./index";
+import type {
+  Row,
+  ChangeEvent,
+  SyncCursor,
+  MutationQueuePersistence,
+  PendingMutation,
+} from "./index";
 
 // ---------------------------------------------------------------------------
 // IndexedDB persistence layer
 // ---------------------------------------------------------------------------
 
-const DB_NAME = "agentdb_sync";
-const DB_VERSION = 1;
+// Bumped DB_VERSION: version 2 adds a pendingMutations object store so the
+// offline queue survives restarts. The upgrade handler below creates it on
+// existing databases — users never lose their entity mirror.
+const DB_NAME = "statecraft_sync";
+const DB_VERSION = 2;
 const STORE_NAME = "entities";
 const CURSOR_STORE = "cursors";
+const MUTATIONS_STORE = "pendingMutations";
 
 /**
  * IndexedDB-backed persistence for the sync store.
@@ -16,6 +26,14 @@ const CURSOR_STORE = "cursors";
 export class IndexedDBPersistence {
   private db: IDBDatabase | null = null;
   private dbName: string;
+
+  /** Shared connection. Exposed so sibling persistence classes (e.g. the
+   *  mutation-queue backend) can reuse the same IDBDatabase — IndexedDB only
+   *  permits one open handle per (origin, db) at a time while upgrades run.
+   */
+  get connection(): IDBDatabase | null {
+    return this.db;
+  }
 
   constructor(appName = "default") {
     this.dbName = `${DB_NAME}_${appName}`;
@@ -33,11 +51,33 @@ export class IndexedDBPersistence {
         if (!db.objectStoreNames.contains(CURSOR_STORE)) {
           db.createObjectStore(CURSOR_STORE, { keyPath: "key" });
         }
+        // v2: durable offline mutation queue.
+        if (!db.objectStoreNames.contains(MUTATIONS_STORE)) {
+          db.createObjectStore(MUTATIONS_STORE, { keyPath: "id" });
+        }
       };
 
       request.onsuccess = () => {
         this.db = request.result;
+        // If another tab later bumps the version, the browser fires
+        // `versionchange` on this handle. Close it so the other tab's
+        // upgrade can proceed — otherwise THEIR start() hangs on our
+        // stale handle. Our app will see the underlying reads fail and
+        // degrade to memory-only gracefully.
+        this.db.onversionchange = () => {
+          this.db?.close();
+          this.db = null;
+        };
         resolve();
+      };
+
+      // `onblocked` fires when we try to upgrade but another tab holds
+      // an older-version connection open. Rejecting here (rather than
+      // waiting forever) lets `start()` fall back to memory-only mode,
+      // which is still functional for the current session. The next tab
+      // reload after the other tab closes will pick up the new version.
+      request.onblocked = () => {
+        reject(new Error("IndexedDB upgrade blocked by another open connection"));
       };
 
       request.onerror = () => {
@@ -165,5 +205,59 @@ export async function persistChange(
     case "delete":
       await persistence.deleteRow(change.entity, change.row_id);
       break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mutation-queue persistence (the durable offline write buffer)
+// ---------------------------------------------------------------------------
+
+/**
+ * IndexedDB-backed implementation of `MutationQueuePersistence`. Wires the
+ * `MutationQueue` into the same database as the entity mirror so everything
+ * the app needs to resume a session lives in one place.
+ *
+ * `saveAll` writes the entire queue on every change. That's O(n) per write,
+ * but `n` is bounded by "how many mutations the user queued while offline",
+ * which is tiny in practice. If that ever becomes a bottleneck, switch to
+ * per-id `put`/`delete` — the schema (`keyPath: "id"`) already supports it.
+ */
+export class IndexedDBMutationPersistence implements MutationQueuePersistence {
+  private db: IDBDatabase | null = null;
+
+  constructor(private readonly parent: IndexedDBPersistence) {}
+
+  private handle(): IDBDatabase | null {
+    return this.parent.connection;
+  }
+
+  async saveAll(mutations: PendingMutation[]): Promise<void> {
+    const db = this.handle();
+    if (!db) return;
+    const tx = db.transaction(MUTATIONS_STORE, "readwrite");
+    const store = tx.objectStore(MUTATIONS_STORE);
+    // Clear then re-put everything. Simpler than diffing, and correct under
+    // the "save-full-snapshot on every change" contract.
+    store.clear();
+    for (const m of mutations) {
+      store.put(m);
+    }
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("mutation queue save failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("mutation queue save aborted"));
+    });
+  }
+
+  async loadAll(): Promise<PendingMutation[]> {
+    const db = this.handle();
+    if (!db) return [];
+    const tx = db.transaction(MUTATIONS_STORE, "readonly");
+    const store = tx.objectStore(MUTATIONS_STORE);
+    return new Promise((resolve, reject) => {
+      const req = store.getAll();
+      req.onsuccess = () => resolve((req.result as PendingMutation[]) ?? []);
+      req.onerror = () => reject(req.error ?? new Error("mutation queue load failed"));
+    });
   }
 }

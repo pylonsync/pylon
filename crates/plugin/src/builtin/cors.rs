@@ -1,5 +1,5 @@
-use crate::{Plugin, PluginError, PluginRoute};
-use agentdb_auth::AuthContext;
+use crate::{Plugin, PluginError};
+use statecraft_auth::AuthContext;
 
 /// CORS plugin. Validates request origins against an allowlist.
 pub struct CorsPlugin {

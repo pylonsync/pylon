@@ -1,5 +1,5 @@
 use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
+use statecraft_auth::AuthContext;
 use serde_json::Value;
 
 /// Timestamps plugin. Auto-sets `createdAt` on insert and `updatedAt` on update.

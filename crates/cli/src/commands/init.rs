@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
@@ -49,7 +49,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "INIT_NO_PATH".into(),
                     message: "No target path provided".into(),
                     span: None,
-                    hint: Some("Usage: agentdb init <path> [--template basic]".into()),
+                    hint: Some("Usage: statecraft init <path> [--template basic]".into()),
                 }],
                 json_mode,
             );
@@ -140,8 +140,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         "private": true,
         "type": "module",
         "scripts": {
-            "codegen": "agentdb codegen app.ts --out agentdb.manifest.json",
-            "doctor": "agentdb doctor agentdb.manifest.json",
+            "codegen": "statecraft codegen app.ts --out statecraft.manifest.json",
+            "doctor": "statecraft doctor statecraft.manifest.json",
             "check": "tsc -p tsconfig.json --noEmit"
         }
     }))
@@ -173,7 +173,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     let entry_path = target.join("app.ts");
-    let manifest_path = target.join("agentdb.manifest.json");
+    let manifest_path = target.join("statecraft.manifest.json");
     let entry_str = entry_path.to_string_lossy().to_string();
 
     match run_bun_codegen(&entry_str) {
@@ -187,7 +187,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         message: format!("Files created but could not write manifest: {e}"),
                         span: None,
                         hint: Some(
-                            "Run 'agentdb codegen app.ts --out agentdb.manifest.json' manually"
+                            "Run 'statecraft codegen app.ts --out statecraft.manifest.json' manually"
                                 .into(),
                         ),
                     }],
@@ -198,11 +198,29 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             // Generate client bindings.
             if let Ok(manifest) = parse_manifest(&manifest_json, &entry_str) {
                 let client_ts = generate_client_ts(&manifest);
-                let client_path = target.join("agentdb.client.ts");
+                let client_path = target.join("statecraft.client.ts");
                 let _ = std::fs::write(&client_path, client_ts);
             }
         }
         Err(diag) => {
+            // The most common cause is a missing bun install — a fresh
+            // machine has no Bun runtime, so `bun run` fails before the
+            // codegen script even starts. Surface the install command in
+            // the hint so users don't need to Google it.
+            let bun_missing = std::process::Command::new("bun")
+                .arg("--version")
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(true);
+            let hint = if bun_missing {
+                if cfg!(target_os = "windows") {
+                    "Install Bun first: powershell -c \"irm bun.sh/install.ps1 | iex\", then: statecraft codegen app.ts --out statecraft.manifest.json".to_string()
+                } else {
+                    "Install Bun first: curl -fsSL https://bun.sh/install | bash, then: statecraft codegen app.ts --out statecraft.manifest.json".to_string()
+                }
+            } else {
+                "Run 'statecraft codegen app.ts --out statecraft.manifest.json' manually".to_string()
+            };
             print_diagnostics(
                 &[Diagnostic {
                     severity: Severity::Warning,
@@ -212,9 +230,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         diag.message
                     ),
                     span: None,
-                    hint: Some(
-                        "Run 'agentdb codegen app.ts --out agentdb.manifest.json' manually".into(),
-                    ),
+                    hint: Some(hint),
                 }],
                 json_mode,
             );
@@ -227,11 +243,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|(name, _)| format!("{target_display}/{name}"))
         .collect();
     if manifest_path.exists() {
-        file_list.push(format!("{target_display}/agentdb.manifest.json"));
+        file_list.push(format!("{target_display}/statecraft.manifest.json"));
     }
-    let client_path = target.join("agentdb.client.ts");
+    let client_path = target.join("statecraft.client.ts");
     if client_path.exists() {
-        file_list.push(format!("{target_display}/agentdb.client.ts"));
+        file_list.push(format!("{target_display}/statecraft.client.ts"));
     }
 
     if json_mode {
@@ -248,16 +264,16 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             println!("  {name}");
         }
         if manifest_path.exists() {
-            println!("  agentdb.manifest.json");
+            println!("  statecraft.manifest.json");
         }
         if client_path.exists() {
-            println!("  agentdb.client.ts");
+            println!("  statecraft.client.ts");
         }
         println!();
         println!("Next steps:");
         println!("  cd {target_display}");
-        println!("  agentdb doctor agentdb.manifest.json");
-        println!("  agentdb explain agentdb.manifest.json");
+        println!("  statecraft doctor statecraft.manifest.json");
+        println!("  statecraft explain statecraft.manifest.json");
     }
 
     ExitCode::Ok

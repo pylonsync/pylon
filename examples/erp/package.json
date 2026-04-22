@@ -1,0 +1,13 @@
+{
+  "name": "@statecraft/example-erp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "codegen": "bun ../../packages/create-statecraft/src/codegen-runner.ts app.ts || bun x statecraft codegen app.ts"
+  },
+  "dependencies": {
+    "@statecraft/functions": "file:../../packages/functions",
+    "@statecraft/sdk": "file:../../packages/sdk"
+  }
+}

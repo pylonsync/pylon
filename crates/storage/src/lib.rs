@@ -1,10 +1,13 @@
+pub mod files;
+#[cfg(feature = "postgres-live")]
+pub mod pg_datastore;
 pub mod pool;
 pub mod postgres;
 pub mod sqlite;
 
 use std::fmt;
 
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -341,9 +344,9 @@ impl StorageAdapter for DiffAdapter {
     ) -> Result<SchemaPlan, StorageError> {
         let mut operations = Vec::new();
 
-        let old_entities: std::collections::HashMap<&str, &agentdb_core::ManifestEntity> =
+        let old_entities: std::collections::HashMap<&str, &statecraft_core::ManifestEntity> =
             self.from.entities.iter().map(|e| (e.name.as_str(), e)).collect();
-        let new_entities: std::collections::HashMap<&str, &agentdb_core::ManifestEntity> =
+        let new_entities: std::collections::HashMap<&str, &statecraft_core::ManifestEntity> =
             target.entities.iter().map(|e| (e.name.as_str(), e)).collect();
 
         // Removed entities
@@ -457,7 +460,7 @@ impl StorageAdapter for DiffAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::*;
+    use statecraft_core::*;
 
     fn minimal_manifest() -> AppManifest {
         AppManifest {

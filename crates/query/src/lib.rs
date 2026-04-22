@@ -1,4 +1,4 @@
-use agentdb_core::{AppManifest, ManifestField, ManifestQuery};
+use statecraft_core::{AppManifest, ManifestField, ManifestQuery};
 
 // ---------------------------------------------------------------------------
 // Query descriptor — runtime-facing query metadata
@@ -77,10 +77,10 @@ impl QueryRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::ManifestField;
+    use statecraft_core::ManifestField;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
             .unwrap()
     }
 

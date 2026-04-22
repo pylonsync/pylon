@@ -1,4 +1,4 @@
-use agentdb_core::{AppManifest, ManifestAction, ManifestField};
+use statecraft_core::{AppManifest, ManifestAction, ManifestField};
 
 // ---------------------------------------------------------------------------
 // Action descriptor — runtime-facing action metadata
@@ -77,10 +77,10 @@ impl ActionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::ManifestField;
+    use statecraft_core::ManifestField;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
             .unwrap()
     }
 

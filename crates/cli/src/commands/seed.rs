@@ -1,7 +1,7 @@
-use agentdb_core::ExitCode;
+use statecraft_core::ExitCode;
 
 use crate::output::{print_diagnostics, print_json};
-use agentdb_core::{Diagnostic, Severity};
+use statecraft_core::{Diagnostic, Severity};
 use serde::Serialize;
 
 use std::collections::BTreeMap;
@@ -32,7 +32,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .windows(2)
         .find(|w| w[0] == "--token")
         .map(|w| w[1].clone())
-        .or_else(|| std::env::var("AGENTDB_ADMIN_TOKEN").ok());
+        .or_else(|| std::env::var("STATECRAFT_ADMIN_TOKEN").ok());
 
     // Read the seed file.
     let content = match std::fs::read_to_string(file_path) {

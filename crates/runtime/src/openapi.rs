@@ -1,4 +1,4 @@
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 use serde_json::{json, Value};
 
 /// Generate a complete OpenAPI 3.0.3 specification from an `AppManifest`.
@@ -514,7 +514,7 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     })
 }
 
-/// Map an agentdb field type string to an OpenAPI schema fragment.
+/// Map an statecraft field type string to an OpenAPI schema fragment.
 fn map_field_type(field_type: &str) -> Value {
     match field_type {
         "string" => json!({ "type": "string" }),
@@ -529,12 +529,12 @@ fn map_field_type(field_type: &str) -> Value {
 }
 
 /// Build an OpenAPI schema object from a `ManifestEntity`.
-fn build_entity_schema(entity: &agentdb_core::ManifestEntity) -> Value {
+fn build_entity_schema(entity: &statecraft_core::ManifestEntity) -> Value {
     build_fields_schema_with_id(&entity.fields)
 }
 
 /// Build an OpenAPI schema from a slice of fields, prepending an `id` property.
-fn build_fields_schema_with_id(fields: &[agentdb_core::ManifestField]) -> Value {
+fn build_fields_schema_with_id(fields: &[statecraft_core::ManifestField]) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required = vec!["id".to_string()];
 
@@ -555,7 +555,7 @@ fn build_fields_schema_with_id(fields: &[agentdb_core::ManifestField]) -> Value 
 }
 
 /// Build an OpenAPI schema from a slice of fields (no implicit `id`).
-fn build_fields_schema(fields: &[agentdb_core::ManifestField]) -> Value {
+fn build_fields_schema(fields: &[statecraft_core::ManifestField]) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
 
@@ -585,7 +585,7 @@ fn build_fields_schema(fields: &[agentdb_core::ManifestField]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::{ManifestEntity, ManifestField, ManifestIndex, ManifestAction};
+    use statecraft_core::{ManifestEntity, ManifestField, ManifestIndex, ManifestAction};
 
     fn sample_manifest() -> AppManifest {
         AppManifest {

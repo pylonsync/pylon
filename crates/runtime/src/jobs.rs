@@ -123,6 +123,10 @@ pub struct JobQueue {
     failed_count: AtomicU64,
     /// Monotonic ID counter.
     next_id: AtomicU64,
+    /// Optional persistent backing store. When set, every state transition is
+    /// mirrored to SQLite so jobs survive restart. Failures to persist are
+    /// logged but not surfaced — durability is best-effort, never blocking.
+    store: Mutex<Option<std::sync::Arc<crate::job_store::JobStore>>>,
 }
 
 impl JobQueue {
@@ -138,6 +142,24 @@ impl JobQueue {
             completed_count: AtomicU64::new(0),
             failed_count: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
+            store: Mutex::new(None),
+        }
+    }
+
+    /// Attach a persistent store. After this, every enqueue, state change, and
+    /// terminal event is mirrored to the store. Call once at startup.
+    pub fn attach_store(&self, store: std::sync::Arc<crate::job_store::JobStore>) {
+        *self.store.lock().unwrap() = Some(store);
+    }
+
+    /// Best-effort persist. Never panics, never propagates errors — durability
+    /// is opportunistic. If the store is detached or write fails, logs and
+    /// continues.
+    fn persist(&self, job: &Job) {
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            if let Err(e) = store.save(job) {
+                tracing::warn!("[jobs] failed to persist job {}: {e}", job.id);
+            }
         }
     }
 
@@ -154,7 +176,10 @@ impl JobQueue {
         self.enqueue_with_options(name, payload, Priority::Normal, 0, 3, "default")
     }
 
-    /// Enqueue with full options.
+    /// Enqueue with full options. Returns the job id, or an empty string if
+    /// the persistent store rejected the write. Prefer
+    /// [`try_enqueue_with_options`] in new code so persist failures don't
+    /// look like success to the caller.
     pub fn enqueue_with_options(
         &self,
         name: &str,
@@ -164,9 +189,30 @@ impl JobQueue {
         max_retries: u32,
         queue: &str,
     ) -> String {
+        match self.try_enqueue_with_options(name, payload, priority, delay_secs, max_retries, queue)
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("[jobs] enqueue rejected: {e}");
+                String::new()
+            }
+        }
+    }
+
+    /// Result-returning variant of [`enqueue_with_options`]. Use this from
+    /// any path where a silent failure would propagate as an apparent
+    /// success (e.g. the TS scheduler hook returning `id: ""` to the user).
+    pub fn try_enqueue_with_options(
+        &self,
+        name: &str,
+        payload: serde_json::Value,
+        priority: Priority,
+        delay_secs: u64,
+        max_retries: u32,
+        queue: &str,
+    ) -> Result<String, String> {
         let id = format!("job_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let now = now_iso();
-
         let job = Job {
             id: id.clone(),
             name: name.to_string(),
@@ -182,7 +228,20 @@ impl JobQueue {
             delay_secs,
             queue: queue.to_string(),
         };
+        self.try_enqueue_job(job)
+    }
 
+    fn try_enqueue_job(&self, job: Job) -> Result<String, String> {
+        // Write-ahead: persist BEFORE the in-memory queue accepts the job, so
+        // a crash between the two states can't lose an accepted job.
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            if let Err(e) = store.save(&job) {
+                return Err(format!("persist failed for job {}: {e}", job.id));
+            }
+        }
+
+        let id = job.id.clone();
+        let priority = job.priority;
         {
             let mut pending = self.pending.lock().unwrap();
             // Insert in priority order (higher priority closer to front).
@@ -192,10 +251,8 @@ impl JobQueue {
                 .unwrap_or(pending.len());
             pending.insert(pos, job);
         }
-
-        // Wake one blocked worker.
         self.notify.notify_one();
-        id
+        Ok(id)
     }
 
     /// Dequeue the highest-priority pending job. Blocks up to `timeout`.
@@ -213,6 +270,7 @@ impl JobQueue {
                 .lock()
                 .unwrap()
                 .insert(job.id.clone(), job.clone());
+            self.persist(&job);
             Some(job)
         } else {
             None
@@ -236,6 +294,7 @@ impl JobQueue {
                 .lock()
                 .unwrap()
                 .insert(job.id.clone(), job.clone());
+            self.persist(&job);
             Some(job)
         } else {
             None
@@ -249,6 +308,7 @@ impl JobQueue {
             job.status = JobStatus::Completed;
             job.completed_at = Some(now_iso());
             self.completed_count.fetch_add(1, Ordering::Relaxed);
+            self.persist(&job);
             self.push_history(job);
         }
     }
@@ -266,6 +326,7 @@ impl JobQueue {
                 job.started_at = None;
                 job.completed_at = None;
 
+                self.persist(&job);
                 let mut pending = self.pending.lock().unwrap();
                 let priority = job.priority as u8;
                 let pos = pending
@@ -280,6 +341,7 @@ impl JobQueue {
                 job.status = JobStatus::Dead;
                 job.completed_at = Some(now_iso());
                 self.failed_count.fetch_add(1, Ordering::Relaxed);
+                self.persist(&job);
                 self.dead_letters.lock().unwrap().push_back(job);
             }
         }
@@ -537,6 +599,7 @@ impl JobQueue {
 /// A worker that continuously processes jobs from the queue.
 pub struct Worker {
     queue: Arc<JobQueue>,
+    #[allow(dead_code)]
     name: String,
     running: Arc<AtomicBool>,
 }
@@ -568,6 +631,7 @@ impl Worker {
 /// Handle returned by `Worker::start()` to stop the background thread.
 pub struct WorkerHandle {
     running: Arc<AtomicBool>,
+    #[allow(dead_code)]
     handle: Option<std::thread::JoinHandle<()>>,
 }
 

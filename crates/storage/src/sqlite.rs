@@ -7,7 +7,7 @@ use crate::{
     ColumnSnapshot, FieldSpec, IndexSnapshot, SchemaOperation, SchemaPlan, SchemaSnapshot,
     StorageAdapter, StorageError, TableSnapshot,
 };
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Type mapping: manifest field types -> SQLite column types
@@ -136,7 +136,32 @@ impl StorageAdapter for SqliteAdapter {
     }
 
     fn apply_schema(&self, plan: &SchemaPlan) -> Result<(), StorageError> {
-        self.apply_schema_impl(plan)
+        // Wrap the whole plan in a single transaction so that if operation N
+        // fails, operations 1..N are rolled back. Without this, a partial
+        // migration would leave the database in an inconsistent state that
+        // doesn't match either the old or the new manifest.
+        self.conn.execute("BEGIN", []).map_err(|e| StorageError {
+            code: "SQLITE_EXEC_FAILED".into(),
+            message: format!("BEGIN failed: {e}"),
+        })?;
+        match self.apply_schema_impl(plan) {
+            Ok(()) => {
+                self.conn.execute("COMMIT", []).map_err(|e| StorageError {
+                    code: "SQLITE_EXEC_FAILED".into(),
+                    message: format!("COMMIT failed after apply: {e}"),
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                if let Err(rb) = self.conn.execute("ROLLBACK", []) {
+                    // Log both — a failed rollback leaves the connection in
+                    // a broken state but the original error is what the
+                    // caller cares about.
+                    tracing::warn!("[sqlite] ROLLBACK after apply error failed: {rb}");
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -144,7 +169,7 @@ impl StorageAdapter for SqliteAdapter {
 // Migration history
 // ---------------------------------------------------------------------------
 
-const HISTORY_TABLE: &str = "_agentdb_schema_history";
+const HISTORY_TABLE: &str = "_statecraft_schema_history";
 
 /// A single row from the schema push history table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,54 +214,81 @@ impl SqliteAdapter {
         Ok(())
     }
 
-    /// Apply a schema plan and record the push in the history table.
+    /// Apply a schema plan and record the push in the history table —
+    /// atomically. If either the DDL or the history INSERT fails, the
+    /// whole transaction rolls back so the database never ends up with a
+    /// schema change that has no history row, or a history row that
+    /// points at a failed migration.
     pub fn apply_with_history(
         &self,
         plan: &SchemaPlan,
         meta: &PushMetadata<'_>,
     ) -> Result<(), StorageError> {
-        // Apply the plan.
-        self.apply_schema_impl(plan)?;
-
-        // Record history.
+        // History table creation runs OUTSIDE the transaction because
+        // CREATE TABLE IF NOT EXISTS is a cheap idempotent bootstrap and
+        // can safely predate the real migration atomicity boundary.
         self.ensure_history_table()?;
 
-        let plan_json = serde_json::to_string(plan).map_err(|e| StorageError {
-            code: "SQLITE_SERIALIZE_FAILED".into(),
-            message: format!("Failed to serialize plan: {e}"),
+        self.conn.execute("BEGIN", []).map_err(|e| StorageError {
+            code: "SQLITE_EXEC_FAILED".into(),
+            message: format!("BEGIN failed: {e}"),
         })?;
 
-        let id = generate_push_id();
-        let now = now_iso8601();
-        let op_count = plan
-            .operations
-            .iter()
-            .filter(|op| !matches!(op, SchemaOperation::Noop))
-            .count() as i64;
+        let result = (|| -> Result<(), StorageError> {
+            self.apply_schema_impl(plan)?;
 
-        self.conn
-            .execute(
-                &format!(
-                    "INSERT INTO {} (id, manifest_version, app_version, applied_at, operation_count, baseline, plan_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    quote_ident(HISTORY_TABLE)
-                ),
-                rusqlite::params![
-                    id,
-                    meta.manifest_version as i64,
-                    meta.app_version,
-                    now,
-                    op_count,
-                    meta.baseline,
-                    plan_json,
-                ],
-            )
-            .map_err(|e| StorageError {
-                code: "SQLITE_EXEC_FAILED".into(),
-                message: format!("Failed to insert history row: {e}"),
+            let plan_json = serde_json::to_string(plan).map_err(|e| StorageError {
+                code: "SQLITE_SERIALIZE_FAILED".into(),
+                message: format!("Failed to serialize plan: {e}"),
             })?;
 
-        Ok(())
+            let id = generate_push_id();
+            let now = now_iso8601();
+            let op_count = plan
+                .operations
+                .iter()
+                .filter(|op| !matches!(op, SchemaOperation::Noop))
+                .count() as i64;
+
+            self.conn
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (id, manifest_version, app_version, applied_at, operation_count, baseline, plan_json) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        quote_ident(HISTORY_TABLE)
+                    ),
+                    rusqlite::params![
+                        id,
+                        meta.manifest_version as i64,
+                        meta.app_version,
+                        now,
+                        op_count,
+                        meta.baseline,
+                        plan_json,
+                    ],
+                )
+                .map_err(|e| StorageError {
+                    code: "SQLITE_EXEC_FAILED".into(),
+                    message: format!("Failed to insert history row: {e}"),
+                })?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute("COMMIT", []).map_err(|e| StorageError {
+                    code: "SQLITE_EXEC_FAILED".into(),
+                    message: format!("COMMIT failed: {e}"),
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                if let Err(rb) = self.conn.execute("ROLLBACK", []) {
+                    tracing::warn!("[sqlite] ROLLBACK after apply_with_history error failed: {rb}");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Read schema push history, newest-first.
@@ -432,7 +484,7 @@ impl SqliteAdapter {
         // Get all user tables, sorted for determinism.
         let mut stmt = self
             .conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_agentdb_%' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_statecraft_%' ORDER BY name")
             .map_err(sqlite_err)?;
 
         let table_names: Vec<String> = stmt
@@ -540,7 +592,7 @@ fn sqlite_err(e: rusqlite::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::*;
+    use statecraft_core::*;
 
     fn test_manifest() -> AppManifest {
         AppManifest {
@@ -1084,7 +1136,7 @@ mod tests {
         adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
 
         let snapshot = adapter.read_schema().unwrap();
-        assert!(!snapshot.tables.iter().any(|t| t.name.starts_with("_agentdb")));
+        assert!(!snapshot.tables.iter().any(|t| t.name.starts_with("_statecraft")));
     }
 
     // -- read_history tests --

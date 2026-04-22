@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
@@ -82,7 +82,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         message: "No entry file provided and no app.ts found in current directory"
                             .into(),
                         span: None,
-                        hint: Some("Usage: agentdb dev [app.ts] [--once]".into()),
+                        hint: Some("Usage: statecraft dev [app.ts] [--once]".into()),
                     }],
                     json_mode,
                 );
@@ -168,7 +168,7 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
         };
         print_json(&output);
     } else {
-        println!("agentdb dev");
+        println!("statecraft dev");
         println!();
         println!("  App:       {} v{}", manifest.name, manifest.version);
         println!("  Entry:     {entry_file}");
@@ -186,7 +186,7 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
             println!();
         }
 
-        println!("Schema valid. Use 'agentdb dev' (without --once) to start the dev server.");
+        println!("Schema valid. Use 'statecraft dev' (without --once) to start the dev server.");
     }
 
     ExitCode::Ok
@@ -201,7 +201,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     let watch_dir = entry_path.parent().unwrap_or(Path::new("."));
 
     if !json_mode {
-        println!("agentdb dev");
+        println!("statecraft dev");
         println!("  Watching: {} (*.ts)", watch_dir.display());
         println!("  Server:   http://localhost:{port}");
         println!();
@@ -213,13 +213,13 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
     // Start dev server in background if initial build succeeded.
     if let Some(m) = manifest {
-        let db_path = watch_dir.join("agentdb.dev.db");
+        let db_path = watch_dir.join("statecraft.dev.db");
         let db_str = db_path.to_string_lossy().to_string();
 
         // Auto-push schema to the dev database.
-        if let Ok(adapter) = agentdb_storage::sqlite::SqliteAdapter::open(&db_str) {
+        if let Ok(adapter) = statecraft_storage::sqlite::SqliteAdapter::open(&db_str) {
             if let Ok(plan) = adapter.plan_from_live(&m) {
-                let meta = agentdb_storage::sqlite::PushMetadata {
+                let meta = statecraft_storage::sqlite::PushMetadata {
                     manifest_version: m.manifest_version,
                     app_version: &m.version,
                     baseline: "dev",
@@ -233,7 +233,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         }
 
         // Open runtime against the persistent DB.
-        let runtime = match agentdb_runtime::Runtime::open(&db_str, m) {
+        let runtime = match statecraft_runtime::Runtime::open(&db_str, m) {
             Ok(rt) => Arc::new(rt),
             Err(e) => {
                 if !json_mode {
@@ -245,7 +245,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
         let rt_clone = Arc::clone(&runtime);
         std::thread::spawn(move || {
-            let _ = agentdb_runtime::server::start(rt_clone, port);
+            let _ = statecraft_runtime::server::start(rt_clone, port);
         });
     }
 
@@ -268,7 +268,7 @@ fn run_rebuild_and_get_manifest(
     entry_file: &str,
     json_mode: bool,
     count: &mut u32,
-) -> Option<agentdb_core::AppManifest> {
+) -> Option<statecraft_core::AppManifest> {
     *count += 1;
     let n = *count;
 
@@ -432,17 +432,17 @@ fn run_rebuild(entry_file: &str, json_mode: bool, count: &mut u32) {
 fn write_generated_files(
     entry_file: &str,
     manifest_json: &str,
-    manifest: &agentdb_core::AppManifest,
+    manifest: &statecraft_core::AppManifest,
 ) {
     let entry_path = Path::new(entry_file);
     let dir = entry_path.parent().unwrap_or(Path::new("."));
 
     // Write manifest.
-    let manifest_path = dir.join("agentdb.manifest.json");
+    let manifest_path = dir.join("statecraft.manifest.json");
     let _ = std::fs::write(&manifest_path, format!("{manifest_json}\n"));
 
     // Write client bindings.
-    let client_path = dir.join("agentdb.client.ts");
+    let client_path = dir.join("statecraft.client.ts");
     let client_ts = generate_client_ts(manifest);
     let _ = std::fs::write(&client_path, client_ts);
 }
@@ -456,7 +456,7 @@ fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
             if path.extension().and_then(|e| e.to_str()) == Some("ts") {
                 // Skip generated files to avoid infinite rebuild loops.
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("agentdb.") {
+                    if name.starts_with("statecraft.") {
                         continue;
                     }
                 }

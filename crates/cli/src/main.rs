@@ -4,10 +4,36 @@ mod commands;
 mod manifest;
 mod output;
 
-use agentdb_core::ExitCode;
+use statecraft_core::ExitCode;
 
 fn main() {
+    init_tracing();
     std::process::exit(run().as_i32());
+}
+
+/// Initialize structured logging.
+///
+/// Reads the log level from `RUST_LOG` (e.g. `statecraft=debug,info`).
+/// Defaults to `info`. Output goes to stderr so logs and JSON output
+/// don't intermix on stdout.
+///
+/// Format is controlled by `STATECRAFT_LOG_FORMAT`:
+/// - unset or `pretty` → human-readable compact output (dev default)
+/// - `json` → one JSON object per line (Datadog/Axiom/Sentry ingestible)
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let format = std::env::var("STATECRAFT_LOG_FORMAT").unwrap_or_default();
+    let builder = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false);
+    if format.eq_ignore_ascii_case("json") {
+        let _ = builder.json().try_init();
+    } else {
+        let _ = builder.compact().try_init();
+    }
 }
 
 fn run() -> ExitCode {
@@ -62,6 +88,9 @@ fn run() -> ExitCode {
             }
         },
         Some("seed") => commands::seed::run(&args, json_mode),
+        Some("test") => commands::test::run(&args, json_mode),
+        Some("backup") => commands::backup::run_backup(&args, json_mode),
+        Some("restore") => commands::backup::run_restore(&args, json_mode),
         Some("version") => commands::version::run(json_mode),
         Some(cmd) => {
             output::print_error(&format!("unknown command: \"{cmd}\""));
@@ -90,9 +119,10 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 15] = [
-    "build", "cache", "codegen", "deploy", "dev", "doctor", "env", "explain",
-    "init", "migrate", "plugins", "schema", "seed", "version", "help",
+const TOP_LEVEL_COMMANDS: [&str; 18] = [
+    "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env",
+    "explain", "init", "migrate", "plugins", "restore", "schema", "seed",
+    "test", "version", "help",
 ];
 
 const SCHEMA_SUBCOMMANDS: [&str; 5] = [
@@ -104,7 +134,7 @@ const SCHEMA_SUBCOMMANDS: [&str; 5] = [
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    println!("agentdb -- AI-native framework for web/mobile apps");
+    println!("statecraft -- AI-native framework for web/mobile apps");
     println!();
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");

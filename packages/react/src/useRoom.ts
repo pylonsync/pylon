@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { getBaseUrl } from './index';
 
 // ---------------------------------------------------------------------------
 // Room types
@@ -16,7 +17,7 @@ export interface RoomSnapshot {
 }
 
 export interface UseRoomOptions {
-  /** Base URL of the agentdb server. */
+  /** Base URL of the statecraft server. */
   baseUrl?: string;
   /** Auth token for API requests. */
   token?: string;
@@ -57,17 +58,35 @@ export interface UseRoomReturn {
  * );
  * ```
  */
+/**
+ * Read the current statecraft token from localStorage, matching the
+ * convention used by `callFn` and the sync engine. Keeps the hook working
+ * even when the caller doesn't explicitly thread a token — otherwise every
+ * useRoom request hits the server as anonymous and 401s under any
+ * authenticated room policy.
+ */
+function readStoredToken(): string | undefined {
+  if (typeof window === 'undefined' || !window.localStorage) return undefined;
+  return window.localStorage.getItem('statecraft_token') ?? undefined;
+}
+
 export function useRoom(
   roomId: string,
   userId: string,
   options: UseRoomOptions = {},
 ): UseRoomReturn {
   const {
-    baseUrl = '',
-    token,
+    // Fall back to the globally configured baseUrl so room requests don't
+    // land on the Vite dev origin (localhost:5173) and 404 when the caller
+    // forgets to pass one.
+    baseUrl = getBaseUrl(),
+    token: explicitToken,
     initialPresence = {},
     heartbeatInterval = 5_000,
   } = options;
+  // Resolve at render time rather than hook-creation time so the room
+  // reconnects with a fresh token after login.
+  const token = explicitToken ?? readStoredToken();
 
   const [peers, setPeers] = useState<RoomPeer[]>([]);
   const [isConnected, setIsConnected] = useState(false);

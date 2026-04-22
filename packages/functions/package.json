@@ -1,0 +1,44 @@
+{
+  "name": "@statecraft/functions",
+  "version": "0.1.0",
+  "description": "TypeScript function runtime for statecraft — defines server-side queries, mutations, and actions.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./runtime": "./src/runtime.ts"
+  },
+  "bin": {
+    "statecraft-functions-runtime": "src/runtime.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "keywords": [
+    "statecraft",
+    "typescript",
+    "functions",
+    "database"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "devDependencies": {
+    "typescript": "^5.5"
+  },
+  "peerDependencies": {
+    "bun-types": "*"
+  },
+  "peerDependenciesMeta": {
+    "bun-types": {
+      "optional": true
+    }
+  }
+}

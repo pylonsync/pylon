@@ -1,10 +1,14 @@
 pub mod cache_handlers;
 pub mod cache_server;
+pub mod config;
 pub mod cron;
+pub mod datastore;
+pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
 pub mod log;
 pub mod metrics;
+pub mod oauth_backend;
 pub mod openapi;
 pub mod presence;
 pub mod pubsub;
@@ -14,6 +18,8 @@ pub mod resp_server;
 pub mod rooms;
 pub mod scheduler;
 pub mod server;
+pub mod session_backend;
+pub mod shard_ws;
 pub mod sse;
 pub mod tls;
 pub mod workflow_store;
@@ -24,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use agentdb_core::{AppManifest, ManifestEntity};
+use statecraft_core::{AppManifest, ManifestEntity};
 use rusqlite::Connection;
 
 // ---------------------------------------------------------------------------
@@ -122,6 +128,9 @@ pub struct Runtime {
     read_counter: AtomicUsize,
     manifest: AppManifest,
     entities: HashMap<String, ManifestEntity>,
+    /// Set by the constructor — NOT derived from `conn.path()` (that path
+    /// conflates "no filename" with "in-memory"; see `is_in_memory` doc).
+    is_in_memory: bool,
 }
 
 /// Number of read-only connections to open in the pool.
@@ -134,7 +143,62 @@ impl Runtime {
             code: "RUNTIME_OPEN_FAILED".into(),
             message: format!("Failed to open database: {e}"),
         })?;
-        Self::from_connection(conn, manifest)
+        Self::from_connection(conn, manifest, false)
+    }
+
+    /// Returns true if this runtime is backed by an in-memory SQLite DB.
+    ///
+    /// Stored at open time rather than queried via `conn.path()` because
+    /// the path-based check conflates "no filename" with "in-memory":
+    /// `Connection::open("")` yields a file-backed DB with empty path,
+    /// and would falsely pass as in-memory. Since we always know at
+    /// construction time which constructor was used, track the bit.
+    ///
+    /// Gates the test-reset endpoint — a false positive here would let
+    /// `/api/__test__/reset` truncate real tables.
+    pub fn is_in_memory(&self) -> bool {
+        self.is_in_memory
+    }
+
+    /// Filesystem path to the SQLite database, if this runtime is file-backed.
+    /// Returns `None` for in-memory runtimes. Used by the server bootstrap to
+    /// derive companion paths (session store, change log persistence) without
+    /// requiring the caller to pass them in.
+    pub fn db_path(&self) -> Option<String> {
+        if self.is_in_memory {
+            return None;
+        }
+        let conn = self.write_conn.lock().ok()?;
+        conn.path().filter(|p| !p.is_empty()).map(String::from)
+    }
+
+    /// Drop every row from every entity table. Intended for test harnesses
+    /// that call `/api/__test__/reset` between cases; refuses to run on
+    /// anything but an in-memory database.
+    ///
+    /// Does NOT drop the tables themselves — schema stays, indexes stay,
+    /// triggers stay. Just truncates user data + the change log.
+    pub fn reset_for_tests(&self) -> Result<(), RuntimeError> {
+        if !self.is_in_memory() {
+            return Err(RuntimeError {
+                code: "RESET_REFUSED".into(),
+                message: "reset_for_tests is only available on in-memory databases".into(),
+            });
+        }
+        let conn = self.lock_write_conn()?;
+        let entity_names: Vec<String> = self
+            .entities
+            .values()
+            .map(|e| e.name.clone())
+            .collect();
+        for name in entity_names {
+            let sql = format!("DELETE FROM {}", quote_ident(&name));
+            let _ = conn.execute(&sql, []);
+            // Also clear any FTS5 shadow table if present.
+            let fts_sql = format!("DELETE FROM {}", quote_ident(&format!("{name}_fts")));
+            let _ = conn.execute(&fts_sql, []);
+        }
+        Ok(())
     }
 
     /// Create an in-memory runtime (useful for tests and benchmarks).
@@ -143,10 +207,10 @@ impl Runtime {
             code: "RUNTIME_OPEN_FAILED".into(),
             message: format!("Failed to open in-memory database: {e}"),
         })?;
-        Self::from_connection(conn, manifest)
+        Self::from_connection(conn, manifest, true)
     }
 
-    fn from_connection(conn: Connection, manifest: AppManifest) -> Result<Self, RuntimeError> {
+    fn from_connection(conn: Connection, manifest: AppManifest, is_in_memory: bool) -> Result<Self, RuntimeError> {
         // Enable WAL mode for better concurrency.
         conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
 
@@ -200,6 +264,90 @@ impl Runtime {
                 );
                 conn.execute(&idx_sql, []).ok();
             }
+
+            // Create an FTS5 virtual table over all text-ish fields so clients
+            // can do full-text search via the `$search` query operator.
+            //
+            // Fields that look like "string" / "richtext" / "text" are indexed.
+            // The FTS table is a contentless external-content table pointed at
+            // the entity table, so SQLite keeps it consistent via triggers we
+            // install below.
+            let text_fields: Vec<&str> = entity
+                .fields
+                .iter()
+                .filter(|f| matches!(f.field_type.as_str(), "string" | "richtext" | "text"))
+                .map(|f| f.name.as_str())
+                .collect();
+            if !text_fields.is_empty() {
+                let fts_name = format!("{}_fts", entity.name);
+                let quoted_cols: Vec<String> =
+                    text_fields.iter().map(|f| quote_ident(f)).collect();
+                let fts_sql = format!(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5({}, content={}, content_rowid='rowid')",
+                    quote_ident(&fts_name),
+                    quoted_cols.join(", "),
+                    quote_ident(&entity.name),
+                );
+                // FTS5 may not be compiled in; ignore errors so those builds
+                // still work (queries using $search will return empty).
+                let fts_ok = conn.execute(&fts_sql, []).is_ok();
+
+                if fts_ok {
+                    // Sync triggers: keep FTS index current on INSERT/UPDATE/DELETE.
+                    //
+                    // Subtle bug fixed: the trigger NAME must be built from
+                    // the raw `fts_name` + suffix and THEN quoted once.
+                    // Previously this code quoted `fts_name` first and then
+                    // appended `_ai`/`_ad`/`_au` AFTER the closing quote,
+                    // producing invalid SQL like `"foo_fts"_ai`. The
+                    // `.ok()` after execute silently ate the error, so the
+                    // triggers were never created and FTS stayed out of
+                    // sync on writes.
+                    let tbl = quote_ident(&entity.name);
+                    let ftb = quote_ident(&fts_name);
+                    let cols_list = quoted_cols.join(", ");
+                    let new_list: Vec<String> =
+                        text_fields.iter().map(|f| format!("new.{}", quote_ident(f))).collect();
+                    let old_list: Vec<String> =
+                        text_fields.iter().map(|f| format!("old.{}", quote_ident(f))).collect();
+
+                    let trigger_ai = quote_ident(&format!("{}_ai", fts_name));
+                    let trigger_ad = quote_ident(&format!("{}_ad", fts_name));
+                    let trigger_au = quote_ident(&format!("{}_au", fts_name));
+
+                    let trigger_ins = format!(
+                        "CREATE TRIGGER IF NOT EXISTS {trigger_ai} AFTER INSERT ON {tbl} BEGIN \
+                         INSERT INTO {ftb}(rowid, {cols_list}) VALUES (new.rowid, {new_vals}); END",
+                        new_vals = new_list.join(", "),
+                    );
+                    let trigger_del = format!(
+                        "CREATE TRIGGER IF NOT EXISTS {trigger_ad} AFTER DELETE ON {tbl} BEGIN \
+                         INSERT INTO {ftb}({ftb}, rowid, {cols_list}) VALUES('delete', old.rowid, {old_vals}); END",
+                        old_vals = old_list.join(", "),
+                    );
+                    let trigger_upd = format!(
+                        "CREATE TRIGGER IF NOT EXISTS {trigger_au} AFTER UPDATE ON {tbl} BEGIN \
+                         INSERT INTO {ftb}({ftb}, rowid, {cols_list}) VALUES('delete', old.rowid, {old_vals}); \
+                         INSERT INTO {ftb}(rowid, {cols_list}) VALUES (new.rowid, {new_vals}); END",
+                        new_vals = new_list.join(", "),
+                        old_vals = old_list.join(", "),
+                    );
+                    // Log failures instead of silently dropping — FTS going
+                    // stale should be visible to operators.
+                    for (label, sql) in [
+                        ("ai", &trigger_ins),
+                        ("ad", &trigger_del),
+                        ("au", &trigger_upd),
+                    ] {
+                        if let Err(e) = conn.execute(sql, []) {
+                            tracing::warn!(
+                                "[fts] failed to create {label} trigger for {}: {e}",
+                                entity.name
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Open read-only connection pool for file-backed databases.
@@ -234,6 +382,7 @@ impl Runtime {
             read_counter: AtomicUsize::new(0),
             manifest,
             entities,
+            is_in_memory,
         })
     }
 
@@ -583,6 +732,8 @@ impl Runtime {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut order_clause = String::new();
         let mut limit_clause = String::new();
+        let mut join_clause = String::new();
+        let mut fts_order = false;
         let mut idx = 1;
 
         for (key, val) in &obj {
@@ -606,6 +757,33 @@ impl Runtime {
                 "$limit" => {
                     if let Some(n) = val.as_u64() {
                         limit_clause = format!(" LIMIT {n}");
+                    }
+                }
+                "$offset" => {
+                    if let Some(n) = val.as_u64() {
+                        // SQLite requires LIMIT before OFFSET; add a default.
+                        if limit_clause.is_empty() {
+                            limit_clause = " LIMIT -1".into();
+                        }
+                        limit_clause = format!("{limit_clause} OFFSET {n}");
+                    }
+                }
+                "$search" => {
+                    if let Some(q) = val.as_str() {
+                        // Join against the entity's FTS5 virtual table.
+                        let fts = format!("{}_fts", entity);
+                        join_clause = format!(
+                            " JOIN {fts} ON {ent}.rowid = {fts}.rowid",
+                            fts = quote_ident(&fts),
+                            ent = quote_ident(entity),
+                        );
+                        where_clauses.push(format!(
+                            "{} MATCH ?{idx}",
+                            quote_ident(&fts)
+                        ));
+                        values.push(Box::new(q.to_string()));
+                        fts_order = true;
+                        idx += 1;
                     }
                 }
                 _ => {
@@ -688,12 +866,22 @@ impl Runtime {
         };
 
         if order_clause.is_empty() {
-            order_clause = " ORDER BY \"id\"".to_string();
+            order_clause = if fts_order {
+                // FTS joins default-order by bm25 relevance.
+                " ORDER BY bm25(".to_string()
+                    + &quote_ident(&format!("{}_fts", entity))
+                    + ")"
+            } else {
+                format!(" ORDER BY {}.\"id\"", quote_ident(entity))
+            };
         }
 
+        let select_prefix = format!("{}.*", quote_ident(entity));
         let sql = format!(
-            "SELECT * FROM {}{}{}{}",
+            "SELECT {} FROM {}{}{}{}{}",
+            select_prefix,
             quote_ident(entity),
+            join_clause,
             where_sql,
             order_clause,
             limit_clause
@@ -746,7 +934,17 @@ impl Runtime {
 
             // Apply includes (relations) if present.
             let rows = if let Some(include) = query_opts.get("include").and_then(|v| v.as_object()) {
-                let ent = self.entities.get(entity_name).unwrap();
+                // Internal invariant: if query_filtered succeeded above, the
+                // entity must exist. Previously this used .unwrap() which
+                // would panic if the invariant broke — a panic inside the
+                // handler path poisons the connection mutex and takes down
+                // all subsequent reads. Fail the request cleanly instead.
+                let ent = self.entities.get(entity_name).ok_or_else(|| RuntimeError {
+                    code: "INVARIANT_BROKEN".into(),
+                    message: format!(
+                        "entity \"{entity_name}\" missing from registry during include expansion"
+                    ),
+                })?;
                 rows.into_iter()
                     .map(|mut row| {
                         for (rel_name, _sub_query) in include {
@@ -886,6 +1084,490 @@ impl Runtime {
         Ok(affected > 0)
     }
 
+    /// Read a row by id using a pre-held connection (for transactions).
+    pub fn get_by_id_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(entity));
+        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare query: {e}"),
+        })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        Ok(stmt
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
+            .ok())
+    }
+
+    /// List rows using a pre-held connection (for transactions).
+    pub fn list_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let sql = format!("SELECT * FROM {} ORDER BY \"id\"", quote_ident(entity));
+        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare query: {e}"),
+        })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let rows = stmt
+            .query_map([], |row| Ok(row_to_json(row, &columns)))
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Query failed: {e}"),
+            })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// List after cursor using a pre-held connection (for transactions).
+    pub fn list_after_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let table = quote_ident(entity);
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
+            Some(cursor) => (
+                format!(
+                    "SELECT * FROM {table} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2"
+                ),
+                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
+            ),
+            None => (
+                format!("SELECT * FROM {table} ORDER BY \"id\" LIMIT ?1"),
+                vec![Box::new(limit as i64)],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Query failed: {e}"),
+            })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Lookup by field using a pre-held connection (for transactions).
+    pub fn lookup_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        validate_column_name(field, ent)?;
+        let sql = format!(
+            "SELECT * FROM {} WHERE {} = ?1 LIMIT 1",
+            quote_ident(entity),
+            quote_ident(field)
+        );
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        Ok(conn
+            .prepare(&sql)
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(rusqlite::params![value], |row| {
+                    Ok(row_to_json(row, &columns))
+                })
+                .ok()
+            }))
+    }
+
+    /// Link relation using a pre-held connection (for transactions).
+    pub fn link_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+        relation: &str,
+        target_id: &str,
+    ) -> Result<bool, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let rel = ent
+            .relations
+            .iter()
+            .find(|r| r.name == relation)
+            .ok_or_else(|| RuntimeError {
+                code: "RELATION_NOT_FOUND".into(),
+                message: format!("Relation \"{relation}\" not found on \"{entity}\""),
+            })?;
+        let data = serde_json::json!({ rel.field.clone(): target_id });
+        self.update_with_conn(conn, entity, id, &data)
+    }
+
+    /// Unlink relation using a pre-held connection (for transactions).
+    pub fn unlink_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+        relation: &str,
+    ) -> Result<bool, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let rel = ent
+            .relations
+            .iter()
+            .find(|r| r.name == relation)
+            .ok_or_else(|| RuntimeError {
+                code: "RELATION_NOT_FOUND".into(),
+                message: format!("Relation \"{relation}\" not found on \"{entity}\""),
+            })?;
+        let data = serde_json::json!({ rel.field.clone(): serde_json::Value::Null });
+        self.update_with_conn(conn, entity, id, &data)
+    }
+
+    /// Query with filters using a pre-held connection (for transactions).
+    ///
+    /// Shares the filter-building logic with [`query_filtered`] by executing
+    /// against the provided connection rather than acquiring one.
+    pub fn query_filtered_with_conn(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let empty = serde_json::Map::new();
+        let obj = filter.as_object().unwrap_or(&empty);
+
+        let mut where_clauses = Vec::new();
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut order_clause = String::new();
+        let mut limit_clause = String::new();
+        let mut idx = 1;
+
+        for (key, val) in obj {
+            match key.as_str() {
+                "$order" => {
+                    if let Some(o) = val.as_object() {
+                        let mut parts: Vec<String> = Vec::new();
+                        for (col, dir) in o {
+                            validate_column_name(col, ent)?;
+                            let d = match dir.as_str().unwrap_or("asc") {
+                                "desc" | "DESC" => "DESC",
+                                _ => "ASC",
+                            };
+                            parts.push(format!("{} {d}", quote_ident(col)));
+                        }
+                        if !parts.is_empty() {
+                            order_clause = format!(" ORDER BY {}", parts.join(", "));
+                        }
+                    }
+                }
+                "$limit" => {
+                    if let Some(n) = val.as_u64() {
+                        limit_clause = format!(" LIMIT {n}");
+                    }
+                }
+                "$offset" => {
+                    if let Some(n) = val.as_u64() {
+                        if limit_clause.is_empty() {
+                            limit_clause = " LIMIT -1".into();
+                        }
+                        limit_clause = format!("{limit_clause} OFFSET {n}");
+                    }
+                }
+                _ => {
+                    validate_column_name(key, ent)?;
+                    let qk = quote_ident(key);
+                    if let Some(op_obj) = val.as_object() {
+                        for (op, op_val) in op_obj {
+                            match op.as_str() {
+                                "$not" => {
+                                    where_clauses.push(format!("{qk} != ?{idx}"));
+                                    values.push(json_to_sql(op_val));
+                                    idx += 1;
+                                }
+                                "$gt" => {
+                                    where_clauses.push(format!("{qk} > ?{idx}"));
+                                    values.push(json_to_sql(op_val));
+                                    idx += 1;
+                                }
+                                "$gte" => {
+                                    where_clauses.push(format!("{qk} >= ?{idx}"));
+                                    values.push(json_to_sql(op_val));
+                                    idx += 1;
+                                }
+                                "$lt" => {
+                                    where_clauses.push(format!("{qk} < ?{idx}"));
+                                    values.push(json_to_sql(op_val));
+                                    idx += 1;
+                                }
+                                "$lte" => {
+                                    where_clauses.push(format!("{qk} <= ?{idx}"));
+                                    values.push(json_to_sql(op_val));
+                                    idx += 1;
+                                }
+                                "$like" => {
+                                    where_clauses.push(format!("{qk} LIKE ?{idx}"));
+                                    let p = format!("%{}%", op_val.as_str().unwrap_or(""));
+                                    values.push(Box::new(p));
+                                    idx += 1;
+                                }
+                                "$in" => {
+                                    if let Some(arr) = op_val.as_array() {
+                                        let ph: Vec<String> = arr
+                                            .iter()
+                                            .map(|v| {
+                                                let p = format!("?{idx}");
+                                                values.push(json_to_sql(v));
+                                                idx += 1;
+                                                p
+                                            })
+                                            .collect();
+                                        if !ph.is_empty() {
+                                            where_clauses.push(format!(
+                                                "{qk} IN ({})",
+                                                ph.join(", ")
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        where_clauses.push(format!("{qk} = ?{idx}"));
+                        values.push(json_to_sql(val));
+                        idx += 1;
+                    }
+                }
+            }
+        }
+
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_clauses.join(" AND "))
+        };
+        if order_clause.is_empty() {
+            order_clause = " ORDER BY \"id\"".into();
+        }
+
+        let sql = format!(
+            "SELECT * FROM {}{}{}{}",
+            quote_ident(entity),
+            where_sql,
+            order_clause,
+            limit_clause
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Query failed: {e}"),
+            })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Graph query using a pre-held connection (for transactions).
+    pub fn query_graph_with_conn(
+        &self,
+        conn: &Connection,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let obj = query.as_object().ok_or_else(|| RuntimeError {
+            code: "INVALID_QUERY".into(),
+            message: "Graph query must be a JSON object".into(),
+        })?;
+        let mut results = serde_json::Map::new();
+        for (entity_name, query_opts) in obj {
+            let _ent = self.require_entity(entity_name)?;
+            let filter = query_opts.get("where").cloned().unwrap_or(serde_json::json!({}));
+            let rows = self.query_filtered_with_conn(conn, entity_name, &filter)?;
+            results.insert(entity_name.clone(), serde_json::json!(rows));
+        }
+        Ok(serde_json::Value::Object(results))
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggregations — count, sum, avg, min, max, group by
+    // -----------------------------------------------------------------------
+
+    /// Run an aggregation query. See [`statecraft_http::DataStore::aggregate`]
+    /// for the spec shape.
+    pub fn aggregate(
+        &self,
+        entity: &str,
+        spec: &serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let ent = self.require_entity(entity)?;
+        let conn = self.lock_read_conn()?;
+        let obj = spec.as_object().ok_or_else(|| RuntimeError {
+            code: "INVALID_QUERY".into(),
+            message: "aggregate spec must be an object".into(),
+        })?;
+
+        // Build the SELECT list.
+        let mut select_parts: Vec<String> = Vec::new();
+        let mut result_fields: Vec<String> = Vec::new();
+
+        if let Some(count) = obj.get("count") {
+            match count {
+                serde_json::Value::String(s) if s == "*" => {
+                    select_parts.push("COUNT(*) AS count".into());
+                    result_fields.push("count".into());
+                }
+                serde_json::Value::String(field) => {
+                    validate_column_name(field, ent)?;
+                    let alias = format!("count_{field}");
+                    select_parts.push(format!(
+                        "COUNT({}) AS {}",
+                        quote_ident(field),
+                        quote_ident(&alias)
+                    ));
+                    result_fields.push(alias);
+                }
+                _ => {}
+            }
+        }
+
+        for (fn_name, alias_prefix) in
+            [("sum", "sum_"), ("avg", "avg_"), ("min", "min_"), ("max", "max_")]
+        {
+            if let Some(fields) = obj.get(fn_name).and_then(|v| v.as_array()) {
+                for field in fields {
+                    if let Some(f) = field.as_str() {
+                        validate_column_name(f, ent)?;
+                        let alias = format!("{alias_prefix}{f}");
+                        let sql_fn = fn_name.to_uppercase();
+                        select_parts.push(format!(
+                            "{}({}) AS {}",
+                            sql_fn,
+                            quote_ident(f),
+                            quote_ident(&alias)
+                        ));
+                        result_fields.push(alias);
+                    }
+                }
+            }
+        }
+
+        // Group-by fields come first in the SELECT so each row is identifiable.
+        let mut group_by: Vec<String> = Vec::new();
+        let mut group_field_names: Vec<String> = Vec::new();
+        if let Some(groups) = obj.get("groupBy").and_then(|v| v.as_array()) {
+            for g in groups {
+                if let Some(f) = g.as_str() {
+                    validate_column_name(f, ent)?;
+                    group_by.push(quote_ident(f));
+                    group_field_names.push(f.to_string());
+                }
+            }
+        }
+        let mut full_select = group_by.clone();
+        full_select.extend(select_parts.iter().cloned());
+        if full_select.is_empty() {
+            return Err(RuntimeError {
+                code: "INVALID_QUERY".into(),
+                message: "aggregate spec must include count/sum/avg/min/max/groupBy".into(),
+            });
+        }
+
+        // WHERE clause (reuse filter syntax, but only simple equality for now).
+        let mut where_clauses = Vec::new();
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        if let Some(where_obj) = obj.get("where").and_then(|v| v.as_object()) {
+            for (k, v) in where_obj {
+                validate_column_name(k, ent)?;
+                where_clauses.push(format!("{} = ?{idx}", quote_ident(k)));
+                values.push(json_to_sql(v));
+                idx += 1;
+            }
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_clauses.join(" AND "))
+        };
+
+        let group_sql = if group_by.is_empty() {
+            String::new()
+        } else {
+            format!(" GROUP BY {}", group_by.join(", "))
+        };
+
+        let sql = format!(
+            "SELECT {} FROM {}{}{}",
+            full_select.join(", "),
+            quote_ident(entity),
+            where_sql,
+            group_sql
+        );
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            values.iter().map(|v| v.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare aggregate: {e}"),
+        })?;
+
+        let column_names: Vec<String> = {
+            let mut v = group_field_names.clone();
+            v.extend(result_fields.iter().cloned());
+            v
+        };
+
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let mut obj = serde_json::Map::new();
+                for (i, name) in column_names.iter().enumerate() {
+                    // Try int first (counts/sums), then float, then string, then null.
+                    if let Ok(n) = row.get::<_, i64>(i) {
+                        obj.insert(name.clone(), serde_json::Value::Number(n.into()));
+                    } else if let Ok(f) = row.get::<_, f64>(i) {
+                        if let Some(num) = serde_json::Number::from_f64(f) {
+                            obj.insert(name.clone(), serde_json::Value::Number(num));
+                        } else {
+                            obj.insert(name.clone(), serde_json::Value::Null);
+                        }
+                    } else if let Ok(s) = row.get::<_, String>(i) {
+                        obj.insert(name.clone(), serde_json::Value::String(s));
+                    } else {
+                        obj.insert(name.clone(), serde_json::Value::Null);
+                    }
+                }
+                Ok(serde_json::Value::Object(obj))
+            })
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Aggregate failed: {e}"),
+            })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            if let Ok(val) = row {
+                result.push(val);
+            }
+        }
+        Ok(serde_json::json!({ "rows": result }))
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -931,14 +1613,23 @@ impl Runtime {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Generate a short, URL-safe random ID.
+/// Generate a lex-sortable, monotonic-ish unique ID.
+///
+/// Same shape as `statecraft_storage::postgres::generate_id` — fixed-width hex
+/// of nanoseconds + 8-hex per-process counter (40 chars total). The fixed
+/// width is what makes `WHERE id > $1 ORDER BY id` correct for cursor
+/// pagination: variable-width hex sorts incorrectly at width boundaries
+/// (e.g. `"ff"` lex-sorts after `"100"`).
 fn generate_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:x}", nanos)
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:032x}{seq:08x}")
 }
 
 /// Convert a `serde_json::Value` to a boxed `ToSql` for rusqlite.
@@ -997,14 +1688,14 @@ fn row_to_json(row: &rusqlite::Row<'_>, field_names: &[String]) -> serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::{ManifestField, ManifestIndex};
+    use statecraft_core::{ManifestField, ManifestIndex};
 
     fn test_manifest() -> AppManifest {
         AppManifest {
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
-            entities: vec![agentdb_core::ManifestEntity {
+            entities: vec![statecraft_core::ManifestEntity {
                 name: "User".into(),
                 fields: vec![
                     ManifestField {
@@ -1032,6 +1723,27 @@ mod tests {
             actions: vec![],
             policies: vec![],
         }
+    }
+
+    #[test]
+    fn reset_for_tests_wipes_in_memory() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
+        assert_eq!(rt.list("User").unwrap().len(), 1);
+        rt.reset_for_tests().unwrap();
+        assert_eq!(rt.list("User").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reset_for_tests_refuses_file_db() {
+        let dir = std::env::temp_dir().join("statecraft-reset-refuse");
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("db.sqlite");
+        let _ = std::fs::remove_file(&db_path);
+        let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
+        let err = rt.reset_for_tests().unwrap_err();
+        assert_eq!(err.code, "RESET_REFUSED");
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]
@@ -1154,7 +1866,7 @@ mod tests {
 
     #[test]
     fn open_creates_read_pool() {
-        let dir = std::env::temp_dir().join(format!("agentdb_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("statecraft_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_read_pool.db");
 
@@ -1176,7 +1888,7 @@ mod tests {
     fn concurrent_reads_dont_block_on_write() {
         use std::sync::Arc;
 
-        let dir = std::env::temp_dir().join(format!("agentdb_conc_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("statecraft_conc_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_concurrent.db");
 

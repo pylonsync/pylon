@@ -1,3 +1,5 @@
+pub mod email;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -5,19 +7,38 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// The auth context for a request. Represents who is making the request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Do NOT derive `Deserialize` on this type.** If the server ever parses an
+/// `AuthContext` from client-supplied JSON, a client can set `is_admin=true`
+/// or add roles and bypass every policy. Identity must come from
+/// server-minted sessions (`Session::to_auth_context`) or explicit
+/// constructors, never from deserialization.
+///
+/// `Serialize` is safe because sending the resolved context BACK to the
+/// client exposes nothing the server didn't already decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthContext {
     /// The authenticated user ID, or None for public/anonymous access.
     pub user_id: Option<String>,
     /// Whether this is an admin context (bypasses policies).
-    #[serde(default)]
     pub is_admin: bool,
+    /// Roles granted to this user. Empty for anonymous.
+    pub roles: Vec<String>,
+    /// Active tenant id (for multi-tenant apps). Set when the user has
+    /// selected an organization for the current session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 impl AuthContext {
     /// Create an anonymous/public auth context.
     pub fn anonymous() -> Self {
-        Self { user_id: None, is_admin: false }
+        Self {
+            user_id: None,
+            is_admin: false,
+            roles: Vec::new(),
+            tenant_id: None,
+        }
     }
 
     /// Create an authenticated auth context.
@@ -25,6 +46,8 @@ impl AuthContext {
         Self {
             user_id: Some(user_id),
             is_admin: false,
+            roles: Vec::new(),
+            tenant_id: None,
         }
     }
 
@@ -33,6 +56,8 @@ impl AuthContext {
         Self {
             user_id: Some(guest_id),
             is_admin: false,
+            roles: Vec::new(),
+            tenant_id: None,
         }
     }
 
@@ -41,12 +66,46 @@ impl AuthContext {
         Self {
             user_id: Some("__admin__".into()),
             is_admin: true,
+            roles: vec!["admin".into()],
+            tenant_id: None,
         }
+    }
+
+    /// Convenience: build a user context from a user id.
+    pub fn user(user_id: String) -> Self {
+        Self::authenticated(user_id)
+    }
+
+    /// Active tenant id (None when the user hasn't selected an org).
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
+    }
+
+    /// Attach a tenant id to the context (chainable).
+    pub fn with_tenant(mut self, tenant_id: String) -> Self {
+        self.tenant_id = Some(tenant_id);
+        self
     }
 
     /// Check if this context represents an authenticated user.
     pub fn is_authenticated(&self) -> bool {
         self.user_id.is_some()
+    }
+
+    /// Check if the user has a specific role. Admins have every role implicitly.
+    pub fn has_role(&self, role: &str) -> bool {
+        self.is_admin || self.roles.iter().any(|r| r == role)
+    }
+
+    /// Check if the user has ANY of the given roles.
+    pub fn has_any_role(&self, roles: &[&str]) -> bool {
+        self.is_admin || roles.iter().any(|r| self.has_role(r))
+    }
+
+    /// Attach roles to the context (chainable).
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = roles;
+        self
     }
 }
 
@@ -111,21 +170,78 @@ impl AuthMode {
 pub struct Session {
     pub token: String,
     pub user_id: String,
+    /// Unix epoch seconds at which this session expires. 0 = never.
+    #[serde(default)]
+    pub expires_at: u64,
+    /// Optional user-agent / device tag recorded at session creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// Unix epoch seconds when the session was created.
+    #[serde(default)]
+    pub created_at: u64,
+    /// Active tenant id (selected organization). Set via
+    /// `/api/auth/select-org`. Flows into `AuthContext.tenant_id` which
+    /// powers row-scoped policies like `data.orgId == auth.tenantId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 impl Session {
-    /// Create a new session with a generated token.
+    /// Default session lifetime: 30 days.
+    pub const DEFAULT_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+
+    /// Create a new session with a generated token and default 30-day expiry.
     pub fn new(user_id: String) -> Self {
+        let now = now_secs();
         Self {
             token: generate_token(),
             user_id,
+            expires_at: now.saturating_add(Self::DEFAULT_LIFETIME_SECS),
+            device: None,
+            created_at: now,
+            tenant_id: None,
         }
     }
 
-    /// Convert this session to an auth context.
-    pub fn to_auth_context(&self) -> AuthContext {
-        AuthContext::authenticated(self.user_id.clone())
+    /// Create a session with a specific lifetime.
+    pub fn with_lifetime(user_id: String, lifetime_secs: u64) -> Self {
+        let now = now_secs();
+        Self {
+            token: generate_token(),
+            user_id,
+            expires_at: if lifetime_secs == 0 {
+                0
+            } else {
+                now.saturating_add(lifetime_secs)
+            },
+            device: None,
+            created_at: now,
+            tenant_id: None,
+        }
     }
+
+    /// Convert this session to an auth context, carrying the selected
+    /// tenant so row-scoped policies see `auth.tenantId`.
+    pub fn to_auth_context(&self) -> AuthContext {
+        let ctx = AuthContext::authenticated(self.user_id.clone());
+        match &self.tenant_id {
+            Some(t) => ctx.with_tenant(t.clone()),
+            None => ctx,
+        }
+    }
+
+    /// Returns true if the session has passed its expires_at time.
+    pub fn is_expired(&self) -> bool {
+        self.expires_at != 0 && now_secs() > self.expires_at
+    }
+}
+
+fn now_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +293,179 @@ impl OAuthConfig {
             _ => "",
         }
     }
+
+    /// URL for the userinfo endpoint, which returns the authenticated user's profile.
+    pub fn userinfo_url(&self) -> &str {
+        match self.provider.as_str() {
+            "google" => "https://www.googleapis.com/oauth2/v3/userinfo",
+            "github" => "https://api.github.com/user",
+            _ => "",
+        }
+    }
+
+    /// Exchange an authorization code for an access token.
+    ///
+    /// Uses the system `curl` binary so the auth crate stays free of HTTP
+    /// client dependencies. Returns the provider-specific access token string
+    /// (extracted from the JSON response).
+    pub fn exchange_code(&self, code: &str) -> Result<String, String> {
+        let body = match self.provider.as_str() {
+            "google" => format!(
+                "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
+                url_encode(&self.client_id),
+                url_encode(&self.client_secret),
+                url_encode(&self.redirect_uri)
+            ),
+            "github" => format!(
+                "code={code}&client_id={}&client_secret={}&redirect_uri={}",
+                url_encode(&self.client_id),
+                url_encode(&self.client_secret),
+                url_encode(&self.redirect_uri)
+            ),
+            _ => return Err(format!("unknown OAuth provider: {}", self.provider)),
+        };
+
+        let out = http_post_form(self.token_url(), &body, self.provider.as_str() == "github")?;
+        extract_access_token(&out)
+    }
+
+    /// Fetch the authenticated user's email + display name using an access token.
+    /// Returns `(email, display_name)`.
+    pub fn fetch_userinfo(&self, access_token: &str) -> Result<(String, Option<String>), String> {
+        let out = http_get_bearer(self.userinfo_url(), access_token)?;
+        let parsed: serde_json::Value = serde_json::from_str(&out)
+            .map_err(|e| format!("userinfo not valid JSON: {e}"))?;
+        match self.provider.as_str() {
+            "google" => {
+                let email = parsed
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .ok_or("no email in userinfo")?
+                    .to_string();
+                let name = parsed
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok((email, name))
+            }
+            "github" => {
+                let name = parsed
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| parsed.get("login").and_then(|v| v.as_str()))
+                    .map(String::from);
+                let email = parsed
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                // GitHub may return a null email if the user hasn't published one;
+                // in that case the caller should hit /user/emails with the same token.
+                let email = email
+                    .or_else(|| fetch_github_primary_email(access_token).ok())
+                    .ok_or("no accessible email on GitHub account")?;
+                Ok((email, name))
+            }
+            _ => Err(format!("unknown provider: {}", self.provider)),
+        }
+    }
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Timeout for OAuth / userinfo HTTP calls. Short enough that a hung
+/// provider doesn't block a login indefinitely; long enough to absorb
+/// typical internet latency.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn ureq_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_TIMEOUT)
+        .timeout_read(HTTP_TIMEOUT)
+        .timeout_write(HTTP_TIMEOUT)
+        .user_agent("statecraft/0.1")
+        .build()
+}
+
+fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, String> {
+    let agent = ureq_agent();
+    let mut req = agent
+        .post(url)
+        .set("Content-Type", "application/x-www-form-urlencoded");
+    if accept_json {
+        req = req.set("Accept", "application/json");
+    }
+    match req.send_string(body) {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {body}"))
+        }
+        Err(e) => Err(format!("HTTP error: {e}")),
+    }
+}
+
+fn http_get_bearer(url: &str, token: &str) -> Result<String, String> {
+    let agent = ureq_agent();
+    match agent
+        .get(url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .call()
+    {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {body}"))
+        }
+        Err(e) => Err(format!("HTTP error: {e}")),
+    }
+}
+
+fn fetch_github_primary_email(token: &str) -> Result<String, String> {
+    let out = http_get_bearer("https://api.github.com/user/emails", token)?;
+    let emails: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("emails not JSON: {e}"))?;
+    emails
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|e| {
+                    e.get("primary").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && e.get("verified").and_then(|v| v.as_bool()).unwrap_or(false)
+                })
+                .and_then(|e| e.get("email").and_then(|v| v.as_str()).map(String::from))
+        })
+        .ok_or_else(|| "no primary verified email on GitHub".into())
+}
+
+fn extract_access_token(body: &str) -> Result<String, String> {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(t) = json.get("access_token").and_then(|v| v.as_str()) {
+            return Ok(t.to_string());
+        }
+    }
+    // GitHub can return url-encoded: access_token=...&scope=...&token_type=bearer
+    for pair in body.split('&') {
+        if let Some(val) = pair.strip_prefix("access_token=") {
+            return Ok(val.to_string());
+        }
+    }
+    Err(format!("no access_token in token response: {body}"))
 }
 
 /// OAuth provider registry.
@@ -200,34 +489,34 @@ impl OAuthRegistry {
     }
 
     /// Build from environment variables.
-    /// Looks for AGENTDB_OAUTH_GOOGLE_CLIENT_ID, etc.
+    /// Looks for STATECRAFT_OAUTH_GOOGLE_CLIENT_ID, etc.
     pub fn from_env() -> Self {
         let mut reg = Self::new();
 
         // Google
         if let (Ok(id), Ok(secret)) = (
-            std::env::var("AGENTDB_OAUTH_GOOGLE_CLIENT_ID"),
-            std::env::var("AGENTDB_OAUTH_GOOGLE_CLIENT_SECRET"),
+            std::env::var("STATECRAFT_OAUTH_GOOGLE_CLIENT_ID"),
+            std::env::var("STATECRAFT_OAUTH_GOOGLE_CLIENT_SECRET"),
         ) {
             reg.register(OAuthConfig {
                 provider: "google".into(),
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("AGENTDB_OAUTH_GOOGLE_REDIRECT")
+                redirect_uri: std::env::var("STATECRAFT_OAUTH_GOOGLE_REDIRECT")
                     .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/google".into()),
             });
         }
 
         // GitHub
         if let (Ok(id), Ok(secret)) = (
-            std::env::var("AGENTDB_OAUTH_GITHUB_CLIENT_ID"),
-            std::env::var("AGENTDB_OAUTH_GITHUB_CLIENT_SECRET"),
+            std::env::var("STATECRAFT_OAUTH_GITHUB_CLIENT_ID"),
+            std::env::var("STATECRAFT_OAUTH_GITHUB_CLIENT_SECRET"),
         ) {
             reg.register(OAuthConfig {
                 provider: "github".into(),
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("AGENTDB_OAUTH_GITHUB_REDIRECT")
+                redirect_uri: std::env::var("STATECRAFT_OAUTH_GITHUB_REDIRECT")
                     .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/github".into()),
             });
         }
@@ -240,24 +529,80 @@ impl OAuthRegistry {
 // OAuth state store — CSRF protection for OAuth flows
 // ---------------------------------------------------------------------------
 
-/// Stores OAuth state parameters to prevent CSRF attacks on the callback.
-///
-/// TODO: For production, state tokens should be short-lived and bound to the
-/// user's session. This in-memory store is sufficient for development.
-pub struct OAuthStateStore {
+/// Backing store for OAuth state tokens. Default impl keeps them in memory
+/// (fine for tests + dev); the runtime swaps in a SQLite-backed impl so a
+/// restart in the middle of an OAuth handshake doesn't leave the user with
+/// "invalid state" on the callback. Same pattern as `SessionBackend`.
+pub trait OAuthStateBackend: Send + Sync {
+    fn put(&self, token: &str, provider: &str, expires_at: u64);
+    /// Atomic compare-and-consume: returns the stored provider if the token
+    /// exists and hasn't expired, then removes it. Returning `None` means
+    /// either the token never existed or it has already been used.
+    fn take(&self, token: &str, now_unix_secs: u64) -> Option<String>;
+}
+
+/// In-memory backend (default). Lost on restart.
+pub struct InMemoryOAuthBackend {
     states: Mutex<HashMap<String, OAuthState>>,
 }
 
-struct OAuthState {
-    provider: String,
-    expires_at: u64,
+impl InMemoryOAuthBackend {
+    pub fn new() -> Self {
+        Self {
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryOAuthBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OAuthStateBackend for InMemoryOAuthBackend {
+    fn put(&self, token: &str, provider: &str, expires_at: u64) {
+        self.states.lock().unwrap().insert(
+            token.to_string(),
+            OAuthState {
+                provider: provider.to_string(),
+                expires_at,
+            },
+        );
+    }
+    fn take(&self, token: &str, now_unix_secs: u64) -> Option<String> {
+        let mut s = self.states.lock().unwrap();
+        let entry = s.remove(token)?;
+        if entry.expires_at <= now_unix_secs {
+            return None;
+        }
+        Some(entry.provider)
+    }
+}
+
+/// Stores OAuth state parameters to prevent CSRF attacks on the callback.
+///
+/// State tokens are short-lived (10 minutes) and single-use. Backed by an
+/// `OAuthStateBackend`; defaults to in-memory but the runtime persists them
+/// to SQLite so they survive a restart that happens mid-OAuth-handshake.
+pub struct OAuthStateStore {
+    backend: Box<dyn OAuthStateBackend>,
+}
+
+pub struct OAuthState {
+    pub provider: String,
+    pub expires_at: u64,
 }
 
 impl OAuthStateStore {
     pub fn new() -> Self {
         Self {
-            states: Mutex::new(HashMap::new()),
+            backend: Box::new(InMemoryOAuthBackend::new()),
         }
+    }
+
+    pub fn with_backend(backend: Box<dyn OAuthStateBackend>) -> Self {
+        Self { backend }
     }
 
     /// Generate and store a new state parameter. Returns the random state string.
@@ -268,28 +613,23 @@ impl OAuthStateStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.states.lock().unwrap().insert(
-            token.clone(),
-            OAuthState {
-                provider: provider.to_string(),
-                expires_at: now + 600, // 10 minutes
-            },
-        );
+        self.backend.put(&token, provider, now + 600);
         token
     }
 
-    /// Validate and consume a state parameter. Returns the provider if valid.
+    /// Validate and consume a state parameter. Returns true iff the state
+    /// existed, has not expired, and matches `expected_provider`. The token
+    /// is removed either way to make replay impossible.
     pub fn validate(&self, state: &str, expected_provider: &str) -> bool {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut states = self.states.lock().unwrap();
-        if let Some(entry) = states.remove(state) {
-            return entry.provider == expected_provider && entry.expires_at > now;
+        match self.backend.take(state, now) {
+            Some(provider) => provider == expected_provider,
+            None => false,
         }
-        false
     }
 }
 
@@ -307,6 +647,32 @@ pub struct MagicCode {
     pub email: String,
     pub code: String,
     pub expires_at: u64,
+    /// Failed verify attempts against this code. Once it reaches
+    /// `MAX_ATTEMPTS` the code is invalidated.
+    pub attempts: u32,
+}
+
+/// Maximum verify attempts per code before it's burned. 5 is a common bound —
+/// lets the user fix typos without enabling realistic brute-force against a
+/// 6-digit code space.
+const MAX_ATTEMPTS: u32 = 5;
+
+/// Minimum seconds between successive `create()` calls for the same email.
+/// Throttles magic-code spam (user can't be flooded with login codes).
+const CREATE_COOLDOWN_SECS: u64 = 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MagicCodeError {
+    /// There is no active code for this email, or it expired.
+    NotFound,
+    /// The code is present but `MAX_ATTEMPTS` failed verifies have occurred.
+    TooManyAttempts,
+    /// The code did not match.
+    BadCode,
+    /// The code expired since it was created.
+    Expired,
+    /// Another code was requested too recently. Wait and try again.
+    Throttled { retry_after_secs: u64 },
 }
 
 impl MagicCodeStore {
@@ -316,44 +682,87 @@ impl MagicCodeStore {
         }
     }
 
-    /// Generate a 6-digit code for an email. Returns the code.
-    /// In production this would send an email. In dev it just stores and returns.
+    /// Generate a 6-digit code for an email and return it. Subject to a
+    /// per-email cooldown — returns the error-shape via `try_create`.
     pub fn create(&self, email: &str) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        // Back-compat wrapper: same signature as before, but we still burn
+        // the cooldown if one is active. Use `try_create` for a Result shape.
+        self.try_create(email).unwrap_or_else(|_| String::new())
+    }
+
+    /// Create a magic code, enforcing per-email cooldown. Returns the code
+    /// or an error describing why one couldn't be issued.
+    pub fn try_create(&self, email: &str) -> Result<String, MagicCodeError> {
+        let now = now_secs();
+
+        let mut codes = self.codes.lock().unwrap();
+
+        // Cooldown check: if a live code exists and was created less than
+        // CREATE_COOLDOWN_SECS ago, throttle. The age-of-code is
+        // `expires_at - 600 + cooldown` since expires_at is create_time + 600.
+        if let Some(existing) = codes.get(email) {
+            if existing.expires_at > now {
+                let created_at = existing.expires_at.saturating_sub(600);
+                let age = now.saturating_sub(created_at);
+                if age < CREATE_COOLDOWN_SECS {
+                    return Err(MagicCodeError::Throttled {
+                        retry_after_secs: CREATE_COOLDOWN_SECS - age,
+                    });
+                }
+            }
+        }
 
         let code = generate_magic_code();
-
         let mc = MagicCode {
             email: email.to_string(),
             code: code.clone(),
-            expires_at: ts + 600, // 10 minutes
+            expires_at: now + 600, // 10 minutes
+            attempts: 0,
         };
-
-        self.codes.lock().unwrap().insert(email.to_string(), mc);
-        code
+        codes.insert(email.to_string(), mc);
+        Ok(code)
     }
 
     /// Verify a code for an email. Returns true if valid and not expired.
     /// Uses constant-time comparison to prevent timing attacks.
+    /// Back-compat wrapper around [`try_verify`].
     pub fn verify(&self, email: &str, code: &str) -> bool {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        matches!(self.try_verify(email, code), Ok(()))
+    }
 
+    /// Verify a code. Returns a typed error so callers can surface specific
+    /// messages. On the MAX_ATTEMPTS-th failure, the code is burned — even
+    /// correct subsequent attempts return `TooManyAttempts`.
+    pub fn try_verify(&self, email: &str, code: &str) -> Result<(), MagicCodeError> {
+        let now = now_secs();
         let mut codes = self.codes.lock().unwrap();
-        if let Some(mc) = codes.get(email) {
-            if constant_time_eq(mc.code.as_bytes(), code.as_bytes()) && mc.expires_at > now {
-                codes.remove(email);
-                return true;
-            }
+
+        let mc = match codes.get_mut(email) {
+            Some(m) => m,
+            None => return Err(MagicCodeError::NotFound),
+        };
+
+        if mc.attempts >= MAX_ATTEMPTS {
+            return Err(MagicCodeError::TooManyAttempts);
         }
-        false
+        if mc.expires_at <= now {
+            codes.remove(email);
+            return Err(MagicCodeError::Expired);
+        }
+
+        let ok = constant_time_eq(mc.code.as_bytes(), code.as_bytes());
+        if !ok {
+            mc.attempts += 1;
+            // Burn the code at MAX_ATTEMPTS so retries can't hit max.
+            if mc.attempts >= MAX_ATTEMPTS {
+                return Err(MagicCodeError::TooManyAttempts);
+            }
+            return Err(MagicCodeError::BadCode);
+        }
+
+        // Correct code — consume it.
+        codes.remove(email);
+        Ok(())
     }
 }
 
@@ -378,7 +787,7 @@ fn generate_token() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
-    format!("agentdb_{}", hex_encode(&bytes))
+    format!("statecraft_{}", hex_encode(&bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -388,15 +797,48 @@ fn generate_token() -> String {
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// A simple in-memory session store for development.
+/// Pluggable storage backend for sessions. The default is in-memory; apps
+/// deploying for real should supply a persistent backend (e.g. SQLite or
+/// Redis) so users don't log out on server restart.
+pub trait SessionBackend: Send + Sync {
+    fn load_all(&self) -> Vec<Session>;
+    fn save(&self, session: &Session);
+    fn remove(&self, token: &str);
+}
+
+/// A session store. In-memory by default; optionally backed by a
+/// persistent [`SessionBackend`].
+///
+/// The in-memory map is always authoritative — reads don't touch the
+/// backend. The backend receives every `save`/`remove`, making it a
+/// write-through cache. On construction via [`SessionStore::with_backend`],
+/// the store hydrates from the backend so sessions survive restart.
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Session>>,
+    backend: Option<Box<dyn SessionBackend>>,
 }
 
 impl SessionStore {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            backend: None,
+        }
+    }
+
+    /// Build a session store backed by a persistent store. Existing sessions
+    /// are loaded from the backend on construction; every future mutation
+    /// writes through.
+    pub fn with_backend(backend: Box<dyn SessionBackend>) -> Self {
+        let mut map = HashMap::new();
+        for s in backend.load_all() {
+            if !s.is_expired() {
+                map.insert(s.token.clone(), s);
+            }
+        }
+        Self {
+            sessions: Mutex::new(map),
+            backend: Some(backend),
         }
     }
 
@@ -405,17 +847,27 @@ impl SessionStore {
         let session = Session::new(user_id);
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(session.token.clone(), session.clone());
+        if let Some(b) = &self.backend {
+            b.save(&session);
+        }
         session
     }
 
-    /// Look up a session by token.
+    /// Look up a session by token. Returns None if the session is expired.
     pub fn get(&self, token: &str) -> Option<Session> {
-        let sessions = self.sessions.lock().unwrap();
-        sessions.get(token).cloned()
+        let mut sessions = self.sessions.lock().unwrap();
+        match sessions.get(token) {
+            Some(s) if s.is_expired() => {
+                sessions.remove(token);
+                None
+            }
+            Some(s) => Some(s.clone()),
+            None => None,
+        }
     }
 
     /// Resolve a token to an auth context.
-    /// Returns anonymous context if the token is invalid or missing.
+    /// Returns anonymous context if the token is invalid, missing, or expired.
     pub fn resolve(&self, token: Option<&str>) -> AuthContext {
         match token {
             Some(t) => match self.get(t) {
@@ -423,6 +875,91 @@ impl SessionStore {
                 None => AuthContext::anonymous(),
             },
             None => AuthContext::anonymous(),
+        }
+    }
+
+    /// Refresh a session — issues a new token, copies user/device, extends expiry.
+    /// The old token is revoked. Returns the new session or None if the old
+    /// token is missing/expired.
+    pub fn refresh(&self, old_token: &str) -> Option<Session> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let old = sessions.remove(old_token)?;
+        if let Some(b) = &self.backend {
+            b.remove(old_token);
+        }
+        if old.is_expired() {
+            return None;
+        }
+        let mut new = Session::new(old.user_id.clone());
+        new.device = old.device.clone();
+        sessions.insert(new.token.clone(), new.clone());
+        if let Some(b) = &self.backend {
+            b.save(&new);
+        }
+        Some(new)
+    }
+
+    /// List all active sessions for a user.
+    pub fn list_for_user(&self, user_id: &str) -> Vec<Session> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .values()
+            .filter(|s| s.user_id == user_id && !s.is_expired())
+            .cloned()
+            .collect()
+    }
+
+    /// Revoke all sessions for a user. Returns the count removed.
+    pub fn revoke_all_for_user(&self, user_id: &str) -> usize {
+        let mut sessions = self.sessions.lock().unwrap();
+        let tokens: Vec<String> = sessions
+            .iter()
+            .filter_map(|(t, s)| {
+                if s.user_id == user_id {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let n = tokens.len();
+        for t in &tokens {
+            sessions.remove(t);
+            if let Some(b) = &self.backend {
+                b.remove(t);
+            }
+        }
+        n
+    }
+
+    /// Sweep expired sessions. Returns the count removed.
+    pub fn sweep_expired(&self) -> usize {
+        let mut sessions = self.sessions.lock().unwrap();
+        let expired: Vec<String> = sessions
+            .iter()
+            .filter_map(|(t, s)| if s.is_expired() { Some(t.clone()) } else { None })
+            .collect();
+        let n = expired.len();
+        for t in &expired {
+            sessions.remove(t);
+            if let Some(b) = &self.backend {
+                b.remove(t);
+            }
+        }
+        n
+    }
+
+    /// Attach a device label to a session (typically on login from a browser).
+    pub fn set_device(&self, token: &str, device: String) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(s) = sessions.get_mut(token) {
+            s.device = Some(device);
+            if let Some(b) = &self.backend {
+                b.save(s);
+            }
+            true
+        } else {
+            false
         }
     }
 
@@ -440,6 +977,26 @@ impl SessionStore {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(token) {
             session.user_id = real_user_id;
+            if let Some(b) = &self.backend {
+                b.save(session);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Switch the session's active tenant (organization). `None` clears it.
+    /// Callers should verify the user actually has membership in the target
+    /// tenant BEFORE invoking this — the session store takes the value on
+    /// trust. Returns true if the session exists, false otherwise.
+    pub fn set_tenant(&self, token: &str, tenant_id: Option<String>) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(token) {
+            session.tenant_id = tenant_id;
+            if let Some(b) = &self.backend {
+                b.save(session);
+            }
             true
         } else {
             false
@@ -449,7 +1006,13 @@ impl SessionStore {
     /// Remove a session.
     pub fn revoke(&self, token: &str) -> bool {
         let mut sessions = self.sessions.lock().unwrap();
-        sessions.remove(token).is_some()
+        let removed = sessions.remove(token).is_some();
+        if removed {
+            if let Some(b) = &self.backend {
+                b.remove(token);
+            }
+        }
+        removed
     }
 }
 
@@ -501,7 +1064,7 @@ mod tests {
         let store = SessionStore::new();
         let session = store.create("user-1".into());
         assert!(!session.token.is_empty());
-        assert!(session.token.starts_with("agentdb_"));
+        assert!(session.token.starts_with("statecraft_"));
 
         let retrieved = store.get(&session.token).unwrap();
         assert_eq!(retrieved.user_id, "user-1");
@@ -626,10 +1189,10 @@ mod tests {
         let t1 = generate_token();
         let t2 = generate_token();
         assert_ne!(t1, t2);
-        assert!(t1.starts_with("agentdb_"));
-        assert!(t2.starts_with("agentdb_"));
-        // 256 bits = 64 hex chars + "agentdb_" prefix
-        assert_eq!(t1.len(), 8 + 64);
+        assert!(t1.starts_with("statecraft_"));
+        assert!(t2.starts_with("statecraft_"));
+        // 256 bits = 64 hex chars + "statecraft_" prefix (9 chars)
+        assert_eq!(t1.len(), 11 + 64);
     }
 
     // -- OAuth registry --

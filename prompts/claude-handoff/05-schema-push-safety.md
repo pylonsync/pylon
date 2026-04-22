@@ -1,4 +1,4 @@
-Use `/Users/ericc59/Dev/agentdb/prompts/claude-handoff/00-shared-context.md` as shared context.
+Use `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md` as shared context.
 
 Goal:
 Add safety rails to `schema push` for destructive or unsupported plans.

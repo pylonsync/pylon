@@ -1,11 +1,13 @@
 {
-  "name": "agentdb",
+  "name": "statecraft",
   "private": true,
   "version": "0.1.0",
   "packageManager": "bun@1.2.19",
   "workspaces": [
+    "apps/*",
     "packages/*",
-    "examples/*"
+    "examples/*",
+    "examples/*/web"
   ],
   "devDependencies": {
     "typescript": "^5.8.3"

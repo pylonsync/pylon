@@ -1,27 +1,113 @@
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 
 /// Generate the Studio inspector as a full React + Tailwind app.
 /// Uses CDN imports so no build step needed.
 pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
     let manifest_json = serde_json::to_string(manifest).unwrap_or_else(|_| "{}".into());
-    let manifest_pretty = serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".into());
+    let _manifest_pretty = serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".into());
 
     let entity_names: Vec<&str> = manifest.entities.iter().map(|e| e.name.as_str()).collect();
     let entity_json = serde_json::to_string(&entity_names).unwrap_or_else(|_| "[]".into());
 
-    let query_names: Vec<&str> = manifest.queries.iter().map(|q| q.name.as_str()).collect();
-    let action_names: Vec<&str> = manifest.actions.iter().map(|a| a.name.as_str()).collect();
-    let policy_names: Vec<&str> = manifest.policies.iter().map(|p| p.name.as_str()).collect();
-    let route_paths: Vec<&str> = manifest.routes.iter().map(|r| r.path.as_str()).collect();
+    let _query_names: Vec<&str> = manifest.queries.iter().map(|q| q.name.as_str()).collect();
+    let _action_names: Vec<&str> = manifest.actions.iter().map(|a| a.name.as_str()).collect();
+    let _policy_names: Vec<&str> = manifest.policies.iter().map(|p| p.name.as_str()).collect();
+    let _route_paths: Vec<&str> = manifest.routes.iter().map(|r| r.path.as_str()).collect();
 
-    // XSS prevention: escape </script> sequences in JSON embedded in <script> tags.
-    // Without this, a malicious entity name containing "</script>" could break out
-    // of the script context and inject arbitrary HTML.
+    // XSS prevention. The manifest is developer-authored but can contain
+    // user-shaped strings (entity names, route paths, app name from
+    // package.json), so treat every interpolated value as untrusted:
+    //
+    //   - JSON embedded inside <script>: escape `</script` so a crafted
+    //     entity name can't close the script tag early.
+    //   - Raw strings embedded in HTML (title, JSX text): HTML-encode all
+    //     metacharacters so nothing interprets as markup.
+    //   - Raw strings embedded as JS string literals (api_base): escape
+    //     backslashes and quotes.
+    //
+    // Without these, `manifest.name = "</title><script>alert(1)</script>"`
+    // was a one-line XSS on the Studio page.
+    /// Escape `</script` (case-insensitive) and the JS line separators
+    /// U+2028 / U+2029 inside JSON embedded in a `<script>` block.
+    ///
+    /// Previously this only replaced three exact casings (`script`/
+    /// `Script`/`SCRIPT`). HTML tag matching is ASCII-case-insensitive,
+    /// so `</ScRiPt>` still closed the script tag — a one-shot XSS via a
+    /// crafted entity name. Now: any `</script` regardless of case gets
+    /// a backslash inserted between the `<` and the `/`, which is still
+    /// valid JSON (backslashes can escape any char) and no longer looks
+    /// like a closing tag to the HTML parser.
+    ///
+    /// U+2028 and U+2029 are JS "line terminators" that close unclosed
+    /// string literals and break Babel's parser; escape them as \u00XX-
+    /// style sequences inside the JSON.
     fn escape_script_json(s: &str) -> String {
-        s.replace("</script", r"<\/script").replace("</Script", r"<\/Script").replace("</SCRIPT", r"<\/SCRIPT")
+        // Compare on an ASCII-lowercased view (keeps byte indices aligned
+        // with the original) so the match is case-insensitive, then write
+        // from the original preserving non-ASCII bytes verbatim.
+        let lower = s.to_ascii_lowercase();
+        let sb = s.as_bytes();
+        let lb = lower.as_bytes();
+        let needle = b"</script";
+        let mut out = String::with_capacity(s.len() + 8);
+        let mut i = 0;
+        while i < sb.len() {
+            if i + needle.len() <= sb.len() && &lb[i..i + needle.len()] == needle {
+                // Insert a backslash between `<` and `/` so the HTML
+                // parser no longer sees a closing tag, but the JSON
+                // remains valid (backslash-escape of `/` is allowed).
+                out.push('<');
+                out.push('\\');
+                out.push_str(&s[i + 1..i + needle.len()]);
+                i += needle.len();
+            } else {
+                // Append one char (not one byte) to avoid corrupting
+                // multi-byte UTF-8 sequences like U+2028.
+                let c = s[i..].chars().next().expect("mid-string must yield a char");
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+        // U+2028 / U+2029 are JS line terminators — close unclosed string
+        // literals in Babel's parser. Escape inside the JSON.
+        out.replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029")
+    }
+    fn html_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&#39;"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+    fn js_string_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\u{2028}' => out.push_str("\\u2028"),
+                '\u{2029}' => out.push_str("\\u2029"),
+                '<' => out.push_str("\\u003c"), // also covers </script in JS context
+                _ => out.push(c),
+            }
+        }
+        out
     }
     let manifest_json = escape_script_json(&manifest_json);
     let entity_json = escape_script_json(&entity_json);
+    let name_safe = html_escape(&manifest.name);
+    let version_safe = html_escape(&manifest.version);
+    let api_base_safe = js_string_escape(api_base);
 
     format!(
         r##"<!DOCTYPE html>
@@ -29,10 +115,14 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{name} — agentdb Studio</title>
+  <title>{name} — statecraft Studio</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@19/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/react-dom@19/umd/react-dom.production.min.js"></script>
+  <!-- React 19 dropped UMD builds — the v19 URLs return 404 and Studio
+       fails to boot with "ReactDOM is not defined". Pin to React 18
+       which still ships UMD. Upgrade path when we move Studio to a
+       bundled build: drop these scripts entirely. -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script>
     tailwind.config = {{
@@ -143,6 +233,56 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
       const [health, setHealth] = React.useState(null);
       const [metrics, setMetrics] = React.useState(null);
       const [healthLoading, setHealthLoading] = React.useState(false);
+
+      // Functions tab state
+      const [fns, setFns] = React.useState([]);
+      const [fnsLoading, setFnsLoading] = React.useState(false);
+      const [fnTraces, setFnTraces] = React.useState([]);
+      const [selectedTrace, setSelectedTrace] = React.useState(null);
+      const [fnInvokeName, setFnInvokeName] = React.useState("");
+      const [fnInvokeArgs, setFnInvokeArgs] = React.useState("{{}}");
+      const [fnInvokeResult, setFnInvokeResult] = React.useState(null);
+
+      const loadFns = async () => {{
+        setFnsLoading(true);
+        try {{
+          const [fnsRes, tracesRes] = await Promise.all([
+            fetch(`${{API}}/api/fn`),
+            fetch(`${{API}}/api/fn/traces`),
+          ]);
+          const fnsData = await fnsRes.json();
+          const tracesData = await tracesRes.json();
+          setFns(Array.isArray(fnsData) ? fnsData : (fnsData.data || []));
+          setFnTraces(Array.isArray(tracesData) ? tracesData : (tracesData.data || []));
+        }} catch (err) {{
+          setError(err.message);
+        }}
+        setFnsLoading(false);
+      }};
+
+      const invokeFn = async () => {{
+        try {{
+          const args = fnInvokeArgs.trim() ? JSON.parse(fnInvokeArgs) : {{}};
+          const res = await fetch(`${{API}}/api/fn/${{fnInvokeName}}`, {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify(args),
+          }});
+          const data = await res.json();
+          setFnInvokeResult({{ status: res.status, data }});
+          loadFns();
+        }} catch (err) {{
+          setFnInvokeResult({{ status: 0, data: {{ error: err.message }} }});
+        }}
+      }};
+
+      React.useEffect(() => {{
+        if (tab === "functions") {{
+          loadFns();
+          const id = setInterval(loadFns, 5000);
+          return () => clearInterval(id);
+        }}
+      }}, [tab]);
 
       const loadRows = async (e) => {{
         const target = e || entity;
@@ -337,7 +477,7 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
         <div className="max-w-6xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-xl font-semibold">agentdb Studio</h1>
+              <h1 className="text-xl font-semibold">statecraft Studio</h1>
               <p className="text-sm text-muted-foreground">{name} v{version}</p>
             </div>
             <div className="flex gap-2">
@@ -349,7 +489,7 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
           </div>
 
           <div className="flex gap-1 mb-4 border-b border-border overflow-x-auto">
-            {{["entities", "users", "rooms", "audit", "health", "queries", "actions", "policies", "routes", "sync", "manifest"].map(t => (
+            {{["entities", "users", "rooms", "audit", "health", "functions", "queries", "actions", "policies", "routes", "sync", "manifest"].map(t => (
               <div key={{t}} className={{`tab ${{tab === t ? "active" : ""}}`}} onClick={{() => setTab(t)}}>
                 {{t.charAt(0).toUpperCase() + t.slice(1)}}
               </div>
@@ -743,6 +883,100 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
             </div>
           )}}
 
+          {{/* ---- Functions Tab ---- */}}
+          {{tab === "functions" && (
+            <div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div className="card p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-medium">Registered ({{fns.length}})</h2>
+                    <button className="btn btn-ghost text-xs" onClick={{loadFns}}>Refresh</button>
+                  </div>
+                  {{fnsLoading ? (
+                    <p className="text-muted-foreground text-sm">Loading...</p>
+                  ) : fns.length === 0 ? (
+                    <p className="text-muted-foreground text-sm">No TypeScript functions registered. Add files to ./functions/ and restart.</p>
+                  ) : (
+                    <div>
+                      {{fns.map(f => (
+                        <div key={{f.name}} className="py-1.5 border-b border-border last:border-0 flex items-center justify-between">
+                          <div>
+                            <span className="font-mono text-sm">{{f.name}}</span>
+                            <span className={{`badge ml-2 ${{f.fn_type === 'mutation' ? 'badge-yellow' : f.fn_type === 'query' ? 'badge-blue' : 'badge-purple'}}`}}>{{f.fn_type}}</span>
+                          </div>
+                          <button className="btn btn-ghost text-xs" onClick={{() => {{ setFnInvokeName(f.name); setFnInvokeArgs("{{}}"); setFnInvokeResult(null); }}}}>Invoke</button>
+                        </div>
+                      ))}}
+                    </div>
+                  )}}
+                </div>
+
+                <div className="card p-4">
+                  <h2 className="text-sm font-medium mb-3">Invoke</h2>
+                  <input
+                    className="input mb-2 font-mono"
+                    placeholder="function name"
+                    value={{fnInvokeName}}
+                    onChange={{(e) => setFnInvokeName(e.target.value)}}
+                  />
+                  <textarea
+                    className="input font-mono mb-2"
+                    rows={{4}}
+                    placeholder='{{ "name": "value" }}'
+                    value={{fnInvokeArgs}}
+                    onChange={{(e) => setFnInvokeArgs(e.target.value)}}
+                  />
+                  <button className="btn btn-primary" onClick={{invokeFn}} disabled={{!fnInvokeName}}>
+                    Call
+                  </button>
+                  {{fnInvokeResult && (
+                    <div className="mt-3">
+                      <p className="text-xs text-muted-foreground mb-1">Status: {{fnInvokeResult.status}}</p>
+                      <pre><code>{{JSON.stringify(fnInvokeResult.data, null, 2)}}</code></pre>
+                    </div>
+                  )}}
+                </div>
+              </div>
+
+              <div className="card p-4">
+                <h2 className="text-sm font-medium mb-3">Recent traces ({{fnTraces.length}})</h2>
+                {{fnTraces.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">No traces yet — invoke a function to see one here.</p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      {{fnTraces.map((t, i) => (
+                        <div
+                          key={{i}}
+                          className={{`py-1.5 px-2 cursor-pointer rounded ${{selectedTrace === t ? 'bg-accent' : ''}} hover:bg-accent`}}
+                          onClick={{() => setSelectedTrace(t)}}
+                        >
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-mono">{{t.fn_name || t.name}}</span>
+                            <span className={{`badge ${{t.error ? 'badge-red' : 'badge-green'}}`}}>
+                              {{t.error ? "error" : "ok"}}
+                            </span>
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {{t.duration_ms !== undefined ? `${{t.duration_ms}}ms` : ""}}
+                            {{t.timestamp ? ` · ${{new Date(t.timestamp).toLocaleTimeString()}}` : ""}}
+                          </div>
+                        </div>
+                      ))}}
+                    </div>
+                    <div>
+                      {{selectedTrace ? (
+                        <pre><code>{{JSON.stringify(selectedTrace, null, 2)}}</code></pre>
+                      ) : (
+                        <p className="text-muted-foreground text-sm">Click a trace to see details.</p>
+                      )}}
+                    </div>
+                  </div>
+                )}}
+              </div>
+            </div>
+          )}}
+
           {{/* ---- Manifest Tab ---- */}}
           {{tab === "manifest" && (
             <div>
@@ -823,9 +1057,9 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
   </script>
 </body>
 </html>"##,
-        name = manifest.name,
-        version = manifest.version,
-        api_base = api_base,
+        name = name_safe,
+        version = version_safe,
+        api_base = api_base_safe,
         manifest_json = manifest_json,
         entity_json = entity_json,
         entity_count = manifest.entities.len(),
@@ -840,7 +1074,7 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
             .unwrap()
     }
 
@@ -848,10 +1082,147 @@ mod tests {
     fn generates_html() {
         let html = generate_studio_html(&test_manifest(), "http://localhost:4321");
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("agentdb Studio"));
+        assert!(html.contains("statecraft Studio"));
         assert!(html.contains("todo-app"));
         assert!(html.contains("tailwindcss"));
         assert!(html.contains("react"));
+    }
+
+    #[test]
+    fn html_escapes_manifest_name_in_title() {
+        // The <title> tag interpolates manifest.name as raw HTML. An
+        // attacker-influenced name must not break out of the title element.
+        let mut m = test_manifest();
+        m.name = "</title><script>alert('x')</script>".into();
+        let html = generate_studio_html(&m, "http://localhost:4321");
+
+        // Extract the title text and verify it only contains the escaped
+        // form. (The full HTML contains the manifest_json embed too, which
+        // carries the raw-looking name inside a <script> block — that path
+        // is safe because </script is independently escaped.)
+        let start = html.find("<title>").expect("no <title>");
+        let end = html[start..].find("</title>").expect("no </title>");
+        let title = &html[start..start + end];
+        assert!(
+            !title.contains("<script>"),
+            "XSS: raw <script> tag inside <title>: {title:?}"
+        );
+        assert!(title.contains("&lt;/title&gt;"));
+    }
+
+    #[test]
+    fn html_escapes_manifest_version() {
+        // version is embedded inside JSX text via format!. Even though React
+        // escapes text children, the pre-Babel format! substitution must
+        // HTML-encode so the substituted bytes can't alter the JSX AST.
+        let mut m = test_manifest();
+        m.version = "<img src=x onerror=alert(1)>".into();
+        let html = generate_studio_html(&m, "http://localhost:4321");
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    }
+
+    #[test]
+    fn api_base_is_js_escaped() {
+        // api_base is interpolated into `const API = "…";` as a JS string
+        // literal. A quote in the input must appear backslash-escaped
+        // (or Unicode-escaped) in the output so it can't close the string
+        // early.
+        let m = test_manifest();
+        let html = generate_studio_html(&m, "http://example.com\"; alert(1); //");
+        // Locate the exact `const API = "..."` statement.
+        let needle = "const API = \"";
+        let start = html.find(needle).expect("no const API line");
+        let rest = &html[start + needle.len()..];
+        // Find the end of the JS string literal: first unescaped ".
+        let mut idx = 0;
+        let bytes = rest.as_bytes();
+        while idx < bytes.len() {
+            if bytes[idx] == b'"' {
+                // Check if escaped by backslash. Walk back counting \.
+                let mut backslashes = 0usize;
+                let mut j = idx;
+                while j > 0 && bytes[j - 1] == b'\\' {
+                    backslashes += 1;
+                    j -= 1;
+                }
+                if backslashes % 2 == 0 {
+                    break;
+                }
+            }
+            idx += 1;
+        }
+        let literal = &rest[..idx];
+        assert!(
+            !literal.contains("; alert(1); //")
+                || literal.contains("\\\"; alert(1); //")
+                || literal.contains("\\u0022"),
+            "XSS: raw quote broke out of JS string: {literal:?}"
+        );
+    }
+
+    #[test]
+    fn escape_script_json_is_case_insensitive() {
+        // Regression: mixed-case </ScRiPt> used to slip past the filter
+        // and close the <script> tag that surrounds the embedded MANIFEST
+        // JSON. Any casing must now get the backslash break.
+        let mut m = test_manifest();
+        m.entities[0].name = "E</ScRiPt><svg onload=alert(1)>".into();
+        let html = generate_studio_html(&m, "http://ok");
+        // Walk the HTML looking for a closing script tag embedded in a
+        // string context. Any `</script` in any case in the manifest JSON
+        // would be a break-out; the escape replaces it with `<\\/script`
+        // (JSON backslash followed by forward slash).
+        let embedded = find_manifest_json_block(&html);
+        let lower = embedded.to_ascii_lowercase();
+        // Look for literal "</script" in the embedded JSON. After fix,
+        // every occurrence must be preceded by a backslash.
+        let mut pos = 0;
+        while let Some(idx) = lower[pos..].find("</script") {
+            let abs = pos + idx;
+            let preceded_by_backslash = abs > 0 && embedded.as_bytes()[abs - 1] == b'\\';
+            assert!(
+                preceded_by_backslash,
+                "unescaped </script at byte {abs} in: {embedded}"
+            );
+            pos = abs + 1;
+        }
+    }
+
+    #[test]
+    fn escape_script_json_handles_line_separator() {
+        // U+2028 / U+2029 close JS string literals in Babel's parser.
+        // Escape them so a crafted name can't break the MANIFEST const.
+        let mut m = test_manifest();
+        m.entities[0].name = "ok\u{2028}oops".into();
+        let html = generate_studio_html(&m, "http://ok");
+        let embedded = find_manifest_json_block(&html);
+        assert!(
+            !embedded.contains('\u{2028}'),
+            "U+2028 leaked into the embedded manifest JSON"
+        );
+        assert!(embedded.contains("\\u2028"));
+    }
+
+    fn find_manifest_json_block(html: &str) -> String {
+        // The MANIFEST const in the generated HTML sits inline:
+        //   const MANIFEST = {...};
+        let start = html.find("const MANIFEST = ").expect("no MANIFEST const");
+        let after = &html[start..];
+        let end = after.find(";\n").unwrap_or_else(|| after.len().min(100_000));
+        after[..end].to_string()
+    }
+
+    #[test]
+    fn escape_helpers_directly() {
+        // Unit-test the helpers so future edits are harder to get wrong.
+        // (Defined inside generate_studio_html, so exercise through the
+        // public function.)
+        let mut m = test_manifest();
+        m.name = "A&B <C>".into();
+        let html = generate_studio_html(&m, "http://ok");
+        let start = html.find("<title>").unwrap();
+        let end = html[start..].find("</title>").unwrap();
+        assert!(html[start..start + end].contains("A&amp;B &lt;C&gt;"));
     }
 
     #[test]

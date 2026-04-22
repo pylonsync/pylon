@@ -1,0 +1,282 @@
+{
+  "manifest_version": 1,
+  "name": "chat",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Channel",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "isPrivate",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Membership",
+      "fields": [
+        {
+          "name": "channelId",
+          "type": "id(Channel)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "joinedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_channel_user",
+          "fields": [
+            "channelId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Message",
+      "fields": [
+        {
+          "name": "channelId",
+          "type": "id(Channel)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "authorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "parentMessageId",
+          "type": "id(Message)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "editedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_channel_created",
+          "fields": [
+            "channelId",
+            "createdAt"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_author",
+          "fields": [
+            "authorId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_parent",
+          "fields": [
+            "parentMessageId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Reaction",
+      "fields": [
+        {
+          "name": "messageId",
+          "type": "id(Message)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "emoji",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_message_user_emoji",
+          "fields": [
+            "messageId",
+            "userId",
+            "emoji"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "ReadMarker",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "channelId",
+          "type": "id(Channel)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lastReadAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user_channel",
+          "fields": [
+            "userId",
+            "channelId"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "channels_require_auth",
+      "allow": "auth.userId != null",
+      "entity": "Channel"
+    },
+    {
+      "name": "messages_require_auth",
+      "allow": "auth.userId != null",
+      "entity": "Message"
+    },
+    {
+      "name": "reactions_require_auth",
+      "allow": "auth.userId != null",
+      "entity": "Reaction"
+    },
+    {
+      "name": "memberships_require_auth",
+      "allow": "auth.userId != null",
+      "entity": "Membership"
+    }
+  ]
+}

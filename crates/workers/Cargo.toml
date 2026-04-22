@@ -1,0 +1,30 @@
+[package]
+name = "statecraft-workers"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enable to compile the Workers fetch handler (WASM target only).
+workers = ["dep:worker", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:futures"]
+
+[dependencies]
+statecraft-core = { path = "../core" }
+statecraft-http = { path = "../http" }
+statecraft-router = { path = "../router" }
+statecraft-auth = { path = "../auth" }
+statecraft-policy = { path = "../policy" }
+statecraft-sync = { path = "../sync" }
+statecraft-realtime = { path = "../realtime" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Optional deps — only pulled in when `workers` feature is enabled.
+worker = { version = "0.5", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+futures = { version = "0.3", optional = true }

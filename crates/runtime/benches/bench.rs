@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use agentdb_core::*;
-use agentdb_runtime::Runtime;
+use statecraft_core::*;
+use statecraft_runtime::Runtime;
 
 fn test_manifest() -> AppManifest {
-    serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json")).unwrap()
+    serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json")).unwrap()
 }
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
@@ -32,7 +32,7 @@ fn bench(name: &str, iterations: u32, f: impl Fn()) {
 }
 
 fn main() {
-    println!("\nagentdb runtime benchmarks\n");
+    println!("\nstatecraft runtime benchmarks\n");
 
     let rt = Runtime::in_memory(test_manifest()).unwrap();
 

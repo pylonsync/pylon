@@ -1,5 +1,5 @@
-use agentdb_core::ExitCode;
-use agentdb_plugin::registry::{PluginCategory, PluginMarketplace, PluginMetadata};
+use statecraft_core::ExitCode;
+use statecraft_plugin::registry::{PluginCategory, PluginMarketplace, PluginMetadata};
 
 use crate::output;
 
@@ -59,7 +59,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `agentdb plugins list`
+// `statecraft plugins list`
 // ---------------------------------------------------------------------------
 
 fn run_list(json_mode: bool) -> ExitCode {
@@ -105,7 +105,7 @@ fn run_list(json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `agentdb plugins search <query>`
+// `statecraft plugins search <query>`
 // ---------------------------------------------------------------------------
 
 fn run_search(query: &str, json_mode: bool) -> ExitCode {
@@ -157,7 +157,7 @@ fn run_search(query: &str, json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `agentdb plugins info <name>`
+// `statecraft plugins info <name>`
 // ---------------------------------------------------------------------------
 
 fn run_info(name: &str, json_mode: bool) -> ExitCode {
@@ -225,10 +225,10 @@ fn print_plugin_row(p: &PluginMetadata, color: bool) {
 
 fn print_plugins_usage() {
     eprintln!("Usage:");
-    eprintln!("  agentdb plugins              List all available plugins");
-    eprintln!("  agentdb plugins list          List all available plugins");
-    eprintln!("  agentdb plugins search <q>    Search plugins by name/tag");
-    eprintln!("  agentdb plugins info <name>   Show detailed plugin info");
+    eprintln!("  statecraft plugins              List all available plugins");
+    eprintln!("  statecraft plugins list          List all available plugins");
+    eprintln!("  statecraft plugins search <q>    Search plugins by name/tag");
+    eprintln!("  statecraft plugins info <name>   Show detailed plugin info");
 }
 
 // ---------------------------------------------------------------------------

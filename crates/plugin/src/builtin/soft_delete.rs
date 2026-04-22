@@ -1,6 +1,5 @@
 use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
-use serde_json::Value;
+use statecraft_auth::AuthContext;
 
 /// Soft delete plugin. Converts deletes to updates that set `deletedAt`.
 /// Adds a before_delete hook that rejects the actual delete and instead
@@ -31,6 +30,7 @@ impl SoftDeletePlugin {
     }
 }
 
+#[allow(dead_code)]
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();

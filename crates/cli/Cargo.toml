@@ -1,19 +1,23 @@
 [package]
-name = "agentdb-cli"
+name = "statecraft-cli"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "agentdb"
+name = "statecraft"
 path = "src/main.rs"
 
 [dependencies]
-agentdb-core = { path = "../core" }
-agentdb-plugin = { path = "../plugin" }
-agentdb-schema = { path = "../schema" }
-agentdb-storage = { path = "../storage", features = ["postgres-live"] }
-agentdb-runtime = { path = "../runtime" }
-agentdb-staticgen = { path = "../staticgen" }
+statecraft-core = { path = "../core" }
+statecraft-plugin = { path = "../plugin" }
+statecraft-schema = { path = "../schema" }
+statecraft-storage = { path = "../storage", features = ["postgres-live"] }
+statecraft-runtime = { path = "../runtime" }
+statecraft-staticgen = { path = "../staticgen" }
+statecraft-migrate = { path = "../migrate" }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

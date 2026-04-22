@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
+use crate::Plugin;
 
 /// Session with expiry tracking.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TrackedSession {
     token: String,
     user_id: String,
@@ -104,12 +104,26 @@ impl SessionExpiryPlugin {
     }
 
     /// Refresh a session's expiry (extend the lifetime).
+    ///
+    /// The new `expires_at` is capped at `created_at + max_lifetime`, so a
+    /// session can be kept alive by activity but will still be forced to
+    /// re-authenticate when its absolute lifetime is up. Previously this
+    /// method set `expires_at = now + max_lifetime` unconditionally, which
+    /// meant a busy user could renew their session indefinitely — defeating
+    /// the whole point of an "absolute" lifetime cap.
     pub fn refresh(&self, token: &str) -> bool {
         let now = now_secs();
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(token) {
+            let hard_cap = session.created_at.saturating_add(self.max_lifetime);
+            if now >= hard_cap {
+                // Session is past its absolute lifetime — refusing to renew.
+                sessions.remove(token);
+                return false;
+            }
             session.last_active = now;
-            session.expires_at = now + self.max_lifetime;
+            let proposed = now.saturating_add(self.max_lifetime);
+            session.expires_at = proposed.min(hard_cap);
             true
         } else {
             false

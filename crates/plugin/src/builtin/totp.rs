@@ -5,17 +5,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
-use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
+use crate::Plugin;
 
 type HmacSha1 = Hmac<Sha1>;
 
 /// TOTP 2FA enrollment for a user.
-#[derive(Debug, Clone)]
+///
+/// `last_accepted_counter` is the most recent TOTP time-step counter that
+/// was successfully verified. A re-use within the same 30s window has the
+/// same counter, so we can detect and refuse replays. Without this, a code
+/// observed by an attacker (shoulder-surfing, phishing, log leak) was
+/// usable for up to 30 seconds — the full window.
+///
+/// Debug is deliberately NOT derived: the secret must never land in a log.
 pub struct TotpEnrollment {
     pub user_id: String,
     pub secret: String,
     pub verified: bool,
+    pub last_accepted_counter: Option<u64>,
+}
+
+impl Clone for TotpEnrollment {
+    fn clone(&self) -> Self {
+        Self {
+            user_id: self.user_id.clone(),
+            secret: self.secret.clone(),
+            verified: self.verified,
+            last_accepted_counter: self.last_accepted_counter,
+        }
+    }
 }
 
 /// TOTP 2FA plugin. Implements time-based one-time passwords (RFC 6238).
@@ -54,23 +72,43 @@ impl TotpPlugin {
                 user_id: user_id.to_string(),
                 secret: secret.clone(),
                 verified: false,
+                last_accepted_counter: None,
             },
         );
         secret
     }
 
     /// Verify a TOTP code and mark enrollment as verified.
-    /// Uses constant-time comparison to prevent timing attacks.
+    ///
+    /// Constant-time compare prevents timing attacks on the 6-digit code.
+    /// The verified code's counter is recorded so the same code cannot be
+    /// replayed within its 30-second window — a successful verify burns
+    /// that counter for this user.
     pub fn verify(&self, user_id: &str, code: &str) -> bool {
-        let expected = self.current_code(user_id);
-        if let Some(expected) = expected {
-            if agentdb_auth::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
-                let mut enrollments = self.enrollments.lock().unwrap();
-                if let Some(enrollment) = enrollments.get_mut(user_id) {
-                    enrollment.verified = true;
-                }
-                return true;
-            }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let counter = now / 30;
+
+        let mut enrollments = self.enrollments.lock().unwrap();
+        let enrollment = match enrollments.get_mut(user_id) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        // Replay guard: if this counter's code was already accepted for this
+        // user, refuse. A legitimate second login attempt in the same window
+        // will have to wait for the next 30s step.
+        if enrollment.last_accepted_counter == Some(counter) {
+            return false;
+        }
+
+        let expected = generate_totp_at(&enrollment.secret, now);
+        if statecraft_auth::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
+            enrollment.verified = true;
+            enrollment.last_accepted_counter = Some(counter);
+            return true;
         }
         false
     }
@@ -172,6 +210,21 @@ mod tests {
         plugin.enroll("user-1");
         assert!(!plugin.verify("user-1", "000000"));
         assert!(!plugin.is_verified("user-1"));
+    }
+
+    #[test]
+    fn code_cannot_be_replayed_in_same_window() {
+        // The second verify within the same 30-second counter must fail —
+        // this is the replay guard. Even if `code` is still "current",
+        // last_accepted_counter pins it to burn-on-use.
+        let plugin = TotpPlugin::new();
+        plugin.enroll("user-1");
+        let code = plugin.current_code("user-1").unwrap();
+        assert!(plugin.verify("user-1", &code), "first verify should succeed");
+        assert!(
+            !plugin.verify("user-1", &code),
+            "replay within the same window must be rejected"
+        );
     }
 
     #[test]

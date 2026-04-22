@@ -1,0 +1,15 @@
+target
+node_modules
+.git
+.DS_Store
+dist
+build
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+uploads
+coverage
+.vscode
+.idea
+tarpaulin-report.html

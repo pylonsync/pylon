@@ -11,6 +11,7 @@ use serde::Serialize;
 
 /// The value types the cache can store.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum CacheValue {
     String(String),
     Int(i64),

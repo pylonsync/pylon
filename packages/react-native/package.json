@@ -1,7 +1,7 @@
 {
-  "name": "@agentdb/react-native",
+  "name": "@statecraft/react-native",
+  "publishConfig": { "access": "public" },
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -10,8 +10,8 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@agentdb/sdk": "file:../sdk",
-    "@agentdb/sync": "file:../sync"
+    "@statecraft/sdk": "file:../sdk",
+    "@statecraft/sync": "file:../sync"
   },
   "peerDependencies": {
     "react": ">=18",

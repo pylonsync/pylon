@@ -91,6 +91,43 @@ impl Metrics {
             }
         })
     }
+
+    /// Return metrics in Prometheus text exposition format.
+    ///
+    /// Supports scraping by Prometheus, Grafana Agent, OTel collector, etc.
+    pub fn prometheus(&self) -> String {
+        let total = self.requests_total.load(Ordering::Relaxed);
+        let ok = self.requests_ok.load(Ordering::Relaxed);
+        let err = self.requests_err.load(Ordering::Relaxed);
+        let uptime = self.uptime_secs();
+        let get = self.requests_by_method.get.load(Ordering::Relaxed);
+        let post = self.requests_by_method.post.load(Ordering::Relaxed);
+        let patch = self.requests_by_method.patch.load(Ordering::Relaxed);
+        let delete = self.requests_by_method.delete.load(Ordering::Relaxed);
+        let options = self.requests_by_method.options.load(Ordering::Relaxed);
+
+        format!(
+            "# HELP statecraft_uptime_seconds Server uptime in seconds.\n\
+             # TYPE statecraft_uptime_seconds gauge\n\
+             statecraft_uptime_seconds {uptime}\n\
+             # HELP statecraft_http_requests_total HTTP requests total.\n\
+             # TYPE statecraft_http_requests_total counter\n\
+             statecraft_http_requests_total {total}\n\
+             # HELP statecraft_http_requests_ok_total HTTP requests with 2xx/3xx status.\n\
+             # TYPE statecraft_http_requests_ok_total counter\n\
+             statecraft_http_requests_ok_total {ok}\n\
+             # HELP statecraft_http_requests_errors_total HTTP requests with 4xx/5xx status.\n\
+             # TYPE statecraft_http_requests_errors_total counter\n\
+             statecraft_http_requests_errors_total {err}\n\
+             # HELP statecraft_http_requests_by_method HTTP requests by method.\n\
+             # TYPE statecraft_http_requests_by_method counter\n\
+             statecraft_http_requests_by_method{{method=\"GET\"}} {get}\n\
+             statecraft_http_requests_by_method{{method=\"POST\"}} {post}\n\
+             statecraft_http_requests_by_method{{method=\"PATCH\"}} {patch}\n\
+             statecraft_http_requests_by_method{{method=\"DELETE\"}} {delete}\n\
+             statecraft_http_requests_by_method{{method=\"OPTIONS\"}} {options}\n"
+        )
+    }
 }
 
 impl Default for Metrics {

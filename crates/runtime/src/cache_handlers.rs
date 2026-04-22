@@ -4,7 +4,7 @@
 //! They are used by both the main server (`/api/cache`, `/api/pubsub/*`) and
 //! the standalone cache server (`/cache`, `/pubsub/*`).
 
-use agentdb_plugin::builtin::cache::CachePlugin;
+use statecraft_plugin::builtin::cache::CachePlugin;
 use crate::pubsub::PubSubBroker;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,13 @@ pub fn handle_cache_command(cache: &CachePlugin, body: &str) -> (u16, String) {
             } else {
                 (
                     400,
-                    serde_json::json!({"ok": false, "error": "pairs object required"}).to_string(),
+                    serde_json::json!({
+                        "error": {
+                            "code": "INVALID_ARG",
+                            "message": "pairs object required"
+                        }
+                    })
+                    .to_string(),
                 )
             }
         }
@@ -439,7 +445,13 @@ pub fn handle_cache_get(cache: &CachePlugin, key: &str) -> (u16, String) {
         ),
         None => (
             404,
-            serde_json::json!({"ok": false, "error": "key not found"}).to_string(),
+            serde_json::json!({
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "key not found"
+                }
+            })
+            .to_string(),
         ),
     }
 }

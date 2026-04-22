@@ -6,15 +6,32 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use agentdb_sync::ChangeEvent;
+use statecraft_sync::ChangeEvent;
+
+use crate::ip_limit::{IpConnCounter, IpConnGuard};
 
 const NUM_SHARDS: usize = 16;
+
+/// Per-client state in the shard map. The `_guard` is held for the lifetime
+/// of the connection — dropping it (when the client is removed) releases
+/// the client's slot in the per-IP connection counter. Without this, a
+/// crash-loopy browser could open unlimited SSE streams.
+struct SseClient {
+    stream: TcpStream,
+    _guard: Option<IpConnGuard>,
+}
+
+/// Same rationale as the WS hub: bounded queue + drop-oldest-on-full so a
+/// stuck subscriber can't balloon memory on the broadcast path. Clients
+/// that miss events catch up via the change-log cursor protocol on
+/// reconnect — SSE is a notify-sooner, not a durable-delivery transport.
+const BROADCAST_QUEUE_DEPTH: usize = 1024;
 
 /// A single shard holding a subset of SSE clients, protected by its own lock.
 /// Sharding reduces contention: concurrent broadcasts only block within the
 /// same shard, not across the entire client set.
 struct SseShard {
-    clients: Mutex<HashMap<u64, TcpStream>>,
+    clients: Mutex<HashMap<u64, SseClient>>,
 }
 
 impl SseShard {
@@ -24,8 +41,11 @@ impl SseShard {
         }
     }
 
-    fn add(&self, id: u64, stream: TcpStream) {
-        self.clients.lock().unwrap().insert(id, stream);
+    fn add(&self, id: u64, stream: TcpStream, guard: Option<IpConnGuard>) {
+        self.clients
+            .lock()
+            .unwrap()
+            .insert(id, SseClient { stream, _guard: guard });
     }
 
     #[allow(dead_code)]
@@ -39,8 +59,10 @@ impl SseShard {
         let sse_data = format!("data: {data}\n\n");
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
-        for (id, stream) in clients.iter_mut() {
-            if stream.write_all(sse_data.as_bytes()).is_err() || stream.flush().is_err() {
+        for (id, client) in clients.iter_mut() {
+            if client.stream.write_all(sse_data.as_bytes()).is_err()
+                || client.stream.flush().is_err()
+            {
                 dead.push(*id);
             }
         }
@@ -54,8 +76,10 @@ impl SseShard {
     fn keepalive(&self) {
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
-        for (id, stream) in clients.iter_mut() {
-            if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err() {
+        for (id, client) in clients.iter_mut() {
+            if client.stream.write_all(b": keepalive\n\n").is_err()
+                || client.stream.flush().is_err()
+            {
                 dead.push(*id);
             }
         }
@@ -80,7 +104,7 @@ impl SseShard {
 pub struct SseHub {
     shards: Vec<Arc<SseShard>>,
     next_id: Mutex<u64>,
-    broadcast_txs: Vec<mpsc::Sender<String>>,
+    broadcast_txs: Vec<mpsc::SyncSender<String>>,
 }
 
 impl SseHub {
@@ -90,7 +114,7 @@ impl SseHub {
 
         for i in 0..NUM_SHARDS {
             let shard = Arc::new(SseShard::new());
-            let (tx, rx) = mpsc::channel::<String>();
+            let (tx, rx) = mpsc::sync_channel::<String>(BROADCAST_QUEUE_DEPTH);
 
             // Broadcast worker: drains the channel and writes to every client
             // in this shard. Runs until the channel is dropped (hub teardown).
@@ -132,27 +156,39 @@ impl SseHub {
             Ok(j) => j,
             Err(_) => return,
         };
-        for tx in &self.broadcast_txs {
-            let _ = tx.send(json.clone());
-        }
+        self.send_to_all(&json);
     }
 
     /// Broadcast an arbitrary string message (e.g. presence/topic updates).
     pub fn broadcast_message(&self, msg: &str) {
+        self.send_to_all(msg);
+    }
+
+    /// Internal: bounded-queue send to all shard workers.
+    fn send_to_all(&self, msg: &str) {
         for tx in &self.broadcast_txs {
-            let _ = tx.send(msg.to_string());
+            match tx.try_send(msg.to_string()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!("[sse] broadcast queue full — dropping event for one shard");
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {}
+            }
         }
     }
 
     /// Register a new SSE client. Returns the assigned client ID.
     /// The stream is moved into the appropriate shard — the caller should not
-    /// use it after this call.
-    fn add_client(&self, stream: TcpStream) -> u64 {
+    /// use it after this call. The optional `guard` binds the client's slot
+    /// in the per-IP connection counter to this client's presence in the
+    /// shard map; when the client is removed, the guard drops and the slot
+    /// is returned.
+    fn add_client(&self, stream: TcpStream, guard: Option<IpConnGuard>) -> u64 {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        self.shards[shard_idx].add(id, stream);
+        self.shards[shard_idx].add(id, stream, guard);
         id
     }
 
@@ -172,14 +208,19 @@ pub fn start_sse_server(hub: Arc<SseHub>, port: u16) {
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[sse] Failed to bind on {addr}: {e}");
+            tracing::warn!("[sse] Failed to bind on {addr}: {e}");
             return;
         }
     };
 
-    eprintln!(
+    tracing::warn!(
         "[sse] SSE server listening on http://localhost:{port}/events (sharded, {NUM_SHARDS} shards)"
     );
+
+    // Per-IP cap mirrors the one on /ws. Idle SSE streams are cheap, but a
+    // crash-loopy client can still accumulate thousands of them — this
+    // bounds that.
+    let ip_counter = Arc::new(IpConnCounter::default());
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -187,21 +228,30 @@ pub fn start_sse_server(hub: Arc<SseHub>, port: u16) {
             Err(_) => continue,
         };
 
+        let ip = match stream.peer_addr() {
+            Ok(addr) => addr.ip(),
+            Err(_) => continue,
+        };
+        let guard = match ip_counter.acquire(ip) {
+            Some(g) => g,
+            None => continue,
+        };
+
         let hub = Arc::clone(&hub);
         // Lightweight accept thread with a small stack. It reads the HTTP
-        // request, writes SSE headers, registers the stream, then exits.
-        // No ongoing per-client thread — the shard workers handle the rest.
+        // request, writes SSE headers, registers the stream (transferring
+        // the IP-conn guard into the shard map), then exits.
         thread::Builder::new()
             .name("sse-accept".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                handle_sse_connection(hub, stream);
+                handle_sse_connection(hub, stream, guard);
             })
             .ok();
     }
 }
 
-fn handle_sse_connection(hub: Arc<SseHub>, mut stream: TcpStream) {
+fn handle_sse_connection(hub: Arc<SseHub>, mut stream: TcpStream, guard: IpConnGuard) {
     // Consume the HTTP request headers. We don't route — any connection
     // to this port is treated as an SSE subscription.
     let mut buf = [0u8; 2048];
@@ -227,9 +277,11 @@ fn handle_sse_connection(hub: Arc<SseHub>, mut stream: TcpStream) {
     }
     let _ = stream.flush();
 
-    // Hand the stream to the hub. The shard's broadcast and keepalive
-    // workers now own writes to this client. This thread exits.
-    hub.add_client(stream);
+    // Hand the stream AND the IP-conn guard to the hub. The shard's
+    // broadcast and keepalive workers now own writes; the guard is
+    // released when the client is dropped from the shard map. This
+    // thread exits.
+    hub.add_client(stream, Some(guard));
 }
 
 #[cfg(test)]

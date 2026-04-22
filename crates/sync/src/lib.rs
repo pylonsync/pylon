@@ -63,6 +63,19 @@ pub struct PullResponse {
     pub has_more: bool,
 }
 
+/// Error returned by [`ChangeLog::pull`].
+#[derive(Debug, Clone)]
+pub enum PullError {
+    /// The caller's cursor has fallen off the back of the retention window.
+    /// The client should do a full re-sync from entity-list state rather than
+    /// trusting the delta stream — events between `cursor.last_seq` and
+    /// `oldest_seq` were evicted and cannot be replayed.
+    ResyncRequired {
+        oldest_seq: u64,
+        cursor: SyncCursor,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Push request — what a client sends to push changes
 // ---------------------------------------------------------------------------
@@ -71,6 +84,14 @@ pub struct PullResponse {
 pub struct PushRequest {
     /// The changes the client wants to push.
     pub changes: Vec<ClientChange>,
+    /// Stable identifier for this client across reconnects. Lets the server
+    /// correlate retries (even without op_id) and attach per-client
+    /// diagnostics / rate limits. Clients that don't supply one get a
+    /// synthesized `"anon"` bucket for those features. Legacy clients
+    /// without this field keep working — the router ignores it when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,23 +101,75 @@ pub struct ClientChange {
     pub kind: ChangeKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// Client-minted idempotency key. The server remembers recently-seen
+    /// op_ids and short-circuits replays with the previous result instead
+    /// of re-applying the change. When absent, no dedup is performed (legacy
+    /// clients stay functional but lose idempotency on retry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Change log — in-memory append-only log
 // ---------------------------------------------------------------------------
 
-/// An in-memory change log for development.
+/// An in-memory change log with bounded retention.
+///
+/// Older events are evicted when the log exceeds `capacity`. The sequence
+/// counter still increments monotonically; clients pulling with an old
+/// cursor will see only what remains in memory (or should issue a full
+/// re-sync if their cursor falls off the back).
 pub struct ChangeLog {
-    events: Mutex<Vec<ChangeEvent>>,
+    events: Mutex<std::collections::VecDeque<ChangeEvent>>,
     seq: Mutex<u64>,
+    capacity: usize,
+    /// Recently-seen client op_ids, for push idempotency. Bounded by
+    /// `op_id_capacity`; oldest entries age out when the map grows past it.
+    seen_op_ids: Mutex<std::collections::VecDeque<String>>,
+    seen_op_id_set: Mutex<std::collections::HashSet<String>>,
+    op_id_capacity: usize,
 }
 
 impl ChangeLog {
+    /// Create a new change log with the default capacity of 10,000 events.
     pub fn new() -> Self {
+        Self::with_capacity(10_000)
+    }
+
+    /// Create a new change log with a specific capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            events: Mutex::new(Vec::new()),
+            events: Mutex::new(std::collections::VecDeque::with_capacity(capacity.min(1024))),
             seq: Mutex::new(0),
+            capacity,
+            seen_op_ids: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
+            seen_op_id_set: Mutex::new(std::collections::HashSet::with_capacity(1024)),
+            op_id_capacity: 10_000,
+        }
+    }
+
+    /// Returns true if this op_id was already applied. Used by the push
+    /// handler to short-circuit replays. Callers that observe `true` should
+    /// NOT re-apply the change and should return success to the client.
+    pub fn has_seen_op_id(&self, op_id: &str) -> bool {
+        self.seen_op_id_set.lock().unwrap().contains(op_id)
+    }
+
+    /// Mark an op_id as processed. Safe to call multiple times. Evicts the
+    /// oldest entry when the cache exceeds `op_id_capacity`.
+    pub fn remember_op_id(&self, op_id: &str) {
+        let mut set = self.seen_op_id_set.lock().unwrap();
+        if set.contains(op_id) {
+            return;
+        }
+        set.insert(op_id.to_string());
+        drop(set);
+        let mut q = self.seen_op_ids.lock().unwrap();
+        q.push_back(op_id.to_string());
+        while q.len() > self.op_id_capacity {
+            if let Some(evicted) = q.pop_front() {
+                self.seen_op_id_set.lock().unwrap().remove(&evicted);
+            }
         }
     }
 
@@ -112,13 +185,56 @@ impl ChangeLog {
             data,
             timestamp: now_iso8601(),
         };
-        self.events.lock().unwrap().push(event);
+        let mut events = self.events.lock().unwrap();
+        events.push_back(event);
+        while events.len() > self.capacity {
+            events.pop_front();
+        }
         *seq
     }
 
     /// Pull changes since a cursor, up to a limit.
-    pub fn pull(&self, cursor: &SyncCursor, limit: usize) -> PullResponse {
+    ///
+    /// Returns `Err(PullError::ResyncRequired)` when the caller's cursor has
+    /// fallen off the back of the retention window — i.e. the cursor's
+    /// `last_seq` is lower than the oldest seq we still remember. Previously
+    /// this case was silent: `pull` would return the surviving tail and
+    /// advance the cursor, so the client converged to a state that skipped
+    /// the evicted events entirely. That's a permanent correctness bug;
+    /// clients should instead do a full re-sync from entity list state.
+    pub fn pull(&self, cursor: &SyncCursor, limit: usize) -> Result<PullResponse, PullError> {
         let events = self.events.lock().unwrap();
+        let current_seq = *self.seq.lock().unwrap();
+
+        // Detect "cursor from a previous server lifetime": the caller's
+        // cursor is ahead of the current seq counter. In-memory change logs
+        // reset on process restart, so a client that persisted cursor=15
+        // under the old server will silently tail-follow forever against
+        // the new server (which starts at 0 and will never produce seqs
+        // within (0, 15]). Force a resync so the client rehydrates from
+        // the entity list endpoints.
+        if cursor.last_seq > current_seq {
+            return Err(PullError::ResyncRequired {
+                oldest_seq: current_seq.saturating_add(1),
+                cursor: cursor.clone(),
+            });
+        }
+
+        // Detect "cursor too old": the caller's cursor is before the oldest
+        // retained event by more than one seq (i.e. there are evicted seqs
+        // between cursor.last_seq and front.seq). We do NOT carve out
+        // cursor=0 — a fresh client must use an entity-list endpoint for
+        // initial state rather than pull, because pull silently returning
+        // only the post-eviction tail hides that state is missing.
+        if let Some(front) = events.front() {
+            if cursor.last_seq + 1 < front.seq {
+                return Err(PullError::ResyncRequired {
+                    oldest_seq: front.seq,
+                    cursor: cursor.clone(),
+                });
+            }
+        }
+
         let changes: Vec<ChangeEvent> = events
             .iter()
             .filter(|e| e.seq > cursor.last_seq)
@@ -129,11 +245,11 @@ impl ChangeLog {
         let last_seq = changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
         let has_more = events.iter().any(|e| e.seq > last_seq);
 
-        PullResponse {
+        Ok(PullResponse {
             changes,
             cursor: SyncCursor { last_seq },
             has_more,
-        }
+        })
     }
 
     /// Get the total number of events in the log.
@@ -178,7 +294,7 @@ mod tests {
 
         assert_eq!(log.len(), 2);
 
-        let resp = log.pull(&SyncCursor::beginning(), 100);
+        let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
         assert_eq!(resp.changes.len(), 2);
         assert_eq!(resp.cursor.last_seq, 2);
         assert!(!resp.has_more);
@@ -192,7 +308,7 @@ mod tests {
         log.append("User", "u3", ChangeKind::Insert, None);
 
         // Pull from seq 1 — should get events 2 and 3.
-        let resp = log.pull(&SyncCursor { last_seq: 1 }, 100);
+        let resp = log.pull(&SyncCursor { last_seq: 1 }, 100).unwrap();
         assert_eq!(resp.changes.len(), 2);
         assert_eq!(resp.changes[0].seq, 2);
         assert_eq!(resp.changes[1].seq, 3);
@@ -205,13 +321,13 @@ mod tests {
         log.append("User", "u2", ChangeKind::Insert, None);
         log.append("User", "u3", ChangeKind::Insert, None);
 
-        let resp = log.pull(&SyncCursor::beginning(), 2);
+        let resp = log.pull(&SyncCursor::beginning(), 2).unwrap();
         assert_eq!(resp.changes.len(), 2);
         assert!(resp.has_more);
         assert_eq!(resp.cursor.last_seq, 2);
 
         // Continue pulling.
-        let resp2 = log.pull(&resp.cursor, 2);
+        let resp2 = log.pull(&resp.cursor, 2).unwrap();
         assert_eq!(resp2.changes.len(), 1);
         assert!(!resp2.has_more);
     }
@@ -223,7 +339,7 @@ mod tests {
         log.append("Todo", "t1", ChangeKind::Update, Some(serde_json::json!({"title": "Updated"})));
         log.append("Todo", "t1", ChangeKind::Delete, None);
 
-        let resp = log.pull(&SyncCursor::beginning(), 100);
+        let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
         assert_eq!(resp.changes[0].kind, ChangeKind::Insert);
         assert_eq!(resp.changes[1].kind, ChangeKind::Update);
         assert_eq!(resp.changes[2].kind, ChangeKind::Delete);
@@ -259,27 +375,67 @@ mod tests {
     // -- Edge cases --
 
     #[test]
-    fn pull_from_future_cursor_returns_empty() {
+    fn pull_from_future_cursor_requires_resync() {
+        // A cursor whose last_seq is greater than the log's current seq
+        // counter is from a previous server lifetime (the in-memory log
+        // reset on restart). The server must force resync — silently
+        // returning an empty tail here used to wedge clients forever.
         let log = ChangeLog::new();
         log.append("User", "u1", ChangeKind::Insert, None);
-        let resp = log.pull(&SyncCursor { last_seq: 999 }, 100);
-        assert!(resp.changes.is_empty());
-        assert!(!resp.has_more);
+        let err = log
+            .pull(&SyncCursor { last_seq: 999 }, 100)
+            .expect_err("future cursors must signal resync");
+        match err {
+            PullError::ResyncRequired { cursor, .. } => {
+                assert_eq!(cursor.last_seq, 999);
+            }
+        }
     }
 
     #[test]
     fn pull_limit_zero_returns_empty() {
         let log = ChangeLog::new();
         log.append("User", "u1", ChangeKind::Insert, None);
-        let resp = log.pull(&SyncCursor::beginning(), 0);
+        let resp = log.pull(&SyncCursor::beginning(), 0).unwrap();
         assert!(resp.changes.is_empty());
+    }
+
+    #[test]
+    fn pull_with_evicted_cursor_requires_resync() {
+        // Capacity 2 — we keep only the most recent 2. After seq 1..4 are
+        // appended the oldest retained is seq 3.
+        let log = ChangeLog::with_capacity(2);
+        log.append("A", "1", ChangeKind::Insert, None);
+        log.append("A", "2", ChangeKind::Insert, None);
+        log.append("A", "3", ChangeKind::Insert, None);
+        log.append("A", "4", ChangeKind::Insert, None);
+
+        // Client knew up to seq 1 — seq 2 is unrecoverable, so RESYNC.
+        let err = log.pull(&SyncCursor { last_seq: 1 }, 100).unwrap_err();
+        match err {
+            PullError::ResyncRequired { oldest_seq, .. } => {
+                assert_eq!(oldest_seq, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn pull_with_cursor_at_eviction_boundary_is_ok() {
+        // Capacity 2 retains seq 2..3 after appending 1..3.
+        let log = ChangeLog::with_capacity(2);
+        log.append("A", "1", ChangeKind::Insert, None);
+        log.append("A", "2", ChangeKind::Insert, None);
+        log.append("A", "3", ChangeKind::Insert, None);
+        // Client cursor=1, next event is seq 2 — exactly what we have.
+        let resp = log.pull(&SyncCursor { last_seq: 1 }, 100).unwrap();
+        assert_eq!(resp.changes.len(), 2);
     }
 
     #[test]
     fn delete_event_has_no_data() {
         let log = ChangeLog::new();
         log.append("User", "u1", ChangeKind::Delete, None);
-        let resp = log.pull(&SyncCursor::beginning(), 100);
+        let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
         assert!(resp.changes[0].data.is_none());
     }
 
@@ -302,12 +458,23 @@ mod tests {
                     row_id: "u1".into(),
                     kind: ChangeKind::Insert,
                     data: Some(serde_json::json!({"name": "Alice"})),
+                    op_id: None,
                 },
             ],
+            client_id: Some("cl_123".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: PushRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.changes.len(), 1);
         assert_eq!(parsed.changes[0].entity, "User");
+        assert_eq!(parsed.client_id.as_deref(), Some("cl_123"));
+    }
+
+    #[test]
+    fn push_request_accepts_missing_client_id() {
+        // Legacy clients that don't send client_id must still parse.
+        let json = r#"{"changes":[]}"#;
+        let parsed: PushRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.client_id.is_none());
     }
 }

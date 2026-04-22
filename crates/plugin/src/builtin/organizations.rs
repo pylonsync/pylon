@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
-use serde_json::Value;
+use crate::Plugin;
 
 /// Member role within an organization.
 #[derive(Debug, Clone, PartialEq, Eq)]

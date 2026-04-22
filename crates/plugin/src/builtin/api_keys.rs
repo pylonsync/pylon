@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use sha2::{Sha256, Digest};
 
 use crate::{Plugin, PluginError};
-use agentdb_auth::AuthContext;
+use statecraft_auth::AuthContext;
 
 /// An API key with scoped permissions.
 ///
@@ -58,7 +58,7 @@ fn generate_key() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let bytes: [u8; 24] = rng.gen();
-    format!("agentdb_{}", hex_encode(&bytes))
+    format!("statecraft_{}", hex_encode(&bytes))
 }
 
 impl ApiKeysPlugin {
@@ -94,10 +94,25 @@ impl ApiKeysPlugin {
 
     /// Resolve an API key to an auth context.
     /// Hashes the provided key and performs an O(1) HashMap lookup.
+    ///
+    /// The returned `AuthContext` is DETACHED from this store — if the key
+    /// is later revoked, callers holding the context won't see the change.
+    /// This matters for middleware/session layers that cache the resolved
+    /// context across requests. Such callers should also call
+    /// [`is_active`] on every request or re-`resolve` to pick up
+    /// revocations.
     pub fn resolve(&self, key: &str) -> Option<AuthContext> {
         let h = hash_key(key);
         let keys = self.keys.lock().unwrap();
         keys.get(&h).map(|k| AuthContext::authenticated(k.user_id.clone()))
+    }
+
+    /// Returns true if the raw key still exists in the store. Use this to
+    /// validate a cached `AuthContext` against the current revocation state
+    /// before trusting it on a subsequent request.
+    pub fn is_active(&self, key: &str) -> bool {
+        let h = hash_key(key);
+        self.keys.lock().unwrap().contains_key(&h)
     }
 
     /// Check if an API key has a specific scope.
@@ -166,7 +181,7 @@ mod tests {
     fn create_and_resolve() {
         let plugin = ApiKeysPlugin::new();
         let created = plugin.create_key("test-key", "user-1", vec!["read".into(), "write".into()]);
-        assert!(created.raw_key.starts_with("agentdb_"));
+        assert!(created.raw_key.starts_with("statecraft_"));
 
         let ctx = plugin.resolve(&created.raw_key).unwrap();
         assert_eq!(ctx.user_id, Some("user-1".into()));
@@ -230,6 +245,15 @@ mod tests {
     }
 
     #[test]
+    fn is_active_tracks_revocation() {
+        let plugin = ApiKeysPlugin::new();
+        let created = plugin.create_key("test", "user-1", vec![]);
+        assert!(plugin.is_active(&created.raw_key));
+        plugin.revoke(&created.raw_key);
+        assert!(!plugin.is_active(&created.raw_key));
+    }
+
+    #[test]
     fn list_keys_by_user() {
         let plugin = ApiKeysPlugin::new();
         plugin.create_key("key1", "user-1", vec![]);
@@ -248,9 +272,9 @@ mod tests {
         let k1 = generate_key();
         let k2 = generate_key();
         assert_ne!(k1, k2);
-        assert!(k1.starts_with("agentdb_"));
-        // "agentdb_" (8) + 48 hex chars (24 bytes) = 56
-        assert_eq!(k1.len(), 56);
+        assert!(k1.starts_with("statecraft_"));
+        // "statecraft_" (11) + 48 hex chars (24 bytes) = 59
+        assert_eq!(k1.len(), 59);
     }
 
     #[test]

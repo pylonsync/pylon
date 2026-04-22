@@ -1,13 +1,18 @@
-use agentdb_core::Diagnostic;
-use agentdb_core::Severity;
+use statecraft_core::Diagnostic;
+use statecraft_core::Severity;
 
 use crate::manifest::parse_manifest;
 
 /// Run a TS entry file with Bun and return the trimmed stdout as manifest JSON.
 /// Validates that the output parses as a valid manifest.
 pub fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
+    // `--` before the entry file stops Bun from interpreting a filename
+    // that starts with `-` as a flag. Without this, an attacker able to
+    // smuggle a crafted filename into this call could inject flags like
+    // `--eval <code>`. Bun treats everything after `--` as positional args.
     let output = std::process::Command::new("bun")
         .arg("run")
+        .arg("--")
         .arg(entry_file)
         .output()
         .map_err(|e| Diagnostic {

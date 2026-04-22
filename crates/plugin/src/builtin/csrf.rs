@@ -103,7 +103,7 @@ impl crate::Plugin for CsrfPlugin {
         &self,
         _method: &str,
         _path: &str,
-        _auth: &agentdb_auth::AuthContext,
+        _auth: &statecraft_auth::AuthContext,
     ) -> Result<(), PluginError> {
         // The Plugin trait's on_request does not receive HTTP headers, so CSRF
         // validation cannot happen here automatically. Use `check()` at the
