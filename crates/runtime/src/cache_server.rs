@@ -2,12 +2,12 @@
 //!
 //! Runs a lightweight HTTP server that exposes only cache and pub/sub
 //! endpoints. This allows the cache to be deployed independently of the
-//! main agentdb server for horizontal scaling.
+//! main statecraft server for horizontal scaling.
 //!
 //! # Usage
 //!
 //! ```text
-//! agentdb cache --port 6380 --max-keys 100000 --max-history 100
+//! statecraft cache --port 6380 --max-keys 100000 --max-history 100
 //! ```
 //!
 //! # Endpoints
@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use agentdb_plugin::builtin::cache::CachePlugin;
+use statecraft_plugin::builtin::cache::CachePlugin;
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::cache_handlers::{
@@ -34,7 +34,7 @@ use crate::pubsub::PubSubBroker;
 /// Start a standalone cache server on the given port.
 ///
 /// This blocks the calling thread, serving requests in a synchronous loop.
-/// It runs independently of the main agentdb server -- no auth, no entities,
+/// It runs independently of the main statecraft server -- no auth, no entities,
 /// no sync. Just the cache and pub/sub.
 pub fn start_cache_server(port: u16, max_keys: usize, max_history: usize) -> Result<(), String> {
     start_cache_server_with_options(port, max_keys, max_history, None, false)
@@ -68,7 +68,7 @@ pub fn start_cache_server_with_options(
     // If resp-only mode, block on the RESP server instead of HTTP.
     if resp_only {
         let rp = resp_port.unwrap_or(6379);
-        eprintln!("[cache] RESP-only mode -- no HTTP server started");
+        tracing::warn!("[cache] RESP-only mode -- no HTTP server started");
         // The RESP server was already spawned above if resp_port was Some.
         // If it was None (user said --resp-only without --resp-port), start
         // it on the default port on this thread.
@@ -89,10 +89,10 @@ pub fn start_cache_server_with_options(
     let server =
         Server::http(&addr).map_err(|e| format!("Failed to start cache server: {e}"))?;
 
-    eprintln!("agentdb cache server listening on http://localhost:{port}");
-    eprintln!("  Cache:  POST http://localhost:{port}/cache");
-    eprintln!("  PubSub: POST http://localhost:{port}/pubsub/publish");
-    eprintln!("  Health: GET  http://localhost:{port}/health");
+    tracing::warn!("statecraft cache server listening on http://localhost:{port}");
+    tracing::warn!("  Cache:  POST http://localhost:{port}/cache");
+    tracing::warn!("  PubSub: POST http://localhost:{port}/pubsub/publish");
+    tracing::warn!("  Health: GET  http://localhost:{port}/health");
 
     for mut request in server.incoming_requests() {
         let cache = Arc::clone(&cache);
@@ -183,7 +183,13 @@ fn route_request(
 
     (
         404,
-        serde_json::json!({"error": "Not found"}).to_string(),
+        serde_json::json!({
+            "error": {
+                "code": "NOT_FOUND",
+                "message": "Not found"
+            }
+        })
+        .to_string(),
     )
 }
 

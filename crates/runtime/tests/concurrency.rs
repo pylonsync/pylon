@@ -1,4 +1,4 @@
-//! Concurrency stress tests for agentdb runtime.
+//! Concurrency stress tests for statecraft runtime.
 //!
 //! These tests verify that all Mutex-based code is safe under contention and
 //! that concurrent operations do not lose data, deadlock, or panic.
@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use agentdb_core::{AppManifest, ManifestEntity, ManifestField};
-use agentdb_runtime::jobs::JobQueue;
-use agentdb_runtime::rate_limit::RateLimiter;
-use agentdb_runtime::rooms::RoomManager;
-use agentdb_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
-use agentdb_runtime::Runtime;
+use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
+use statecraft_runtime::jobs::JobQueue;
+use statecraft_runtime::rate_limit::RateLimiter;
+use statecraft_runtime::rooms::RoomManager;
+use statecraft_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
+use statecraft_runtime::Runtime;
 
 // ---------------------------------------------------------------------------
 // Helpers

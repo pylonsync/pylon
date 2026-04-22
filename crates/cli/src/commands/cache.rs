@@ -1,6 +1,6 @@
-//! `agentdb cache` -- start a standalone cache server.
+//! `statecraft cache` -- start a standalone cache server.
 //!
-//! This runs the agentdb cache as an independent HTTP service, enabling
+//! This runs the statecraft cache as an independent HTTP service, enabling
 //! horizontal scaling by deploying the cache on a separate machine.
 //!
 //! Optionally starts a RESP-compatible TCP server alongside (or instead of)
@@ -10,10 +10,10 @@
 //! # Usage
 //!
 //! ```text
-//! agentdb cache [--port 6380] [--resp-port 6379] [--resp-only] [--max-keys 100000] [--max-history 100]
+//! statecraft cache [--port 6380] [--resp-port 6379] [--resp-only] [--max-keys 100000] [--max-history 100]
 //! ```
 
-use agentdb_core::ExitCode;
+use statecraft_core::ExitCode;
 use crate::output::print_error;
 
 const DEFAULT_PORT: u16 = 6380;
@@ -58,7 +58,7 @@ pub fn run(args: &[String], _json_mode: bool) -> ExitCode {
     }
     eprintln!();
 
-    match agentdb_runtime::cache_server::start_cache_server_with_options(
+    match statecraft_runtime::cache_server::start_cache_server_with_options(
         port,
         max_keys,
         max_history,
@@ -74,10 +74,10 @@ pub fn run(args: &[String], _json_mode: bool) -> ExitCode {
 }
 
 fn print_usage() {
-    println!("agentdb cache -- run a standalone cache server");
+    println!("statecraft cache -- run a standalone cache server");
     println!();
     println!("Usage:");
-    println!("  agentdb cache [options]");
+    println!("  statecraft cache [options]");
     println!();
     println!("Options:");
     println!("  --port <port>          HTTP listen port (default: {DEFAULT_PORT})");

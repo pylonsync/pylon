@@ -1,5 +1,5 @@
 [package]
-name = "agentdb-plugin"
+name = "statecraft-plugin"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,8 +8,8 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-agentdb-core = { path = "../core" }
-agentdb-auth = { path = "../auth" }
+statecraft-core = { path = "../core" }
+statecraft-auth = { path = "../auth" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hmac = { workspace = true }

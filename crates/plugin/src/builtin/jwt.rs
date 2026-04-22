@@ -95,24 +95,32 @@ impl JwtPlugin {
 
     /// Consume a refresh token and issue a new token pair.
     ///
-    /// The old refresh token is invalidated (one-time use). If the token has
-    /// already been used, the request is rejected to guard against replay
-    /// attacks.
+    /// Order of operations matters for security:
+    ///   1. Cryptographically verify the token FIRST. If we inserted into the
+    ///      replay cache before verification, an attacker could pollute the
+    ///      cache by posting random garbage, growing it unbounded. Worse, a
+    ///      real token presented alongside that garbage would get "burned"
+    ///      before we knew whether it was even valid.
+    ///   2. Then check the replay cache and atomically insert.
+    ///
+    /// The window between `verify()` and `insert()` is a TOCTOU where two
+    /// concurrent refreshes of the same token could both succeed. The Mutex
+    /// around `used_refresh_tokens` is the serialization point — the check +
+    /// insert happens under the same lock.
     pub fn refresh(&self, refresh_token: &str) -> Result<TokenPair, String> {
-        // Check for replay before doing any expensive work.
+        let claims = self.verify(refresh_token)?;
+
+        match claims.kind.as_deref() {
+            Some("refresh") => {}
+            _ => return Err("Token is not a refresh token".into()),
+        }
+
         {
             let mut used = self.used_refresh_tokens.lock().map_err(|_| "Lock poisoned")?;
             if used.contains(refresh_token) {
                 return Err("Refresh token already used".into());
             }
             used.insert(refresh_token.to_string());
-        }
-
-        let claims = self.verify(refresh_token)?;
-
-        match claims.kind.as_deref() {
-            Some("refresh") => {}
-            _ => return Err("Token is not a refresh token".into()),
         }
 
         Ok(self.issue_pair(&claims.sub, 86400 * 7))
@@ -129,7 +137,7 @@ impl JwtPlugin {
         let signing_input = format!("{}.{}", parts[0], parts[1]);
         let expected_sig = base64url_encode(&hmac_sha256(&self.secret, &signing_input));
 
-        if !agentdb_auth::constant_time_eq(parts[2].as_bytes(), expected_sig.as_bytes()) {
+        if !statecraft_auth::constant_time_eq(parts[2].as_bytes(), expected_sig.as_bytes()) {
             return Err("Invalid signature".into());
         }
 

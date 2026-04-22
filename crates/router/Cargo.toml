@@ -1,0 +1,17 @@
+[package]
+name = "statecraft-router"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+statecraft-core = { path = "../core" }
+statecraft-http = { path = "../http" }
+statecraft-auth = { path = "../auth" }
+statecraft-policy = { path = "../policy" }
+statecraft-sync = { path = "../sync" }
+statecraft-functions = { path = "../functions" }
+statecraft-realtime = { path = "../realtime" }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

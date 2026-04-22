@@ -4,15 +4,22 @@ members = [
   "crates/auth",
   "crates/cli",
   "crates/core",
+  "crates/functions",
+  "crates/http",
+  "crates/migrate",
+  "crates/observability",
   "crates/plugin",
   "crates/policy",
   "crates/query",
+  "crates/realtime",
+  "crates/router",
   "crates/runtime",
   "crates/schema",
   "crates/staticgen",
   "crates/storage",
   "crates/studio_api",
   "crates/sync",
+  "crates/workers",
 ]
 resolver = "2"
 
@@ -26,13 +33,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 tiny_http = "0.12"
-postgres = "0.19"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
 tungstenite = "0.24"
 hmac = "0.12"
 sha2 = "0.10"
 sha1 = "0.10"
 rand = "0.8"
 argon2 = "0.5"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

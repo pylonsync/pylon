@@ -1,4 +1,4 @@
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::manifest::load_manifest;
@@ -26,7 +26,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
-    let manifest_path = positional.first().copied().unwrap_or("agentdb.manifest.json");
+    let manifest_path = positional.first().copied().unwrap_or("statecraft.manifest.json");
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -36,7 +36,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    let pages = agentdb_staticgen::generate_static_pages(&manifest);
+    let pages = statecraft_staticgen::generate_static_pages(&manifest);
 
     if pages.is_empty() {
         if json_mode {
@@ -53,7 +53,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     let out_path = std::path::Path::new(out_dir);
-    match agentdb_staticgen::write_pages(&pages, out_path) {
+    match statecraft_staticgen::write_pages(&pages, out_path) {
         Ok(count) => {
             if json_mode {
                 print_json(&BuildResult {

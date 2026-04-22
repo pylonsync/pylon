@@ -19,6 +19,7 @@ use crate::jobs::{JobHandler, JobQueue};
 // ---------------------------------------------------------------------------
 
 /// Internal representation of a recurring scheduled task.
+#[allow(dead_code)]
 struct ScheduledTask {
     name: String,
     cron: CronExpr,
@@ -199,6 +200,7 @@ impl Scheduler {
 /// Handle returned by `Scheduler::start()` to stop the background thread.
 pub struct SchedulerHandle {
     scheduler: Arc<Scheduler>,
+    #[allow(dead_code)]
     handle: Option<std::thread::JoinHandle<()>>,
 }
 

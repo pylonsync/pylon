@@ -1,23 +1,235 @@
-# agentdb
+# statecraft
 
-`agentdb` is an AI-native framework for building:
+A self-hostable, single-binary backend for web, mobile, and real-time apps.
 
-- web apps
-- mobile apps
-- static sites
-- local-first software with built-in sync
+[![CI](https://github.com/ericc59/agentdb/actions/workflows/ci.yml/badge.svg)](https://github.com/ericc59/agentdb/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-The product is optimized for:
+statecraft gives you what Convex / Firebase / Supabase do — declarative schema,
+real-time sync, server functions, auth, file storage — but as a single Rust
+binary you can `scp` to a VPS or run on Cloudflare Workers.
 
-- Rust core runtime
-- single-binary deployment
-- CLI-first operation
-- Bun for the TypeScript workspace
-- TypeScript app APIs
-- React on web
-- React Native + Expo on mobile
-- SQLite by default, optional local Postgres in dev, Postgres in production
+```sh
+# Install
+cargo install --git https://github.com/ericc59/agentdb statecraft-cli
 
-The framework is not a dashboard-heavy backend or CMS. AI tools should be able to operate the entire system through code, the CLI, and machine-readable introspection.
+# New project
+statecraft init my-app
+cd my-app
 
-See [ARCHITECTURE.md](/Users/ericc59/Dev/agentdb/ARCHITECTURE.md) for the v1 design.
+# Dev server with live reload
+statecraft dev
+```
+
+Visit `http://localhost:4321/studio` for the inspector.
+
+## What you get
+
+- **Declarative schema** in JSON or DSL → tables, types, OpenAPI, client types
+- **Real-time sync** — clients see updates as they happen (WebSocket + SSE)
+- **TypeScript functions** — `mutation`/`query`/`action` with typed `ctx.db`
+  - Handler IS the transaction (atomic by default)
+  - Streaming responses for AI chat / live data
+- **Auth** — sessions, magic codes, OAuth (Google + GitHub), RBAC
+- **Real-time shards** for multiplayer games & collab apps
+  - Tick-driven simulations
+  - Matchmaker, area-of-interest, replay
+- **Background jobs** + cron scheduler
+- **Workflows** — long-running, durable
+- **File storage**, **email**, **rate limiting**, **policies**, **plugins**
+
+## How does it compare?
+
+|  | statecraft | Convex | Supabase | Firebase |
+|---|---|---|---|---|
+| Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
+| Deploy targets | self-host, Workers, AWS | their cloud only | their cloud / k8s | their cloud only |
+| Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
+| Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
+| Game shards | ✅ tick-based | ❌ | ❌ | ❌ |
+| Built on | Rust + SQLite | Rust + custom db | PG + Go + Deno | proprietary |
+| Single process | ✅ | ❌ | ❌ | n/a |
+
+## Quickstart
+
+### 1. Install
+
+```sh
+# Curl-pipe-bash (Linux + macOS)
+curl -fsSL https://raw.githubusercontent.com/ericc59/agentdb/main/install.sh | bash
+
+# Homebrew
+brew tap ericc59/agentdb https://github.com/ericc59/agentdb
+brew install statecraft
+
+# From source
+cargo install --git https://github.com/ericc59/agentdb statecraft-cli
+
+# Docker
+docker pull ghcr.io/ericc59/agentdb:latest
+```
+
+### 2. Define your schema
+
+`statecraft.manifest.json`:
+
+```json
+{
+  "manifest_version": 1,
+  "name": "todos",
+  "version": "0.1.0",
+  "entities": [
+    { "name": "Todo", "fields": [
+      { "name": "title", "type": "string", "optional": false, "unique": false },
+      { "name": "done", "type": "bool", "optional": false, "unique": false }
+    ], "indexes": [], "relations": [] }
+  ],
+  "routes": [], "queries": [], "actions": [], "policies": []
+}
+```
+
+### 3. Run
+
+```sh
+statecraft dev
+```
+
+### 4. Connect from React
+
+```tsx
+import { init, db } from "@statecraft/react";
+init({ baseUrl: "http://localhost:4321" });
+
+function TodoList() {
+  const { data: todos } = db.useQuery("Todo");
+  const { mutate: add } = db.useMutation("createTodo");
+
+  return (
+    <>
+      {todos.map(t => <li key={t.id}>{t.title}</li>)}
+      <button onClick={() => add({ title: "New todo" })}>Add</button>
+    </>
+  );
+}
+```
+
+### 5. Add server-side logic
+
+`functions/createTodo.ts`:
+
+```ts
+import { mutation, v } from "@statecraft/functions";
+
+export default mutation({
+  args: { title: v.string() },
+  async handler(ctx, args) {
+    const id = await ctx.db.insert("Todo", {
+      title: args.title,
+      done: false,
+      authorId: ctx.auth.userId,
+    });
+    return { id };
+  },
+});
+```
+
+### 6. Add a multiplayer shard (optional)
+
+```rust
+use statecraft_realtime::{Shard, ShardConfig, SimState};
+
+struct MyGame { /* state */ }
+impl SimState for MyGame { /* tick, snapshot, apply_input */ }
+
+let shard = Shard::new("match_1", MyGame::default(), ShardConfig {
+    tick_rate_hz: 20,
+    ..Default::default()
+});
+```
+
+Then connect from the client:
+
+```tsx
+import { useShard } from "@statecraft/react";
+const { snapshot, send } = useShard("match_1", { subscriberId: "player_42" });
+```
+
+## Project layout
+
+```
+statecraft/
+├── crates/
+│   ├── core/            Shared types, error codes, utilities
+│   ├── http/            Platform-agnostic HTTP types + DataStore trait
+│   ├── runtime/         SQLite-backed dev/prod server
+│   ├── router/          HTTP routing logic, reused across platforms
+│   ├── workers/         Cloudflare Workers adapter (experimental)
+│   ├── functions/       Rust side of the TypeScript function runtime
+│   ├── realtime/        Sharded game/collab server primitives
+│   ├── auth/            Sessions, magic codes, OAuth, RBAC
+│   ├── policy/          Access control rules engine
+│   ├── sync/            Change log + push/pull
+│   ├── storage/         SQLite + Postgres backends, file storage
+│   ├── plugin/          Built-in plugins (cache, webhooks, soft delete, ...)
+│   ├── migrate/         Schema migration diff engine
+│   ├── cli/             The `statecraft` binary
+│   └── ...
+└── packages/
+    ├── sdk/             Schema DSL + manifest builder
+    ├── react/           React hooks + typed client
+    ├── react-native/    RN hooks + offline storage
+    ├── next/            Next.js integration
+    ├── functions/       Function definitions + Bun runtime
+    ├── sync/            Local-first sync engine
+    ├── workflows/       Durable workflow runner
+    └── create-statecraft/  Project scaffolder
+```
+
+## Configuration
+
+All configuration is via environment variables. See `crates/runtime/src/config.rs`.
+
+Common settings:
+
+```sh
+STATECRAFT_PORT=4321
+STATECRAFT_DB_PATH=/var/lib/statecraft/statecraft.db
+STATECRAFT_FILES_DIR=/var/lib/statecraft/uploads
+STATECRAFT_SESSION_DB=/var/lib/statecraft/sessions.db
+STATECRAFT_ADMIN_TOKEN=<long random>
+STATECRAFT_CORS_ORIGIN=https://your-app.com
+STATECRAFT_DEV_MODE=false
+```
+
+## Deployment
+
+- **Self-host**: `cargo install` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
+- **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
+- **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
+
+Operational docs:
+- [DEPLOY.md](docs/ops/DEPLOY.md) — env vars, reverse proxy, health checks
+- [SIZING.md](docs/ops/SIZING.md) — measured throughput, capacity planning
+- [TOKEN_ROTATION.md](docs/ops/TOKEN_ROTATION.md) — admin token rotation
+- [INCIDENT.md](docs/ops/INCIDENT.md) — incident response playbook
+- [WORKERS_COSTS.md](docs/ops/WORKERS_COSTS.md) — cost patterns on Cloudflare
+
+## Project status
+
+**Pre-1.0.** API is stable enough to build with but may evolve. Production
+self-hosted SQLite deployments are well-tested. Workers / Postgres are
+experimental — see `SECURITY.md` for a list of pre-1.0 hardening gaps.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and PRs welcome.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and hardening
+notes. **Do not file security issues publicly.** Email security@statecraft.dev.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE)
+at your option.

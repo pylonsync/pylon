@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 
 use crate::client_codegen::generate_client_ts;
 use crate::manifest::load_manifest;
@@ -33,7 +33,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     message: "No manifest path provided".into(),
                     span: None,
                     hint: Some(
-                        "Usage: agentdb codegen client <manifest> --out <path>".into(),
+                        "Usage: statecraft codegen client <manifest> --out <path>".into(),
                     ),
                 }],
                 json_mode,

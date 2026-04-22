@@ -1,4 +1,4 @@
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 
 use crate::manifest::{load_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
@@ -17,6 +17,11 @@ enum DeployTarget {
     Fly,
     /// Generate a docker-compose.yml + Dockerfile.
     Compose,
+    /// Generate a Cloudflare Workers wrangler.toml. Experimental — see
+    /// crates/workers/README.md for what works.
+    Workers,
+    /// Generate a systemd unit file for VPS deploys.
+    Systemd,
 }
 
 impl DeployTarget {
@@ -25,6 +30,8 @@ impl DeployTarget {
             "docker" => Some(Self::Docker),
             "fly" => Some(Self::Fly),
             "compose" => Some(Self::Compose),
+            "workers" => Some(Self::Workers),
+            "systemd" => Some(Self::Systemd),
             _ => None,
         }
     }
@@ -42,10 +49,10 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/agentdb /usr/local/bin/
-COPY --from=builder /app/agentdb.manifest.json /app/
+COPY --from=builder /app/target/release/statecraft /usr/local/bin/
+COPY --from=builder /app/statecraft.manifest.json /app/
 EXPOSE 4321
-CMD ["agentdb", "dev", "--once"]
+CMD ["statecraft", "dev", "--once"]
 "#
     .to_string()
 }
@@ -65,6 +72,68 @@ primary_region = "iad"
     )
 }
 
+fn generate_wrangler_toml(app_name: &str) -> String {
+    format!(
+        r#"name = "{app_name}"
+main = "build/worker.js"
+compatibility_date = "2025-01-01"
+
+# Created database with: wrangler d1 create {app_name}-db
+# Then paste the database_id printed by wrangler below.
+[[d1_databases]]
+binding = "STATECRAFT_DB"
+database_name = "{app_name}-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Optional: persistent file storage via R2
+# [[r2_buckets]]
+# binding = "STATECRAFT_FILES"
+# bucket_name = "{app_name}-files"
+
+# Per-room WebSocket Durable Object (experimental)
+# [[durable_objects.bindings]]
+# name = "ROOM"
+# class_name = "RoomDO"
+"#
+    )
+}
+
+fn generate_systemd_unit(app_name: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=statecraft ({app_name})
+After=network.target
+
+[Service]
+Type=simple
+User=statecraft
+Group=statecraft
+WorkingDirectory=/var/lib/statecraft
+ExecStart=/usr/local/bin/statecraft dev
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/statecraft
+
+# Environment
+Environment=STATECRAFT_PORT=4321
+Environment=STATECRAFT_DB_PATH=/var/lib/statecraft/statecraft.db
+Environment=STATECRAFT_FILES_DIR=/var/lib/statecraft/uploads
+Environment=STATECRAFT_SESSION_DB=/var/lib/statecraft/sessions.db
+Environment=STATECRAFT_DEV_MODE=false
+# EnvironmentFile=/etc/statecraft/secrets  # STATECRAFT_ADMIN_TOKEN, OAuth keys, etc.
+
+[Install]
+WantedBy=multi-user.target
+"#
+    )
+}
+
 fn generate_docker_compose() -> String {
     r#"services:
   app:
@@ -72,8 +141,8 @@ fn generate_docker_compose() -> String {
     ports:
       - "4321:4321"
     environment:
-      - DATABASE_URL=postgres://agentdb:agentdb@db:5432/agentdb
-      - AGENTDB_ADMIN_TOKEN=${AGENTDB_ADMIN_TOKEN}
+      - DATABASE_URL=postgres://statecraft:statecraft@db:5432/statecraft
+      - STATECRAFT_ADMIN_TOKEN=${STATECRAFT_ADMIN_TOKEN}
     depends_on:
       db:
         condition: service_started
@@ -81,9 +150,9 @@ fn generate_docker_compose() -> String {
   db:
     image: postgres:16
     environment:
-      - POSTGRES_USER=agentdb
-      - POSTGRES_PASSWORD=agentdb
-      - POSTGRES_DB=agentdb
+      - POSTGRES_USER=statecraft
+      - POSTGRES_PASSWORD=statecraft
+      - POSTGRES_DB=statecraft
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -104,7 +173,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
-    let manifest_path = positional.first().copied().unwrap_or("agentdb.manifest.json");
+    let manifest_path = positional.first().copied().unwrap_or("statecraft.manifest.json");
 
     let out_dir = args
         .windows(2)
@@ -132,10 +201,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     severity: Severity::Error,
                     code: "INVALID_TARGET".into(),
                     message: format!(
-                        "Unknown deploy target \"{raw}\". Valid targets: docker, fly, compose"
+                        "Unknown deploy target \"{raw}\". Valid targets: docker, fly, compose, workers, systemd"
                     ),
                     span: None,
-                    hint: Some("Use --target docker, --target fly, or --target compose".into()),
+                    hint: Some(
+                        "Use --target docker | fly | compose | workers | systemd".into(),
+                    ),
                 }],
                 json_mode,
             );
@@ -178,7 +249,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     // Write manifest to deploy dir.
-    let manifest_out = out_path.join("agentdb.manifest.json");
+    let manifest_out = out_path.join("statecraft.manifest.json");
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
     if let Err(e) = std::fs::write(&manifest_out, format!("{manifest_json}\n")) {
         print_diagnostics(
@@ -196,13 +267,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     // Write client bindings.
     let client_ts = crate::client_codegen::generate_client_ts(&manifest);
-    let _ = std::fs::write(out_path.join("agentdb.client.ts"), &client_ts);
+    let _ = std::fs::write(out_path.join("statecraft.client.ts"), &client_ts);
 
     // Generate static pages if any.
-    let static_pages = agentdb_staticgen::generate_static_pages(&manifest);
+    let static_pages = statecraft_staticgen::generate_static_pages(&manifest);
     if !static_pages.is_empty() {
         let static_dir = out_path.join("static");
-        let _ = agentdb_staticgen::write_pages(&static_pages, &static_dir);
+        let _ = statecraft_staticgen::write_pages(&static_pages, &static_dir);
     }
 
     // Write a small deploy info file.
@@ -227,8 +298,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // -----------------------------------------------------------------------
 
     let mut generated_files: Vec<String> = vec![
-        "agentdb.manifest.json".into(),
-        "agentdb.client.ts".into(),
+        "statecraft.manifest.json".into(),
+        "statecraft.client.ts".into(),
         "deploy.json".into(),
     ];
 
@@ -256,6 +327,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             let compose = generate_docker_compose();
             write_or_fail(out_path, "docker-compose.yml", &compose, json_mode);
             generated_files.push("docker-compose.yml".into());
+        }
+        DeployTarget::Workers => {
+            let app_name = sanitize_app_name(&manifest.name);
+            let wrangler = generate_wrangler_toml(&app_name);
+            write_or_fail(out_path, "wrangler.toml", &wrangler, json_mode);
+            generated_files.push("wrangler.toml".into());
+        }
+        DeployTarget::Systemd => {
+            let app_name = sanitize_app_name(&manifest.name);
+            let unit = generate_systemd_unit(&app_name);
+            write_or_fail(out_path, "statecraft.service", &unit, json_mode);
+            generated_files.push("statecraft.service".into());
         }
         DeployTarget::Default => {}
     }
@@ -286,8 +369,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         match target {
             DeployTarget::Docker => {
                 println!("To build and run:");
-                println!("  docker build -t agentdb-app {out_dir}/");
-                println!("  docker run -p 4321:4321 agentdb-app");
+                println!("  docker build -t statecraft-app {out_dir}/");
+                println!("  docker run -p 4321:4321 statecraft-app");
             }
             DeployTarget::Fly => {
                 println!("To deploy to Fly.io:");
@@ -297,14 +380,32 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 println!("To run with Docker Compose:");
                 println!("  cd {out_dir} && docker compose up");
             }
+            DeployTarget::Workers => {
+                println!("To deploy to Cloudflare Workers (experimental):");
+                println!("  cd {out_dir}");
+                println!("  wrangler d1 create $(basename $(pwd))-db");
+                println!("  # paste database_id into wrangler.toml");
+                println!("  wrangler deploy");
+                println!();
+                println!("See crates/workers/README.md for current limitations.");
+            }
+            DeployTarget::Systemd => {
+                println!("To install on a Linux VPS:");
+                println!("  sudo cp {out_dir}/statecraft.service /etc/systemd/system/");
+                println!("  sudo useradd --system --home /var/lib/statecraft statecraft");
+                println!("  sudo mkdir -p /var/lib/statecraft && sudo chown statecraft: /var/lib/statecraft");
+                println!("  sudo systemctl enable --now statecraft");
+            }
             DeployTarget::Default => {
                 println!("To run the server:");
-                println!("  agentdb dev {manifest_path}");
+                println!("  statecraft dev {manifest_path}");
                 println!();
                 println!("For containerized deployment, use --target:");
-                println!("  agentdb deploy --target docker   # Dockerfile");
-                println!("  agentdb deploy --target fly      # Dockerfile + fly.toml");
-                println!("  agentdb deploy --target compose   # docker-compose.yml + Dockerfile");
+                println!("  statecraft deploy --target docker     # Dockerfile");
+                println!("  statecraft deploy --target fly        # Dockerfile + fly.toml");
+                println!("  statecraft deploy --target compose    # docker-compose.yml + Dockerfile");
+                println!("  statecraft deploy --target workers    # Cloudflare wrangler.toml (experimental)");
+                println!("  statecraft deploy --target systemd    # systemd unit for VPS install");
             }
         }
     }
@@ -364,7 +465,7 @@ mod tests {
         assert!(df.contains("FROM debian:bookworm-slim"));
         assert!(df.contains("EXPOSE 4321"));
         assert!(df.contains("cargo build --release"));
-        assert!(df.contains("agentdb.manifest.json"));
+        assert!(df.contains("statecraft.manifest.json"));
     }
 
     #[test]
@@ -381,8 +482,8 @@ mod tests {
         let dc = generate_docker_compose();
         assert!(dc.contains("services:"));
         assert!(dc.contains("postgres:16"));
-        assert!(dc.contains("DATABASE_URL=postgres://agentdb:agentdb@db:5432/agentdb"));
-        assert!(dc.contains("AGENTDB_ADMIN_TOKEN"));
+        assert!(dc.contains("DATABASE_URL=postgres://statecraft:statecraft@db:5432/statecraft"));
+        assert!(dc.contains("STATECRAFT_ADMIN_TOKEN"));
         assert!(dc.contains("pgdata:"));
     }
 
@@ -399,7 +500,27 @@ mod tests {
         assert_eq!(DeployTarget::from_arg("docker"), Some(DeployTarget::Docker));
         assert_eq!(DeployTarget::from_arg("fly"), Some(DeployTarget::Fly));
         assert_eq!(DeployTarget::from_arg("compose"), Some(DeployTarget::Compose));
+        assert_eq!(DeployTarget::from_arg("workers"), Some(DeployTarget::Workers));
+        assert_eq!(DeployTarget::from_arg("systemd"), Some(DeployTarget::Systemd));
         assert_eq!(DeployTarget::from_arg("unknown"), None);
+    }
+
+    #[test]
+    fn wrangler_toml_contains_required_fields() {
+        let w = generate_wrangler_toml("my-app");
+        assert!(w.contains("name = \"my-app\""));
+        assert!(w.contains("d1_databases"));
+        assert!(w.contains("STATECRAFT_DB"));
+        assert!(w.contains("compatibility_date"));
+    }
+
+    #[test]
+    fn systemd_unit_contains_hardening() {
+        let u = generate_systemd_unit("statecraft-prod");
+        assert!(u.contains("ExecStart=/usr/local/bin/statecraft"));
+        assert!(u.contains("NoNewPrivileges=true"));
+        assert!(u.contains("ProtectSystem=strict"));
+        assert!(u.contains("WantedBy=multi-user.target"));
     }
 
     #[test]

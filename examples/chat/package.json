@@ -1,0 +1,14 @@
+{
+  "name": "chat-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "statecraft dev"
+  },
+  "dependencies": {
+    "@statecraft/functions": "workspace:*",
+    "@statecraft/react": "workspace:*",
+    "@statecraft/sdk": "workspace:*"
+  }
+}

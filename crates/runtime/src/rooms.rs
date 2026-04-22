@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -65,6 +65,7 @@ struct RoomMember {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Room {
     name: String,
     members: HashMap<String, RoomMember>,
@@ -383,6 +384,7 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn join_creates_room() {

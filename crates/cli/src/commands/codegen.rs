@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use agentdb_core::{Diagnostic, ExitCode, Severity};
+use statecraft_core::{Diagnostic, ExitCode, Severity};
 
 use crate::bun::run_bun_codegen;
 use crate::output::{print_diagnostics, print_json};
@@ -26,7 +26,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "CODEGEN_NO_ENTRY".into(),
                     message: "No entry file provided".into(),
                     span: None,
-                    hint: Some("Usage: agentdb codegen <entry-file> [--out <path>]".into()),
+                    hint: Some("Usage: statecraft codegen <entry-file> [--out <path>]".into()),
                 }],
                 json_mode,
             );

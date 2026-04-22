@@ -1,4 +1,4 @@
-use agentdb_core::{Diagnostic, Severity};
+use statecraft_core::{Diagnostic, Severity};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------

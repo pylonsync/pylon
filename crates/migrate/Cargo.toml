@@ -1,0 +1,10 @@
+[package]
+name = "statecraft-migrate"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+statecraft-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

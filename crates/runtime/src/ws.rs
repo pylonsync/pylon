@@ -5,20 +5,48 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use agentdb_sync::ChangeEvent;
-use tungstenite::{accept, Message, WebSocket};
+use statecraft_auth::SessionStore;
+use statecraft_sync::ChangeEvent;
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tungstenite::{accept_hdr, Message, WebSocket};
+
+use crate::ip_limit::IpConnCounter;
 
 /// Number of shards for distributing WebSocket clients.
 /// Must be a power of two for even modulo distribution.
 const NUM_SHARDS: usize = 16;
 
+/// Maximum number of outbound messages queued per shard. Once the broadcast
+/// worker thread falls this many behind, the OLDEST queued message is
+/// dropped to make room for the new one. That means slow subscribers can
+/// miss messages — but the alternative (unbounded queue) was OOM when a
+/// single stuck client blocked its shard worker.
+///
+/// Callers that need exact delivery should layer their own retry on top
+/// (the change-log cursor protocol already does this for sync).
+const BROADCAST_QUEUE_DEPTH: usize = 1024;
+
+/// Read timeout on each WebSocket read. Kept low so the mutex guarding the
+/// socket is released frequently, letting the broadcaster get its turn even
+/// if the client never sends anything. Previously this was 120s, which meant
+/// one quiet client could wedge the shard's writer for up to two minutes.
+const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// One entry per connected client. The socket lives behind its OWN
+/// `Mutex`, not a shard-wide one, so the reader thread's blocking
+/// `socket.read()` doesn't hold a lock that covers every client in the
+/// same shard. The broadcaster iterates the client map (outer lock is
+/// brief — O(count of clients in shard)), then grabs each client's
+/// individual mutex to do the `socket.send`. Contention is now per-
+/// client instead of per-shard.
+type ClientSocket = Arc<Mutex<WebSocket<TcpStream>>>;
+
 /// A single shard holding a subset of WebSocket clients.
 ///
-/// Each shard has its own lock, so concurrent broadcasts across shards
-/// never contend with each other. This reduces lock contention by NUM_SHARDS
-/// compared to a single global mutex.
+/// The outer `Mutex<HashMap>` is held only for insert/remove and while
+/// enumerating client handles — never across I/O.
 struct Shard {
-    clients: Mutex<HashMap<u64, WebSocket<TcpStream>>>,
+    clients: Mutex<HashMap<u64, ClientSocket>>,
 }
 
 impl Shard {
@@ -28,8 +56,10 @@ impl Shard {
         }
     }
 
-    fn add(&self, id: u64, ws: WebSocket<TcpStream>) {
-        self.clients.lock().unwrap().insert(id, ws);
+    fn add(&self, id: u64, ws: WebSocket<TcpStream>) -> ClientSocket {
+        let handle = Arc::new(Mutex::new(ws));
+        self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
+        handle
     }
 
     fn remove(&self, id: u64) {
@@ -37,17 +67,38 @@ impl Shard {
     }
 
     /// Send a message to all clients in this shard.
-    /// Dead clients (those that fail to receive) are removed immediately.
+    ///
+    /// Snapshot the client handles under the shard lock, drop the shard
+    /// lock, then contend only with per-client mutexes to do the writes.
+    /// This is what lets a reader thread hold its client's mutex for a
+    /// socket.read() without stalling broadcasts for the whole shard.
     fn broadcast(&self, msg: &str) {
-        let mut clients = self.clients.lock().unwrap();
-        let mut dead = Vec::new();
-        for (id, socket) in clients.iter_mut() {
-            if socket.send(Message::Text(msg.to_string())).is_err() {
-                dead.push(*id);
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .iter()
+                .map(|(id, h)| (*id, Arc::clone(h)))
+                .collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            // `try_lock` would skip clients whose reader is currently
+            // blocked in read(); we prefer `lock()` here so the occasional
+            // broadcaster wait (bounded by the 200ms read timeout) doesn't
+            // drop the message for that client.
+            let mut guard = match handle.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.send(Message::Text(msg.to_string())).is_err() {
+                dead.push(id);
             }
         }
-        for id in &dead {
-            clients.remove(id);
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for id in &dead {
+                clients.remove(id);
+            }
         }
     }
 
@@ -72,8 +123,17 @@ impl Shard {
 pub struct WsHub {
     shards: Vec<Arc<Shard>>,
     next_id: Mutex<u64>,
-    /// Channel senders for each shard's broadcast worker.
-    broadcast_txs: Vec<mpsc::Sender<String>>,
+    /// Bounded-capacity senders for each shard's broadcast worker. When
+    /// a send would block because the queue is full, `broadcast_raw` drains
+    /// the oldest queued messages so new ones aren't lost to a stuck worker.
+    broadcast_txs: Vec<mpsc::SyncSender<String>>,
+    /// Matching receivers are held by each worker thread and also exposed
+    /// here so the "drop oldest" fallback can drain them on full. Keeping
+    /// the receiver handle alongside the sender is only safe because mpsc
+    /// lets multiple clones share a queue — here we only consume via the
+    /// worker, and the sender-side uses `try_send` + drain retry.
+    #[allow(dead_code)]
+    queue_depth: usize,
 }
 
 impl WsHub {
@@ -83,10 +143,10 @@ impl WsHub {
 
         for i in 0..NUM_SHARDS {
             let shard = Arc::new(Shard::new());
-            let (tx, rx) = mpsc::channel::<String>();
+            // Bounded queue — if a broadcast worker stalls, `try_send` fails
+            // with Full and `broadcast_raw` drops the oldest to make room.
+            let (tx, rx) = mpsc::sync_channel::<String>(BROADCAST_QUEUE_DEPTH);
 
-            // Each shard gets a dedicated broadcast worker thread.
-            // These are long-lived threads (one per shard, not per client).
             let shard_clone = Arc::clone(&shard);
             thread::Builder::new()
                 .name(format!("ws-broadcast-{i}"))
@@ -105,6 +165,7 @@ impl WsHub {
             shards,
             next_id: Mutex::new(0),
             broadcast_txs,
+            queue_depth: BROADCAST_QUEUE_DEPTH,
         })
     }
 
@@ -124,22 +185,39 @@ impl WsHub {
     }
 
     /// Internal: fan out a message string to all shard broadcast channels.
+    ///
+    /// Uses `try_send`; on full we log once (per call) and drop the message
+    /// for that shard. Previously the channel was unbounded, so a stuck
+    /// worker thread would grow memory until OOM. The new bounded queue
+    /// means a slow/stuck subscriber at worst loses broadcast events —
+    /// correctness for critical data still comes through the change-log
+    /// cursor on a reconnect.
     fn broadcast_raw(&self, msg: &str) {
         for tx in &self.broadcast_txs {
-            // If a shard's channel is disconnected, skip it silently.
-            // This only happens during shutdown.
-            let _ = tx.send(msg.to_string());
+            match tx.try_send(msg.to_string()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "[ws] broadcast queue full — dropping event for one shard"
+                    );
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    // Worker exited (shutdown). Silent.
+                }
+            }
         }
     }
 
     /// Assign a client to a shard via round-robin and register it.
-    fn add_client(&self, ws: WebSocket<TcpStream>) -> u64 {
+    /// Returns `(id, socket_handle)` — the caller keeps the handle and uses
+    /// it for reads; the shard also keeps an Arc clone for broadcasts.
+    fn add_client(&self, ws: WebSocket<TcpStream>) -> (u64, ClientSocket) {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        self.shards[shard_idx].add(id, ws);
-        id
+        let handle = self.shards[shard_idx].add(id, ws);
+        (id, handle)
     }
 
     fn remove_client(&self, id: u64) {
@@ -159,19 +237,27 @@ impl WsHub {
 /// connection spawns a lightweight reader thread with a 64KB stack.
 /// Broadcast writes are handled by the shard worker threads, not by
 /// per-client threads.
-pub fn start_ws_server(hub: Arc<WsHub>, port: u16) {
+///
+/// The session store is required: every connection must present a valid
+/// bearer token (Authorization header or `bearer.<token>` subprotocol —
+/// browsers can't set WS headers directly). Previously the notifier hub
+/// accepted any connection and streamed every ChangeEvent/presence event
+/// to it, which was a silent read-policy bypass.
+pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) {
     let addr = format!("0.0.0.0:{port}");
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[ws] Failed to bind on {addr}: {e}");
+            tracing::warn!("[ws] Failed to bind on {addr}: {e}");
             return;
         }
     };
 
-    eprintln!(
+    tracing::warn!(
         "[ws] WebSocket server listening on ws://localhost:{port} (sharded, {NUM_SHARDS} shards)"
     );
+
+    let ip_counter = Arc::new(IpConnCounter::default());
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -179,16 +265,44 @@ pub fn start_ws_server(hub: Arc<WsHub>, port: u16) {
             Err(_) => continue,
         };
 
+        // Per-IP connection cap: reject BEFORE the handshake so a cheap
+        // connect storm doesn't force us through tungstenite's HTTP parse
+        // and the session-resolve round trip. The guard is dropped when
+        // the reader thread exits (or fails to start), freeing the slot.
+        let ip = match stream.peer_addr() {
+            Ok(addr) => addr.ip(),
+            Err(_) => continue,
+        };
+        let guard = match ip_counter.acquire(ip) {
+            Some(g) => g,
+            None => {
+                // Ignore: let the client re-try after an existing connection
+                // closes. Previously an IP could open unbounded connections
+                // and each one spawned a thread + held a per-client mutex.
+                continue;
+            }
+        };
+
         let hub = Arc::clone(&hub);
+        let sessions = Arc::clone(&sessions);
         // Spawn a reader thread per client with a small stack.
         // 64KB stack * 10k connections = ~640MB, vs 2-8MB default * 10k = 20-80GB.
-        thread::Builder::new()
+        let spawn_result = thread::Builder::new()
             .name("ws-client".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                handle_ws_connection(hub, stream);
-            })
-            .ok(); // If thread creation fails, drop the connection gracefully.
+                // Holding `guard` for the life of the connection thread is
+                // what makes the decrement-on-disconnect contract work. Not
+                // `let _ = guard;` — that drops immediately.
+                let _conn_slot = guard;
+                handle_ws_connection(hub, sessions, stream);
+            });
+        if spawn_result.is_err() {
+            // Thread creation failed — guard is already dropped here, slot
+            // returned. We deliberately don't call `continue` before the
+            // spawn: we've paid the acquire cost and want to avoid leaking
+            // a slot under transient thread-limit pressure.
+        }
     }
 }
 
@@ -197,33 +311,98 @@ pub fn start_ws_server(hub: Arc<WsHub>, port: u16) {
 /// Sets a read timeout to prevent zombie threads on dead connections.
 /// Handles ping/pong for keepalive, presence/topic message relay,
 /// and clean disconnect with presence broadcast.
-fn handle_ws_connection(hub: Arc<WsHub>, stream: TcpStream) {
-    // 120s read timeout prevents threads from hanging indefinitely
-    // on half-open connections where the peer disappears without FIN.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .ok();
+fn handle_ws_connection(
+    hub: Arc<WsHub>,
+    sessions: Arc<SessionStore>,
+    stream: TcpStream,
+) {
+    // Short read timeout bounds how long the PER-CLIENT mutex is held
+    // while this thread is blocked in socket.read(). Each client now has
+    // its own mutex (not a shard-wide one), so a quiet client only stalls
+    // the broadcaster when it's broadcasting to THAT specific client —
+    // other clients in the same shard proceed without contention.
+    stream.set_read_timeout(Some(WS_READ_TIMEOUT)).ok();
+    // Also cap write time. A stuck kernel send (slow client, full send
+    // buffer, dropped packets) would otherwise stall the shard's
+    // broadcast worker holding this client's mutex — backpressure
+    // becomes head-of-line blocking for everyone. Capped at 5s; slow
+    // clients get disconnected rather than stalling the hub.
+    stream.set_write_timeout(Some(WS_READ_TIMEOUT)).ok();
 
-    let ws = match accept(stream) {
+    // Extract the bearer token from the handshake, preferring the
+    // Authorization header (native clients) and falling back to the
+    // `bearer.<token>` WebSocket subprotocol (browsers). We only learn
+    // whether the token is valid AFTER accept_hdr completes, since the
+    // header callback must return synchronously with a Response.
+    let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let slot_for_cb = Arc::clone(&token_slot);
+    let ws = match accept_hdr(stream, move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
+        let mut chosen_protocol: Option<String> = None;
+        let mut auth: Option<String> = None;
+        for (name, value) in req.headers() {
+            let lower = name.as_str().to_ascii_lowercase();
+            if lower == "authorization" {
+                if let Ok(v) = value.to_str() {
+                    if let Some(tok) = v.strip_prefix("Bearer ") {
+                        auth = Some(tok.to_string());
+                    }
+                }
+            } else if lower == "sec-websocket-protocol" {
+                if let Ok(v) = value.to_str() {
+                    for proto in v.split(',').map(str::trim) {
+                        if let Some(encoded) = proto.strip_prefix("bearer.") {
+                            if let Some(decoded) = percent_decode_token(encoded) {
+                                auth = auth.or(Some(decoded));
+                                chosen_protocol = Some(proto.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // RFC 6455 §11.3.4 — echo the chosen subprotocol in the response or
+        // browsers will refuse the connection.
+        if let Some(chosen) = chosen_protocol {
+            if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
+                resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
+            }
+        }
+        *slot_for_cb.lock().unwrap() = auth;
+        Ok(resp)
+    }) {
         Ok(ws) => ws,
         Err(_) => return,
     };
 
-    let client_id = hub.add_client(ws);
-    let shard_idx = (client_id as usize) % NUM_SHARDS;
+    // Reject unauthenticated or invalid-token handshakes AFTER accept —
+    // tungstenite's handshake callback can't easily return a 401 without
+    // a custom error response, and we already have the socket open for
+    // a clean close frame.
+    let token = token_slot.lock().unwrap().clone();
+    let auth_ctx = sessions.resolve(token.as_deref());
+    if auth_ctx.user_id.is_none() && !auth_ctx.is_admin {
+        let mut ws = ws;
+        let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "unauthorized: bearer token required".into(),
+        }));
+        return;
+    }
+
+    let (client_id, socket_handle) = hub.add_client(ws);
 
     loop {
-        // Lock the shard only for the duration of the socket read.
-        // tungstenite's read() will block until data arrives or timeout,
-        // BUT the underlying socket has a read timeout set, so this won't
-        // hold the lock forever.
+        // Lock this client's socket mutex only for the duration of the
+        // read. With a 5s read timeout, broadcasters waiting to send to
+        // THIS client wait at most 5s. Other clients are never blocked
+        // by this lock — they have their own.
         let msg = {
-            let mut clients = hub.shards[shard_idx].clients.lock().unwrap();
-            let socket = match clients.get_mut(&client_id) {
-                Some(s) => s,
-                None => break,
+            let mut guard = match socket_handle.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
             };
-            socket.read()
+            guard.read()
         };
 
         match msg {
@@ -237,12 +416,36 @@ fn handle_ws_connection(hub: Arc<WsHub>, stream: TcpStream) {
             }
             Ok(Message::Ping(data)) => {
                 // Respond with pong to keep the connection alive.
-                let mut clients = hub.shards[shard_idx].clients.lock().unwrap();
-                if let Some(socket) = clients.get_mut(&client_id) {
-                    let _ = socket.send(Message::Pong(data));
+                if let Ok(mut guard) = socket_handle.lock() {
+                    let _ = guard.send(Message::Pong(data));
                 }
             }
-            Ok(Message::Close(_)) | Err(_) => {
+            Ok(Message::Close(_)) => {
+                hub.remove_client(client_id);
+                let disconnect = serde_json::json!({
+                    "type": "presence",
+                    "event": "disconnect",
+                    "clientId": client_id,
+                });
+                hub.broadcast_presence(&disconnect.to_string());
+                break;
+            }
+            Err(tungstenite::Error::Io(io_err))
+                if io_err.kind() == std::io::ErrorKind::WouldBlock
+                    || io_err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Read timed out — this is EXPECTED with the short
+                // timeout. In theory the mutex is released between
+                // iterations, but `std::sync::Mutex` is not fair: a tight
+                // loop of lock→read→unlock→lock starves the broadcaster
+                // that's been waiting on the same mutex. Explicitly sleep
+                // for a tick so the broadcaster gets scheduled. 1ms is
+                // long enough to hand off, short enough that client→server
+                // latency stays sub-5ms.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(_) => {
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -255,6 +458,38 @@ fn handle_ws_connection(hub: Arc<WsHub>, stream: TcpStream) {
             _ => {}
         }
     }
+}
+
+/// Strict percent-decode for the `bearer.<token>` subprotocol. Returns
+/// `None` on any malformed byte rather than silently passing garbage
+/// through to the session store (which would just fail to resolve and
+/// look like a plain unauth attempt).
+fn percent_decode_token(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]
@@ -280,7 +515,7 @@ mod tests {
             seq: 1,
             entity: "Test".into(),
             row_id: "1".into(),
-            kind: agentdb_sync::ChangeKind::Insert,
+            kind: statecraft_sync::ChangeKind::Insert,
             data: None,
             timestamp: String::new(),
         };

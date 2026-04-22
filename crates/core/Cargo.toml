@@ -1,5 +1,5 @@
 [package]
-name = "agentdb-core"
+name = "statecraft-core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

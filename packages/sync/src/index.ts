@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// agentdb sync client — local-first sync engine
+// statecraft sync client — local-first sync engine
 // ---------------------------------------------------------------------------
 
 export { IndexedDBPersistence, persistChange } from "./persistence";
@@ -34,6 +34,12 @@ export interface ClientChange {
   row_id: string;
   kind: "insert" | "update" | "delete";
   data?: Record<string, unknown>;
+  /**
+   * Client-minted idempotency key. The server tracks recently-seen op_ids
+   * and returns a no-op success for replays. Supply this on every retry of
+   * the same logical mutation — the `MutationQueue` does so automatically.
+   */
+  op_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,6 +50,20 @@ export type Row = Record<string, unknown>;
 
 export class LocalStore {
   private tables: Map<string, Map<string, Row>> = new Map();
+  /**
+   * Tombstones: `(entity, row_id) -> deletedAt seq`. A row whose id is in
+   * here has been deleted; any insert/update event older than the tombstone
+   * is ignored so an out-of-order replay cannot resurrect it.
+   *
+   * Without tombstones, a delete followed by a reconnect-driven replay of
+   * the original insert would re-materialize the row — "last write wins"
+   * was decided by arrival order instead of event sequence.
+   *
+   * The tombstone seq comes from the server's `ChangeEvent.seq`. Client-
+   * triggered optimistic deletes use `Number.MAX_SAFE_INTEGER` so they
+   * dominate anything a concurrent pull could replay.
+   */
+  private tombstones: Map<string, Map<string, number>> = new Map();
   private listeners: Set<() => void> = new Set();
 
   /** Get all rows for an entity. */
@@ -58,6 +78,26 @@ export class LocalStore {
     return this.tables.get(entity)?.get(id) ?? null;
   }
 
+  /** Check if `(entity, id)` has a tombstone. */
+  private isTombstoned(entity: string, id: string, at_seq?: number): boolean {
+    const tombSeq = this.tombstones.get(entity)?.get(id);
+    if (tombSeq === undefined) return false;
+    // If the caller didn't tell us when their change happened, treat as
+    // "this change is older than the tombstone". Safer default.
+    if (at_seq === undefined) return true;
+    return at_seq < tombSeq;
+  }
+
+  private recordTombstone(entity: string, id: string, seq: number): void {
+    if (!this.tombstones.has(entity)) {
+      this.tombstones.set(entity, new Map());
+    }
+    const existing = this.tombstones.get(entity)!.get(id);
+    if (existing === undefined || seq > existing) {
+      this.tombstones.get(entity)!.set(id, seq);
+    }
+  }
+
   /** Apply a change event to the local store. */
   applyChange(change: ChangeEvent): void {
     if (!this.tables.has(change.entity)) {
@@ -65,41 +105,87 @@ export class LocalStore {
     }
     const table = this.tables.get(change.entity)!;
 
+    // Drop insert/update events that arrive AFTER a delete for the same row.
+    // The tombstone map records the seq of the delete; anything strictly
+    // older than that seq is a stale resurrect and must be ignored.
+    if (
+      (change.kind === "insert" || change.kind === "update") &&
+      this.isTombstoned(change.entity, change.row_id, change.seq)
+    ) {
+      return;
+    }
+
     switch (change.kind) {
       case "insert":
         if (change.data) {
-          table.set(change.row_id, { id: change.row_id, ...change.data });
+          // Spread data FIRST, then force id = change.row_id. Previously
+          // id came first and was overridden by any id field in data,
+          // which let a crafted/buggy server event corrupt the replica's
+          // primary key on reload.
+          table.set(change.row_id, {
+            ...change.data,
+            id: change.row_id,
+          });
         }
         break;
       case "update":
         if (change.data) {
           const existing = table.get(change.row_id) ?? { id: change.row_id };
-          table.set(change.row_id, { ...existing, ...change.data });
+          table.set(change.row_id, {
+            ...existing,
+            ...change.data,
+            id: change.row_id, // authoritative — ignore any id in data
+          });
         }
         break;
       case "delete":
         table.delete(change.row_id);
+        this.recordTombstone(change.entity, change.row_id, change.seq);
         break;
     }
   }
 
-  /** Apply multiple changes. */
+  /** Apply multiple changes synchronously. Persistence runs fire-and-forget.
+   *  Prefer [`applyChangesAsync`] when you plan to advance a cursor after —
+   *  otherwise a crash can save the cursor before rows hit disk, causing
+   *  permanent missed changes on restart. */
   applyChanges(changes: ChangeEvent[]): void {
     for (const change of changes) {
       this.applyChange(change);
     }
     this.notify();
 
-    // Persist changes if persistence callback is set.
     if (this._persistFn) {
       for (const change of changes) {
-        this._persistFn(change);
+        // Fire-and-forget: errors are caller-observable via the promise but
+        // we don't block the in-memory apply on disk I/O in the sync path.
+        void this._persistFn(change);
       }
     }
   }
 
-  /** Set a persistence callback for auto-saving changes. */
-  _persistFn: ((change: ChangeEvent) => void) | null = null;
+  /**
+   * Apply + persist, awaiting disk writes before returning. Callers that are
+   * about to advance a cursor based on `changes` MUST use this path —
+   * otherwise cursor durability is broken: a crash between the memory apply
+   * and the eventual disk write can persist a cursor that's ahead of the
+   * replica, skipping those rows forever on restart.
+   */
+  async applyChangesAsync(changes: ChangeEvent[]): Promise<void> {
+    for (const change of changes) {
+      this.applyChange(change);
+    }
+    this.notify();
+    if (this._persistFn) {
+      const results = changes.map((c) => this._persistFn!(c));
+      await Promise.all(results.map((r) => (r instanceof Promise ? r : Promise.resolve())));
+    }
+  }
+
+  /** Set a persistence callback for auto-saving changes. The return type is
+   *  Promise<void> so callers can await. Void-returning callbacks are still
+   *  accepted for backwards compatibility (just not awaitable). */
+  _persistFn: ((change: ChangeEvent) => void | Promise<void>) | null = null;
 
   /** Subscribe to store changes. Returns unsubscribe function. */
   subscribe(listener: () => void): () => void {
@@ -138,6 +224,11 @@ export class LocalStore {
   /** Apply an optimistic delete. */
   optimisticDelete(entity: string, id: string): void {
     this.tables.get(entity)?.delete(id);
+    // Client-side deletes dominate any concurrent server replay until the
+    // server confirms; use MAX_SAFE_INTEGER as the tombstone seq. When the
+    // server's real delete event arrives it will refresh the tombstone with
+    // the authoritative seq (via `recordTombstone`'s max-of).
+    this.recordTombstone(entity, id, Number.MAX_SAFE_INTEGER);
     this.notify();
   }
 }
@@ -153,12 +244,70 @@ export interface PendingMutation {
   error?: string;
 }
 
+/**
+ * Optional persistence backend for the mutation queue. The default
+ * IndexedDB persistence layer provides `savePending`/`loadPending`/etc.
+ * Callers can supply a custom backend for tests or alternative storage.
+ */
+export interface MutationQueuePersistence {
+  saveAll(mutations: PendingMutation[]): Promise<void>;
+  loadAll(): Promise<PendingMutation[]>;
+}
+
+/**
+ * Offline-safe write queue.
+ *
+ * Before: the queue was memory-only. A tab crash or refresh silently lost
+ * every pending write. Now: if a `persistence` backend is provided the queue
+ * writes-through on every mutation, and `hydrate()` restores pending/failed
+ * mutations on startup. Applied mutations are pruned during `clear()`.
+ *
+ * The `id` scheme is stable (timestamp + random suffix) and is also used
+ * as the server-side `op_id` for idempotent replay. A retried push carrying
+ * the same id will short-circuit on the server instead of re-applying.
+ */
 export class MutationQueue {
   private queue: PendingMutation[] = [];
+  private persistence?: MutationQueuePersistence;
 
+  constructor(persistence?: MutationQueuePersistence) {
+    this.persistence = persistence;
+  }
+
+  /** Load persisted queue state. Call once at startup. */
+  async hydrate(): Promise<void> {
+    if (!this.persistence) return;
+    try {
+      const loaded = await this.persistence.loadAll();
+      // Merge in-memory with on-disk. An `add()` that ran while hydrate
+      // was awaiting `loadAll()` will already have flushed a snapshot
+      // that didn't include the loaded rows — re-flush after merge so
+      // disk matches memory again. Without this, a crash between the
+      // interleaved add-flush and the next mutation would leave the
+      // on-disk snapshot missing the loaded mutations.
+      const existingIds = new Set(this.queue.map((m) => m.id));
+      let mergedAny = false;
+      for (const m of loaded) {
+        if (!existingIds.has(m.id)) {
+          this.queue.push(m);
+          mergedAny = true;
+        }
+      }
+      if (mergedAny) this.flush();
+    } catch (err) {
+      // Broken storage shouldn't prevent the app from running — warn and
+      // degrade to memory-only mode.
+      console.warn("[sync] mutation-queue hydrate failed:", err);
+    }
+  }
+
+  /** Add a pending mutation. Returns the op_id used for server idempotency. */
   add(change: ClientChange): string {
     const id = `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    this.queue.push({ id, change, status: "pending" });
+    // Attach op_id on the outgoing ClientChange itself so the server can dedupe.
+    const changeWithOp: ClientChange = { ...change, op_id: id };
+    this.queue.push({ id, change: changeWithOp, status: "pending" });
+    this.flush();
     return id;
   }
 
@@ -169,6 +318,7 @@ export class MutationQueue {
   markApplied(id: string): void {
     const m = this.queue.find((m) => m.id === id);
     if (m) m.status = "applied";
+    this.flush();
   }
 
   markFailed(id: string, error: string): void {
@@ -177,10 +327,35 @@ export class MutationQueue {
       m.status = "failed";
       m.error = error;
     }
+    this.flush();
   }
 
+  /**
+   * Prune applied mutations. Failed mutations are KEPT so the UI can surface
+   * them to the user and so retries are possible. Previously this dropped
+   * failed mutations too, silently discarding server rejections.
+   */
   clear(): void {
-    this.queue = this.queue.filter((m) => m.status === "pending");
+    this.queue = this.queue.filter(
+      (m) => m.status === "pending" || m.status === "failed",
+    );
+    this.flush();
+  }
+
+  /** Remove a specific mutation by id. Used by the UI after user ack of failures. */
+  remove(id: string): void {
+    this.queue = this.queue.filter((m) => m.id !== id);
+    this.flush();
+  }
+
+  /** Fire-and-forget persistence write. Errors are logged but not thrown. */
+  private flush(): void {
+    if (!this.persistence) return;
+    // Snapshot the queue before the async write so we don't race a later mutation.
+    const snapshot = this.queue.slice();
+    this.persistence.saveAll(snapshot).catch((err) => {
+      console.warn("[sync] mutation-queue persist failed:", err);
+    });
   }
 }
 
@@ -208,24 +383,86 @@ export interface SyncEngineConfig {
   appName?: string;
 }
 
+/**
+ * Generate a stable client_id. Prefers a persisted id from localStorage
+ * (so a reload keeps the same identifier) and falls back to a fresh UUID.
+ * Not persisted when there's no window/localStorage (SSR, workers).
+ */
+function generateClientId(): string {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const key = "statecraft:client_id";
+      const existing = window.localStorage.getItem(key);
+      if (existing) return existing;
+      const fresh = newUuidLike();
+      window.localStorage.setItem(key, fresh);
+      return fresh;
+    }
+  } catch {
+    // localStorage disabled / quota exceeded — fall through.
+  }
+  return newUuidLike();
+}
+
+function newUuidLike(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* fall through */
+  }
+  // Fallback: 20 hex chars from random + time.
+  const rand = Math.random().toString(36).slice(2, 10);
+  const t = Date.now().toString(36);
+  return `cl_${t}_${rand}`;
+}
+
 export class SyncEngine {
   private config: SyncEngineConfig;
   private cursor: SyncCursor = { last_seq: 0 };
   private running = false;
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Monotonic attempt counter for exponential backoff. Reset to 0 on a
+   *  successful connection so the next reconnect starts fresh rather than
+   *  inheriting the previous storm's cooldown. */
+  private reconnectAttempts = 0;
   private persistence: import("./persistence").IndexedDBPersistence | null = null;
 
   readonly store: LocalStore;
   readonly mutations: MutationQueue;
 
+  /**
+   * Stable per-client identifier. Minted on first construction, not
+   * necessarily persisted (depends on what the host provides).
+   * Included on every PushRequest so the server can correlate retries and
+   * track per-client diagnostics. Not auth — do not trust this to identify
+   * a user.
+   */
+  readonly clientId: string;
+
   /** Presence state for this client. */
   private presenceData: Record<string, unknown> = {};
+
+  /**
+   * Token observed on the last pull. When the token changes (anonymous →
+   * signed in, or user A → user B), the set of rows the server will expose
+   * changes — so the cursor from the previous identity is meaningless.
+   * Compared on every pull; a mismatch triggers an automatic resync.
+   *
+   * Uses `undefined` as the "never observed" sentinel so we can distinguish
+   * "first pull ever" from "explicitly anonymous". A first pull doesn't
+   * reset (nothing to reset), but every later transition — including
+   * null→token — does.
+   */
+  private lastSeenToken: string | null | undefined = undefined;
 
   constructor(config: SyncEngineConfig) {
     this.config = config;
     this.store = new LocalStore();
     this.mutations = new MutationQueue();
+    this.clientId = generateClientId();
   }
 
   /**
@@ -269,14 +506,22 @@ export class SyncEngine {
 
         // Load cached data into the store.
         const cached = await this.persistence.loadAllEntities();
+        let hydrated = false;
         for (const [entity, rows] of Object.entries(cached)) {
           for (const row of rows) {
             const id = (row as Record<string, unknown>).id as string;
             if (id) {
               this.store.applyChange({ seq: 0, entity, row_id: id, kind: "insert", data: row, timestamp: "" });
+              hydrated = true;
             }
           }
         }
+        // applyChange() doesn't notify — it's the low-level primitive.
+        // Fire one notify after the hydration loop so useSyncExternalStore
+        // subscribers re-read. Without this, if the subsequent pull returns
+        // no changes (replica already at cursor), subscribers stay stuck on
+        // their initial empty snapshot until the first WS event arrives.
+        if (hydrated) this.store.notify();
 
         // Load cursor.
         const savedCursor = await this.persistence.loadCursor();
@@ -284,13 +529,29 @@ export class SyncEngine {
           this.cursor = savedCursor;
         }
 
-        // Auto-save changes to IndexedDB.
+        // Auto-save changes to IndexedDB. Returns a Promise so the async
+        // apply path (applyChangesAsync) can await the write before the
+        // cursor advances — the fix for "cursor ahead of replica" on crash.
         const persistence = this.persistence;
-        this.store._persistFn = (change: ChangeEvent) => {
-          import("./persistence").then(({ persistChange }) => {
-            if (persistence) persistChange(persistence, change);
-          });
+        this.store._persistFn = async (change: ChangeEvent) => {
+          const { persistChange } = await import("./persistence");
+          if (persistence) await persistChange(persistence, change);
         };
+
+        // Hydrate the mutation queue from disk. Any offline writes queued
+        // before the tab was closed come back as pending here and will be
+        // pushed on the next `push()` tick. Without this, `MutationQueue`
+        // stayed memory-only and offline mutations were silently lost.
+        try {
+          const { IndexedDBMutationPersistence } = await import("./persistence");
+          const mqPersistence = new IndexedDBMutationPersistence(persistence);
+          // @ts-expect-error — reach into the private field to swap in the
+          // backend post-construction. Same package, acceptable coupling.
+          this.mutations.persistence = mqPersistence;
+          await this.mutations.hydrate();
+        } catch {
+          // Queue persistence optional — memory-only still works.
+        }
       } catch {
         // IndexedDB not available — continue without persistence.
       }
@@ -352,16 +613,28 @@ export class SyncEngine {
       return;
     }
 
+    this.ws.onopen = () => {
+      // Reset backoff so the next drop starts fresh rather than inheriting
+      // the last storm's cooldown. Without this, long-lived sessions
+      // accumulate attempts across unrelated outages and hit the cap.
+      this.reconnectAttempts = 0;
+    };
+
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data as string);
 
-        // Sync change event.
+        // Sync change event. Persist BEFORE advancing the cursor so a crash
+        // can't leave `last_seq` ahead of the replica on disk.
         if (msg.seq && msg.entity && msg.kind) {
           const change = msg as ChangeEvent;
           if (change.seq > this.cursor.last_seq) {
-            this.store.applyChanges([change]);
-            this.cursor = { last_seq: change.seq };
+            void this.store.applyChangesAsync([change]).then(async () => {
+              this.cursor = { last_seq: change.seq };
+              if (this.persistence) {
+                await this.persistence.saveCursor(this.cursor);
+              }
+            });
           }
           return;
         }
@@ -388,12 +661,39 @@ export class SyncEngine {
 
   private scheduleReconnect(): void {
     if (!this.running) return;
-    const delay = this.config.reconnectDelay ?? 1000;
+    this.reconnectAttempts += 1;
+    const delay = this.computeBackoff();
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       // Pull any missed changes, then reconnect.
       this.pull().then(() => this.connectWs());
     }, delay);
+  }
+
+  /**
+   * Exponential backoff with full jitter for reconnects.
+   *
+   * Thundering-herd fix: when the server restarts, every connected client
+   * fires `onclose` at nearly the same instant. Without jitter they all
+   * reconnect at `baseDelay` and hammer the newly-booted server; after a
+   * few cycles the reconnect waves align and the server never recovers.
+   *
+   * Full-jitter (`delay = random(0, exp)`) spreads clients evenly across
+   * the backoff window so the second-wave load is flat, not spiky.
+   * Algorithm from AWS Architecture Blog "Exponential Backoff and Jitter"
+   * — the "Full Jitter" variant, which has the lowest collision rate.
+   *
+   * The `reconnectDelay` config value seeds the exponential base. Max
+   * delay caps at 30s so users don't wait minutes on a long outage.
+   */
+  private computeBackoff(): number {
+    const base = this.config.reconnectDelay ?? 1000;
+    const maxDelay = 30_000;
+    // exp = base * 2^(attempts-1), clamped to maxDelay
+    const attempt = Math.max(1, this.reconnectAttempts);
+    const exp = Math.min(maxDelay, base * Math.pow(2, attempt - 1));
+    // Full jitter: delay is uniform random in [0, exp].
+    return Math.floor(Math.random() * exp);
   }
 
   /** Connect via Server-Sent Events. */
@@ -413,8 +713,12 @@ export class SyncEngine {
           if (msg.seq && msg.entity && msg.kind) {
             const change = msg as ChangeEvent;
             if (change.seq > this.cursor.last_seq) {
-              this.store.applyChanges([change]);
-              this.cursor = { last_seq: change.seq };
+              void this.store.applyChangesAsync([change]).then(async () => {
+                this.cursor = { last_seq: change.seq };
+                if (this.persistence) {
+                  await this.persistence.saveCursor(this.cursor);
+                }
+              });
             }
           }
         } catch {
@@ -423,12 +727,14 @@ export class SyncEngine {
       };
       es.onerror = () => {
         es.close();
-        // Reconnect after delay.
+        // Same jittered backoff as the WS path so SSE clients don't form
+        // a second reconnect wave on server restart.
+        this.reconnectAttempts += 1;
         setTimeout(() => {
           if (this.running) {
             this.pull().then(() => this.connectSse());
           }
-        }, this.config.reconnectDelay ?? 1000);
+        }, this.computeBackoff());
       };
     } catch {
       // EventSource not available — fall back to polling.
@@ -444,34 +750,133 @@ export class SyncEngine {
     return `ws://${url.hostname}:${port + 1}`;
   }
 
+  /**
+   * Drop local cursor + store + notify. Safe to call from any state.
+   * Used by:
+   *  - the 410 RESYNC_REQUIRED handler (server says our cursor is stale)
+   *  - the identity-change detector in pull() (new auth = new visible set)
+   *  - callers that need to force a clean re-pull (tests, sign-out flows)
+   *
+   * Does NOT issue the subsequent pull — callers decide when to re-pull.
+   * That keeps the lifecycle explicit: a caller can reset, swap config,
+   * then pull.
+   */
+  async resetReplica(): Promise<void> {
+    this.cursor = { last_seq: 0 };
+    this.store.tables.clear();
+    this.store.tombstones.clear();
+    this.store.notify();
+    if (this.persistence) {
+      try {
+        await this.persistence.saveCursor(this.cursor);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  /** Current auth token from config or localStorage. Null when neither has one. */
+  private currentToken(): string | null {
+    if (this.config.token) return this.config.token;
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    return window.localStorage.getItem("statecraft_token");
+  }
+
   /** Pull changes from the server. */
   async pull(): Promise<void> {
+    // Identity change detection. If the token flipped since the last pull
+    // (anonymous → signed in, user A → user B, signed in → signed out),
+    // the server's visible set changed under us and the cursor we saved
+    // reflects the previous identity. Reset before pulling so we rebuild
+    // the replica from seq=0 under the new identity.
+    const tokenNow = this.currentToken();
+    if (
+      this.lastSeenToken !== undefined &&
+      this.lastSeenToken !== tokenNow
+    ) {
+      await this.resetReplica();
+    }
+    this.lastSeenToken = tokenNow;
+
     try {
       const resp = await this.request<PullResponse>(
         "GET",
         `/api/sync/pull?since=${this.cursor.last_seq}`
       );
       if (resp.changes.length > 0) {
-        this.store.applyChanges(resp.changes);
+        // Await disk writes before touching the cursor so a crash here can't
+        // persist a cursor that's ahead of what actually landed in IndexedDB.
+        await this.store.applyChangesAsync(resp.changes);
+      }
+      // Always advance the cursor to whatever the server reports, not just
+      // when changes land. If a read policy filters out every event in a
+      // window the server still moves its last_seq forward; clamping to only
+      // "non-empty" responses pins the client at `since=0` forever and turns
+      // every reconnect into another pull for the same empty window.
+      if (resp.cursor && resp.cursor.last_seq > this.cursor.last_seq) {
         this.cursor = resp.cursor;
+        if (this.persistence) {
+          await this.persistence.saveCursor(this.cursor);
+        }
       }
       // If there are more, pull again immediately.
       if (resp.has_more) {
         await this.pull();
       }
-    } catch {
-      // Silently fail — will retry on next poll.
+    } catch (err) {
+      // Swallow network + transient errors so the poll/reconnect loop
+      // keeps trying — but on 429 bump the backoff counter so the next
+      // reconnect waits noticeably longer. Without this, a rate-limited
+      // pull triggers onclose → scheduleReconnect → pull → 429 in a
+      // tight loop that the server reads as abuse.
+      const status = (err as { status?: number })?.status;
+      if (status === 429) {
+        this.reconnectAttempts += 3;
+      }
+      // 410 RESYNC_REQUIRED: cursor is from a previous server lifetime, or
+      // it fell off the retention window. Drop local state + cursor and
+      // re-pull from seq=0. The server replays all current entity rows as
+      // seed events on startup so the fresh pull reconstructs state.
+      if (status === 410) {
+        await this.resetReplica();
+        // Re-pull immediately; the catch block will swallow nested failures.
+        await this.pull();
+      }
     }
   }
 
-  /** Push pending mutations to the server. */
+  /**
+   * In-flight push promise. Used as a mutex so a slow push can't be restarted
+   * by the poll timer or a user mutation, which would resend the same batch
+   * and cause duplicate writes on the server. The mutation `op_id` keeps
+   * that safe at the protocol level (the server deduplicates), but shipping
+   * the same batch twice is still wasted bandwidth — hold them instead.
+   *
+   * Callers always get the SAME promise while a push is running; chain a
+   * `.then(() => next push)` if you need a follow-up push after this one.
+   */
+  private inFlightPush: Promise<void> | null = null;
+
+  /** Push pending mutations to the server. Coalesces concurrent callers. */
   async push(): Promise<void> {
+    if (this.inFlightPush) {
+      return this.inFlightPush;
+    }
+    const work = this.pushInner().finally(() => {
+      this.inFlightPush = null;
+    });
+    this.inFlightPush = work;
+    return work;
+  }
+
+  private async pushInner(): Promise<void> {
     const pending = this.mutations.pending();
     if (pending.length === 0) return;
 
     try {
       const resp = await this.request<PushResponse>("POST", "/api/sync/push", {
         changes: pending.map((m) => m.change),
+        client_id: this.clientId,
       });
 
       // Mark mutations based on response.
@@ -485,7 +890,7 @@ export class SyncEngine {
 
       this.mutations.clear();
     } catch {
-      // Will retry on next tick.
+      // Will retry on next tick. op_id makes retries idempotent on the server.
     }
   }
 
@@ -653,7 +1058,17 @@ export class SyncEngine {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {};
     if (body) headers["Content-Type"] = "application/json";
-    if (this.config.token) headers["Authorization"] = `Bearer ${this.config.token}`;
+    // Prefer the token explicitly configured on the engine; fall back to
+    // the conventional localStorage key that `@statecraft/react`'s auth
+    // helpers store. Without this fallback, the sync engine runs as an
+    // anonymous caller and gets rate-limited into a 429 reconnect storm
+    // once the anon bucket fills.
+    const token =
+      this.config.token ??
+      (typeof window !== "undefined" && window.localStorage
+        ? window.localStorage.getItem("statecraft_token") ?? undefined
+        : undefined);
+    if (token) headers["Authorization"] = `Bearer ${token}`;
 
     const res = await fetch(`${this.config.baseUrl}${path}`, {
       method,
@@ -662,7 +1077,14 @@ export class SyncEngine {
     });
 
     if (!res.ok) {
-      throw new Error(`Sync request failed: ${res.status}`);
+      // Surface the status so the caller can distinguish transient
+      // (429/503) from permanent (400/404) failures — the reconnect
+      // loop uses this to decide whether to back off.
+      const err = new Error(`Sync request failed: ${res.status}`) as Error & {
+        status?: number;
+      };
+      err.status = res.status;
+      throw err;
     }
 
     return res.json() as Promise<T>;
@@ -682,7 +1104,7 @@ export interface HydrationData {
 }
 
 /**
- * Server-side helper: fetch entities from the agentdb API and return
+ * Server-side helper: fetch entities from the statecraft API and return
  * hydration data that can be passed to the client's SyncEngine.hydrate().
  *
  * Use this in Next.js server components, getServerSideProps, or route handlers.
@@ -731,7 +1153,7 @@ export async function getServerData(
 // Convenience factory
 // ---------------------------------------------------------------------------
 
-/** Create a sync engine connected to the agentdb dev server. */
+/** Create a sync engine connected to the statecraft dev server. */
 export function createSyncEngine(
   baseUrl = "http://localhost:4321",
   options?: { token?: string; reconnectDelay?: number; wsUrl?: string }

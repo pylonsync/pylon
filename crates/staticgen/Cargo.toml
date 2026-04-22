@@ -1,5 +1,5 @@
 [package]
-name = "agentdb-staticgen"
+name = "statecraft-staticgen"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,6 +8,6 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-agentdb-core = { path = "../core" }
+statecraft-core = { path = "../core" }
 serde_json = { workspace = true }
 

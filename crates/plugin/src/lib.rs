@@ -1,4 +1,4 @@
-use agentdb_auth::AuthContext;
+use statecraft_auth::AuthContext;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 // Plugin trait — the core contract
 // ---------------------------------------------------------------------------
 
-/// A plugin extends agentdb with custom routes, lifecycle hooks, and entities.
+/// A plugin extends statecraft with custom routes, lifecycle hooks, and entities.
 pub trait Plugin: Send + Sync {
     /// Unique name for this plugin.
     fn name(&self) -> &str;
@@ -70,11 +70,26 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
+    /// Richer variant of [`on_request`] that also receives per-request
+    /// metadata (peer IP today; more fields may be added later). The
+    /// default implementation delegates to `on_request` so existing
+    /// plugins keep working without changes. Plugins that care about
+    /// IP — notably rate limiting — override this hook.
+    fn on_request_with_meta(
+        &self,
+        method: &str,
+        path: &str,
+        auth: &AuthContext,
+        _meta: &RequestMeta<'_>,
+    ) -> Result<(), PluginError> {
+        self.on_request(method, path, auth)
+    }
+
     /// Called when a new session is created.
     fn on_session_create(&self, _user_id: &str, _token: &str) {}
 
     /// Additional manifest entities this plugin contributes.
-    fn entities(&self) -> Vec<agentdb_core::ManifestEntity> {
+    fn entities(&self) -> Vec<statecraft_core::ManifestEntity> {
         vec![]
     }
 }
@@ -82,6 +97,20 @@ pub trait Plugin: Send + Sync {
 // ---------------------------------------------------------------------------
 // Plugin types
 // ---------------------------------------------------------------------------
+
+/// Extra per-request metadata passed to [`Plugin::on_request_with_meta`].
+///
+/// Borrowed so the server layer can construct it cheaply per request
+/// without copying. New fields may be added over time; plugins that only
+/// care about a subset should destructure by name, not by position.
+#[derive(Debug, Clone)]
+pub struct RequestMeta<'a> {
+    /// Peer IP as a string (may be empty if not derivable from the
+    /// transport, e.g. unix sockets). Routing middleware uses this to
+    /// rate-limit anonymous traffic per-IP rather than collapsing every
+    /// anon caller into one global bucket.
+    pub peer_ip: &'a str,
+}
 
 #[derive(Debug, Clone)]
 pub struct PluginError {
@@ -108,12 +137,12 @@ pub struct PluginRoute {
 
 /// Context passed to plugins on init.
 pub struct PluginContext {
-    pub manifest: agentdb_core::AppManifest,
+    pub manifest: statecraft_core::AppManifest,
     pub data: Mutex<HashMap<String, Value>>,
 }
 
 impl PluginContext {
-    pub fn new(manifest: agentdb_core::AppManifest) -> Self {
+    pub fn new(manifest: statecraft_core::AppManifest) -> Self {
         Self {
             manifest,
             data: Mutex::new(HashMap::new()),
@@ -141,7 +170,7 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    pub fn new(manifest: agentdb_core::AppManifest) -> Self {
+    pub fn new(manifest: statecraft_core::AppManifest) -> Self {
         Self {
             plugins: Vec::new(),
             context: Arc::new(PluginContext::new(manifest)),
@@ -228,6 +257,11 @@ impl PluginRegistry {
     }
 
     /// Run on_request middleware. Returns first error, or Ok.
+    ///
+    /// This is the legacy entry point — it has no peer-IP info, so the
+    /// built-in rate limiter degrades to a single `__anon__` bucket for
+    /// unauthenticated callers. Prefer [`run_on_request_with_meta`] from
+    /// the HTTP layer where peer IP is available.
     pub fn run_on_request(
         &self,
         method: &str,
@@ -236,6 +270,23 @@ impl PluginRegistry {
     ) -> Result<(), PluginError> {
         for plugin in &self.plugins {
             plugin.on_request(method, path, auth)?;
+        }
+        Ok(())
+    }
+
+    /// Run on_request middleware with per-request metadata. Plugins that
+    /// override `on_request_with_meta` (e.g. `RateLimitPlugin` for per-IP
+    /// bucketing) get the richer path; others fall through to the default
+    /// delegate so existing plugins keep working.
+    pub fn run_on_request_with_meta(
+        &self,
+        method: &str,
+        path: &str,
+        auth: &AuthContext,
+        meta: &RequestMeta<'_>,
+    ) -> Result<(), PluginError> {
+        for plugin in &self.plugins {
+            plugin.on_request_with_meta(method, path, auth, meta)?;
         }
         Ok(())
     }
@@ -320,9 +371,9 @@ mod tests {
         }
     }
 
-    fn test_manifest() -> agentdb_core::AppManifest {
-        agentdb_core::AppManifest {
-            manifest_version: agentdb_core::MANIFEST_VERSION,
+    fn test_manifest() -> statecraft_core::AppManifest {
+        statecraft_core::AppManifest {
+            manifest_version: statecraft_core::MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
             entities: vec![],

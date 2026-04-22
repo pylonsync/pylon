@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::Plugin;
-use agentdb_auth::AuthContext;
+use statecraft_auth::AuthContext;
 
 /// A feature flag rule.
 #[derive(Debug, Clone)]

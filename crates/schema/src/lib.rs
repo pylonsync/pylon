@@ -1,4 +1,4 @@
-use agentdb_core::{
+use statecraft_core::{
     AppManifest, Diagnostic, ManifestAction, ManifestPolicy, ManifestQuery, ManifestRoute,
     Severity, MANIFEST_VERSION,
 };
@@ -477,7 +477,7 @@ fn extract_path_params(path: &str) -> Vec<String> {
 
 /// Validate input field names for duplicates and empties.
 fn validate_input_field_names(
-    fields: &[agentdb_core::ManifestField],
+    fields: &[statecraft_core::ManifestField],
     parent_kind: &str,
     parent_name: &str,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1065,7 +1065,7 @@ mod tests {
         let mut s = base_schema();
         s.queries = vec![ManifestQuery {
             name: "getX".into(),
-            input: vec![agentdb_core::ManifestField {
+            input: vec![statecraft_core::ManifestField {
                 name: "xId".into(),
                 field_type: "id(X)".into(),
                 optional: false,
@@ -1244,7 +1244,7 @@ mod tests {
         let mut s = base_schema();
         s.queries = vec![ManifestQuery {
             name: "getPost".into(),
-            input: vec![agentdb_core::ManifestField {
+            input: vec![statecraft_core::ManifestField {
                 name: "authorId".into(),
                 field_type: "id(Missing)".into(),
                 optional: false,
@@ -1261,7 +1261,7 @@ mod tests {
         let mut s = base_schema();
         s.actions = vec![ManifestAction {
             name: "doThing".into(),
-            input: vec![agentdb_core::ManifestField {
+            input: vec![statecraft_core::ManifestField {
                 name: "targetId".into(),
                 field_type: "id(Nope)".into(),
                 optional: false,
@@ -1289,7 +1289,7 @@ mod tests {
             }],
             queries: vec![ManifestQuery {
                 name: "q".into(),
-                input: vec![agentdb_core::ManifestField {
+                input: vec![statecraft_core::ManifestField {
                     name: "x".into(),
                     field_type: "id(".into(), // malformed
                     optional: false,
@@ -1326,8 +1326,8 @@ mod tests {
         assert_eq!(format!("{}", FieldType::Id("User".into())), "id(User)");
     }
 
-    fn make_manifest_field(name: &str, ft: &str, optional: bool) -> agentdb_core::ManifestField {
-        agentdb_core::ManifestField {
+    fn make_manifest_field(name: &str, ft: &str, optional: bool) -> statecraft_core::ManifestField {
+        statecraft_core::ManifestField {
             name: name.into(),
             field_type: ft.into(),
             optional,
@@ -1387,8 +1387,8 @@ mod tests {
 
     // -- Field type validation tests --
 
-    fn make_manifest_entity(name: &str, fields: Vec<agentdb_core::ManifestField>) -> agentdb_core::ManifestEntity {
-        agentdb_core::ManifestEntity {
+    fn make_manifest_entity(name: &str, fields: Vec<statecraft_core::ManifestField>) -> statecraft_core::ManifestEntity {
+        statecraft_core::ManifestEntity {
             name: name.into(),
             fields,
             indexes: vec![],
@@ -1396,7 +1396,7 @@ mod tests {
         }
     }
 
-    fn make_test_manifest(entities: Vec<agentdb_core::ManifestEntity>) -> AppManifest {
+    fn make_test_manifest(entities: Vec<statecraft_core::ManifestEntity>) -> AppManifest {
         AppManifest {
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn invalid_query_input_type() {
         let mut m = make_test_manifest(vec![make_manifest_entity("X", vec![])]);
-        m.queries = vec![agentdb_core::ManifestQuery {
+        m.queries = vec![statecraft_core::ManifestQuery {
             name: "q".into(),
             input: vec![make_manifest_field("x", "boolean", false)],
         }];
@@ -1447,7 +1447,7 @@ mod tests {
     #[test]
     fn invalid_action_input_type() {
         let mut m = make_test_manifest(vec![make_manifest_entity("X", vec![])]);
-        m.actions = vec![agentdb_core::ManifestAction {
+        m.actions = vec![statecraft_core::ManifestAction {
             name: "a".into(),
             input: vec![make_manifest_field("x", "date_time", false)],
         }];

@@ -1,13 +1,13 @@
-use agentdb_core::{AppManifest, Diagnostic, Severity, Span};
-use agentdb_schema::{Entity, Field, FieldType, Index, Schema};
+use statecraft_core::{AppManifest, Diagnostic, Severity, Span};
+use statecraft_schema::{Entity, Field, FieldType, Index, Schema};
 
 /// Run all validation passes on a manifest.
 pub fn validate_all(manifest: &AppManifest) -> Vec<Diagnostic> {
     // Check version first — if unsupported, still run other checks for maximum feedback.
-    let mut diagnostics = agentdb_schema::validate_manifest_version(manifest);
+    let mut diagnostics = statecraft_schema::validate_manifest_version(manifest);
     let schema = manifest_to_schema(manifest);
-    diagnostics.extend(agentdb_schema::validate(&schema));
-    diagnostics.extend(agentdb_schema::validate_field_types(manifest));
+    diagnostics.extend(statecraft_schema::validate(&schema));
+    diagnostics.extend(statecraft_schema::validate_field_types(manifest));
     diagnostics
 }
 
@@ -279,14 +279,14 @@ mod tests {
     fn unsupported_manifest_version() {
         let json = r#"{"manifest_version":999,"name":"app","version":"1.0.0","entities":[],"routes":[]}"#;
         let m = parse_manifest(json, "test.json").unwrap();
-        let diags = agentdb_schema::validate_manifest_version(&m);
+        let diags = statecraft_schema::validate_manifest_version(&m);
         assert!(diags.iter().any(|d| d.code == "MANIFEST_VERSION_UNSUPPORTED"));
     }
 
     #[test]
     fn field_type_rename() {
         let json = r#"{"name":"a","type":"string","optional":false,"unique":false}"#;
-        let f: agentdb_core::ManifestField = serde_json::from_str(json).unwrap();
+        let f: statecraft_core::ManifestField = serde_json::from_str(json).unwrap();
         assert_eq!(f.field_type, "string");
         let back = serde_json::to_string(&f).unwrap();
         assert!(back.contains("\"type\":\"string\""));

@@ -1,4 +1,4 @@
-Use `/Users/ericc59/Dev/agentdb/prompts/claude-handoff/00-shared-context.md` as shared context.
+Use `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md` as shared context.
 
 Goal:
 Start the TS client bindings/codegen path from the canonical manifest.
@@ -7,7 +7,7 @@ Build this exact slice:
 
 1. Add a first codegen command for TS bindings
 - suggested CLI:
-  - `agentdb codegen client <manifest> --out <path>`
+  - `statecraft codegen client <manifest> --out <path>`
 - or a similarly narrow subcommand if it fits the current CLI structure better
 
 2. Generate a minimal TS client artifact from the manifest
@@ -39,5 +39,5 @@ Required verification:
 - `cargo check`
 - `cargo test`
 - `bun run check`
-- generate client bindings from `examples/todo-app/agentdb.manifest.json`
+- generate client bindings from `examples/todo-app/statecraft.manifest.json`
 

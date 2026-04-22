@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// @agentdb/react-native
+// @statecraft/react-native
 //
-// React Native adapter for agentdb. Provides the same hook-based API as
-// @agentdb/react, plus RN-specific utilities for offline storage and
+// React Native adapter for statecraft. Provides the same hook-based API as
+// @statecraft/react, plus RN-specific utilities for offline storage and
 // network status monitoring.
 // ---------------------------------------------------------------------------
 
@@ -40,8 +40,8 @@ export { useNetworkStatus } from "./useNetworkStatus";
 export type { NetworkStatus } from "./useNetworkStatus";
 
 // Re-export from SDK
-export { defineRoute } from "@agentdb/sdk";
-export type { RouteMode, AppManifest } from "@agentdb/sdk";
+export { defineRoute } from "@statecraft/sdk";
+export type { RouteMode, AppManifest } from "@statecraft/sdk";
 
 // Re-export sync engine for direct use
 export {
@@ -50,14 +50,14 @@ export {
   getServerData,
   LocalStore,
   MutationQueue,
-} from "@agentdb/sync";
+} from "@statecraft/sync";
 export type {
   ChangeEvent,
   SyncCursor,
   PullResponse,
   HydrationData,
   Row,
-} from "@agentdb/sync";
+} from "@statecraft/sync";
 
 // ---------------------------------------------------------------------------
 // Client context (direct API access without sync engine)

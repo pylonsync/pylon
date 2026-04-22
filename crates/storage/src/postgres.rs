@@ -1,5 +1,5 @@
 use crate::{FieldSpec, SchemaOperation, SchemaPlan, StorageAdapter, StorageError};
-use agentdb_core::AppManifest;
+use statecraft_core::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Type mapping: manifest field types -> PostgreSQL column types
@@ -192,7 +192,7 @@ pub const INTROSPECT_TABLES_SQL: &str = "\
     FROM information_schema.tables \
     WHERE table_schema = 'public' \
       AND table_type = 'BASE TABLE' \
-      AND table_name NOT LIKE '_agentdb_%' \
+      AND table_name NOT LIKE '_statecraft_%' \
     ORDER BY table_name";
 
 /// SQL to list columns for a given table.
@@ -239,14 +239,24 @@ pub fn plan_from_snapshot(
 // CRUD SQL generation helpers (used by live adapter, testable without a DB)
 // ---------------------------------------------------------------------------
 
-/// Generate a unique ID from the current system time in nanoseconds.
+/// Generate a lex-sortable, monotonic-ish unique ID.
+///
+/// Format: 32 hex chars of `as_nanos()` (zero-padded) followed by 8 hex chars
+/// of a per-process atomic counter. The counter prevents collisions when two
+/// inserts hit the same nanosecond and — critically — keeps order stable: an
+/// id minted at the same nanosecond is monotonically greater than the
+/// previous one. Width is fixed at 40 chars so lexicographic comparison
+/// matches creation order, which is what cursor pagination relies on.
 pub fn generate_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{:x}", ts)
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{ts:032x}{seq:08x}")
 }
 
 /// Convert a JSON value to its string representation for use as a SQL parameter.
@@ -503,6 +513,41 @@ pub mod live {
             Ok(rows.iter().map(row_to_json).collect())
         }
 
+        /// Cursor-paginated list. `after` is the last `id` from the previous
+        /// page; the result contains rows with `id > after` (lex order),
+        /// limited to `limit`. Used for sync push/pull.
+        pub fn list_after(
+            &mut self,
+            entity: &str,
+            after: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
+            // Cap limit at a sensible upper bound so a malicious client can't
+            // stream the whole table by passing limit=u64::MAX.
+            let capped: i64 = limit.min(10_000) as i64;
+            let sql = match after {
+                Some(_) => format!(
+                    "SELECT * FROM {} WHERE id > $1 ORDER BY id ASC LIMIT $2",
+                    quote_ident(entity)
+                ),
+                None => format!(
+                    "SELECT * FROM {} ORDER BY id ASC LIMIT $1",
+                    quote_ident(entity)
+                ),
+            };
+            let rows = match after {
+                Some(cursor) => self
+                    .client
+                    .query(sql.as_str(), &[&cursor, &capped])
+                    .map_err(pg_err)?,
+                None => self
+                    .client
+                    .query(sql.as_str(), &[&capped])
+                    .map_err(pg_err)?,
+            };
+            Ok(rows.iter().map(row_to_json).collect())
+        }
+
         /// Update a row by ID. Returns true if the row was found and updated.
         pub fn update(
             &mut self,
@@ -537,21 +582,372 @@ pub mod live {
                 .map_err(pg_err)?;
             Ok(rows_affected > 0)
         }
+
+        /// Look up a row by `field = value`. Caller must validate `field`
+        /// against the manifest before calling — we still `quote_ident` it
+        /// but won't catch a typo against the entity definition.
+        pub fn lookup_field(
+            &mut self,
+            entity: &str,
+            field: &str,
+            value: &str,
+        ) -> Result<Option<serde_json::Value>, StorageError> {
+            let sql = format!(
+                "SELECT * FROM {} WHERE {} = $1 LIMIT 1",
+                quote_ident(entity),
+                quote_ident(field),
+            );
+            let rows = self.client.query(sql.as_str(), &[&value]).map_err(pg_err)?;
+            Ok(rows.first().map(row_to_json))
+        }
+
+        /// Push a `query_filtered` filter down to a real Postgres `WHERE`.
+        ///
+        /// Supported operators: equality (`field: value`), `$gt`, `$gte`,
+        /// `$lt`, `$lte`, `$like`, `$in: [..]`, plus the meta operators
+        /// `$order: { field: "asc"|"desc" }`, `$limit`, `$offset`.
+        ///
+        /// Anything else is silently ignored (matches the in-memory fallback's
+        /// permissive behavior). Field names are validated against `valid_columns`
+        /// to prevent SQL injection — pass the entity's column set.
+        pub fn query_filtered(
+            &mut self,
+            entity: &str,
+            filter: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
+            let empty = serde_json::Map::new();
+            let obj = filter.as_object().unwrap_or(&empty);
+
+            let validate = |col: &str| -> Result<(), StorageError> {
+                if col == "id" || valid_columns.iter().any(|c| c == col) {
+                    Ok(())
+                } else {
+                    Err(StorageError {
+                        code: "UNKNOWN_COLUMN".into(),
+                        message: format!("Unknown column \"{col}\" on entity \"{entity}\""),
+                    })
+                }
+            };
+
+            let mut where_clauses: Vec<String> = Vec::new();
+            let mut order_clause = String::new();
+            let mut limit_clause = String::new();
+            let mut offset_clause = String::new();
+            // Collect (col, op, value) so placeholder numbers can be assigned
+            // in a single materialization pass after the parse loop.
+            let mut planned: Vec<(String, String, String)> = Vec::new();
+
+            for (key, val) in obj {
+                match key.as_str() {
+                    "$order" => {
+                        if let Some(ord) = val.as_object() {
+                            let mut parts = Vec::new();
+                            for (col, dir) in ord {
+                                validate(col)?;
+                                let d = match dir.as_str().unwrap_or("asc") {
+                                    "desc" | "DESC" => "DESC",
+                                    _ => "ASC",
+                                };
+                                parts.push(format!("{} {d}", quote_ident(col)));
+                            }
+                            if !parts.is_empty() {
+                                order_clause = format!(" ORDER BY {}", parts.join(", "));
+                            }
+                        }
+                    }
+                    "$limit" => {
+                        if let Some(n) = val.as_u64() {
+                            limit_clause = format!(" LIMIT {}", n);
+                        }
+                    }
+                    "$offset" => {
+                        if let Some(n) = val.as_u64() {
+                            offset_clause = format!(" OFFSET {}", n);
+                        }
+                    }
+                    field => {
+                        validate(field)?;
+                        match val {
+                            serde_json::Value::Object(ops) => {
+                                for (op, v) in ops {
+                                    match op.as_str() {
+                                        "$gt" => planned.push((field.into(), ">".into(), value_to_pg(v))),
+                                        "$gte" => planned.push((field.into(), ">=".into(), value_to_pg(v))),
+                                        "$lt" => planned.push((field.into(), "<".into(), value_to_pg(v))),
+                                        "$lte" => planned.push((field.into(), "<=".into(), value_to_pg(v))),
+                                        "$like" => planned.push((field.into(), "LIKE".into(), value_to_pg(v))),
+                                        "$in" => {
+                                            if let Some(arr) = v.as_array() {
+                                                let placeholders: Vec<String> = (0..arr.len())
+                                                    .map(|i| format!("${}", planned.len() + 1 + i))
+                                                    .collect();
+                                                where_clauses.push(format!(
+                                                    "{} IN ({})",
+                                                    quote_ident(field),
+                                                    placeholders.join(", "),
+                                                ));
+                                                for x in arr {
+                                                    planned.push((
+                                                        format!("__inline_{}", planned.len()),
+                                                        "__INLINE__".into(),
+                                                        value_to_pg(x),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => planned.push((field.into(), "=".into(), value_to_pg(val))),
+                        }
+                    }
+                }
+            }
+
+            // Materialize planned -> SQL + params.
+            let mut params: Vec<String> = Vec::with_capacity(planned.len());
+            for (field, op, v) in &planned {
+                if op == "__INLINE__" {
+                    // Already emitted via the IN-clause path; just push the value.
+                    params.push(v.clone());
+                } else {
+                    let placeholder = format!("${}", params.len() + 1);
+                    where_clauses.push(format!("{} {} {}", quote_ident(field), op, placeholder));
+                    params.push(v.clone());
+                }
+            }
+
+            let where_sql = if where_clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", where_clauses.join(" AND "))
+            };
+            let sql = format!(
+                "SELECT * FROM {}{}{}{}{}",
+                quote_ident(entity),
+                where_sql,
+                order_clause,
+                limit_clause,
+                offset_clause,
+            );
+
+            let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> = params
+                .iter()
+                .map(|s| s as &(dyn postgres::types::ToSql + Sync))
+                .collect();
+
+            let rows = self.client.query(sql.as_str(), &pg_params).map_err(pg_err)?;
+            Ok(rows.iter().map(row_to_json).collect())
+        }
+    }
+
+    /// Atomic operation describing a single mutation inside [`LivePostgresAdapter::transact`].
+    pub enum TxOp<'a> {
+        Insert {
+            entity: &'a str,
+            data: &'a serde_json::Value,
+        },
+        Update {
+            entity: &'a str,
+            id: &'a str,
+            data: &'a serde_json::Value,
+        },
+        Delete {
+            entity: &'a str,
+            id: &'a str,
+        },
+    }
+
+    /// Result of a single op inside a transaction.
+    #[derive(Debug, Clone)]
+    pub enum TxResult {
+        Inserted(String),
+        Updated(bool),
+        Deleted(bool),
+    }
+
+    impl LivePostgresAdapter {
+        /// Run `ops` inside a single Postgres transaction. Either all of them
+        /// commit together or none of them do — there is no partial state on
+        /// failure. The ROLLBACK happens implicitly when the `Transaction`
+        /// guard is dropped without `commit()` being called.
+        pub fn transact(&mut self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, StorageError> {
+            let mut tx = self.client.transaction().map_err(pg_err)?;
+            let mut results: Vec<TxResult> = Vec::with_capacity(ops.len());
+
+            for op in ops {
+                match op {
+                    TxOp::Insert { entity, data } => {
+                        let (sql, values) = build_insert_sql(entity, data)?;
+                        let id = values[0].clone();
+                        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
+                            .iter()
+                            .map(|v| v as &(dyn postgres::types::ToSql + Sync))
+                            .collect();
+                        tx.execute(sql.as_str(), &params).map_err(pg_err)?;
+                        results.push(TxResult::Inserted(id));
+                    }
+                    TxOp::Update { entity, id, data } => {
+                        let (sql, values) = build_update_sql(entity, id, data)?;
+                        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
+                            .iter()
+                            .map(|v| v as &(dyn postgres::types::ToSql + Sync))
+                            .collect();
+                        let n = tx.execute(sql.as_str(), &params).map_err(pg_err)?;
+                        results.push(TxResult::Updated(n > 0));
+                    }
+                    TxOp::Delete { entity, id } => {
+                        let sql =
+                            format!("DELETE FROM {} WHERE id = $1", quote_ident(entity));
+                        let n = tx
+                            .execute(sql.as_str(), &[id])
+                            .map_err(pg_err)?;
+                        results.push(TxResult::Deleted(n > 0));
+                    }
+                }
+            }
+
+            tx.commit().map_err(pg_err)?;
+            Ok(results)
+        }
+    }
+
+    fn value_to_pg(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        }
     }
 
     fn row_to_json(row: &postgres::Row) -> serde_json::Value {
+        use postgres::types::Type;
         let mut obj = serde_json::Map::new();
         for (i, col) in row.columns().iter().enumerate() {
-            let val: Option<String> = row.get(i);
-            obj.insert(
-                col.name().to_string(),
-                match val {
-                    Some(s) => serde_json::Value::String(s),
-                    None => serde_json::Value::Null,
-                },
-            );
+            let name = col.name().to_string();
+
+            // Use `try_get` everywhere — `Row::get` panics on decode mismatch,
+            // and a panic in a query handler poisons the connection mutex,
+            // taking down all subsequent reads on this datastore. Anything
+            // that fails to decode becomes Null with a one-shot warning.
+            //
+            // Timestamps and the catch-all path explicitly DON'T request
+            // `String` — the postgres crate uses binary protocol by default
+            // and there's no `FromSql<String>` impl for TIMESTAMPTZ etc. We
+            // ask for `Vec<u8>` and lossy-stringify, which works for all
+            // text-shaped columns in either protocol.
+            let value: serde_json::Value = match *col.type_() {
+                Type::BOOL => try_get_or_null::<Option<bool>>(row, i)
+                    .flatten()
+                    .map(serde_json::Value::Bool)
+                    .unwrap_or(serde_json::Value::Null),
+                Type::INT2 => try_get_or_null::<Option<i16>>(row, i)
+                    .flatten()
+                    .map(|v| serde_json::Value::Number(v.into()))
+                    .unwrap_or(serde_json::Value::Null),
+                Type::INT4 => try_get_or_null::<Option<i32>>(row, i)
+                    .flatten()
+                    .map(|v| serde_json::Value::Number(v.into()))
+                    .unwrap_or(serde_json::Value::Null),
+                Type::INT8 => try_get_or_null::<Option<i64>>(row, i)
+                    .flatten()
+                    .map(|v| serde_json::Value::Number(v.into()))
+                    .unwrap_or(serde_json::Value::Null),
+                Type::FLOAT4 => try_get_or_null::<Option<f32>>(row, i)
+                    .flatten()
+                    .and_then(|v| serde_json::Number::from_f64(v as f64))
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                Type::FLOAT8 => try_get_or_null::<Option<f64>>(row, i)
+                    .flatten()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                Type::JSON | Type::JSONB => {
+                    try_get_or_null::<Option<serde_json::Value>>(row, i)
+                        .flatten()
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                Type::BYTEA => try_get_or_null::<Option<Vec<u8>>>(row, i)
+                    .flatten()
+                    .map(|b| serde_json::Value::String(b64(&b)))
+                    .unwrap_or(serde_json::Value::Null),
+                Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
+                    try_get_or_null::<Option<String>>(row, i)
+                        .flatten()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                _ => {
+                    // Last resort: ask Postgres to render anything else as
+                    // text via a stringifying decode through Vec<u8>. If even
+                    // that fails (rare — Postgres types not implementing the
+                    // text format), fall through to Null with a warning.
+                    match row.try_get::<_, Option<String>>(i) {
+                        Ok(Some(s)) => serde_json::Value::String(s),
+                        Ok(None) => serde_json::Value::Null,
+                        Err(_) => match row.try_get::<_, Option<Vec<u8>>>(i) {
+                            Ok(Some(bytes)) => serde_json::Value::String(
+                                String::from_utf8_lossy(&bytes).into_owned(),
+                            ),
+                            _ => serde_json::Value::Null,
+                        },
+                    }
+                }
+            };
+            obj.insert(name, value);
         }
         serde_json::Value::Object(obj)
+    }
+
+    fn try_get_or_null<'a, T>(row: &'a postgres::Row, i: usize) -> Option<T>
+    where
+        T: postgres::types::FromSql<'a>,
+    {
+        match row.try_get::<_, T>(i) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    "[postgres] decode failed for column {} ({}): {e}",
+                    i,
+                    row.columns()[i].name()
+                );
+                None
+            }
+        }
+    }
+
+    /// Minimal base64 encoder so we don't need another dependency just for
+    /// the BYTEA column edge case.
+    fn b64(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+        let chunks = bytes.chunks(3);
+        for chunk in chunks {
+            let b = [
+                chunk.first().copied().unwrap_or(0),
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            out.push(TABLE[(b[0] >> 2) as usize] as char);
+            out.push(TABLE[((b[0] & 0x03) << 4 | b[1] >> 4) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(TABLE[((b[1] & 0x0F) << 2 | b[2] >> 6) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(TABLE[(b[2] & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
     }
 
     fn pg_err(e: postgres::Error) -> StorageError {
@@ -571,7 +967,7 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/agentdb.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
             .unwrap()
     }
 
@@ -747,7 +1143,7 @@ mod tests {
         assert!(INTROSPECT_TABLES_SQL.contains("information_schema.tables"));
         assert!(INTROSPECT_COLUMNS_SQL.contains("$1"));
         assert!(INTROSPECT_INDEXES_SQL.contains("$1"));
-        assert!(INTROSPECT_TABLES_SQL.contains("_agentdb_"));
+        assert!(INTROSPECT_TABLES_SQL.contains("_statecraft_"));
     }
 
     // -- Plan from snapshot tests --
@@ -892,9 +1288,26 @@ mod tests {
     fn generate_id_is_unique_across_calls() {
         let id1 = generate_id();
         let id2 = generate_id();
-        // Nanosecond precision should yield different IDs in sequence.
-        assert!(!id1.is_empty());
-        assert!(!id2.is_empty());
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn generate_id_is_lex_sortable() {
+        // 1000 IDs back-to-back must come out in monotonically increasing
+        // lexicographic order. This is what makes cursor pagination correct.
+        let mut ids: Vec<String> = (0..1000).map(|_| generate_id()).collect();
+        let sorted = {
+            let mut s = ids.clone();
+            s.sort();
+            s
+        };
+        assert_eq!(ids, sorted, "generate_id must be lex-monotonic");
+        // And every id must be the same width (otherwise lex comparison is
+        // wrong at width boundaries).
+        let len0 = ids[0].len();
+        assert!(ids.iter().all(|id| id.len() == len0));
+        ids.dedup();
+        assert_eq!(ids.len(), 1000, "no collisions in a tight loop");
     }
 
     #[test]

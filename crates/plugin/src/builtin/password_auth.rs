@@ -1,14 +1,29 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::{SaltString, rand_core::OsRng};
 
 use crate::Plugin;
-use agentdb_auth::AuthContext;
+
+/// A lazily-computed dummy Argon2 hash used to equalize verify timing for
+/// unknown emails. Generated once per process against a fixed random
+/// password; the password we verify against it at runtime will never match,
+/// so the returned value is always `false`.
+fn dummy_hash() -> &'static str {
+    static CELL: OnceLock<String> = OnceLock::new();
+    CELL.get_or_init(|| {
+        // Hash of a high-entropy throwaway string. We don't care what it is;
+        // we only need a real PHC-format Argon2id hash so `verify_password`
+        // runs through the same code path as a real verify would.
+        hash_password("dummy-password-for-timing-equalization")
+    })
+}
+
 
 /// A stored password entry.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PasswordEntry {
     user_id: String,
     email: String,
@@ -51,14 +66,29 @@ impl PasswordAuthPlugin {
     }
 
     /// Verify email + password. Returns the user_id if valid.
-    /// Argon2's verify_password handles constant-time comparison internally.
+    ///
+    /// Timing-equalized: when the email is unknown we still run a throwaway
+    /// Argon2 verify against a fixed dummy hash. Otherwise an attacker can
+    /// distinguish "known email, wrong password" (takes ~50ms) from "unknown
+    /// email" (<1ms) and enumerate registered addresses.
     pub fn verify(&self, email: &str, password: &str) -> Option<String> {
         let entries = self.entries.lock().unwrap();
-        let entry = entries.get(email)?;
-        if verify_password(password, &entry.hash) {
-            Some(entry.user_id.clone())
-        } else {
-            None
+        match entries.get(email) {
+            Some(entry) => {
+                if verify_password(password, &entry.hash) {
+                    Some(entry.user_id.clone())
+                } else {
+                    None
+                }
+            }
+            None => {
+                // Dummy verify to pay the Argon2 cost even for unknown emails.
+                // dummy_hash() returns a real Argon2id hash of a random string;
+                // the password we pass won't match, so this always returns
+                // false. What matters is the compute time, not the result.
+                let _ = verify_password(password, dummy_hash());
+                None
+            }
         }
     }
 

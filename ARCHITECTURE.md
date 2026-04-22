@@ -1,579 +1,188 @@
-# agentdb Architecture
+# Architecture
 
-## Product Definition
+A map of the statecraft codebase for new contributors. Pairs with [README.md](README.md)
+(user-facing) and [SECURITY.md](SECURITY.md) (operational hardening).
 
-`agentdb` is an AI-native application runtime and framework for:
+## High-level shape
 
-- web apps
-- mobile apps
-- static content sites
-- local-first software with built-in sync
-
-The framework should let AI tools build and operate apps through:
-
-- code
-- CLI commands
-- machine-readable manifests
-- structured diagnostics
-
-The framework should not depend on dashboards or browser-based admin workflows for core functionality.
-
-## Design Goals
-
-- Single-binary server deployment
-- Excellent local DX for both AI and humans
-- One obvious way to model data, read data, write data, and define routes
-- Local-first sync by default for app data
-- Static rendering and live app rendering in the same framework
-- First-class mobile support
-- Predictable machine-readable control surface
-
-## Non-Goals
-
-- Rich CMS/editor product
-- Dashboard-first backend management
-- Multiple competing data APIs
-- CRDT-heavy collaboration in v1
-- Plugin marketplace in v1
-- Multi-runtime product complexity in v1
-
-## Core Thesis
-
-The framework should center around a small set of primitives:
-
-- `Schema`
-- `Query`
-- `Action`
-- `Policy`
-- `Route`
-- `Asset`
-
-Everything else should derive from these primitives.
-
-## Language and Runtime Choices
-
-### Core
-
-- Rust for the runtime, sync engine, storage adapters, auth runtime, CLI, and deployable server
-
-Why:
-
-- single binary
-- strong performance profile
-- low memory footprint
-- good cold starts
-- better fit than Go for a sync/storage-heavy product
-
-### App Surface
-
-- TypeScript for app definitions and generated bindings
-- React for web rendering
-- React Native + Expo for mobile rendering
-
-Why:
-
-- AI already understands TS/JSX extremely well
-- strong web and mobile ecosystem
-- low friction for app authors
-
-## Storage Model
-
-### Local Dev
-
-- SQLite by default
-- optional local Postgres
-
-### Production
-
-- Postgres as canonical relational store
-- SQLite as client/local replica
-- object storage for blobs/assets
-
-### Data Model
-
-The server owns canonical state. Clients maintain local SQLite replicas for:
-
-- offline access
-- optimistic writes
-- fast reads
-- sync recovery
-
-## App Model
-
-An app is made of:
-
-- typed schema
-- typed queries
-- typed actions
-- declarative policies
-- explicit routes
-- views
-- optional file-backed content
-- optional data-backed content
-
-## Filesystem Contract
-
-User app layout:
-
-```txt
-/app
-  /schema
-    entities.ts
-    relations.ts
-    indexes.ts
-    queries.ts
-    actions.ts
-    policies.ts
-  /routes
-    index.route.tsx
-    blog-slug.route.tsx
-    app-project-id.route.tsx
-  /views
-  /components
-  /content
-    docs/
-    blog/
-    pages/
-  /styles
-  /agents
-    manifest.json
-    context.md
-    invariants.md
-  /generated
-/tests
-agentdb.config.ts
-package.json
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Client (browser, RN, server)            │
+│  packages/react · packages/sync · packages/sdk · packages/fns   │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ HTTP + WS + SSE
+┌────────────────────────────▼────────────────────────────────────┐
+│  crates/cli  (statecraft dev | build | migrate | seed | deploy)    │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────────┐
+│  crates/runtime  (tiny_http server, RoomManager, JobQueue,      │
+│                   PubSub, WorkflowEngine, BunRuntime)           │
+│        │              │              │              │           │
+│        ▼              ▼              ▼              ▼           │
+│   crates/router  crates/realtime  crates/auth   crates/policy   │
+│   (route(),       (Shard, tick,    (sessions,   (rule engine,   │
+│    DataStore-     SimState,        magic codes,  RBAC, expr     │
+│    backed)        AOI, replay)     OAuth)        evaluator)     │
+│                                                                 │
+│  crates/sync   crates/storage   crates/plugin   crates/migrate  │
+│  (change log)  (sqlite/pg)      (cache, etc.)   (schema diff)   │
+│                                                                 │
+│       crates/http  (DataStore trait — platform boundary)        │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-Rules:
-
-- `/generated` is framework-owned
-- app code lives in `/app`
-- all important behavior should be visible from files in the repo
-- no dashboard-only configuration
-
-## Core Primitives
-
-### Schema
-
-Defines:
-
-- entities
-- fields
-- relations
-- indexes
-- content entities
-- assets
-
-Schema is the single source of truth for:
-
-- storage
-- generated client bindings
-- query planning
-- policies
-- sync metadata
-
-### Query
-
-Typed graph reads that run in one of three modes:
-
-- `static`
-- `server`
-- `live`
-
-Queries are the only standard read path.
-
-### Action
-
-Typed transactional writes with:
-
-- validation
-- auth context
-- policy checks
-- idempotency
-- undo metadata
-
-Actions are the only standard write path.
-
-### Policy
-
-Declarative authorization rules at:
-
-- entity level
-- field level
-- action level
-- route access level
-
-Policies run during query planning and mutation execution.
-
-### Route
-
-Every route must declare:
-
-- path
-- mode
-- query
-- view
-- optional auth requirement
-- optional SEO metadata
-
-Route modes:
-
-- `static`
-- `server`
-- `live`
-
-### Asset
-
-First-class file/blob records with:
-
-- metadata
-- ownership
-- derived URLs
-- storage references
-
-## Content Model
-
-There is no editor product in v1.
-
-Content exists in two forms:
-
-### File-Backed Content
-
-For:
-
-- docs
-- blogs
-- marketing pages
-- changelogs
-
-Stored in repo files. AI tools edit them through code or CLI workflows.
-
-### Data-Backed Content
-
-For:
-
-- user-generated content
-- dynamic pages
-- app-managed content
-
-Stored as normal entities and manipulated through actions.
-
-The framework should support draft/publish states, but not a rich authoring UI.
-
-## Sync Architecture
-
-### Model
-
-- server-authoritative
-- client-local replica
-- append-only change log
-- cursor-based pull
-- idempotent push
-- optimistic local actions
-
-### Client Responsibilities
-
-- maintain local SQLite replica
-- queue pending actions
-- apply optimistic updates
-- track sync cursor
-- subscribe to invalidation hints
-
-### Server Responsibilities
-
-- validate auth and policies
-- execute actions transactionally
-- append durable change events
-- serve pull updates since cursor
-- dedupe repeated mutations
-
-### Transport
-
-Durable sync:
-
-- HTTP push/pull
-
-Realtime hints:
-
-- WebSocket or SSE
-
-Sockets should not be the source of truth. They only accelerate freshness.
-
-### Conflict Policy
-
-V1 defaults:
-
-- entity versioning
-- tombstones for deletes
-- last-write-wins at field level
-- structured mutation rejection payloads
-
-Custom merge logic can be added later at the action level.
-
-## Auth Model
-
-V1 auth support:
-
-- email link / magic code
-- GitHub OAuth
-- Google OAuth
-- session cookies
-- bearer tokens
-
-Auth context must be available consistently in:
-
-- routes
-- queries
-- actions
-- policies
-
-## Runtime Topology
-
-### Default Deployment
-
-- one Rust binary
-- one Postgres database
-- optional object storage
-
-The binary should contain:
-
-- HTTP server
-- auth runtime
-- query execution
-- action execution
-- sync endpoints
-- static asset serving
-- realtime invalidation transport
-
-### Scaling Modes
-
-#### Static
-
-- prerendered output only
-- host anywhere
-
-#### Single-Binary
-
-- default production mode
-- one runtime process
-- one Postgres
-
-#### Horizontally Scaled
-
-- many stateless runtime instances
-- shared Postgres
-- optional dedicated invalidation/sync fanout layer later
-
-The architecture should allow scaling out without changing the programming model.
-
-## Frontend Model
-
-React still makes sense as the rendering layer, but not as the center of the framework.
-
-Framework responsibilities:
-
-- own data model
-- own action model
-- own route model
-- own sync semantics
-- own auth semantics
-
-React responsibilities:
-
-- render views
-- bind to queries
-- bind to actions
-
-For static content:
-
-- render HTML first
-- hydrate only where needed
-
-For app routes:
-
-- use live queries and action bindings through generated hooks
-
-## Mobile Model
-
-Mobile support is first-class in v1.
-
-Target:
-
-- React Native + Expo
-
-Requirements:
-
-- local SQLite replica
-- background-safe sync model
-- generated TS bindings
-- same schema/query/action surface as web
-
-Web and mobile should share:
-
-- schema
-- actions
-- queries
-- route-adjacent view logic where practical
-- generated client APIs
-
-## CLI Contract
-
-The CLI is the primary operator surface.
-
-Every important command should support `--json`.
-
-Initial command set:
-
-- `agentdb init`
-- `agentdb dev`
-- `agentdb codegen`
-- `agentdb studio`
-- `agentdb schema check`
-- `agentdb schema push`
-- `agentdb query run <name>`
-- `agentdb action run <name>`
-- `agentdb explain <route|query|action|policy>`
-- `agentdb sync inspect`
-- `agentdb build`
-- `agentdb deploy`
-- `agentdb doctor`
-
-### Most Important Commands
-
-`agentdb dev`
-
-- starts local runtime
-- starts local storage
-- watches schema, routes, views, content
-- regenerates bindings
-- exposes local Studio
-
-`agentdb explain`
-
-- explains framework interpretation of route/query/action/policy
-- should be useful to both humans and AI
-
-`agentdb doctor`
-
-- validates environment
-- validates schema
-- validates auth configuration
-- validates deploy readiness
-
-## Introspection and Diagnostics
-
-Every app should generate machine-readable metadata:
-
-`/app/agents/manifest.json`
-
-Should include:
-
-- schema summary
-- route inventory
-- action signatures
-- policy summary
-- environment requirements
-- deploy target
-- test commands
-
-Errors should be structured and machine-actionable:
-
-- error code
-- failing resource
-- failing invariant
-- probable fix
-
-## Local Studio
-
-Studio is a debug and inspection tool, not a CMS.
-
-V1 Studio features:
-
-- entity browser
-- query runner
-- action runner
-- auth/session viewer
-- policy evaluator
-- sync inspector
-- route manifest viewer
-- schema graph viewer
-
-No rich editor. No publishing workspace. No media management product.
-
-## Developer Experience Requirements
-
-- no cloud account required for local dev
-- app boots locally with one command
-- generated code is human-readable
-- route mode is explicit
-- direct writes outside actions are blocked
-- destructive schema changes require explicit confirmation
-- undo exists for major destructive operations where feasible
-
-## Example Programming Model
-
-Schema:
-
-```ts
-export const Post = entity("Post", {
-  title: field.string(),
-  slug: field.string().unique(),
-  body: field.richtext(),
-  authorId: field.id("User"),
-  publishedAt: field.datetime().optional(),
-})
+The boundary between platform-agnostic logic and the self-hosted server is
+`crates/http`'s `DataStore` trait. The same `route()` function in
+`crates/router` runs on top of the SQLite-backed `Runtime` in self-host mode
+and (eventually) on top of D1 in the Cloudflare Workers adapter.
+
+## Crate responsibilities
+
+### Foundation
+
+- **`crates/core`** — error codes (`ExitCode`, `AgentDBErrorCode`), shared
+  types (`AppManifest`, `EntityDef`, `FieldType`), no I/O.
+- **`crates/http`** — `HttpMethod`, `DataError`, and the `DataStore` trait.
+  This is the contract every backend (SQLite, D1, Postgres) implements.
+
+### Routing
+
+- **`crates/router`** — `route(ctx, method, url, body, auth)`. Owns every URL
+  the framework exposes: `/api/sync/*`, `/api/auth/*`, `/api/entity/*`,
+  `/api/fn/*`, `/api/aggregate/*`, `/api/import`, `/api/rooms/*`,
+  `/api/jobs/*`, `/api/workflows/*`, `/api/shards/*`, `/api/files/*`.
+  Depends only on traits — no `tiny_http`, no `worker`.
+
+### Storage
+
+- **`crates/storage`** — SQL generation (`quote_ident`, `validate_column_name`,
+  `create_table_sql`), SQLite adapter, optional Postgres adapter behind the
+  `postgres` feature flag, file-storage helpers.
+- **`crates/runtime/src/datastore.rs`** — `impl DataStore for Runtime` plus
+  `TxStore` (the in-transaction handle passed to TS mutations).
+- **`crates/migrate`** — schema diff engine. Compares current `AppManifest`
+  to the live database, emits a plan, applies via `migrate apply`.
+
+### Cross-cutting
+
+- **`crates/auth`** — `SessionStore` + `SessionBackend` trait (in-memory or
+  SQLite-backed via `crates/runtime/src/session_backend.rs`), `MagicCodeStore`
+  with brute-force protection, `OAuthConfig` (Google + GitHub), `AuthContext`
+  with role membership.
+- **`crates/policy`** — expression evaluator. Supports `auth.userId`,
+  `auth.isAdmin`, `auth.hasRole('x')`, `auth.hasAnyRole('a','b')`,
+  `record.fieldName`, basic boolean and comparison ops.
+- **`crates/sync`** — append-only change log + cursor-based pull endpoint.
+- **`crates/plugin`** — plugin trait + builtins (cache, webhooks, soft delete,
+  audit log).
+
+### Compute
+
+- **`crates/runtime`** — the self-hosted server.
+  - `lib.rs` — `Runtime` (SQLite-backed; CRUD + `_with_conn` variants).
+  - `server.rs` — `tiny_http` listener, request → `route()` glue, drain on
+    shutdown, optional Bun spawn, optional shard WebSocket server (port + 3).
+  - `config.rs` — `ServerConfig::from_env`. The single env-var entry point.
+  - `rooms.rs`, `jobs.rs`, `workflows.rs`, `pubsub.rs` — multiplayer rooms,
+    background queue, durable workflow engine, in-process pub/sub.
+  - `bun_runtime.rs` — child process supervisor for the TS function runtime.
+  - `session_backend.rs` — SQLite session persistence.
+- **`crates/realtime`** — game/collab shards. `Shard<S: SimState>`, tick loop,
+  area-of-interest, snapshot delta, replay, matchmaker. WebSocket transport
+  in `transport.rs`.
+- **`crates/functions`** — Rust side of the TS function runtime. NDJSON over
+  stdin/stdout to a Bun child process.
+- **`crates/workers`** — Cloudflare Workers adapter (experimental — see
+  `crates/workers/README.md` for what works and what doesn't).
+
+### CLI
+
+- **`crates/cli`** — the `statecraft` binary. `main.rs` dispatches to
+  `commands/<verb>.rs`. JSON output mode for everything; structured logs to
+  stderr via `init_tracing()`.
+
+### TypeScript packages
+
+- **`packages/sdk`** — schema DSL + manifest builder. Run during `statecraft
+  codegen` to emit `statecraft.manifest.json`.
+- **`packages/functions`** — `mutation(...)`, `query(...)`, `action(...)`
+  helpers. The Bun runtime in `packages/functions/src/runtime.ts` reads NDJSON
+  RPCs from stdin and dispatches to handlers.
+- **`packages/react`** — `useQuery`, `useMutation`, `useInfiniteQuery`,
+  `useFn`, `useShard`, plus `createTypedDb<S>()` for codegen-driven typing.
+- **`packages/sync`** — local-first replica + offline queue.
+- **`packages/react-native`** — RN hooks + Expo SQLite-backed replica.
+- **`packages/workflows`** — durable workflow runner (sidecar process).
+
+## Request lifecycle (self-hosted)
+
+```
+HTTP request (tiny_http)
+  → server.rs builds RouterContext (refs to Runtime, SessionStore, etc.)
+  → router::route() dispatches by URL
+  → handler reads/writes via DataStore trait (Runtime impl)
+  → response built; CORS + security headers added in server.rs
+  → tiny_http writes response
 ```
 
-Action:
+Mutations that hit `/api/fn/<name>` instead route to `BunRuntime`, which:
 
-```ts
-export const publishPost = action("publishPost", {
-  input: { postId: id("Post") },
-  run: ({ db, input, auth }) => {
-    const post = db.get("Post", input.postId)
-    auth.require("update", post)
-    return db.update("Post", input.postId, {
-      publishedAt: new Date(),
-    })
-  },
-})
-```
+1. Sends `{call_id, fn, args, ctx}` as NDJSON to the Bun child.
+2. Bun handler runs with a typed `ctx.db` proxy — every `db.insert/get/update`
+   call round-trips back to Rust, where it's executed inside a single
+   transaction (`TxStore`).
+3. Bun returns `{call_id, result | error}`; Rust commits or rolls back.
 
-Route:
+The `pendingRpcs` map keyed by `call_id` is what makes concurrent function
+calls safe with a single reader loop.
 
-```ts
-export default defineRoute({
-  path: "/blog/:slug",
-  mode: "static",
-  query: q.post.bySlug(),
-  view: BlogPostPage,
-})
-```
+## Real-time
 
-## V1 Roadmap
+Two unrelated systems share the word "real-time":
 
-1. Rust workspace and CLI shell
-2. Schema DSL and validation
-3. Codegen pipeline for TS bindings
-4. Route manifest and static rendering
-5. Postgres and SQLite adapters
-6. Query and action execution runtime
-7. Sync push/pull protocol
-8. Web TS/React SDK
-9. Mobile TS/React Native SDK
-10. Auth runtime
-11. Local Studio
-12. Single-binary deploy path
+- **Sync** (`crates/sync`) — invalidates client replicas. Server-authoritative,
+  durable, append-only. Transport is HTTP pull + WebSocket/SSE hints.
+- **Shards** (`crates/realtime`) — tick-driven multiplayer simulations.
+  `Shard<S: SimState>` runs a fixed-rate game loop, broadcasts snapshot deltas
+  to subscribers, accepts inputs through `push_input_json`. Each shard owns
+  its state — no shared lock contention. Used by Mooncraft.
 
-## V1 Success Criteria
+## Transactions
 
-A strong engineer or agent should be able to:
+- HTTP mutations on entities are atomic per-request (single SQLite transaction
+  in `Runtime`).
+- TS function handlers are atomic per-call: the entire handler runs inside one
+  `TxStore` transaction. Throwing rolls back; returning commits.
+- Workflows are *not* atomic — they're durable step machines with retries.
 
-- create an app in minutes
-- create a content site in minutes
-- add auth quickly
-- define a live synced route quickly
-- run the app locally with one command
-- deploy the server as one binary
-- debug policy and sync failures without reading framework internals
+## Where things are deliberately small
+
+- No ORM. SQL is generated from the manifest and parameterized.
+- No async runtime in the HTTP path. `tiny_http` is blocking, one OS thread
+  per connection. Easier to reason about, easier to debug, fast enough for
+  the target deployment (single VPS, < 10k req/s).
+- The Bun runtime is one child process. Concurrency comes from JS's event
+  loop and from running the function handler inside a Rust transaction —
+  not from a worker pool.
+- No service mesh, no gRPC, no message broker. The runtime is one binary.
+
+## What's experimental
+
+- `crates/workers` — D1 DataStore is partially implemented; routes don't all
+  work; WebSocket via Durable Objects is sketched but not wired.
+- `crates/storage` Postgres adapter — basic CRUD works, but `query_filtered`,
+  `lookup`, and `query_graph` still go through SQLite-shaped paths in places.
+  See task list in `SECURITY.md`.
+
+## Adding a new feature: where does it go?
+
+| Need to... | Touch |
+|---|---|
+| Add a URL | `crates/router/src/lib.rs` (and `crates/http` if it needs new trait methods) |
+| Add a CLI command | `crates/cli/src/commands/<verb>.rs`, register in `main.rs` |
+| Add a storage backend | `impl DataStore for ...` in a new crate |
+| Add a built-in plugin | `crates/plugin/src/builtin/` |
+| Add a TS hook | `packages/react/src/` |
+| Change schema diff behavior | `crates/migrate` |
+| Add a new auth provider | `crates/auth/src/oauth.rs` |

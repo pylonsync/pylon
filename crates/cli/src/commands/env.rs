@@ -1,4 +1,4 @@
-use agentdb_core::ExitCode;
+use statecraft_core::ExitCode;
 use serde::Serialize;
 
 use crate::output;
@@ -16,43 +16,43 @@ struct EnvVarDef {
 
 const ENV_VARS: &[EnvVarDef] = &[
     EnvVarDef {
-        name: "AGENTDB_ADMIN_TOKEN",
+        name: "STATECRAFT_ADMIN_TOKEN",
         description: "Admin auth token for protected endpoints",
         default: None,
         sensitive: true,
     },
     EnvVarDef {
-        name: "AGENTDB_RATE_LIMIT_MAX",
+        name: "STATECRAFT_RATE_LIMIT_MAX",
         description: "Max requests per window",
         default: Some("100"),
         sensitive: false,
     },
     EnvVarDef {
-        name: "AGENTDB_RATE_LIMIT_WINDOW",
+        name: "STATECRAFT_RATE_LIMIT_WINDOW",
         description: "Rate limit window in seconds",
         default: Some("60"),
         sensitive: false,
     },
     EnvVarDef {
-        name: "AGENTDB_OAUTH_GOOGLE_CLIENT_ID",
+        name: "STATECRAFT_OAUTH_GOOGLE_CLIENT_ID",
         description: "Google OAuth client ID",
         default: None,
         sensitive: false,
     },
     EnvVarDef {
-        name: "AGENTDB_OAUTH_GOOGLE_CLIENT_SECRET",
+        name: "STATECRAFT_OAUTH_GOOGLE_CLIENT_SECRET",
         description: "Google OAuth client secret",
         default: None,
         sensitive: true,
     },
     EnvVarDef {
-        name: "AGENTDB_OAUTH_GITHUB_CLIENT_ID",
+        name: "STATECRAFT_OAUTH_GITHUB_CLIENT_ID",
         description: "GitHub OAuth client ID",
         default: None,
         sensitive: false,
     },
     EnvVarDef {
-        name: "AGENTDB_OAUTH_GITHUB_CLIENT_SECRET",
+        name: "STATECRAFT_OAUTH_GITHUB_CLIENT_SECRET",
         description: "GitHub OAuth client secret",
         default: None,
         sensitive: true,
@@ -140,9 +140,9 @@ pub fn run(_args: &[String], json_mode: bool) -> ExitCode {
 
     println!();
     if color {
-        println!("{BOLD}agentdb environment variables{RESET}");
+        println!("{BOLD}statecraft environment variables{RESET}");
     } else {
-        println!("agentdb environment variables");
+        println!("statecraft environment variables");
     }
     println!();
 

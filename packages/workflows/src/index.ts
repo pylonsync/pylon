@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// @agentdb/workflows — define durable, multi-step workflows in TypeScript
+// @statecraft/workflows — define durable, multi-step workflows in TypeScript
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

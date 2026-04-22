@@ -1,10 +1,10 @@
-You are working in `/Users/ericc59/Dev/agentdb`.
+You are working in `/Users/ericc59/Dev/statecraft`.
 
 Read first:
 
-- `/Users/ericc59/Dev/agentdb/README.md`
-- `/Users/ericc59/Dev/agentdb/ARCHITECTURE.md`
-- `/Users/ericc59/Dev/agentdb/ROADMAP.md`
+- `/Users/ericc59/Dev/statecraft/README.md`
+- `/Users/ericc59/Dev/statecraft/ARCHITECTURE.md`
+- `/Users/ericc59/Dev/statecraft/ROADMAP.md`
 
 Current state summary:
 
@@ -20,7 +20,7 @@ Current state summary:
   - `policy`
   - `buildManifest`
 - example app lives at:
-  - `/Users/ericc59/Dev/agentdb/examples/todo-app/app.ts`
+  - `/Users/ericc59/Dev/statecraft/examples/todo-app/app.ts`
 - CLI commands currently include:
   - `codegen`
   - `schema check`

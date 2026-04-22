@@ -1,10 +1,37 @@
 use std::collections::{BTreeSet, HashMap};
 
-use agentdb_core::{AppManifest, Diagnostic, ExitCode, Severity};
+use statecraft_core::{AppManifest, Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::manifest::{load_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
+
+/// Redact the password out of a Postgres DSN before printing it.
+///
+/// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`.
+/// Malformed DSNs return unchanged — better to leak the raw value than to
+/// silently hide a configuration problem. Callers must still treat the
+/// output as "might include the url shape" and not the credentials.
+fn redact_dsn(dsn: &str) -> String {
+    // Find the first `@` that separates userinfo from host. A `:` inside
+    // the userinfo denotes password.
+    let scheme_end = match dsn.find("://") {
+        Some(i) => i + 3,
+        None => return dsn.to_string(),
+    };
+    let rest = &dsn[scheme_end..];
+    let at = match rest.find('@') {
+        Some(i) => i,
+        None => return dsn.to_string(),
+    };
+    let userinfo = &rest[..at];
+    let host_and_rest = &rest[at..]; // starts with '@'
+    let redacted_userinfo = match userinfo.find(':') {
+        Some(i) => format!("{}:***", &userinfo[..i]),
+        None => userinfo.to_string(),
+    };
+    format!("{}{}{}", &dsn[..scheme_end], redacted_userinfo, host_and_rest)
+}
 
 // ---------------------------------------------------------------------------
 // schema check
@@ -17,7 +44,7 @@ pub fn run_check(args: &[String], json_mode: bool) -> ExitCode {
         .next()
         .map(|s| s.as_str());
 
-    let manifest_path = path.unwrap_or("agentdb.manifest.json");
+    let manifest_path = path.unwrap_or("statecraft.manifest.json");
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -95,7 +122,7 @@ pub fn run_diff(args: &[String], json_mode: bool) -> ExitCode {
                 code: "DIFF_MISSING_ARGS".into(),
                 message: "Two manifest paths are required".into(),
                 span: None,
-                hint: Some("Usage: agentdb schema diff <old-manifest> <new-manifest>".into()),
+                hint: Some("Usage: statecraft schema diff <old-manifest> <new-manifest>".into()),
             }],
             json_mode,
         );
@@ -179,8 +206,8 @@ struct PushResult {
     database_path: Option<String>,
     baseline: &'static str,
     manifest_version: u32,
-    plan: agentdb_storage::SchemaPlan,
-    analysis: agentdb_storage::PlanAnalysis,
+    plan: statecraft_storage::SchemaPlan,
+    analysis: statecraft_storage::PlanAnalysis,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -278,7 +305,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                     message: "No manifest path provided".into(),
                     span: None,
                     hint: Some(
-                        "Usage: agentdb schema push <manifest> --dry-run|--sqlite <path> [--from <old>]"
+                        "Usage: statecraft schema push <manifest> --dry-run|--sqlite <path> [--from <old>]"
                             .into(),
                     ),
                 }],
@@ -314,7 +341,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
     if dry_run {
         // Dry-run: report plan, do not apply.
         let baseline = if from_path.is_some() { "manifest" } else { "empty" };
-        let analysis = agentdb_storage::analyze_plan(&plan);
+        let analysis = statecraft_storage::analyze_plan(&plan);
         let result = PushResult {
             code: "PUSH_DRY_RUN",
             dry_run: true,
@@ -347,7 +374,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
 
     if let Some(db_path) = sqlite_path {
         // SQLite apply mode.
-        let adapter = match agentdb_storage::sqlite::SqliteAdapter::open(db_path) {
+        let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -388,7 +415,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             }
         };
 
-        let analysis = agentdb_storage::analyze_plan(&live_plan);
+        let analysis = statecraft_storage::analyze_plan(&live_plan);
 
         // Block apply if the plan contains unsupported operations.
         if analysis.has_unsupported {
@@ -423,7 +450,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             return ExitCode::Error;
         }
 
-        let push_meta = agentdb_storage::sqlite::PushMetadata {
+        let push_meta = statecraft_storage::sqlite::PushMetadata {
             manifest_version: manifest.manifest_version,
             app_version: &manifest.version,
             baseline,
@@ -480,7 +507,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else if let Some(pg_url) = postgres_url {
         // Postgres apply mode.
-        let mut adapter = match agentdb_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
+        let mut adapter = match statecraft_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -518,7 +545,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             }
         };
 
-        let analysis = agentdb_storage::analyze_plan(&pg_plan);
+        let analysis = statecraft_storage::analyze_plan(&pg_plan);
 
         if analysis.has_unsupported {
             let result = PushResult {
@@ -526,7 +553,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                 dry_run: false,
                 applied: false,
                 adapter: Some("postgres"),
-                database_path: Some(pg_url.to_string()),
+                database_path: Some(redact_dsn(pg_url)),
                 baseline,
                 manifest_version: manifest.manifest_version,
                 plan: pg_plan.clone(),
@@ -554,7 +581,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                     dry_run: false,
                     applied: true,
                     adapter: Some("postgres"),
-                    database_path: Some(pg_url.to_string()),
+                    database_path: Some(redact_dsn(pg_url)),
                     baseline,
                     manifest_version: manifest.manifest_version,
                     plan: pg_plan.clone(),
@@ -568,7 +595,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                     println!("schema push --postgres");
                     println!();
                     println!("  Manifest:  {manifest_path}");
-                    println!("  Database:  {pg_url}");
+                    println!("  Database:  {}", redact_dsn(pg_url));
                     println!("  Baseline:  {baseline}");
                     println!("  Version:   {}", manifest.manifest_version);
                     print_plan_human(&pg_plan);
@@ -601,7 +628,7 @@ fn build_plan(
     manifest: &AppManifest,
     from_path: Option<&str>,
     json_mode: bool,
-) -> Option<agentdb_storage::SchemaPlan> {
+) -> Option<statecraft_storage::SchemaPlan> {
     if let Some(from) = from_path {
         let old_manifest = match load_manifest(from) {
             Ok(m) => m,
@@ -610,8 +637,8 @@ fn build_plan(
                 return None;
             }
         };
-        let adapter = agentdb_storage::DiffAdapter { from: old_manifest };
-        match agentdb_storage::StorageAdapter::plan_schema(&adapter, manifest) {
+        let adapter = statecraft_storage::DiffAdapter { from: old_manifest };
+        match statecraft_storage::StorageAdapter::plan_schema(&adapter, manifest) {
             Ok(p) => Some(p),
             Err(e) => {
                 print_diagnostics(
@@ -628,8 +655,8 @@ fn build_plan(
             }
         }
     } else {
-        let adapter = agentdb_storage::DryRunAdapter;
-        match agentdb_storage::StorageAdapter::plan_schema(&adapter, manifest) {
+        let adapter = statecraft_storage::DryRunAdapter;
+        match statecraft_storage::StorageAdapter::plan_schema(&adapter, manifest) {
             Ok(p) => Some(p),
             Err(e) => {
                 print_diagnostics(
@@ -648,7 +675,7 @@ fn build_plan(
     }
 }
 
-fn print_plan_human(plan: &agentdb_storage::SchemaPlan) {
+fn print_plan_human(plan: &statecraft_storage::SchemaPlan) {
     if plan.is_empty() {
         println!();
         println!("  No operations needed.");
@@ -661,7 +688,7 @@ fn print_plan_human(plan: &agentdb_storage::SchemaPlan) {
     }
 }
 
-fn print_warnings_human(analysis: &agentdb_storage::PlanAnalysis) {
+fn print_warnings_human(analysis: &statecraft_storage::PlanAnalysis) {
     if analysis.warnings.is_empty() {
         return;
     }
@@ -676,8 +703,8 @@ fn print_warnings_human(analysis: &agentdb_storage::PlanAnalysis) {
     }
 }
 
-fn format_operation(op: &agentdb_storage::SchemaOperation) -> String {
-    use agentdb_storage::SchemaOperation::*;
+fn format_operation(op: &statecraft_storage::SchemaOperation) -> String {
+    use statecraft_storage::SchemaOperation::*;
     match op {
         CreateEntity { name, fields } => {
             format!("CREATE entity {} ({} fields)", name, fields.len())
@@ -735,7 +762,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
                     code: "HISTORY_NO_TARGET".into(),
                     message: "No database target specified".into(),
                     span: None,
-                    hint: Some("Usage: agentdb schema history --sqlite <db-path> [--limit N] [--id <entry-id>]".into()),
+                    hint: Some("Usage: statecraft schema history --sqlite <db-path> [--limit N] [--id <entry-id>]".into()),
                 }],
                 json_mode,
             );
@@ -776,7 +803,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
         None => None,
     };
 
-    let adapter = match agentdb_storage::sqlite::SqliteAdapter::open(db_path) {
+    let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
         Ok(a) => a,
         Err(e) => {
             print_diagnostics(
@@ -853,7 +880,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
 }
 
 fn run_history_single(
-    adapter: &agentdb_storage::sqlite::SqliteAdapter,
+    adapter: &statecraft_storage::sqlite::SqliteAdapter,
     entry_id: &str,
     db_path: &str,
     json_mode: bool,
@@ -932,7 +959,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
                 code: "INSPECT_NO_TARGET".into(),
                 message: "No database target specified".into(),
                 span: None,
-                hint: Some("Usage: agentdb schema inspect --sqlite <path> or --postgres <url>".into()),
+                hint: Some("Usage: statecraft schema inspect --sqlite <path> or --postgres <url>".into()),
             }],
             json_mode,
         );
@@ -940,7 +967,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     let (snapshot, target_label) = if let Some(db_path) = sqlite_path {
-        let adapter = match agentdb_storage::sqlite::SqliteAdapter::open(db_path) {
+        let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -974,7 +1001,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else if let Some(pg_url) = postgres_url {
         let mut adapter =
-            match agentdb_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
+            match statecraft_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
                 Ok(a) => a,
                 Err(e) => {
                     print_diagnostics(
@@ -991,7 +1018,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
                 }
             };
         match adapter.read_schema() {
-            Ok(s) => (s, format!("--postgres {pg_url}")),
+            Ok(s) => (s, format!("--postgres {}", redact_dsn(pg_url))),
             Err(e) => {
                 print_diagnostics(
                     &[Diagnostic {
@@ -1068,9 +1095,9 @@ fn compute_diff(old: &AppManifest, new: &AppManifest) -> Vec<DiffChange> {
     }
 
     // Entities
-    let old_entities: HashMap<&str, &agentdb_core::ManifestEntity> =
+    let old_entities: HashMap<&str, &statecraft_core::ManifestEntity> =
         old.entities.iter().map(|e| (e.name.as_str(), e)).collect();
-    let new_entities: HashMap<&str, &agentdb_core::ManifestEntity> =
+    let new_entities: HashMap<&str, &statecraft_core::ManifestEntity> =
         new.entities.iter().map(|e| (e.name.as_str(), e)).collect();
 
     let old_entity_names: BTreeSet<&str> = old_entities.keys().copied().collect();
@@ -1183,7 +1210,29 @@ fn diff_by_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentdb_core::*;
+    use statecraft_core::*;
+
+    #[test]
+    fn redact_dsn_hides_password() {
+        let dsn = "postgres://alice:s3cret@db.example.com:5432/app";
+        let red = redact_dsn(dsn);
+        assert!(!red.contains("s3cret"));
+        assert!(red.contains("alice"));
+        assert!(red.contains("db.example.com"));
+        assert!(red.contains("***"));
+    }
+
+    #[test]
+    fn redact_dsn_passes_through_no_password() {
+        let dsn = "postgres://alice@db.example.com/app";
+        assert_eq!(redact_dsn(dsn), dsn);
+    }
+
+    #[test]
+    fn redact_dsn_passes_through_malformed() {
+        let dsn = "not a url";
+        assert_eq!(redact_dsn(dsn), dsn);
+    }
 
     fn minimal_manifest() -> AppManifest {
         AppManifest {

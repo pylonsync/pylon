@@ -1,5 +1,5 @@
 [package]
-name = "agentdb-query"
+name = "statecraft-query"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,7 +8,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-agentdb-core = { path = "../core" }
+statecraft-core = { path = "../core" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

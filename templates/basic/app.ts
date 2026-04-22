@@ -37,5 +37,5 @@ const manifest = buildManifest({
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: agentdb codegen app.ts
+// Used by: statecraft codegen app.ts
 console.log(JSON.stringify(manifest, null, 2));

@@ -1,7 +1,7 @@
-//! RESP-compatible TCP server for the agentdb cache.
+//! RESP-compatible TCP server for the statecraft cache.
 //!
 //! Speaks the Redis wire protocol (RESP2), so any `redis-cli` or Redis client
-//! library can talk directly to the agentdb cache without HTTP overhead.
+//! library can talk directly to the statecraft cache without HTTP overhead.
 //!
 //! # Supported commands
 //!
@@ -19,7 +19,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use agentdb_plugin::builtin::cache::CachePlugin;
+use statecraft_plugin::builtin::cache::CachePlugin;
 
 use crate::resp::{parse_resp, RespValue};
 
@@ -32,13 +32,13 @@ pub fn start_resp_server(cache: Arc<CachePlugin>, port: u16) {
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[resp] Failed to bind RESP server on {addr}: {e}");
+            tracing::warn!("[resp] Failed to bind RESP server on {addr}: {e}");
             return;
         }
     };
 
-    eprintln!("[resp] RESP server listening on resp://localhost:{port}");
-    eprintln!("[resp] Compatible with redis-cli: redis-cli -p {port}");
+    tracing::warn!("[resp] RESP server listening on resp://localhost:{port}");
+    tracing::warn!("[resp] Compatible with redis-cli: redis-cli -p {port}");
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -624,7 +624,7 @@ fn execute_command(cache: &CachePlugin, args: &[String]) -> RespValue {
         "INFO" => {
             let stats = cache.info();
             let info = format!(
-                "# Server\r\nredis_version:agentdb-resp\r\n\r\n\
+                "# Server\r\nredis_version:statecraft-resp\r\n\r\n\
                  # Stats\r\nhits:{}\r\nmisses:{}\r\nsets:{}\r\ndeletes:{}\r\nevictions:{}\r\nexpired:{}\r\n\r\n\
                  # Keyspace\r\nkeys:{}\r\n",
                 stats.hits,

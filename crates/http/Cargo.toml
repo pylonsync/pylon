@@ -1,0 +1,9 @@
+[package]
+name = "statecraft-http"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+statecraft-core = { path = "../core" }
+serde_json = { workspace = true }

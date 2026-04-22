@@ -158,7 +158,22 @@ export interface PolicyDefinition {
   name: string;
   entity?: string;
   action?: string;
-  allow: string;
+  /**
+   * Fallback allow expression — evaluated when a more-specific
+   * allowRead/allowWrite/allowUpdate/allowDelete isn't set. Kept for
+   * backwards compatibility with single-gate policies.
+   */
+  allow?: string;
+  /** Overrides `allow` for reads (pull, list, get). */
+  allowRead?: string;
+  /** Overrides `allow` for inserts. Falls back to `allowWrite`. */
+  allowInsert?: string;
+  /** Overrides `allow`/`allowWrite` for updates. */
+  allowUpdate?: string;
+  /** Overrides `allow`/`allowWrite` for deletes. */
+  allowDelete?: string;
+  /** Shared fallback for any write when the specific rule is missing. */
+  allowWrite?: string;
 }
 
 export function policy(def: PolicyDefinition): PolicyDefinition {
@@ -245,7 +260,12 @@ export interface ManifestPolicy {
   name: string;
   entity?: string;
   action?: string;
-  allow: string;
+  allow?: string;
+  allowRead?: string;
+  allowInsert?: string;
+  allowUpdate?: string;
+  allowDelete?: string;
+  allowWrite?: string;
 }
 
 export const MANIFEST_VERSION = 1;
@@ -336,7 +356,13 @@ export function policiesToManifest(
   policies: PolicyDefinition[]
 ): ManifestPolicy[] {
   return policies.map((p) => {
-    const result: ManifestPolicy = { name: p.name, allow: p.allow };
+    const result: ManifestPolicy = { name: p.name };
+    if (p.allow) result.allow = p.allow;
+    if (p.allowRead) result.allowRead = p.allowRead;
+    if (p.allowInsert) result.allowInsert = p.allowInsert;
+    if (p.allowUpdate) result.allowUpdate = p.allowUpdate;
+    if (p.allowDelete) result.allowDelete = p.allowDelete;
+    if (p.allowWrite) result.allowWrite = p.allowWrite;
     if (p.entity) result.entity = p.entity;
     if (p.action) result.action = p.action;
     return result;

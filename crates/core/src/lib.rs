@@ -2,6 +2,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod clock;
+pub mod errors;
+pub mod util;
+
+pub use clock::{Clock, MockClock, SystemClock};
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
@@ -158,14 +164,60 @@ pub struct ManifestAction {
     pub input: Vec<ManifestField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Row-level access policy attached to an entity or action.
+///
+/// `allow` is the legacy single-gate expression used for every kind of
+/// access. The optional `allow_*` fields let callers differentiate read
+/// from write from delete. When a per-action field is present it wins;
+/// otherwise the engine falls back to `allow`. That keeps old manifests
+/// working unchanged while enabling finer-grained ownership rules —
+/// "anyone can read, only the author can edit or delete."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ManifestPolicy {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub allow: String,
+    /// Overrides `allow` for reads (pull, list, get). Optional.
+    #[serde(
+        default,
+        rename = "allowRead",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_read: Option<String>,
+    /// Overrides `allow` for inserts. Optional; falls back to `allow_write`
+    /// then `allow`.
+    #[serde(
+        default,
+        rename = "allowInsert",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_insert: Option<String>,
+    /// Overrides `allow`/`allow_write` for updates. Optional.
+    #[serde(
+        default,
+        rename = "allowUpdate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_update: Option<String>,
+    /// Overrides `allow`/`allow_write` for deletes. Optional.
+    #[serde(
+        default,
+        rename = "allowDelete",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_delete: Option<String>,
+    /// Shared fallback for any write (insert/update/delete) when the
+    /// more-specific field isn't set. Optional.
+    #[serde(
+        default,
+        rename = "allowWrite",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_write: Option<String>,
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-import { entity, field, defineRoute, query, action, policy, buildManifest } from "@agentdb/sdk";
+import { entity, field, defineRoute, query, action, policy, buildManifest } from "@statecraft/sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -114,5 +114,5 @@ const manifest = buildManifest({
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: agentdb codegen examples/todo-app/app.ts
+// Used by: statecraft codegen examples/todo-app/app.ts
 console.log(JSON.stringify(manifest, null, 2));

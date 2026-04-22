@@ -204,7 +204,7 @@ pub fn init_logger(level: LogLevel) {
 pub fn logger() -> &'static Logger {
     LOGGER
         .get()
-        .expect("agentdb: logger not initialised — call init_logger() first")
+        .expect("statecraft: logger not initialised — call init_logger() first")
 }
 
 // ---------------------------------------------------------------------------

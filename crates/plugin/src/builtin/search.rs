@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::Plugin;
-use agentdb_auth::AuthContext;
+use statecraft_auth::AuthContext;
 use serde_json::Value;
 
 /// A search index entry.
@@ -45,7 +45,7 @@ impl SearchPlugin {
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
 
         let index = self.index.lock().unwrap();
-        let mut results: Vec<SearchResult> = index
+        let results: Vec<SearchResult> = index
             .iter()
             .filter(|entry| {
                 let text_lower = entry.text.to_lowercase();

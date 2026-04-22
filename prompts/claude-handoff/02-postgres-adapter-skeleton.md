@@ -1,4 +1,4 @@
-Use `/Users/ericc59/Dev/agentdb/prompts/claude-handoff/00-shared-context.md` as shared context.
+Use `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md` as shared context.
 
 Goal:
 Add the first Postgres storage adapter skeleton so SQLite is no longer the only concrete backend.

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use agentdb_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
-use agentdb_runtime::ws::WsHub;
-use agentdb_runtime::sse::SseHub;
+use statecraft_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
+use statecraft_runtime::ws::WsHub;
+use statecraft_runtime::sse::SseHub;
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
     let start = Instant::now();
@@ -24,7 +24,7 @@ fn bench(name: &str, iterations: u32, f: impl Fn()) {
 }
 
 fn main() {
-    println!("\nagentdb sync benchmarks\n");
+    println!("\nstatecraft sync benchmarks\n");
 
     // -- ChangeLog throughput --
     let log = ChangeLog::new();

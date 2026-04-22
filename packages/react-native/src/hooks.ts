@@ -1,9 +1,9 @@
-import { SyncEngine, type Row } from "@agentdb/sync";
+import { SyncEngine, type Row } from "@statecraft/sync";
 
 // ---------------------------------------------------------------------------
-// React Native hooks for agentdb
+// React Native hooks for statecraft
 //
-// These are identical to the @agentdb/react hooks. They use only React and
+// These are identical to the @statecraft/react hooks. They use only React and
 // the SyncEngine (which relies on fetch), both available in React Native.
 // We duplicate rather than import via subpath to avoid Metro resolution
 // issues with packages that don't declare explicit `exports`.
