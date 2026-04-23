@@ -187,14 +187,14 @@ function ChatDemo() {
 
 function HeroTerminal() {
   const lines = [
-    { t: "prompt", v: "❯ ", c: "cargo install pylon-cli" },
-    { t: "out", v: "   Compiling pylon-cli v0.8.2" },
+    { t: "prompt", v: "❯ ", c: "cargo install --path crates/cli --locked" },
+    { t: "out", v: "   Compiling pylon-cli v0.1.0" },
     { t: "out-ok", v: "    Finished release in 41.2s" },
-    { t: "prompt", v: "❯ ", c: "pylon dev" },
-    { t: "out", v: "  schema  · 12 tables loaded" },
-    { t: "out", v: "  shards  · 4 rooms · area-of-interest: 64m" },
-    { t: "out-accent", v: "  serving on http://localhost:4242" },
-    { t: "out-ok", v: "  ✓ hot-reload · type-safe client regenerated" },
+    { t: "prompt", v: "❯ ", c: "pylon dev app.ts" },
+    { t: "out", v: "  ✓ my-app v0.1.0 — 12 entities, 4 policies" },
+    { t: "out-accent", v: "  Server:   http://localhost:4321" },
+    { t: "out", v: "  Database: .pylon/dev.db (schema synced)" },
+    { t: "out-ok", v: "  ✓ typed client regenerated" },
   ] as const;
   return (
     <div className="terminal">
@@ -560,22 +560,19 @@ function ChatDemoFull() {
               name: "chat/Channel.tsx",
               langLabel: "TSX",
               lang: "ts",
-              code: `import { db } from "@pylon/client";
+              code: `import { db, callFn } from "@pylonsync/react";
 
 export function Channel({ id }: { id: string }) {
-  const messages = db.useQuery("Message", {
-    where: { channelId: id },
-    order: "desc",
-    limit: 50,
-  });
-
-  const send = db.useMutation("send");
+  const { data: messages } = db.useQuery(
+    "Message",
+    { channelId: id },
+  );
 
   return (
     <Pane>
       <List items={messages ?? []} />
       <Composer onSubmit={body =>
-        send({ channelId: id, body })
+        callFn("sendMessage", { channelId: id, body })
       } />
     </Pane>
   );
@@ -585,22 +582,26 @@ export function Channel({ id }: { id: string }) {
               name: "app.ts",
               langLabel: "TS",
               lang: "ts",
-              code: `import { entity, v } from "@pylon/server";
+              code: `import { entity, field, policy, buildManifest }
+  from "@pylonsync/sdk";
 
-export const Message = entity({
-  fields: {
-    channelId: v.id("Channel"),
-    authorId:  v.id("User"),
-    body:      v.string().min(1).max(4000),
-    createdAt: v.timestamp(),
-  },
+const Message = entity("Message", {
+  channelId: field.id("Channel"),
+  authorId:  field.id("User"),
+  body:      field.richtext(),
+  createdAt: field.datetime(),
+}, {
   indexes: [
-    { on: ["channelId", "createdAt"] },
+    { name: "by_channel_time",
+      fields: ["channelId", "createdAt"] },
   ],
-  policy: {
-    read:  (ctx) => ctx.user != null,
-    write: (ctx, row) => row.authorId === ctx.user.id,
-  },
+});
+
+const msgPolicy = policy({
+  name: "msg_auth",
+  entity: "Message",
+  allowRead:   "auth.userId != null",
+  allowInsert: "auth.userId == data.authorId",
 });`,
             },
           ]}
@@ -692,24 +693,20 @@ function DashboardDemoFull() {
               name: "admin/Dashboard.tsx",
               langLabel: "TSX",
               lang: "ts",
-              code: `import { db } from "@pylon/client";
+              code: `import { db } from "@pylonsync/react";
 
 export function Dashboard() {
-  const revenue = db.useAggregate("Order", {
-    sum: "total",
-    where: { createdAt: { gte: "-24h" } },
-  });
-  const orders = db.useQuery("Order", {
-    order: "desc", limit: 12,
-  });
-  const online = db.usePresence("admin");
+  const { data: orders } = db.useQuery("Order");
+  const revenue = orders
+    ?.filter(o => o.status === "paid")
+    .reduce((s, o) => s + o.total, 0) ?? 0;
 
   return (
     <Grid>
       <Metric label="Revenue (24h)" value={revenue} />
-      <Metric label="Orders" value={orders.length} />
-      <Metric label="Online" value={online.count} />
-      <Chart series={orders.hourlyTotals()} />
+      <Metric label="Orders"
+              value={orders?.length ?? 0} />
+      <Chart series={orders ?? []} />
     </Grid>
   );
 }`,
@@ -718,22 +715,21 @@ export function Dashboard() {
               name: "app.ts",
               langLabel: "TS",
               lang: "ts",
-              code: `import { entity, v } from "@pylon/server";
+              code: `import { entity, field, buildManifest }
+  from "@pylonsync/sdk";
 
-export const Order = entity({
-  fields: {
-    customerId: v.id("Customer"),
-    total:      v.money("USD"),
-    status:     v.enum(["pending", "paid", "refunded"]),
-    createdAt:  v.timestamp(),
-  },
+const Order = entity("Order", {
+  customerId: field.id("Customer"),
+  total:      field.float(),
+  status:     field.string(),
+  createdAt:  field.datetime(),
+}, {
   indexes: [
-    { on: ["createdAt"] },
-    { on: ["status", "createdAt"] },
+    { name: "by_at",
+      fields: ["createdAt"] },
+    { name: "by_status_at",
+      fields: ["status", "createdAt"] },
   ],
-  aggregates: {
-    total: v.sum("total"),
-  },
 });`,
             },
           ]}
@@ -786,16 +782,24 @@ const { state, send } = useShard("match_1");`,
               name: "app.ts",
               langLabel: "TS",
               lang: "ts",
-              code: `import { shard, v } from "@pylon/server";
+              code: `import { entity, field, buildManifest }
+  from "@pylonsync/sdk";
 
-export const Match = shard({
-  fields: {
-    matchId:  v.id("Match"),
-    entities: v.list(v.ref("Entity")),
-    tick:     v.u32(),
-  },
-  tps: 20,
-  aoi: { radius_m: 150 },
+// 20 Hz position updates; spatial index
+// powers live queries for nearby entities.
+const Entity = entity("Entity", {
+  matchId:  field.id("Match"),
+  x:        field.float(),
+  y:        field.float(),
+  vel:      field.float(),
+  hp:       field.int(),
+  tick:     field.int(),
+  updatedAt: field.datetime(),
+}, {
+  indexes: [
+    { name: "by_match_tick",
+      fields: ["matchId", "tick"] },
+  ],
 });`,
             },
           ]}
@@ -835,32 +839,57 @@ function DevDemoFull() {
               name: "app.ts",
               langLabel: "TS",
               lang: "ts",
-              code: `import { entity, v } from "@pylon/server";
+              code: `import { entity, field, buildManifest }
+  from "@pylonsync/sdk";
 
-export const Message = entity({
-  fields: {
-    channelId: v.id("Channel"),
-    authorId:  v.id("User"),
-    body:      v.string().min(1).max(4000),
-    createdAt: v.timestamp(),
-  },
+const Message = entity("Message", {
+  channelId: field.id("Channel"),
+  authorId:  field.id("User"),
+  body:      field.richtext(),
+  createdAt: field.datetime(),
+}, {
   indexes: [
-    { on: ["channelId", "createdAt"] },
+    { name: "by_channel_time",
+      fields: ["channelId", "createdAt"] },
   ],
-});`,
+});
+
+const manifest = buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [Message],
+  policies: [], queries: [],
+  actions: [], routes: [],
+});
+
+console.log(JSON.stringify(manifest, null, 2));`,
             },
             {
-              name: "pylon.json",
-              langLabel: "JSON",
+              name: "functions/sendMessage.ts",
+              langLabel: "TS",
               lang: "ts",
-              code: `{
-  "name": "my-app",
-  "version": "0.1.0",
-  "storage": "sqlite:.pylon/dev.db",
-  "bindings": {
-    "client": "web/src/pylon.client.ts"
-  }
-}`,
+              code: `import { mutation, v }
+  from "@pylonsync/functions";
+
+export default mutation({
+  args: {
+    channelId: v.id("Channel"),
+    body: v.string(),
+  },
+  async handler(ctx, args) {
+    if (!ctx.auth.userId) {
+      throw ctx.error("UNAUTHENTICATED",
+                      "log in first");
+    }
+    const id = await ctx.db.insert("Message", {
+      channelId: args.channelId,
+      authorId: ctx.auth.userId,
+      body: args.body,
+      createdAt: new Date().toISOString(),
+    });
+    return { id };
+  },
+});`,
             },
           ]}
         />

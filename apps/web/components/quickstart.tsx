@@ -14,55 +14,49 @@ const QS_STEPS: {
   {
     num: "01",
     title: "Install",
-    desc: "Grab the CLI with cargo. One binary — no services, no Docker required.",
+    desc: "Build the CLI from source. One Rust binary — no services, no Docker required.",
     filename: "shell",
     lang: "sh",
-    code: `❯ cargo install pylon-cli
-   Compiling pylon-cli v0.8.2
-    Finished release in 41.2s
+    code: `❯ git clone https://github.com/pylonsync/pylon
+❯ cd pylon && cargo install --path crates/cli --locked
 ❯ pylon --version
-pylon 0.8.2`,
+pylon 0.1.0`,
   },
   {
     num: "02",
     title: "Init a project",
-    desc: "Scaffolds schema, server functions, and a typed client.",
+    desc: "Scaffolds a TypeScript schema entry point you extend by hand.",
     filename: "shell",
     lang: "sh",
     code: `❯ pylon init my-app
-  ✓ schema.json
-  ✓ functions/
-  ✓ shards/
-  ✓ client/ (typed)
-❯ cd my-app`,
+  ✓ app.ts
+  ✓ tsconfig.json
+❯ cd my-app && bun add @pylonsync/sdk @pylonsync/functions`,
   },
   {
     num: "03",
     title: "Run dev",
-    desc: "Starts the server, watches your code, regenerates the client on every save.",
+    desc: "Starts the server, watches your code, regenerates the typed client on every save.",
     filename: "shell",
     lang: "sh",
-    code: `❯ pylon dev
-  schema  · 3 tables
-  shards  · 0 rooms
-  serving on http://localhost:4242
-  ✓ hot-reload · client regenerated (42ms)`,
+    code: `❯ pylon dev app.ts
+  ✓ my-app v0.1.0 — 1 entities, 0 queries, 0 actions, 1 policies
+  Server:   http://localhost:4321
+  Database: .pylon/dev.db (schema synced)`,
   },
   {
     num: "04",
-    title: "Open the browser",
-    desc: "Mount the client anywhere you already have React. Queries are reactive by default.",
+    title: "Connect from React",
+    desc: "One init call, then useQuery subscribes and restreams on every change.",
     filename: "App.tsx",
     lang: "tsx",
-    code: `import { AgentDBProvider, db } from "@/pylon/client";
+    code: `import { init, db } from "@pylonsync/react";
+
+init({ baseUrl: "http://localhost:4321", appName: "my-app" });
 
 export default function App() {
-  const tasks = db.useQuery("Task", { order: "desc" });
-  return (
-    <AgentDBProvider url="http://localhost:4242">
-      <List items={tasks ?? []} />
-    </AgentDBProvider>
-  );
+  const { data: tasks } = db.useQuery("Task");
+  return <List items={tasks ?? []} />;
 }`,
   },
 ];
