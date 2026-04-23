@@ -11,7 +11,7 @@
       "name": "@pylonsync/web",
       "version": "0.0.1",
       "dependencies": {
-        "@radix-ui/react-slot": "^1.1.0",
+        "@radix-ui/react-slot": "^1.2.3",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^0.475.0",
@@ -275,6 +275,10 @@
         "bun-types": ">=1.0.0",
       },
     },
+  },
+  "overrides": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
   },
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
@@ -621,11 +625,9 @@
 
     "@types/node": ["@types/node@22.19.17", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-wGdMcf+vPYM6jikpS/qhg6WiqSV/OhG+jeeHT/KlVqxYfD40iYJf9/AE1uQxVWFvU7MipKRkRv8NSHiCGgPr8Q=="],
 
-    "@types/prop-types": ["@types/prop-types@15.7.15", "", {}, "sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw=="],
+    "@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
 
-    "@types/react": ["@types/react@18.3.28", "", { "dependencies": { "@types/prop-types": "*", "csstype": "^3.2.2" } }, "sha512-z9VXpC7MWrhfWipitjNdgCauoMLRdIILQsAEV+ZesIzBq/oUlxk0m3ApZuMFCXdnS4U7KrI+l3WRUEGQ8K1QKw=="],
-
-    "@types/react-dom": ["@types/react-dom@18.3.7", "", { "peerDependencies": { "@types/react": "^18.0.0" } }, "sha512-MEe3UeoENYVFXzoXEWsvcpg6ZvlrFNlOQ7EOsvhI3CfAXwzPfO8Qwuxd40nepsYKqyyVQnTdEfv68q91yLcKrQ=="],
+    "@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
 
     "@types/yargs": ["@types/yargs@17.0.35", "", { "dependencies": { "@types/yargs-parser": "*" } }, "sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg=="],
 
@@ -1053,69 +1055,11 @@
 
     "@jest/types/@types/node": ["@types/node@25.6.0", "", { "dependencies": { "undici-types": "~7.19.0" } }, "sha512-+qIYRKdNYJwY3vRCZMdJbPLJAtGjQBudzZzdzwQYkEPQd+PJGixUL5QfvCLDaULoLv+RhT3LDkwEfKaAkgSmNQ=="],
 
-    "@pylonsync/example-crew/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
-
-    "@pylonsync/example-crew/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-crew-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-crew-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/example-crm/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
-
-    "@pylonsync/example-crm/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-crm-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-crm-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/example-erp/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
-
-    "@pylonsync/example-erp/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-erp-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-erp-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/example-linear/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
-
-    "@pylonsync/example-linear/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-linear-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-linear-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/example-stage/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
-
-    "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-stage-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/example-stage-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/react/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@pylonsync/react-native/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/react-native/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/react-native/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@pylonsync/web/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@pylonsync/web/@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
-
     "@pylonsync/web/lucide-react": ["lucide-react@0.475.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-NJzvVu1HwFVeZ+Gwq2q00KygM1aBhy/ZrhY9FsAgJtpB+E4R7uxRk9M2iKvHa6/vNxZydIB59htha4c2vvwvVg=="],
 
     "@pylonsync/web/react": ["react@19.2.5", "", {}, "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA=="],
 
     "@pylonsync/web/react-dom": ["react-dom@19.2.5", "", { "dependencies": { "scheduler": "^0.27.0" }, "peerDependencies": { "react": "^19.2.5" } }, "sha512-J5bAZz+DXMMwW/wV3xzKke59Af6CHY7G4uYLN1OvBcKEsWOs4pQExj86BBKamxl/Ik5bx9whOrvBlSDfWzgSag=="],
-
-    "@react-native/virtualized-lists/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
 
     "@tailwindcss/oxide-wasm32-wasi/@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" }, "bundled": true }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
@@ -1164,8 +1108,6 @@
     "micromatch/picomatch": ["picomatch@2.3.2", "", {}, "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="],
 
     "next/postcss": ["postcss@8.4.31", "", { "dependencies": { "nanoid": "^3.3.6", "picocolors": "^1.0.0", "source-map-js": "^1.0.2" } }, "sha512-PS08Iboia9mts/2ygV3eLpY5ghnUcfLV/EXTOW1E2qYxJKGGBUtNjN76FYHnMs36RmARn41bC0AZmn+rR0OVpQ=="],
-
-    "react-native/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
 
     "react-native/react": ["react@19.2.5", "", {}, "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA=="],
 
