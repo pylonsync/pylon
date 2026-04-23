@@ -86,7 +86,8 @@ my-app/
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PYLON_DB_PATH` | `.pylon/dev.db` | SQLite file location |
+| `PYLON_DB_PATH` | `.pylon/dev.db` | SQLite file location (ignored if `DATABASE_URL` is set) |
+| `DATABASE_URL` | *(unset)* | `postgres://...` connection string. When set, Pylon uses the Postgres adapter instead of SQLite |
 | `PYLON_FILES_DIR` | `.pylon/uploads` | File upload storage |
 | `PYLON_CORS_ORIGIN` | `*` (dev only) | Allowed origin in prod |
 | `PYLON_DEV_MODE` | `true` | Dev-only behavior (generous rate limits, CORS `*`) |

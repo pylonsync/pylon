@@ -115,7 +115,7 @@ export default mutation({
 pylon dev app.ts
 ```
 
-Pylon watches `app.ts` and `functions/*.ts`, pushes schema changes to the local SQLite file, and serves the API on `http://localhost:4321`.
+Pylon watches `app.ts` and `functions/*.ts`, pushes schema changes to your database (SQLite by default, Postgres if `PYLON_DB_URL` is set), and serves the API on `http://localhost:4321`.
 
 In a second terminal:
 
@@ -129,7 +129,7 @@ Open two browser tabs at the Vite URL. Create a note in one — it appears in th
 
 - `app.ts` compiled to a manifest — the wire format Pylon's runtime consumes.
 - The manifest includes the `Note` entity's columns, indexes, and the row-level policy.
-- Pylon auto-migrated your SQLite file to match the schema.
+- Pylon auto-migrated your database (SQLite by default, Postgres if configured) to match the schema.
 - `createNote.ts` was loaded by the functions runtime (bun) and registered as `/api/fn/createNote`.
 - The React client's `db.useQuery("Note")` subscribed to all notes. When you called `createNote`, the live query fan-out pushed the new row to every subscriber.
 

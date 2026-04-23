@@ -85,7 +85,7 @@ const { data: messages } = db.useQuery("Message", { roomId });
 
 ## Schema changes
 
-Edit `app.ts`, save — `pylon dev` picks up the change and runs a live migration. Pylon's storage layer plans the diff (add column, drop index, etc.) and applies it to the SQLite file. Destructive operations (dropping a column that has data) require you to bump `manifest.version`.
+Edit `app.ts`, save — `pylon dev` picks up the change and runs a live migration. Pylon's storage layer plans the diff (add column, drop index, etc.) and applies it to your database, whether SQLite or Postgres. Destructive operations (dropping a column that has data) require you to bump `manifest.version`.
 
 ## Next
 

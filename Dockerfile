@@ -9,7 +9,7 @@
 #     -e PYLON_CORS_ORIGIN=https://your-app.vercel.app \
 #     pylon-crm
 
-ARG RUST_VERSION=1.84
+ARG RUST_VERSION=1.89
 
 # ---- Rust build stage -------------------------------------------------------
 FROM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
