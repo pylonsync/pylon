@@ -51,28 +51,28 @@ export function Footer() {
           <div>
             <h5>Docs</h5>
             <ul>
-              <li><a href="#">Getting started</a></li>
-              <li><a href="#">Schema &amp; queries</a></li>
-              <li><a href="#">Shards &amp; ticks</a></li>
-              <li><a href="#">Deploy guides</a></li>
+              <li><a href="https://docs.pylonsync.com">Introduction</a></li>
+              <li><a href="https://docs.pylonsync.com/quickstart">Quickstart</a></li>
+              <li><a href="https://docs.pylonsync.com/concepts/entities">Entities &amp; schema</a></li>
+              <li><a href="https://docs.pylonsync.com/concepts/live-queries">Live queries</a></li>
+              <li><a href="/skill">Claude Code skill</a></li>
             </ul>
           </div>
           <div>
             <h5>Project</h5>
             <ul>
-              <li><a href="#">GitHub</a></li>
-              <li><a href="#">Changelog</a></li>
-              <li><a href="#">Roadmap</a></li>
-              <li><a href="#">SECURITY.md</a></li>
+              <li><a href="https://github.com/pylonsync/pylon">GitHub</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/releases">Changelog</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/blob/main/ROADMAP.md">Roadmap</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/blob/main/SECURITY.md">SECURITY.md</a></li>
             </ul>
           </div>
           <div>
             <h5>Community</h5>
             <ul>
-              <li><a href="#">Discord</a></li>
-              <li><a href="#">Discussions</a></li>
-              <li><a href="#">Contributing</a></li>
-              <li><a href="#">Code of Conduct</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/discussions">Discussions</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/blob/main/CONTRIBUTING.md">Contributing</a></li>
+              <li><a href="https://github.com/pylonsync/pylon/blob/main/CODE_OF_CONDUCT.md">Code of Conduct</a></li>
             </ul>
           </div>
         </div>
