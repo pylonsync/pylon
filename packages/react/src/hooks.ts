@@ -1,6 +1,6 @@
 import { SyncEngine, type Row } from "@statecraft/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { callFn } from "./index";
+import { callFn, getBaseUrl, storageKey } from "./index";
 
 // ---------------------------------------------------------------------------
 // Query shapes
@@ -632,4 +632,129 @@ export function useFn<TResult = unknown>(
     error: m.error,
     reset: m.reset,
   };
+}
+
+// ---------------------------------------------------------------------------
+// useAggregate — live count/sum/avg/groupBy queries for dashboards
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate spec — server matches this shape in
+ * `POST /api/aggregate/:entity`. The server auto-injects an `orgId`
+ * clamp into `where` when the caller has a tenant, so a malicious
+ * client can't sum across orgs.
+ */
+export interface AggregateSpec {
+  /** "*" for COUNT(*), a column name for COUNT(col). */
+  count?: string;
+  /** Columns to sum. */
+  sum?: string[];
+  /** Columns to average. */
+  avg?: string[];
+  /** Columns to take the minimum of. */
+  min?: string[];
+  /** Columns to take the maximum of. */
+  max?: string[];
+  /** Columns to COUNT DISTINCT. */
+  countDistinct?: string[];
+  /**
+   * Group keys. Each entry is either a column name, or a date-bucket
+   * spec `{ field, bucket }` where bucket ∈ hour/day/week/month/year.
+   */
+  groupBy?: (string | { field: string; bucket: "hour" | "day" | "week" | "month" | "year" })[];
+  /** Equality filter applied before aggregation. */
+  where?: Record<string, unknown>;
+}
+
+export interface UseAggregateReturn<Row = Record<string, unknown>> {
+  data: Row[] | null;
+  loading: boolean;
+  error: Error | null;
+  /** Re-run the query. Rarely needed — the hook refreshes on sync notify. */
+  refresh: () => void;
+}
+
+/**
+ * Run an aggregate query and keep it fresh as the sync store mutates.
+ *
+ * The hook re-fetches whenever the given entity changes in the local
+ * sync replica — so charts stay live without polling. Subscribes to
+ * the entity's sync events; any change triggers a debounced re-fetch.
+ *
+ * ```tsx
+ * const { data } = useAggregate(sync, "Order", {
+ *   count: "*",
+ *   groupBy: [{ field: "createdAt", bucket: "day" }],
+ *   where: { status: "delivered" },
+ * });
+ * ```
+ */
+export function useAggregate<Row = Record<string, unknown>>(
+  sync: SyncEngine,
+  entity: string,
+  spec: AggregateSpec,
+): UseAggregateReturn<Row> {
+  const [data, setData] = useState<Row[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  // Stringify the spec so we only refetch when the semantic query changes,
+  // not on every parent render (spec object is usually a literal).
+  const specKey = JSON.stringify(spec);
+
+  const run = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const baseUrl = getBaseUrl();
+      const token =
+        typeof window !== "undefined" && window.localStorage
+          ? window.localStorage.getItem(storageKey("token"))
+          : null;
+      const res = await fetch(`${baseUrl}/api/aggregate/${entity}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: specKey,
+      });
+      const json = (await res.json()) as { rows?: Row[]; error?: { message: string } };
+      if (!res.ok) {
+        throw new Error(json.error?.message || `HTTP ${res.status}`);
+      }
+      setData(json.rows ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entity, specKey]);
+
+  // Initial fetch + refetch on spec change.
+  useEffect(() => {
+    void run();
+  }, [run]);
+
+  // Live refresh: re-run whenever the sync store notifies a change for
+  // this entity (or any entity — pessimistic, but debounced). Keeps
+  // charts in sync with writes without manual polling.
+  useEffect(() => {
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    const unsub = sync.store.subscribe((changedEntity?: string) => {
+      if (changedEntity && changedEntity !== entity) return;
+      if (pending) clearTimeout(pending);
+      // 150ms debounce — burst writes (bulk import, WS replay) collapse
+      // into a single refetch instead of hammering the aggregate endpoint.
+      pending = setTimeout(() => {
+        void run();
+      }, 150);
+    });
+    return () => {
+      if (pending) clearTimeout(pending);
+      unsub();
+    };
+  }, [sync, entity, run]);
+
+  return { data, loading, error, refresh: run };
 }

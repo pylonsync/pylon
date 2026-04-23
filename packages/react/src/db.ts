@@ -4,14 +4,24 @@ import {
   useQueryOne as useQueryOneHook,
   useMutation as useMutationHook,
   useInfiniteQuery as useInfiniteQueryHook,
+  useAggregate as useAggregateHook,
   useEntityMutation,
   type QueryOptions,
   type UseQueryReturn,
   type UseQueryOneReturn,
   type UseMutationReturn,
   type UseInfiniteQueryReturn,
+  type AggregateSpec,
+  type UseAggregateReturn,
 } from "./hooks";
-import { callFn, streamFn, uploadFile, uploadFileMultipart, type UploadedFile } from "./index";
+import {
+  callFn,
+  configureClient,
+  streamFn,
+  uploadFile,
+  uploadFileMultipart,
+  type UploadedFile,
+} from "./index";
 
 // ---------------------------------------------------------------------------
 // db — one-liner API
@@ -31,6 +41,12 @@ let _started = false;
 export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) {
   _sync = createSyncEngine(config?.baseUrl ?? "http://localhost:4321", config);
   _started = false;
+  // Keep the React-side helpers in sync — a single init() should fully
+  // namespace this app's storage without a separate configureClient call.
+  configureClient({
+    baseUrl: config?.baseUrl,
+    appName: config?.appName,
+  });
 }
 
 function getSync(): SyncEngine {
@@ -85,6 +101,18 @@ export const db = {
     options: { pageSize?: number } = {}
   ): UseInfiniteQueryReturn<T> {
     return useInfiniteQueryHook<T>(getSync(), entity, options);
+  },
+
+  /**
+   * Live aggregate query (count / sum / avg / groupBy). Automatically
+   * re-runs when the entity's rows change in the sync replica — dashboard
+   * charts stay up to date without polling.
+   */
+  useAggregate<Row = Record<string, unknown>>(
+    entity: string,
+    spec: AggregateSpec
+  ): UseAggregateReturn<Row> {
+    return useAggregateHook<Row>(getSync(), entity, spec);
   },
 
   /** Entity-level optimistic CRUD (not server-side functions). */

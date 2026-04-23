@@ -213,8 +213,30 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
     // Start dev server in background if initial build succeeded.
     if let Some(m) = manifest {
-        let db_path = watch_dir.join("statecraft.dev.db");
+        // Keep the project root clean: machine-local dev data lives in a
+        // hidden `.statecraft/` folder alongside source, the same way
+        // `.next/` or `target/` do. The sessions + jobs siblings that
+        // the server derives from `db_path` follow automatically.
+        let data_dir = watch_dir.join(".statecraft");
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            if !json_mode {
+                eprintln!("[dev] Failed to create data dir {}: {e}", data_dir.display());
+            }
+            return ExitCode::Error;
+        }
+        let db_path = data_dir.join("dev.db");
         let db_str = db_path.to_string_lossy().to_string();
+
+        // Default uploads into the hidden data dir too so `examples/*/uploads/`
+        // stops littering project roots. Operators can still override via
+        // STATECRAFT_FILES_DIR for production layouts.
+        if std::env::var("STATECRAFT_FILES_DIR").is_err() {
+            let uploads = data_dir.join("uploads");
+            // Safety: single-threaded here; server thread spawns below.
+            unsafe {
+                std::env::set_var("STATECRAFT_FILES_DIR", uploads);
+            }
+        }
 
         // Auto-push schema to the dev database.
         if let Ok(adapter) = statecraft_storage::sqlite::SqliteAdapter::open(&db_str) {

@@ -8,11 +8,20 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { init, db, useRoom, callFn, configureClient } from "@statecraft/react";
+import {
+  init,
+  db,
+  useRoom,
+  callFn,
+  configureClient,
+  storageKey,
+} from "@statecraft/react";
 
 const BASE_URL = "http://localhost:4321";
-init({ baseUrl: BASE_URL });
-configureClient({ baseUrl: BASE_URL });
+// Give this app its own namespace so chat's auth + replica don't clobber
+// any other Statecraft app served from the same browser origin.
+init({ baseUrl: BASE_URL, appName: "chat" });
+configureClient({ baseUrl: BASE_URL, appName: "chat" });
 
 // ---------------------------------------------------------------------------
 // Types
@@ -175,7 +184,7 @@ function dmPeerId(ch: { name: string }, me: string): string | null {
 // accounts on a shared machine. Not synced across devices; move to a
 // StarredChannel entity if you need that.
 function starsKey(userId: string) {
-  return `statecraft_stars_${userId}`;
+  return storageKey(`stars:${userId}`);
 }
 
 function loadStars(userId: string): Set<string> {
@@ -217,8 +226,8 @@ function useStars(userId: string): {
 export function ChatApp() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
-      const token = localStorage.getItem("statecraft_token");
-      const cached = localStorage.getItem("statecraft_user");
+      const token = localStorage.getItem(storageKey("token"));
+      const cached = localStorage.getItem(storageKey("user"));
       return token && cached ? (JSON.parse(cached) as User) : null;
     } catch {
       return null;
@@ -239,12 +248,12 @@ export function ChatApp() {
   useEffect(() => {
     if (liveUser && liveUser.id === currentUser?.id) {
       setCurrentUser(liveUser);
-      localStorage.setItem("statecraft_user", JSON.stringify(liveUser));
+      localStorage.setItem(storageKey("user"), JSON.stringify(liveUser));
     }
   }, [liveUser, currentUser?.id]);
 
   useEffect(() => {
-    const token = localStorage.getItem("statecraft_token");
+    const token = localStorage.getItem(storageKey("token"));
     if (!token || !currentUser) return;
     let cancelled = false;
     (async () => {
@@ -256,10 +265,10 @@ export function ChatApp() {
         const me = (await res.json()) as { user_id: string | null };
         if (cancelled) return;
         if (!me.user_id || me.user_id !== currentUser.id) {
-          localStorage.removeItem("statecraft_token");
-          localStorage.removeItem("statecraft_user");
+          localStorage.removeItem(storageKey("token"));
+          localStorage.removeItem(storageKey("user"));
           try {
-            indexedDB.deleteDatabase("statecraft_sync_default");
+            indexedDB.deleteDatabase(`statecraft_sync_chat`);
           } catch {}
           setCurrentUser(null);
         }
@@ -326,9 +335,9 @@ export function ChatApp() {
   }, [currentUser, paletteOpen, dmPickerOpen, shortcutsOpen, threadMessageId]);
 
   async function signOut() {
-    const token = localStorage.getItem("statecraft_token");
-    localStorage.removeItem("statecraft_token");
-    localStorage.removeItem("statecraft_user");
+    const token = localStorage.getItem(storageKey("token"));
+    localStorage.removeItem(storageKey("token"));
+    localStorage.removeItem(storageKey("user"));
     if (token) {
       fetch(`${BASE_URL}/api/auth/session`, {
         method: "DELETE",
@@ -336,7 +345,7 @@ export function ChatApp() {
       }).catch(() => {});
     }
     try {
-      indexedDB.deleteDatabase("statecraft_sync_default");
+      indexedDB.deleteDatabase(`statecraft_sync_chat`);
     } catch {}
     setCurrentUser(null);
     setActiveChannelId(null);
@@ -454,7 +463,7 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
         method: "POST",
       }).then((r) => r.json());
       const token: string = session.token;
-      localStorage.setItem("statecraft_token", token);
+      localStorage.setItem(storageKey("token"), token);
       configureClient({ baseUrl: BASE_URL });
       const user = await callFn<User>("upsertUser", {
         email,
@@ -468,7 +477,7 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
         },
         body: JSON.stringify({ user_id: user.id }),
       });
-      localStorage.setItem("statecraft_user", JSON.stringify(user));
+      localStorage.setItem(storageKey("user"), JSON.stringify(user));
       void db.sync.pull();
       onReady(user);
     } catch (e) {
@@ -2607,7 +2616,7 @@ function ProfileModal({
           email,
           avatarColor: color,
         };
-        localStorage.setItem("statecraft_user", JSON.stringify(next));
+        localStorage.setItem(storageKey("user"), JSON.stringify(next));
       }
       setEditing(false);
     } catch (e) {

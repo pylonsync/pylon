@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Statecraft ERP — Custom Fabrication</title>
+    <title>Dallas Door Designs — Projects</title>
     <link rel="preconnect" href="https://rsms.me/" />
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
     <style>
@@ -339,6 +339,52 @@
       .avatar-md { width: 36px; height: 36px; font-size: 13px; }
 
       .spacer { flex: 1; }
+
+      /* Org presence — stacked avatar chip */
+      .presence-stack {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 8px 3px 4px;
+        background: var(--surface-hover);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+      .presence-stack:hover {
+        background: var(--surface-active);
+        border-color: var(--border-strong);
+      }
+      .presence-stack-avatars {
+        display: flex;
+      }
+      .presence-stack-avatars .avatar {
+        border: 2px solid var(--surface);
+        box-sizing: content-box;
+      }
+      .presence-stack-avatars .avatar + .avatar {
+        margin-left: -10px;
+      }
+      .presence-more {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        margin-left: -10px;
+        border: 2px solid var(--surface);
+        border-radius: 999px;
+        background: var(--surface-active);
+        color: var(--text-muted);
+        font-size: 10px;
+        font-weight: 600;
+      }
+      .presence-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-muted);
+        margin-left: 6px;
+      }
 
       /* Login / onboarding */
       .split-screen {

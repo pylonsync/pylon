@@ -17,9 +17,25 @@ dist/
 !.env.example
 !.env.*.example
 
-# Generated files
+# Generated TS client — regenerated on every `statecraft dev`
 agentdb.client.ts
+
+# Legacy dev-DB layout (pre .statecraft/). Keep for old checkouts.
 agentdb.dev.db
+statecraft.dev.db
+statecraft.dev.db-*
+statecraft.dev.db.*
+statecraft.sessions.db
+statecraft.sessions.db-*
+statecraft.jobs.db
+statecraft.jobs.db-*
+
+# New layout: everything runtime-local under .statecraft/ next to app.ts
+.statecraft/
+
+# File uploads dumped at project root
+/uploads/
+**/uploads/
 
 # Logs / coverage / temp
 *.log

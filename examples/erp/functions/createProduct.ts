@@ -22,7 +22,22 @@ export default mutation({
     if (name.length === 0) throw ctx.error("INVALID_NAME", "name is required");
     if (args.basePrice < 0) throw ctx.error("INVALID_PRICE", "price must be ≥ 0");
 
-    const validCategories = ["door", "window", "cabinet", "hardware", "other"];
+    // Categories follow Dallas Door Designs' product taxonomy — iron and
+    // wood entry doors, barns, pivots, patios, and fiberglass for exterior;
+    // interior and architectural cover the indoor lines; "other" is the
+    // escape hatch for accessories and services (installation, paint, etc).
+    const validCategories = [
+      "iron",
+      "wood",
+      "barn",
+      "pivot",
+      "patio",
+      "fiberglass",
+      "interior",
+      "architectural",
+      "service",
+      "other",
+    ];
     if (!validCategories.includes(args.category)) {
       throw ctx.error(
         "INVALID_CATEGORY",

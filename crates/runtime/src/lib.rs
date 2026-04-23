@@ -1467,19 +1467,79 @@ impl Runtime {
             }
         }
 
+        // countDistinct — separate handler because COUNT(DISTINCT) is a
+        // distinct SQL form from COUNT(field). Lets dashboards ask "how
+        // many unique customers placed orders this month" without a
+        // client-side post-processing pass.
+        if let Some(fields) = obj.get("countDistinct").and_then(|v| v.as_array()) {
+            for field in fields {
+                if let Some(f) = field.as_str() {
+                    validate_column_name(f, ent)?;
+                    let alias = format!("count_distinct_{f}");
+                    select_parts.push(format!(
+                        "COUNT(DISTINCT {}) AS {}",
+                        quote_ident(f),
+                        quote_ident(&alias)
+                    ));
+                    result_fields.push(alias);
+                }
+            }
+        }
+
         // Group-by fields come first in the SELECT so each row is identifiable.
+        // Each entry is either a plain column name (string) or a date-bucket
+        // spec — `{ field: "createdAt", bucket: "day" }`. Buckets map to
+        // SQLite strftime patterns so aggregation keys collapse to the
+        // bucket boundary (hour / day / week / month / year).
         let mut group_by: Vec<String> = Vec::new();
+        let mut group_select: Vec<String> = Vec::new();
         let mut group_field_names: Vec<String> = Vec::new();
         if let Some(groups) = obj.get("groupBy").and_then(|v| v.as_array()) {
             for g in groups {
                 if let Some(f) = g.as_str() {
                     validate_column_name(f, ent)?;
-                    group_by.push(quote_ident(f));
+                    let quoted = quote_ident(f);
+                    group_by.push(quoted.clone());
+                    group_select.push(quoted);
                     group_field_names.push(f.to_string());
+                } else if let Some(spec) = g.as_object() {
+                    let field = spec
+                        .get("field")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| RuntimeError {
+                            code: "INVALID_QUERY".into(),
+                            message: "groupBy object spec requires `field`".into(),
+                        })?;
+                    validate_column_name(field, ent)?;
+                    let bucket = spec
+                        .get("bucket")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("day");
+                    let fmt = match bucket {
+                        "hour" => "%Y-%m-%d %H:00:00",
+                        "day" => "%Y-%m-%d",
+                        "month" => "%Y-%m",
+                        "year" => "%Y",
+                        "week" => "%Y-W%W",
+                        _ => {
+                            return Err(RuntimeError {
+                                code: "INVALID_QUERY".into(),
+                                message: format!(
+                                    "bucket must be one of hour/day/week/month/year, got {bucket}"
+                                ),
+                            });
+                        }
+                    };
+                    let alias = format!("{field}_{bucket}");
+                    let expr =
+                        format!("strftime('{}', {})", fmt, quote_ident(field));
+                    group_by.push(expr.clone());
+                    group_select.push(format!("{} AS {}", expr, quote_ident(&alias)));
+                    group_field_names.push(alias);
                 }
             }
         }
-        let mut full_select = group_by.clone();
+        let mut full_select = group_select.clone();
         full_select.extend(select_parts.iter().cloned());
         if full_select.is_empty() {
             return Err(RuntimeError {

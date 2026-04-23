@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getBaseUrl } from './index';
+import { getBaseUrl, storageKey } from './index';
 
 // ---------------------------------------------------------------------------
 // Room types
@@ -67,7 +67,7 @@ export interface UseRoomReturn {
  */
 function readStoredToken(): string | undefined {
   if (typeof window === 'undefined' || !window.localStorage) return undefined;
-  return window.localStorage.getItem('statecraft_token') ?? undefined;
+  return window.localStorage.getItem(storageKey('token')) ?? undefined;
 }
 
 export function useRoom(

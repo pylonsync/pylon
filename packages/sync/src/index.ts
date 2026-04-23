@@ -775,11 +775,21 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * localStorage key for the auth token, namespaced by appName. Matches
+   * the key the React package's `configureClient` writes to so the sync
+   * engine and the hooks agree on where the token lives.
+   */
+  private tokenStorageKey(): string {
+    const app = this.config.appName || "default";
+    return app === "default" ? "statecraft_token" : `statecraft:${app}:token`;
+  }
+
   /** Current auth token from config or localStorage. Null when neither has one. */
   private currentToken(): string | null {
     if (this.config.token) return this.config.token;
     if (typeof window === "undefined" || !window.localStorage) return null;
-    return window.localStorage.getItem("statecraft_token");
+    return window.localStorage.getItem(this.tokenStorageKey());
   }
 
   /** Pull changes from the server. */
@@ -1066,7 +1076,7 @@ export class SyncEngine {
     const token =
       this.config.token ??
       (typeof window !== "undefined" && window.localStorage
-        ? window.localStorage.getItem("statecraft_token") ?? undefined
+        ? window.localStorage.getItem(this.tokenStorageKey()) ?? undefined
         : undefined);
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
