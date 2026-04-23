@@ -1,0 +1,101 @@
+---
+title: Live queries
+description: "Subscriptions that stay in sync with zero extra code."
+---
+
+A **live query** is a server query whose result streams updates to the client. In React:
+
+```tsx
+import { db } from "@pylonsync/react";
+
+function Inbox() {
+  const { data: messages, loading } = db.useQuery("Message", { roomId });
+  if (loading) return null;
+  return messages.map((m) => <Row key={m.id} msg={m} />);
+}
+```
+
+When anyone inserts, updates, or deletes a `Message` row matching `{ roomId }`, every subscribed client gets the new result — without writing a single line of WebSocket code.
+
+## How it works
+
+1. Client opens a WebSocket to the Pylon server.
+2. `useQuery` sends a `subscribe` frame with the entity and filter.
+3. Server runs the query once, returns the initial result, and adds the subscription to its index.
+4. On every mutation, Pylon's change log walks all active subscriptions whose filter matches the changed row and pushes the diff.
+5. Client applies the diff locally and React re-renders.
+
+## Filters
+
+Filters map to indexed columns. Equality is always fast; inequality and range scans require an index on the queried columns.
+
+```tsx
+db.useQuery("Issue", { teamId, state: "open" });
+db.useQuery("Message", { roomId });
+db.useQuery("User");              // full table (careful, scales O(N))
+```
+
+## Typed queries
+
+With codegen, `db` is fully typed to your schema:
+
+```tsx
+const { data } = db.useQuery("Message", { roomId });
+// data: Message[]
+
+const { data: issue } = db.useOne("Issue", issueId);
+// issue: Issue | null
+```
+
+Type errors catch mismatched filter keys or wrong entity names at compile time.
+
+## Pagination
+
+Live pagination works; each page is its own subscription:
+
+```tsx
+const { data, hasMore, loadMore } = db.useQueryPaginated("Message", {
+  filter: { roomId },
+  orderBy: ["sentAt", "desc"],
+  pageSize: 50,
+});
+```
+
+## Policies apply
+
+Live queries respect [policies](/concepts/policies). A subscribed client only receives rows it's allowed to read. If a row becomes readable (or unreadable) due to a policy re-evaluation, the subscription updates.
+
+## Performance
+
+Pylon maintains an index of active subscriptions keyed by entity + indexed filter fields. A write that affects N matching subscriptions is O(N), not O(all subscriptions). Practical numbers:
+
+- Tens of thousands of concurrent subscriptions per server
+- Sub-millisecond fan-out per subscriber
+- Writes stay fast because the subscription index is kept small via the schema's declared indexes
+
+See the [`bench` example](/examples/bench) to measure for yourself.
+
+## Falling back to non-live
+
+Sometimes you want a one-shot read without the subscription overhead:
+
+```tsx
+const rows = await db.list("Message", { roomId });
+```
+
+Or from a server function:
+
+```ts
+const rows = await ctx.db.query("Message", { roomId });
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime architecture" icon="radio" href="/concepts/realtime">
+    How the sync layer is built.
+  </Card>
+  <Card title="React SDK" icon="react" href="/client/react">
+    All the hooks the client exposes.
+  </Card>
+</CardGroup>

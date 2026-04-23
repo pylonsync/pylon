@@ -1,0 +1,126 @@
+---
+title: Policies
+description: "Row-level access rules that live next to your schema."
+---
+
+A **policy** is a boolean expression evaluated on every row access. It lives beside your entities, not buried in middleware.
+
+```ts
+import { policy } from "@pylonsync/sdk";
+
+const noteOwner = policy({
+  name: "note_owner",
+  entity: "Note",
+  allowRead: "true",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId",
+});
+```
+
+## What the expressions see
+
+| Binding | Type | Contains |
+|---|---|---|
+| `auth.userId` | `string \| null` | Current user's id, `null` if unauthenticated |
+| `auth.email` | `string \| null` | Email of the authenticated user |
+| `auth.roles` | `string[]` | Role names attached to the session |
+| `data.*` | `object` | The row being written (insert/update/delete) |
+| `existing.*` | `object` | The current row in storage (update/delete only) |
+
+## Each action
+
+- **`allowRead`** — runs on query results. If false, row is filtered out.
+- **`allowInsert`** — runs against the proposed `data`.
+- **`allowUpdate`** — runs against both `data` (the patch) and `existing` (the current row).
+- **`allowDelete`** — runs against `existing`.
+
+If a policy is omitted, that action is denied by default.
+
+## Operators
+
+```
+==    !=    <    <=    >    >=
+&&    ||    !
++     -     *     /     %
+```
+
+Plus membership:
+
+```
+auth.userId in data.memberIds
+"admin" in auth.roles
+```
+
+And string checks:
+
+```
+data.email ends_with "@example.com"
+data.title starts_with "[draft]"
+```
+
+## Examples
+
+### Public read, author-only write
+
+```ts
+policy({
+  name: "post_public",
+  entity: "Post",
+  allowRead: "true",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == existing.authorId",
+  allowDelete: "auth.userId == existing.authorId",
+});
+```
+
+### Members of an org
+
+```ts
+policy({
+  name: "org_member",
+  entity: "Document",
+  allowRead: "auth.userId in existing.memberIds",
+  allowInsert: "auth.userId in data.memberIds",
+  allowUpdate: "auth.userId in existing.memberIds",
+});
+```
+
+### Admin override
+
+```ts
+policy({
+  name: "admin_all",
+  entity: "AuditLog",
+  allowRead: "'admin' in auth.roles",
+  allowInsert: "'admin' in auth.roles",
+});
+```
+
+## Policy composition
+
+Multiple policies on the same entity **AND** together — all must pass. Use this to layer a broad rule with a narrow exception:
+
+```ts
+const readable = policy({ name: "readable", entity: "Doc", allowRead: "true" });
+const noDrafts = policy({
+  name: "no_drafts",
+  entity: "Doc",
+  allowRead: "existing.status != 'draft' || auth.userId == existing.authorId",
+});
+```
+
+## Server functions bypass policies
+
+Policies guard the **raw** `/api/entities/*` endpoints. Server functions (`ctx.db.insert`, `ctx.db.update`, etc.) run with elevated access — they trust you to enforce your own checks inside the handler. This lets you write escape-hatch operations (admin tools, batch imports) without contorting your policy language.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Functions" icon="function" href="/concepts/functions">
+    Write server logic for anything policies can't express.
+  </Card>
+  <Card title="Live queries" icon="radio" href="/concepts/live-queries">
+    Policies also filter subscription results.
+  </Card>
+</CardGroup>

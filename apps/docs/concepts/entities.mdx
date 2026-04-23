@@ -1,0 +1,99 @@
+---
+title: Entities
+description: "Declare typed tables with fields, indexes, and relationships."
+---
+
+An **entity** is a table. You declare one with `entity(name, fields, options)`.
+
+```ts
+import { entity, field } from "@pylonsync/sdk";
+
+const User = entity(
+  "User",
+  {
+    email: field.string().unique(),
+    name: field.string(),
+    createdAt: field.datetime(),
+  },
+  {
+    indexes: [{ name: "by_email", fields: ["email"], unique: true }],
+  },
+);
+```
+
+Every entity gets an auto-generated `id` (ULID string) and the column order you declared.
+
+## Field types
+
+| Method | Type | Notes |
+|---|---|---|
+| `field.string()` | `TEXT` | Any UTF-8 string |
+| `field.int()` | `INTEGER` | 64-bit signed |
+| `field.float()` | `REAL` | 64-bit IEEE-754 |
+| `field.boolean()` | `INTEGER` (0/1) | |
+| `field.datetime()` | `TEXT` (ISO-8601) | Store with `new Date().toISOString()` |
+| `field.richtext()` | `TEXT` | For prose; the client SDK has editors ready |
+| `field.id(entity)` | `TEXT` | Foreign key to another entity's `id` |
+
+### Modifiers
+
+- `.optional()` — column is nullable
+- `.unique()` — adds a unique index on that one column
+
+```ts
+field.string().optional()          // nullable
+field.string().unique()            // UNIQUE constraint
+field.id("User")                   // FK to User.id
+field.int().optional()             // nullable int
+```
+
+## Indexes
+
+Declare composite or non-unique indexes in the options block:
+
+```ts
+entity(
+  "Message",
+  {
+    roomId: field.id("Room"),
+    authorId: field.id("User"),
+    sentAt: field.datetime(),
+    body: field.richtext(),
+  },
+  {
+    indexes: [
+      { name: "by_room_time", fields: ["roomId", "sentAt"], unique: false },
+      { name: "by_author", fields: ["authorId"], unique: false },
+    ],
+  },
+);
+```
+
+Indexes are created and maintained automatically. Live queries use them to stay fast under load.
+
+## Relationships
+
+Pylon doesn't have a separate relation primitive — use `field.id("Other")` and query with filters. The typed client `db.query("Message", { roomId })` narrows by indexed columns.
+
+```ts
+// In a server function:
+const msgs = await ctx.db.query("Message", { roomId: args.roomId });
+
+// Or in a React client:
+const { data: messages } = db.useQuery("Message", { roomId });
+```
+
+## Schema changes
+
+Edit `app.ts`, save — `pylon dev` picks up the change and runs a live migration. Pylon's storage layer plans the diff (add column, drop index, etc.) and applies it to the SQLite file. Destructive operations (dropping a column that has data) require you to bump `manifest.version`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Policies" icon="shield" href="/concepts/policies">
+    Control who can read and write each row.
+  </Card>
+  <Card title="Functions" icon="function" href="/concepts/functions">
+    Write server-side logic.
+  </Card>
+</CardGroup>
