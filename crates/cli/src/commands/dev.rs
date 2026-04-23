@@ -238,6 +238,18 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         }
 
+        // Dev-mode rate limits — production defaults (30 fn calls / min)
+        // strangle realtime demos like world3d that write pose at 10 Hz.
+        // Operators can still override any of these for stress testing.
+        unsafe {
+            if std::env::var("PYLON_RATE_LIMIT_MAX").is_err() {
+                std::env::set_var("PYLON_RATE_LIMIT_MAX", "100000");
+            }
+            if std::env::var("PYLON_FN_RATE_LIMIT_MAX").is_err() {
+                std::env::set_var("PYLON_FN_RATE_LIMIT_MAX", "100000");
+            }
+        }
+
         // Auto-push schema to the dev database.
         if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_str) {
             if let Ok(plan) = adapter.plan_from_live(&m) {

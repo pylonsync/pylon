@@ -21,10 +21,10 @@ const Avatar = entity(
     userId: field.string(),
     name: field.string(),
     color: field.string(),
-    x: field.number(),
-    y: field.number(),
-    z: field.number(),
-    heading: field.number(),     // radians, y-axis rotation
+    x: field.float(),
+    y: field.float(),
+    z: field.float(),
+    heading: field.float(),     // radians, y-axis rotation
     emote: field.string().optional(),
     isBot: field.bool(),
     lastSeenAt: field.datetime(),

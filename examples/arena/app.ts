@@ -20,13 +20,13 @@ const Dot = entity(
   "Dot",
   {
     userId: field.string(),
-    x: field.number(),
-    y: field.number(),
-    tx: field.number(),
-    ty: field.number(),
+    x: field.float(),
+    y: field.float(),
+    tx: field.float(),
+    ty: field.float(),
     color: field.string(),
     label: field.string().optional(),
-    speed: field.number(),          // units per second
+    speed: field.float(),          // units per second
     isBot: field.bool(),
     lastSeenAt: field.datetime(),
   },
@@ -44,8 +44,8 @@ const ArenaStats = entity(
   "ArenaStats",
   {
     key: field.string().unique(),
-    mutations: field.number(),
-    broadcasts: field.number(),
+    mutations: field.float(),
+    broadcasts: field.float(),
     updatedAt: field.datetime(),
   },
 );

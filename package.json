@@ -10,18 +10,18 @@
     "examples/*/web"
   ],
   "devDependencies": {
-    "typescript": "^5.8.3"
+    "typescript": "^5.9.3"
   },
   "scripts": {
     "build": "bun run --filter '*' --if-present build",
     "check": "bun run --filter '*' --if-present check"
   },
   "overrides": {
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   },
   "resolutions": {
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   }
 }

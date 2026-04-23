@@ -321,24 +321,25 @@ export function WorldApp() {
         m.curHead += dh * lerp;
       }
 
-      // Self movement: WASD in world space relative to camera yaw.
-      let vx = 0, vz = 0;
-      if (keys.has("w") || keys.has("arrowup")) vz -= 1;
-      if (keys.has("s") || keys.has("arrowdown")) vz += 1;
-      if (keys.has("a") || keys.has("arrowleft")) vx -= 1;
-      if (keys.has("d") || keys.has("arrowright")) vx += 1;
-      const mag = Math.hypot(vx, vz);
-      if (mag > 0) { vx /= mag; vz /= mag; }
+      // Self movement: WASD relative to camera yaw.
+      // Camera sits at (avatar - sin(yaw)*dist, _, avatar - cos(yaw)*dist)
+      // looking at the avatar, so "forward" in world is (sin yaw, cos yaw).
+      let forward = 0, right = 0;
+      if (keys.has("w") || keys.has("arrowup")) forward += 1;
+      if (keys.has("s") || keys.has("arrowdown")) forward -= 1;
+      if (keys.has("d") || keys.has("arrowright")) right += 1;
+      if (keys.has("a") || keys.has("arrowleft")) right -= 1;
+      const mag = Math.hypot(forward, right);
+      if (mag > 0) { forward /= mag; right /= mag; }
 
-      // Rotate input by camera yaw so "W" means "forward from camera POV"
-      const rx = Math.cos(mouseYaw) * vx - Math.sin(mouseYaw) * vz;
-      const rz = Math.sin(mouseYaw) * vx + Math.cos(mouseYaw) * vz;
+      const rx = Math.sin(mouseYaw) * forward - Math.cos(mouseYaw) * right;
+      const rz = Math.cos(mouseYaw) * forward + Math.sin(mouseYaw) * right;
 
       // Update self heading toward movement direction.
       const selfEntry = selfId ? meshes.get(selfId) : null;
       if (selfEntry) {
         if (mag > 0.01) {
-          const target = Math.atan2(rx, rz) + Math.PI;
+          const target = Math.atan2(rx, rz);
           let dh = target - selfEntry.curHead;
           while (dh > Math.PI) dh -= Math.PI * 2;
           while (dh < -Math.PI) dh += Math.PI * 2;

@@ -1,0 +1,27 @@
+app = "pylon-erp"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+  [build.args]
+    APP = "examples/erp"
+
+[http_service]
+  internal_port = 4321
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
+
+[mounts]
+  source = "pylon_data"
+  destination = "/data"
+
+[env]
+  PYLON_DEV_MODE = "false"
+  # PYLON_CORS_ORIGIN is set via `fly secrets set` after you know the Vercel URL.
