@@ -1,4 +1,4 @@
-# Chat — statecraft example
+# Chat — pylon example
 
 A Slack-style chat app in one manifest + six functions + one React file.
 
@@ -28,11 +28,11 @@ Demonstrates:
 
 Two terminals:
 
-**Terminal 1 — statecraft backend (port 4321):**
+**Terminal 1 — pylon backend (port 4321):**
 
 ```sh
 cd examples/chat
-statecraft dev app.ts
+pylon dev app.ts
 ```
 
 **Terminal 2 — Vite dev server for the React UI (port 5173):**
@@ -53,7 +53,7 @@ Studio at `http://localhost:4321/studio` lets you inspect rows directly
 
 | File | Why |
 |---|---|
-| `statecraft.manifest.json` | Data model — 7 entities, 4 policies |
+| `pylon.manifest.json` | Data model — 7 entities, 4 policies |
 | `functions/sendMessage.ts` | The critical write path — transactional |
 | `functions/toggleReaction.ts` | Race-safe toggle with unique-index fallback |
 | `client/ChatApp.tsx` | React UI — `useQuery`, `useRoom`, `useMutation` |
@@ -64,7 +64,7 @@ Studio at `http://localhost:4321/studio` lets you inspect rows directly
   before shipping; wire up `/api/auth/magic/send` + `/magic/verify`.
 - **No private DMs.** Channels can be private but there's no 1:1 DM
   shortcut. Trivial to add: a `Channel` with exactly two memberships.
-- **No file uploads.** Use `uploadFile` from `@statecraft/react`.
+- **No file uploads.** Use `uploadFile` from `@pylon/react`.
 - **No message editing / deletion.** Add an `edit` mutation that checks
   `authorId === ctx.auth.userId` and sets `editedAt`.
 - **No threads UI.** The schema supports `parentMessageId`; rendering a

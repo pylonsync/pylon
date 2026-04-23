@@ -1,24 +1,24 @@
-# statecraft
+# pylon
 
 A self-hostable, single-binary backend for web, mobile, and real-time apps.
 
 [![CI](https://github.com/ericc59/agentdb/actions/workflows/ci.yml/badge.svg)](https://github.com/ericc59/agentdb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-statecraft gives you what Convex / Firebase / Supabase do — declarative schema,
+pylon gives you what Convex / Firebase / Supabase do — declarative schema,
 real-time sync, server functions, auth, file storage — but as a single Rust
 binary you can `scp` to a VPS or run on Cloudflare Workers.
 
 ```sh
 # Install
-cargo install --git https://github.com/ericc59/agentdb statecraft-cli
+cargo install --git https://github.com/ericc59/agentdb pylon-cli
 
 # New project
-statecraft init my-app
+pylon init my-app
 cd my-app
 
 # Dev server with live reload
-statecraft dev
+pylon dev
 ```
 
 Visit `http://localhost:4321/studio` for the inspector.
@@ -40,7 +40,7 @@ Visit `http://localhost:4321/studio` for the inspector.
 
 ## How does it compare?
 
-|  | statecraft | Convex | Supabase | Firebase |
+|  | pylon | Convex | Supabase | Firebase |
 |---|---|---|---|---|
 | Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
 | Deploy targets | self-host, Workers, AWS | their cloud only | their cloud / k8s | their cloud only |
@@ -60,10 +60,10 @@ curl -fsSL https://raw.githubusercontent.com/ericc59/agentdb/main/install.sh | b
 
 # Homebrew
 brew tap ericc59/agentdb https://github.com/ericc59/agentdb
-brew install statecraft
+brew install pylon
 
 # From source
-cargo install --git https://github.com/ericc59/agentdb statecraft-cli
+cargo install --git https://github.com/ericc59/agentdb pylon-cli
 
 # Docker
 docker pull ghcr.io/ericc59/agentdb:latest
@@ -71,7 +71,7 @@ docker pull ghcr.io/ericc59/agentdb:latest
 
 ### 2. Define your schema
 
-`statecraft.manifest.json`:
+`pylon.manifest.json`:
 
 ```json
 {
@@ -91,13 +91,13 @@ docker pull ghcr.io/ericc59/agentdb:latest
 ### 3. Run
 
 ```sh
-statecraft dev
+pylon dev
 ```
 
 ### 4. Connect from React
 
 ```tsx
-import { init, db } from "@statecraft/react";
+import { init, db } from "@pylon/react";
 init({ baseUrl: "http://localhost:4321" });
 
 function TodoList() {
@@ -118,7 +118,7 @@ function TodoList() {
 `functions/createTodo.ts`:
 
 ```ts
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylon/functions";
 
 export default mutation({
   args: { title: v.string() },
@@ -136,7 +136,7 @@ export default mutation({
 ### 6. Add a multiplayer shard (optional)
 
 ```rust
-use statecraft_realtime::{Shard, ShardConfig, SimState};
+use pylon_realtime::{Shard, ShardConfig, SimState};
 
 struct MyGame { /* state */ }
 impl SimState for MyGame { /* tick, snapshot, apply_input */ }
@@ -150,14 +150,14 @@ let shard = Shard::new("match_1", MyGame::default(), ShardConfig {
 Then connect from the client:
 
 ```tsx
-import { useShard } from "@statecraft/react";
+import { useShard } from "@pylon/react";
 const { snapshot, send } = useShard("match_1", { subscriberId: "player_42" });
 ```
 
 ## Project layout
 
 ```
-statecraft/
+pylon/
 ├── crates/
 │   ├── core/            Shared types, error codes, utilities
 │   ├── http/            Platform-agnostic HTTP types + DataStore trait
@@ -172,7 +172,7 @@ statecraft/
 │   ├── storage/         SQLite + Postgres backends, file storage
 │   ├── plugin/          Built-in plugins (cache, webhooks, soft delete, ...)
 │   ├── migrate/         Schema migration diff engine
-│   ├── cli/             The `statecraft` binary
+│   ├── cli/             The `pylon` binary
 │   └── ...
 └── packages/
     ├── sdk/             Schema DSL + manifest builder
@@ -182,7 +182,7 @@ statecraft/
     ├── functions/       Function definitions + Bun runtime
     ├── sync/            Local-first sync engine
     ├── workflows/       Durable workflow runner
-    └── create-statecraft/  Project scaffolder
+    └── create-pylon/  Project scaffolder
 ```
 
 ## Configuration
@@ -192,13 +192,13 @@ All configuration is via environment variables. See `crates/runtime/src/config.r
 Common settings:
 
 ```sh
-STATECRAFT_PORT=4321
-STATECRAFT_DB_PATH=/var/lib/statecraft/statecraft.db
-STATECRAFT_FILES_DIR=/var/lib/statecraft/uploads
-STATECRAFT_SESSION_DB=/var/lib/statecraft/sessions.db
-STATECRAFT_ADMIN_TOKEN=<long random>
-STATECRAFT_CORS_ORIGIN=https://your-app.com
-STATECRAFT_DEV_MODE=false
+PYLON_PORT=4321
+PYLON_DB_PATH=/var/lib/pylon/pylon.db
+PYLON_FILES_DIR=/var/lib/pylon/uploads
+PYLON_SESSION_DB=/var/lib/pylon/sessions.db
+PYLON_ADMIN_TOKEN=<long random>
+PYLON_CORS_ORIGIN=https://your-app.com
+PYLON_DEV_MODE=false
 ```
 
 ## Deployment
@@ -227,7 +227,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and PRs welcome.
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and hardening
-notes. **Do not file security issues publicly.** Email security@statecraft.dev.
+notes. **Do not file security issues publicly.** Email security@pylon.dev.
 
 ## License
 

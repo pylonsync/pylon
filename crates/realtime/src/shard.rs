@@ -226,7 +226,7 @@ pub struct Shard<S: SimState> {
     /// Count of consecutive idle ticks (no inputs, no subscribers).
     idle_ticks: Mutex<u32>,
     /// Optional hook: user callback invoked after each tick. Useful for
-    /// persistence (save state to statecraft every N ticks).
+    /// persistence (save state to pylon every N ticks).
     on_tick: Mutex<Option<Box<dyn Fn(&S, u64) + Send + Sync>>>,
 }
 
@@ -260,7 +260,7 @@ impl<S: SimState> Shard<S> {
     }
 
     /// Register a callback that runs after every tick — use to persist state
-    /// via statecraft, push metrics, or trigger side effects.
+    /// via pylon, push metrics, or trigger side effects.
     pub fn set_on_tick(&self, callback: impl Fn(&S, u64) + Send + Sync + 'static) {
         *self.on_tick.lock().unwrap() = Some(Box::new(callback));
     }

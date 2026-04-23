@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
-use statecraft_runtime::Runtime;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_runtime::Runtime;
 
 fn test_manifest() -> AppManifest {
     AppManifest {
@@ -66,7 +66,7 @@ fn start_server(rt: Arc<Runtime>) -> u16 {
     let port = available_port();
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {
-        let _ = statecraft_runtime::server::start(rt2, port);
+        let _ = pylon_runtime::server::start(rt2, port);
     });
     for _ in 0..100 {
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
@@ -272,7 +272,7 @@ fn cursor_from_previous_lifetime_forces_resync() {
 //     Regression: SessionStore was in-memory by default; every dev-server
 //     restart invalidated every browser token even though the app DB
 //     carried on unchanged. Now persistence is automatic unless
-//     STATECRAFT_SESSION_IN_MEMORY=1.
+//     PYLON_SESSION_IN_MEMORY=1.
 // ---------------------------------------------------------------------------
 #[test]
 fn sessions_survive_server_restart_by_default() {
@@ -283,8 +283,8 @@ fn sessions_survive_server_restart_by_default() {
     // Safety: tests run in-process; no other thread reads this var
     // between here and the server spawn.
     unsafe {
-        std::env::remove_var("STATECRAFT_SESSION_IN_MEMORY");
-        std::env::remove_var("STATECRAFT_SESSION_DB");
+        std::env::remove_var("PYLON_SESSION_IN_MEMORY");
+        std::env::remove_var("PYLON_SESSION_DB");
     }
 
     // First lifetime: mint a guest, confirm it resolves.

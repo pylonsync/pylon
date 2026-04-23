@@ -1,10 +1,10 @@
-You are working in `/Users/ericc59/Dev/statecraft`.
+You are working in `/Users/ericc59/Dev/pylon`.
 
 Read first:
 
-- `/Users/ericc59/Dev/statecraft/README.md`
-- `/Users/ericc59/Dev/statecraft/ARCHITECTURE.md`
-- `/Users/ericc59/Dev/statecraft/ROADMAP.md`
+- `/Users/ericc59/Dev/pylon/README.md`
+- `/Users/ericc59/Dev/pylon/ARCHITECTURE.md`
+- `/Users/ericc59/Dev/pylon/ROADMAP.md`
 
 Current state summary:
 
@@ -20,7 +20,7 @@ Current state summary:
   - `policy`
   - `buildManifest`
 - example app lives at:
-  - `/Users/ericc59/Dev/statecraft/examples/todo-app/app.ts`
+  - `/Users/ericc59/Dev/pylon/examples/todo-app/app.ts`
 - CLI commands currently include:
   - `codegen`
   - `schema check`

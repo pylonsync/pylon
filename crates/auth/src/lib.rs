@@ -393,7 +393,7 @@ fn ureq_agent() -> ureq::Agent {
         .timeout_connect(HTTP_TIMEOUT)
         .timeout_read(HTTP_TIMEOUT)
         .timeout_write(HTTP_TIMEOUT)
-        .user_agent("statecraft/0.1")
+        .user_agent("pylon/0.1")
         .build()
 }
 
@@ -489,34 +489,34 @@ impl OAuthRegistry {
     }
 
     /// Build from environment variables.
-    /// Looks for STATECRAFT_OAUTH_GOOGLE_CLIENT_ID, etc.
+    /// Looks for PYLON_OAUTH_GOOGLE_CLIENT_ID, etc.
     pub fn from_env() -> Self {
         let mut reg = Self::new();
 
         // Google
         if let (Ok(id), Ok(secret)) = (
-            std::env::var("STATECRAFT_OAUTH_GOOGLE_CLIENT_ID"),
-            std::env::var("STATECRAFT_OAUTH_GOOGLE_CLIENT_SECRET"),
+            std::env::var("PYLON_OAUTH_GOOGLE_CLIENT_ID"),
+            std::env::var("PYLON_OAUTH_GOOGLE_CLIENT_SECRET"),
         ) {
             reg.register(OAuthConfig {
                 provider: "google".into(),
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("STATECRAFT_OAUTH_GOOGLE_REDIRECT")
+                redirect_uri: std::env::var("PYLON_OAUTH_GOOGLE_REDIRECT")
                     .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/google".into()),
             });
         }
 
         // GitHub
         if let (Ok(id), Ok(secret)) = (
-            std::env::var("STATECRAFT_OAUTH_GITHUB_CLIENT_ID"),
-            std::env::var("STATECRAFT_OAUTH_GITHUB_CLIENT_SECRET"),
+            std::env::var("PYLON_OAUTH_GITHUB_CLIENT_ID"),
+            std::env::var("PYLON_OAUTH_GITHUB_CLIENT_SECRET"),
         ) {
             reg.register(OAuthConfig {
                 provider: "github".into(),
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("STATECRAFT_OAUTH_GITHUB_REDIRECT")
+                redirect_uri: std::env::var("PYLON_OAUTH_GITHUB_REDIRECT")
                     .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/github".into()),
             });
         }
@@ -787,7 +787,7 @@ fn generate_token() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
-    format!("statecraft_{}", hex_encode(&bytes))
+    format!("pylon_{}", hex_encode(&bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,7 +1064,7 @@ mod tests {
         let store = SessionStore::new();
         let session = store.create("user-1".into());
         assert!(!session.token.is_empty());
-        assert!(session.token.starts_with("statecraft_"));
+        assert!(session.token.starts_with("pylon_"));
 
         let retrieved = store.get(&session.token).unwrap();
         assert_eq!(retrieved.user_id, "user-1");
@@ -1189,9 +1189,9 @@ mod tests {
         let t1 = generate_token();
         let t2 = generate_token();
         assert_ne!(t1, t2);
-        assert!(t1.starts_with("statecraft_"));
-        assert!(t2.starts_with("statecraft_"));
-        // 256 bits = 64 hex chars + "statecraft_" prefix (9 chars)
+        assert!(t1.starts_with("pylon_"));
+        assert!(t2.starts_with("pylon_"));
+        // 256 bits = 64 hex chars + "pylon_" prefix (9 chars)
         assert_eq!(t1.len(), 11 + 64);
     }
 

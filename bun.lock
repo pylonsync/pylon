@@ -8,7 +8,7 @@
       },
     },
     "apps/web": {
-      "name": "@statecraft/web",
+      "name": "@pylonsync/web",
       "version": "0.0.1",
       "dependencies": {
         "@radix-ui/react-slot": "^1.1.0",
@@ -34,26 +34,26 @@
       "name": "auction-house-example",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/functions": "workspace:*",
-        "@statecraft/react": "workspace:*",
-        "@statecraft/sdk": "workspace:*",
+        "@pylonsync/functions": "workspace:*",
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
       },
     },
     "examples/chat": {
       "name": "chat-example",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/functions": "workspace:*",
-        "@statecraft/react": "workspace:*",
-        "@statecraft/sdk": "workspace:*",
+        "@pylonsync/functions": "workspace:*",
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
       },
     },
     "examples/chat/web": {
       "name": "chat-web",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/react": "workspace:*",
-        "@statecraft/sync": "workspace:*",
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sync": "workspace:*",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
       },
@@ -65,21 +65,126 @@
         "vite": "^5.3.3",
       },
     },
-    "examples/erp": {
-      "name": "@statecraft/example-erp",
+    "examples/crew": {
+      "name": "@pylonsync/example-crew",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/functions": "file:../../packages/functions",
-        "@statecraft/sdk": "file:../../packages/sdk",
+        "@pylonsync/functions": "file:../../packages/functions",
+        "@pylonsync/sdk": "file:../../packages/sdk",
+      },
+    },
+    "examples/crew/web": {
+      "name": "@pylonsync/example-crew-web",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "file:../../../packages/react",
+        "@pylonsync/sdk": "file:../../../packages/sdk",
+        "@pylonsync/sync": "file:../../../packages/sync",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+      },
+      "devDependencies": {
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.3",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11",
+      },
+    },
+    "examples/crm": {
+      "name": "@pylonsync/example-crm",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/functions": "file:../../packages/functions",
+        "@pylonsync/sdk": "file:../../packages/sdk",
+      },
+    },
+    "examples/crm/web": {
+      "name": "@pylonsync/example-crm-web",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "file:../../../packages/react",
+        "@pylonsync/sdk": "file:../../../packages/sdk",
+        "@pylonsync/sync": "file:../../../packages/sync",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+      },
+      "devDependencies": {
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.3",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11",
+      },
+    },
+    "examples/erp": {
+      "name": "@pylonsync/example-erp",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/functions": "file:../../packages/functions",
+        "@pylonsync/sdk": "file:../../packages/sdk",
       },
     },
     "examples/erp/web": {
-      "name": "@statecraft/example-erp-web",
+      "name": "@pylonsync/example-erp-web",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/react": "file:../../../packages/react",
-        "@statecraft/sdk": "file:../../../packages/sdk",
-        "@statecraft/sync": "file:../../../packages/sync",
+        "@pylonsync/react": "file:../../../packages/react",
+        "@pylonsync/sdk": "file:../../../packages/sdk",
+        "@pylonsync/sync": "file:../../../packages/sync",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+      },
+      "devDependencies": {
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.3",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11",
+      },
+    },
+    "examples/linear": {
+      "name": "@pylonsync/example-linear",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/functions": "file:../../packages/functions",
+        "@pylonsync/sdk": "file:../../packages/sdk",
+      },
+    },
+    "examples/linear/web": {
+      "name": "@pylonsync/example-linear-web",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "file:../../../packages/react",
+        "@pylonsync/sdk": "file:../../../packages/sdk",
+        "@pylonsync/sync": "file:../../../packages/sync",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+      },
+      "devDependencies": {
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.3",
+        "typescript": "^5.6.3",
+        "vite": "^5.4.11",
+      },
+    },
+    "examples/stage": {
+      "name": "@pylonsync/example-stage",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/functions": "file:../../packages/functions",
+        "@pylonsync/sdk": "file:../../packages/sdk",
+      },
+    },
+    "examples/stage/web": {
+      "name": "@pylonsync/example-stage-web",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "file:../../../packages/react",
+        "@pylonsync/sdk": "file:../../../packages/sdk",
+        "@pylonsync/sync": "file:../../../packages/sync",
+        "lucide-react": "^1.9.0",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
       },
@@ -92,27 +197,27 @@
       },
     },
     "examples/todo-app": {
-      "name": "@statecraft/example-todo-app",
+      "name": "@pylonsync/example-todo-app",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/sdk": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
       },
     },
-    "packages/create-statecraft": {
-      "name": "create-statecraft",
+    "packages/create-pylon": {
+      "name": "create-pylon",
       "version": "0.1.0",
       "bin": {
-        "create-statecraft": "src/index.ts",
+        "create-pylon": "src/index.ts",
       },
       "devDependencies": {
         "bun-types": "latest",
       },
     },
     "packages/functions": {
-      "name": "@statecraft/functions",
+      "name": "@pylonsync/functions",
       "version": "0.1.0",
       "bin": {
-        "statecraft-functions-runtime": "src/runtime.ts",
+        "pylon-functions-runtime": "src/runtime.ts",
       },
       "devDependencies": {
         "typescript": "^5.5",
@@ -125,11 +230,11 @@
       ],
     },
     "packages/react": {
-      "name": "@statecraft/react",
+      "name": "@pylonsync/react",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/sdk": "file:../sdk",
-        "@statecraft/sync": "file:../sync",
+        "@pylonsync/sdk": "file:../sdk",
+        "@pylonsync/sync": "file:../sync",
       },
       "devDependencies": {
         "@types/react": "^19.0.0",
@@ -139,11 +244,11 @@
       },
     },
     "packages/react-native": {
-      "name": "@statecraft/react-native",
+      "name": "@pylonsync/react-native",
       "version": "0.1.0",
       "dependencies": {
-        "@statecraft/sdk": "file:../sdk",
-        "@statecraft/sync": "file:../sync",
+        "@pylonsync/sdk": "file:../sdk",
+        "@pylonsync/sync": "file:../sync",
       },
       "devDependencies": {
         "@types/react": "^19.0.0",
@@ -156,15 +261,15 @@
       },
     },
     "packages/sdk": {
-      "name": "@statecraft/sdk",
+      "name": "@pylonsync/sdk",
       "version": "0.1.0",
     },
     "packages/sync": {
-      "name": "@statecraft/sync",
+      "name": "@pylonsync/sync",
       "version": "0.1.0",
     },
     "packages/workflows": {
-      "name": "@statecraft/workflows",
+      "name": "@pylonsync/workflows",
       "version": "0.1.0",
       "peerDependencies": {
         "bun-types": ">=1.0.0",
@@ -348,6 +453,42 @@
 
     "@next/swc-win32-x64-msvc": ["@next/swc-win32-x64-msvc@16.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-kMVGgsqhO5YTYODD9IPGGhA6iprWidQckK3LmPeW08PIFENRmgfb4MjXHO+p//d+ts2rpjvK5gXWzXSMrPl9cw=="],
 
+    "@pylonsync/example-crew": ["@pylonsync/example-crew@workspace:examples/crew"],
+
+    "@pylonsync/example-crew-web": ["@pylonsync/example-crew-web@workspace:examples/crew/web"],
+
+    "@pylonsync/example-crm": ["@pylonsync/example-crm@workspace:examples/crm"],
+
+    "@pylonsync/example-crm-web": ["@pylonsync/example-crm-web@workspace:examples/crm/web"],
+
+    "@pylonsync/example-erp": ["@pylonsync/example-erp@workspace:examples/erp"],
+
+    "@pylonsync/example-erp-web": ["@pylonsync/example-erp-web@workspace:examples/erp/web"],
+
+    "@pylonsync/example-linear": ["@pylonsync/example-linear@workspace:examples/linear"],
+
+    "@pylonsync/example-linear-web": ["@pylonsync/example-linear-web@workspace:examples/linear/web"],
+
+    "@pylonsync/example-stage": ["@pylonsync/example-stage@workspace:examples/stage"],
+
+    "@pylonsync/example-stage-web": ["@pylonsync/example-stage-web@workspace:examples/stage/web"],
+
+    "@pylonsync/example-todo-app": ["@pylonsync/example-todo-app@workspace:examples/todo-app"],
+
+    "@pylonsync/functions": ["@pylonsync/functions@workspace:packages/functions"],
+
+    "@pylonsync/react": ["@pylonsync/react@workspace:packages/react"],
+
+    "@pylonsync/react-native": ["@pylonsync/react-native@workspace:packages/react-native"],
+
+    "@pylonsync/sdk": ["@pylonsync/sdk@workspace:packages/sdk"],
+
+    "@pylonsync/sync": ["@pylonsync/sync@workspace:packages/sync"],
+
+    "@pylonsync/web": ["@pylonsync/web@workspace:apps/web"],
+
+    "@pylonsync/workflows": ["@pylonsync/workflows@workspace:packages/workflows"],
+
     "@radix-ui/react-compose-refs": ["@radix-ui/react-compose-refs@1.1.2", "", { "peerDependencies": { "@types/react": "*", "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc" }, "optionalPeers": ["@types/react"] }, "sha512-z4eqJvfiNnFMHIIvXP3CY57y2WJs5g2v3X0zm9mEJkrkNv4rDxu+sg9Jh8EkXyeqBkB7SOcboo9dMVqhyrACIg=="],
 
     "@radix-ui/react-slot": ["@radix-ui/react-slot@1.2.4", "", { "dependencies": { "@radix-ui/react-compose-refs": "1.1.2" }, "peerDependencies": { "@types/react": "*", "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc" }, "optionalPeers": ["@types/react"] }, "sha512-Jl+bCv8HxKnlTLVrcDE8zTMJ09R9/ukw4qBs/oZClOfoQk/cOTbDn+NceXfV7j09YPVQUryJPHurafcSg6EVKA=="],
@@ -429,26 +570,6 @@
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.60.2", "", { "os": "win32", "cpu": "x64" }, "sha512-Nd/SgG27WoA9e+/TdK74KnHz852TLa94ovOYySo/yMPuTmpckK/jIF2jSwS3g7ELSKXK13/cVdmg1Z/DaCWKxA=="],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.27.10", "", {}, "sha512-MTBk/3jGLNB2tVxv6uLlFh1iu64iYOQ2PbdOSK3NW8JZsmlaOh2q6sdtKowBhfw8QFLmYNzTW4/oK4uATIi6ZA=="],
-
-    "@statecraft/example-erp": ["@statecraft/example-erp@workspace:examples/erp"],
-
-    "@statecraft/example-erp-web": ["@statecraft/example-erp-web@workspace:examples/erp/web"],
-
-    "@statecraft/example-todo-app": ["@statecraft/example-todo-app@workspace:examples/todo-app"],
-
-    "@statecraft/functions": ["@statecraft/functions@workspace:packages/functions"],
-
-    "@statecraft/react": ["@statecraft/react@workspace:packages/react"],
-
-    "@statecraft/react-native": ["@statecraft/react-native@workspace:packages/react-native"],
-
-    "@statecraft/sdk": ["@statecraft/sdk@workspace:packages/sdk"],
-
-    "@statecraft/sync": ["@statecraft/sync@workspace:packages/sync"],
-
-    "@statecraft/web": ["@statecraft/web@workspace:apps/web"],
-
-    "@statecraft/workflows": ["@statecraft/workflows@workspace:packages/workflows"],
 
     "@swc/helpers": ["@swc/helpers@0.5.15", "", { "dependencies": { "tslib": "^2.8.0" } }, "sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g=="],
 
@@ -580,7 +701,7 @@
 
     "convert-source-map": ["convert-source-map@2.0.0", "", {}, "sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg=="],
 
-    "create-statecraft": ["create-statecraft@workspace:packages/create-statecraft"],
+    "create-pylon": ["create-pylon@workspace:packages/create-pylon"],
 
     "cross-spawn": ["cross-spawn@7.0.6", "", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
 
@@ -724,7 +845,7 @@
 
     "lru-cache": ["lru-cache@5.1.1", "", { "dependencies": { "yallist": "^3.0.2" } }, "sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w=="],
 
-    "lucide-react": ["lucide-react@0.475.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-NJzvVu1HwFVeZ+Gwq2q00KygM1aBhy/ZrhY9FsAgJtpB+E4R7uxRk9M2iKvHa6/vNxZydIB59htha4c2vvwvVg=="],
+    "lucide-react": ["lucide-react@1.9.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-6qVAmbgCjcJz7sAGSPSSJ++RAwjlK2XCbRrZKv63Ciko1KT8jX0//CXxgI3jg2HlJu8tADqdYlNDebmYjeoruA=="],
 
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
@@ -932,37 +1053,69 @@
 
     "@jest/types/@types/node": ["@types/node@25.6.0", "", { "dependencies": { "undici-types": "~7.19.0" } }, "sha512-+qIYRKdNYJwY3vRCZMdJbPLJAtGjQBudzZzdzwQYkEPQd+PJGixUL5QfvCLDaULoLv+RhT3LDkwEfKaAkgSmNQ=="],
 
+    "@pylonsync/example-crew/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
+
+    "@pylonsync/example-crew/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-crew-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-crew-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/example-crm/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
+
+    "@pylonsync/example-crm/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-crm-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-crm-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/example-erp/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
+
+    "@pylonsync/example-erp/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-erp-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-erp-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/example-linear/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
+
+    "@pylonsync/example-linear/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-linear-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-linear-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/example-stage/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
+
+    "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-stage-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/example-stage-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/react/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
+
+    "@pylonsync/react-native/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react-native/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/react-native/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
+
+    "@pylonsync/web/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
+
+    "@pylonsync/web/@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
+
+    "@pylonsync/web/lucide-react": ["lucide-react@0.475.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-NJzvVu1HwFVeZ+Gwq2q00KygM1aBhy/ZrhY9FsAgJtpB+E4R7uxRk9M2iKvHa6/vNxZydIB59htha4c2vvwvVg=="],
+
+    "@pylonsync/web/react": ["react@19.2.5", "", {}, "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA=="],
+
+    "@pylonsync/web/react-dom": ["react-dom@19.2.5", "", { "dependencies": { "scheduler": "^0.27.0" }, "peerDependencies": { "react": "^19.2.5" } }, "sha512-J5bAZz+DXMMwW/wV3xzKke59Af6CHY7G4uYLN1OvBcKEsWOs4pQExj86BBKamxl/Ik5bx9whOrvBlSDfWzgSag=="],
+
     "@react-native/virtualized-lists/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@statecraft/example-erp/@statecraft/functions": ["@statecraft/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "statecraft-functions-runtime": "src/runtime.ts" } }],
-
-    "@statecraft/example-erp/@statecraft/sdk": ["@statecraft/sdk@file:packages/sdk", {}],
-
-    "@statecraft/example-erp-web/@statecraft/react": ["@statecraft/react@file:packages/react", { "dependencies": { "@statecraft/sdk": "file:../sdk", "@statecraft/sync": "file:../sync" }, "devDependencies": { "@types/react": "^19.0.0" }, "peerDependencies": { "react": ">=18.0.0" } }],
-
-    "@statecraft/example-erp-web/@statecraft/sdk": ["@statecraft/sdk@file:packages/sdk", {}],
-
-    "@statecraft/example-erp-web/@statecraft/sync": ["@statecraft/sync@file:packages/sync", {}],
-
-    "@statecraft/react/@statecraft/sdk": ["@statecraft/sdk@file:packages/sdk", {}],
-
-    "@statecraft/react/@statecraft/sync": ["@statecraft/sync@file:packages/sync", {}],
-
-    "@statecraft/react/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@statecraft/react-native/@statecraft/sdk": ["@statecraft/sdk@file:packages/sdk", {}],
-
-    "@statecraft/react-native/@statecraft/sync": ["@statecraft/sync@file:packages/sync", {}],
-
-    "@statecraft/react-native/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@statecraft/web/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@statecraft/web/@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
-
-    "@statecraft/web/react": ["react@19.2.5", "", {}, "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA=="],
-
-    "@statecraft/web/react-dom": ["react-dom@19.2.5", "", { "dependencies": { "scheduler": "^0.27.0" }, "peerDependencies": { "react": "^19.2.5" } }, "sha512-J5bAZz+DXMMwW/wV3xzKke59Af6CHY7G4uYLN1OvBcKEsWOs4pQExj86BBKamxl/Ik5bx9whOrvBlSDfWzgSag=="],
 
     "@tailwindcss/oxide-wasm32-wasi/@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" }, "bundled": true }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
@@ -1034,13 +1187,7 @@
 
     "@jest/types/@types/node/undici-types": ["undici-types@7.19.2", "", {}, "sha512-qYVnV5OEm2AW8cJMCpdV20CDyaN3g0AjDlOGf1OW4iaDEx8MwdtChUp4zu4H0VP3nDRF/8RKWH+IPp9uW0YGZg=="],
 
-    "@statecraft/example-erp-web/@statecraft/react/@statecraft/sdk": ["@statecraft/sdk@file:packages/sdk", {}],
-
-    "@statecraft/example-erp-web/@statecraft/react/@statecraft/sync": ["@statecraft/sync@file:packages/sync", {}],
-
-    "@statecraft/example-erp-web/@statecraft/react/@types/react": ["@types/react@19.2.14", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w=="],
-
-    "@statecraft/web/react-dom/scheduler": ["scheduler@0.27.0", "", {}, "sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q=="],
+    "@pylonsync/web/react-dom/scheduler": ["scheduler@0.27.0", "", {}, "sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q=="],
 
     "bun-types/@types/node/undici-types": ["undici-types@7.19.2", "", {}, "sha512-qYVnV5OEm2AW8cJMCpdV20CDyaN3g0AjDlOGf1OW4iaDEx8MwdtChUp4zu4H0VP3nDRF/8RKWH+IPp9uW0YGZg=="],
 

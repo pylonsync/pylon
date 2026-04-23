@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-We pledge to make participation in the statecraft project a harassment-free
+We pledge to make participation in the pylon project a harassment-free
 experience for everyone, regardless of age, body size, disability, ethnicity,
 gender identity and expression, level of experience, nationality, personal
 appearance, race, religion, or sexual identity and orientation.
@@ -23,7 +23,7 @@ appearance, race, religion, or sexual identity and orientation.
 
 ## Enforcement
 
-Report unacceptable behavior to the maintainers at conduct@statecraft.dev.
+Report unacceptable behavior to the maintainers at conduct@pylon.dev.
 Reports will be reviewed and investigated promptly and confidentially.
 
 This Code of Conduct is adapted from the

@@ -25,14 +25,14 @@
 //!       --health-retries 5
 //! env:
 //!   TEST_POSTGRES_URL: postgres://postgres:test@localhost/postgres
-//! run: cargo test -p statecraft-storage --features postgres-live
+//! run: cargo test -p pylon-storage --features postgres-live
 //! ```
 
 #![cfg(feature = "postgres-live")]
 
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
-use statecraft_http::DataStore;
-use statecraft_storage::pg_datastore::PostgresDataStore;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_http::DataStore;
+use pylon_storage::pg_datastore::PostgresDataStore;
 
 fn require_pg_url() -> Option<String> {
     std::env::var("TEST_POSTGRES_URL").ok()

@@ -318,11 +318,20 @@ pub enum FnType {
 }
 
 /// Auth context passed to function handlers.
+///
+/// Mirrors the three fields of the runtime's `AuthContext` that a
+/// mutation can legitimately read: the authenticated user id, admin
+/// flag, and active tenant. Functions that gate on `ctx.auth.tenantId`
+/// (anything org-scoped in a B2B app) need the last one forwarded — it's
+/// easy to forget and catches out every new multi-tenant example until
+/// someone hits "why is my session_tenant always null inside functions".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     pub is_admin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 /// Error info in protocol messages.

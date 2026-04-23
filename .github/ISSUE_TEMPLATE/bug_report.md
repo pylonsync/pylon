@@ -10,7 +10,7 @@ labels: bug
 
 **Minimal reproduction**
 
-Include a short code snippet, a failing test, or the exact `statecraft` command + the config used. If the bug only reproduces against a specific manifest, attach it.
+Include a short code snippet, a failing test, or the exact `pylon` command + the config used. If the bug only reproduces against a specific manifest, attach it.
 
 ```
 (paste here)
@@ -18,7 +18,7 @@ Include a short code snippet, a failing test, or the exact `statecraft` command 
 
 **Environment**
 
-- statecraft version: `statecraft version` output
+- pylon version: `pylon version` output
 - OS:
 - Platform: self-hosted / Workers / AWS
 - Database: SQLite file / in-memory / Postgres

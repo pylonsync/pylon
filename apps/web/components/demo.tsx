@@ -17,7 +17,7 @@ const APP_SCHEMA = `{
   }
 }`;
 
-const APP_MUTATION = `import { mutation } from "statecraft/server";
+const APP_MUTATION = `import { mutation } from "pylon/server";
 import { z } from "zod";
 
 export const send = mutation({
@@ -36,7 +36,7 @@ export const send = mutation({
   },
 });`;
 
-const APP_HOOK = `import { db } from "@/statecraft/client";
+const APP_HOOK = `import { db } from "@/pylon/client";
 
 export function Channel({ id }: { id: string }) {
   const messages = db.useQuery("Message", {
@@ -57,7 +57,7 @@ export function Channel({ id }: { id: string }) {
   );
 }`;
 
-const GAME_SIM = `use statecraft::shard::{SimState, Ctx, Input};
+const GAME_SIM = `use pylon::shard::{SimState, Ctx, Input};
 use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -82,7 +82,7 @@ impl SimState for Match {
     }
 }`;
 
-const GAME_HOOK = `import { useShard } from "statecraft/react";
+const GAME_HOOK = `import { useShard } from "pylon/react";
 
 export function Match({ id }: { id: string }) {
   const { state, send, ping } = useShard("Match", id, {
@@ -101,7 +101,7 @@ export function Match({ id }: { id: string }) {
 }`;
 
 const GAME_SERVER = `// shards/match.ts — matchmaker + spawn
-import { shard } from "statecraft/server";
+import { shard } from "pylon/server";
 import { Match } from "./sim";
 
 export const match = shard("Match", {

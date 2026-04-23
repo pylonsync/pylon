@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Send a message to a channel.

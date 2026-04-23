@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Remove a panel from the org dashboard. Gate on tenantId so a caller

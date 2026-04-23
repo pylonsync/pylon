@@ -1,11 +1,11 @@
-You are taking over implementation in `/Users/ericc59/Dev/statecraft`.
+You are taking over implementation in `/Users/ericc59/Dev/pylon`.
 
 Read:
 
-- `/Users/ericc59/Dev/statecraft/README.md`
-- `/Users/ericc59/Dev/statecraft/ARCHITECTURE.md`
-- `/Users/ericc59/Dev/statecraft/ROADMAP.md`
-- `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md`
+- `/Users/ericc59/Dev/pylon/README.md`
+- `/Users/ericc59/Dev/pylon/ARCHITECTURE.md`
+- `/Users/ericc59/Dev/pylon/ROADMAP.md`
+- `/Users/ericc59/Dev/pylon/prompts/claude-handoff/00-shared-context.md`
 
 Current state:
 
@@ -22,12 +22,12 @@ Task selection:
 
 1. First inspect current repo state and avoid reverting unrelated work.
 2. Pick one prompt from:
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/01-schema-history-detail.md`
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/02-postgres-adapter-skeleton.md`
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/03-ts-client-bindings-codegen.md`
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/04-query-action-runtime-stubs.md`
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/05-schema-push-safety.md`
-   - `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/06-postgres-introspection-skeleton.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/01-schema-history-detail.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/02-postgres-adapter-skeleton.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/03-ts-client-bindings-codegen.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/04-query-action-runtime-stubs.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/05-schema-push-safety.md`
+   - `/Users/ericc59/Dev/pylon/prompts/claude-handoff/06-postgres-introspection-skeleton.md`
 3. Implement it with boring, explicit code.
 4. Run:
    - `cargo check`

@@ -1,5 +1,5 @@
-use statecraft_core::ExitCode;
-use statecraft_plugin::registry::{PluginCategory, PluginMarketplace, PluginMetadata};
+use pylon_kernel::ExitCode;
+use pylon_plugin::registry::{PluginCategory, PluginMarketplace, PluginMetadata};
 
 use crate::output;
 
@@ -59,7 +59,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `statecraft plugins list`
+// `pylon plugins list`
 // ---------------------------------------------------------------------------
 
 fn run_list(json_mode: bool) -> ExitCode {
@@ -105,7 +105,7 @@ fn run_list(json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `statecraft plugins search <query>`
+// `pylon plugins search <query>`
 // ---------------------------------------------------------------------------
 
 fn run_search(query: &str, json_mode: bool) -> ExitCode {
@@ -157,7 +157,7 @@ fn run_search(query: &str, json_mode: bool) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// `statecraft plugins info <name>`
+// `pylon plugins info <name>`
 // ---------------------------------------------------------------------------
 
 fn run_info(name: &str, json_mode: bool) -> ExitCode {
@@ -225,10 +225,10 @@ fn print_plugin_row(p: &PluginMetadata, color: bool) {
 
 fn print_plugins_usage() {
     eprintln!("Usage:");
-    eprintln!("  statecraft plugins              List all available plugins");
-    eprintln!("  statecraft plugins list          List all available plugins");
-    eprintln!("  statecraft plugins search <q>    Search plugins by name/tag");
-    eprintln!("  statecraft plugins info <name>   Show detailed plugin info");
+    eprintln!("  pylon plugins              List all available plugins");
+    eprintln!("  pylon plugins list          List all available plugins");
+    eprintln!("  pylon plugins search <q>    Search plugins by name/tag");
+    eprintln!("  pylon plugins info <name>   Show detailed plugin info");
 }
 
 // ---------------------------------------------------------------------------

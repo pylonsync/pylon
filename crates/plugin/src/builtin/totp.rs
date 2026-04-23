@@ -105,7 +105,7 @@ impl TotpPlugin {
         }
 
         let expected = generate_totp_at(&enrollment.secret, now);
-        if statecraft_auth::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
+        if pylon_auth::constant_time_eq(expected.as_bytes(), code.as_bytes()) {
             enrollment.verified = true;
             enrollment.last_accepted_counter = Some(counter);
             return true;

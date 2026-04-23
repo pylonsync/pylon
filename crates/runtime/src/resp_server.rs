@@ -1,7 +1,7 @@
-//! RESP-compatible TCP server for the statecraft cache.
+//! RESP-compatible TCP server for the pylon cache.
 //!
 //! Speaks the Redis wire protocol (RESP2), so any `redis-cli` or Redis client
-//! library can talk directly to the statecraft cache without HTTP overhead.
+//! library can talk directly to the pylon cache without HTTP overhead.
 //!
 //! # Supported commands
 //!
@@ -19,7 +19,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use statecraft_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::cache::CachePlugin;
 
 use crate::resp::{parse_resp, RespValue};
 
@@ -624,7 +624,7 @@ fn execute_command(cache: &CachePlugin, args: &[String]) -> RespValue {
         "INFO" => {
             let stats = cache.info();
             let info = format!(
-                "# Server\r\nredis_version:statecraft-resp\r\n\r\n\
+                "# Server\r\nredis_version:pylon-resp\r\n\r\n\
                  # Stats\r\nhits:{}\r\nmisses:{}\r\nsets:{}\r\ndeletes:{}\r\nevictions:{}\r\nexpired:{}\r\n\r\n\
                  # Keyspace\r\nkeys:{}\r\n",
                 stats.hits,

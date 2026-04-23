@@ -1,4 +1,4 @@
-name = "statecraft"
+name = "pylon"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-12-01"
 
@@ -6,19 +6,19 @@ compatibility_date = "2024-12-01"
 command = "cargo install worker-build && worker-build --release"
 
 # D1 database binding — create with:
-#   wrangler d1 create statecraft
+#   wrangler d1 create pylon
 [[d1_databases]]
-binding = "STATECRAFT_DB"
-database_name = "statecraft"
+binding = "PYLON_DB"
+database_name = "pylon"
 database_id = ""  # Fill in after `wrangler d1 create`
 
 # Environment variables
 [vars]
-STATECRAFT_DEV_MODE = "false"
+PYLON_DEV_MODE = "false"
 
 # Secrets (set via `wrangler secret put`):
-#   STATECRAFT_ADMIN_TOKEN
-#   STATECRAFT_AI_API_KEY (optional)
+#   PYLON_ADMIN_TOKEN
+#   PYLON_AI_API_KEY (optional)
 
 # Durable Objects for WebSocket rooms (future)
 # [durable_objects]

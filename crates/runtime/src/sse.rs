@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use statecraft_sync::ChangeEvent;
+use pylon_sync::ChangeEvent;
 
 use crate::ip_limit::{IpConnCounter, IpConnGuard};
 

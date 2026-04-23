@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use statecraft_realtime::{DynShard, ShardAuth, SnapshotSink, SubscriberId};
+use pylon_realtime::{DynShard, ShardAuth, SnapshotSink, SubscriberId};
 
 // ---------------------------------------------------------------------------
 // WorkerDoSink — bridges a shard's broadcast to DO WebSocket sends
@@ -138,7 +138,7 @@ impl DoSubscriberHandle {
 ///
 /// This can't be generated from Rust alone (the DO class must be exported
 /// from JS so the Workers runtime can instantiate it), so we ship this as
-/// a string constant that the `statecraft deploy --target workers` command
+/// a string constant that the `pylon deploy --target workers` command
 /// can drop into the generated bundle.
 pub const DURABLE_OBJECT_TEMPLATE_JS: &str = r#"
 // Auto-generated. One class per shard type.

@@ -1,5 +1,5 @@
 use crate::{FieldSpec, SchemaOperation, SchemaPlan, StorageAdapter, StorageError};
-use statecraft_core::AppManifest;
+use pylon_kernel::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Type mapping: manifest field types -> PostgreSQL column types
@@ -192,7 +192,7 @@ pub const INTROSPECT_TABLES_SQL: &str = "\
     FROM information_schema.tables \
     WHERE table_schema = 'public' \
       AND table_type = 'BASE TABLE' \
-      AND table_name NOT LIKE '_statecraft_%' \
+      AND table_name NOT LIKE '_pylon_%' \
     ORDER BY table_name";
 
 /// SQL to list columns for a given table.
@@ -967,7 +967,7 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 
@@ -1143,7 +1143,7 @@ mod tests {
         assert!(INTROSPECT_TABLES_SQL.contains("information_schema.tables"));
         assert!(INTROSPECT_COLUMNS_SQL.contains("$1"));
         assert!(INTROSPECT_INDEXES_SQL.contains("$1"));
-        assert!(INTROSPECT_TABLES_SQL.contains("_statecraft_"));
+        assert!(INTROSPECT_TABLES_SQL.contains("_pylon_"));
     }
 
     // -- Plan from snapshot tests --

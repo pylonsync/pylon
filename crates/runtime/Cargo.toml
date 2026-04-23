@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-runtime"
+name = "pylon-runtime"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,19 +8,19 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-http = { path = "../http" }
-statecraft-router = { path = "../router" }
-statecraft-auth = { path = "../auth" }
-statecraft-policy = { path = "../policy" }
-statecraft-plugin = { path = "../plugin" }
-statecraft-sync = { path = "../sync" }
-statecraft-studio-api = { path = "../studio_api" }
-statecraft-storage = { path = "../storage" }
-statecraft-functions = { path = "../functions" }
-statecraft-migrate = { path = "../migrate" }
-statecraft-observability = { path = "../observability" }
-statecraft-realtime = { path = "../realtime" }
+pylon-kernel = { path = "../core" }
+pylon-http = { path = "../http" }
+pylon-router = { path = "../router" }
+pylon-auth = { path = "../auth" }
+pylon-policy = { path = "../policy" }
+pylon-plugin = { path = "../plugin" }
+pylon-sync = { path = "../sync" }
+pylon-studio-api = { path = "../studio_api" }
+pylon-storage = { path = "../storage" }
+pylon-functions = { path = "../functions" }
+pylon-migrate = { path = "../migrate" }
+pylon-observability = { path = "../observability" }
+pylon-realtime = { path = "../realtime" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,22 +1,22 @@
 //! Backup + restore integration test.
 //!
 //! Real disaster-recovery test: seed a SQLite Runtime, snapshot the files
-//! (DB + WAL + SHM exactly as `statecraft backup` does), drop the original,
+//! (DB + WAL + SHM exactly as `pylon backup` does), drop the original,
 //! reopen from the snapshot, and confirm both row contents and the change
 //! log seq survived the round trip.
 //!
 //! Untested backups aren't backups. If this test breaks, the
-//! `statecraft backup` / `statecraft restore` commands are broken too.
+//! `pylon backup` / `pylon restore` commands are broken too.
 
 use std::fs;
 use std::path::PathBuf;
 
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
-use statecraft_runtime::Runtime;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_runtime::Runtime;
 
 fn tmp_dir(suffix: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "statecraft_backup_test_{}_{}",
+        "pylon_backup_test_{}_{}",
         std::process::id(),
         suffix
     ));
@@ -133,7 +133,7 @@ fn backup_preserves_inserts_across_wal_boundary() {
         .unwrap();
     }
 
-    // Live copy — what `statecraft backup` does on a running server.
+    // Live copy — what `pylon backup` does on a running server.
     copy_sqlite_triple(src_db.to_str().unwrap(), dst_db.to_str().unwrap());
 
     // Drop original writer BEFORE opening the copy. If we opened both

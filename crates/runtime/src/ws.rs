@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use statecraft_auth::SessionStore;
-use statecraft_sync::ChangeEvent;
+use pylon_auth::SessionStore;
+use pylon_sync::ChangeEvent;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{accept_hdr, Message, WebSocket};
 
@@ -515,7 +515,7 @@ mod tests {
             seq: 1,
             entity: "Test".into(),
             row_id: "1".into(),
-            kind: statecraft_sync::ChangeKind::Insert,
+            kind: pylon_sync::ChangeKind::Insert,
             data: None,
             timestamp: String::new(),
         };

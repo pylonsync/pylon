@@ -1,6 +1,6 @@
-//! `statecraft cache` -- start a standalone cache server.
+//! `pylon cache` -- start a standalone cache server.
 //!
-//! This runs the statecraft cache as an independent HTTP service, enabling
+//! This runs the pylon cache as an independent HTTP service, enabling
 //! horizontal scaling by deploying the cache on a separate machine.
 //!
 //! Optionally starts a RESP-compatible TCP server alongside (or instead of)
@@ -10,10 +10,10 @@
 //! # Usage
 //!
 //! ```text
-//! statecraft cache [--port 6380] [--resp-port 6379] [--resp-only] [--max-keys 100000] [--max-history 100]
+//! pylon cache [--port 6380] [--resp-port 6379] [--resp-only] [--max-keys 100000] [--max-history 100]
 //! ```
 
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 use crate::output::print_error;
 
 const DEFAULT_PORT: u16 = 6380;
@@ -58,7 +58,7 @@ pub fn run(args: &[String], _json_mode: bool) -> ExitCode {
     }
     eprintln!();
 
-    match statecraft_runtime::cache_server::start_cache_server_with_options(
+    match pylon_runtime::cache_server::start_cache_server_with_options(
         port,
         max_keys,
         max_history,
@@ -74,10 +74,10 @@ pub fn run(args: &[String], _json_mode: bool) -> ExitCode {
 }
 
 fn print_usage() {
-    println!("statecraft cache -- run a standalone cache server");
+    println!("pylon cache -- run a standalone cache server");
     println!();
     println!("Usage:");
-    println!("  statecraft cache [options]");
+    println!("  pylon cache [options]");
     println!();
     println!("Options:");
     println!("  --port <port>          HTTP listen port (default: {DEFAULT_PORT})");

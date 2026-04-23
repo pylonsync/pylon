@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-studio-api"
+name = "pylon-studio-api"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,6 +8,6 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
+pylon-kernel = { path = "../core" }
 serde_json = { workspace = true }
 

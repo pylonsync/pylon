@@ -1,17 +1,17 @@
 [package]
-name = "statecraft-router"
+name = "pylon-router"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-http = { path = "../http" }
-statecraft-auth = { path = "../auth" }
-statecraft-policy = { path = "../policy" }
-statecraft-sync = { path = "../sync" }
-statecraft-functions = { path = "../functions" }
-statecraft-realtime = { path = "../realtime" }
+pylon-kernel = { path = "../core" }
+pylon-http = { path = "../http" }
+pylon-auth = { path = "../auth" }
+pylon-policy = { path = "../policy" }
+pylon-sync = { path = "../sync" }
+pylon-functions = { path = "../functions" }
+pylon-realtime = { path = "../realtime" }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

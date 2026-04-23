@@ -1,9 +1,9 @@
 [package]
-name = "statecraft-http"
+name = "pylon-http"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
-statecraft-core = { path = "../core" }
+pylon-kernel = { path = "../core" }
 serde_json = { workspace = true }

@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use statecraft_http::DataStore;
+use pylon_http::DataStore;
 
 use crate::protocol::*;
 use crate::trace::{TraceBuilder, TraceLog};
@@ -19,7 +19,7 @@ use crate::trace::{TraceBuilder, TraceLog};
 /// Default ceiling on how long a single function call may take. Holds the
 /// SQLite write lock for mutations, so this is also a backstop against a
 /// runaway TS handler blocking the whole DB. Override via
-/// [`FnRunner::set_call_timeout`] or `STATECRAFT_FN_CALL_TIMEOUT` (server-side).
+/// [`FnRunner::set_call_timeout`] or `PYLON_FN_CALL_TIMEOUT` (server-side).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ impl FnRunner {
 
         let (tx, rx): (Sender<TsMessage>, Receiver<TsMessage>) = mpsc::channel();
         std::thread::Builder::new()
-            .name("statecraft-fn-reader".into())
+            .name("pylon-fn-reader".into())
             .spawn(move || reader_loop(BufReader::new(stdout), tx))
             .map_err(|e| {
                 kill_and_msg(&mut child, format!("Failed to spawn reader thread: {e}"))
@@ -314,11 +314,12 @@ impl FnRunner {
         let deadline = Instant::now() + timeout;
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
-        let mut trace = TraceBuilder::new(
+        let mut trace = TraceBuilder::new_with_tenant(
             call_id.clone(),
             fn_name.to_string(),
             fn_type,
             auth.user_id.clone(),
+            auth.tenant_id.clone(),
         );
 
         // Send the call message. Attach HTTP request metadata when the
@@ -443,10 +444,17 @@ impl FnRunner {
 
                 TsMessage::RunFn(run) if run.call_id == call_id => {
                     // Nested function call (action calling query/mutation).
-                    // Execute recursively. The nested call gets its own trace.
+                    // Execute recursively. The nested call gets its own trace
+                    // but inherits user + tenant from the caller so row-level
+                    // policies (`auth.tenantId == data.orgId`) keep working
+                    // when an action stamps tenant-scoped writes via helper
+                    // mutations. Callers that need to cross tenant boundaries
+                    // must do so on the client side — no silent elevation
+                    // happens here; the caller's tenant carries through.
                     let nested_auth = AuthInfo {
                         user_id: trace.user_id().map(|s| s.to_string()),
                         is_admin: false,
+                        tenant_id: trace.tenant_id().map(|s| s.to_string()),
                     };
                     // Prefer the nested_call_hook if installed — it lets the
                     // caller wrap mutations in their own BEGIN/COMMIT around
@@ -633,7 +641,7 @@ impl TraceBuilder {
 fn execute_db_op(
     store: &dyn DataStore,
     msg: &DbOpMessage,
-) -> (Result<serde_json::Value, statecraft_http::DataError>, Option<usize>) {
+) -> (Result<serde_json::Value, pylon_http::DataError>, Option<usize>) {
     match msg.op {
         DbOp::Get => {
             let id = msg.id.as_deref().unwrap_or("");

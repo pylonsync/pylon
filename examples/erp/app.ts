@@ -1,4 +1,4 @@
-import { entity, field, policy, buildManifest } from "@statecraft/sdk";
+import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Custom-fabrication ERP — doors, windows, cabinets.

@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Add a panel to the org dashboard. `spec` should be a JSON-encoded

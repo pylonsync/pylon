@@ -1,7 +1,7 @@
 /**
  * useShard — React hook for real-time sharded simulations (games, MMO zones, etc.).
  *
- * Connects to an statecraft shard over WebSocket (preferred) or SSE (fallback),
+ * Connects to an pylon shard over WebSocket (preferred) or SSE (fallback),
  * receives snapshots as they arrive, and sends inputs upstream.
  *
  * @example
@@ -32,7 +32,7 @@ export interface UseShardOptions {
    * out of URLs — proxy logs, browser devtools network panel, and error
    * telemetry typically record the URL but not the subprotocol value.
    *
-   * The statecraft shard server reads either the subprotocol header or the
+   * The pylon shard server reads either the subprotocol header or the
    * legacy `?token=` query param (which is still accepted but deprecated —
    * scheduled for removal in a future release).
    */
@@ -108,7 +108,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     const host =
       options.baseUrl ||
       (typeof window !== "undefined" ? window.location.hostname : "localhost");
-    const port = options.wsPort ?? 4324; // default: statecraft HTTP port + 3 (4321 + 3)
+    const port = options.wsPort ?? 4324; // default: pylon HTTP port + 3 (4321 + 3)
     const proto =
       typeof window !== "undefined" && window.location.protocol === "https:"
         ? "wss"

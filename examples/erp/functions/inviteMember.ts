@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Invite someone to the active org. Only owners/admins can invite. Email

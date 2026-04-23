@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// TLS configuration for production deployments.
 ///
-/// statecraft itself runs plain HTTP (via tiny_http), so TLS termination is
+/// pylon itself runs plain HTTP (via tiny_http), so TLS termination is
 /// handled by a reverse proxy such as nginx or Caddy.  This struct captures
 /// the certificate paths and listen port so we can generate working proxy
 /// configs automatically.

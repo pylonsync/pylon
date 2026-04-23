@@ -7,7 +7,7 @@ export function Nav() {
         <div className="nav-left">
           <Link href="/" className="logo">
             <span className="logo-mark">▲</span>
-            statecraft
+            pylon
           </Link>
           <div className="nav-links">
             <a href="#demo">Demo</a>

@@ -2,7 +2,7 @@
 
 ## Reporting
 
-**Security vulnerabilities**: email `security@statecraft.dev`. Do NOT file a
+**Security vulnerabilities**: email `security@pylon.dev`. Do NOT file a
 public issue. Acknowledgement within 48 hours. Target remediation 7 days
 for high severity, 30 days for medium.
 
@@ -17,13 +17,13 @@ runbook. This doc is for anchoring the generic moves.
 2. **Preserve**. Snapshot the database before any destructive recovery:
 
    ```sh
-   statecraft backup /var/snapshots/incident-$(date +%Y%m%d-%H%M%S)
+   pylon backup /var/snapshots/incident-$(date +%Y%m%d-%H%M%S)
    ```
 
 3. **Capture signal**. Pull logs, metrics, and recent audit trail:
 
    ```sh
-   journalctl -u statecraft --since "30 min ago" > /tmp/incident.log
+   journalctl -u pylon --since "30 min ago" > /tmp/incident.log
    curl -s http://localhost:4321/metrics > /tmp/incident-metrics.txt
    ```
 
@@ -65,9 +65,9 @@ SQLite in WAL mode delays checkpoints. If checkpoint isn't completing:
 
 ```sh
 # Offline checkpoint — needs exclusive DB access.
-systemctl stop statecraft
-sqlite3 /var/lib/statecraft/statecraft.db "PRAGMA wal_checkpoint(TRUNCATE)"
-systemctl start statecraft
+systemctl stop pylon
+sqlite3 /var/lib/pylon/pylon.db "PRAGMA wal_checkpoint(TRUNCATE)"
+systemctl start pylon
 ```
 
 If the WAL is *always* growing, a long-running read transaction is
@@ -105,6 +105,6 @@ user-impacting incidents per your privacy policy.
 
 ## Contacts
 
-- Security: `security@statecraft.dev`
+- Security: `security@pylon.dev`
 - Public issues / feature requests: github.com/ericc59/agentdb/issues
 - Your oncall: (fill in your rotation)

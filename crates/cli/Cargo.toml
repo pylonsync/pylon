@@ -1,21 +1,21 @@
 [package]
-name = "statecraft-cli"
+name = "pylon-cli"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "statecraft"
+name = "pylon"
 path = "src/main.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-plugin = { path = "../plugin" }
-statecraft-schema = { path = "../schema" }
-statecraft-storage = { path = "../storage", features = ["postgres-live"] }
-statecraft-runtime = { path = "../runtime" }
-statecraft-staticgen = { path = "../staticgen" }
-statecraft-migrate = { path = "../migrate" }
+pylon-kernel = { path = "../core" }
+pylon-plugin = { path = "../plugin" }
+pylon-schema = { path = "../schema" }
+pylon-storage = { path = "../storage", features = ["postgres-live"] }
+pylon-runtime = { path = "../runtime" }
+pylon-staticgen = { path = "../staticgen" }
+pylon-migrate = { path = "../migrate" }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

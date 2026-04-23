@@ -1,7 +1,7 @@
 //! Unified server configuration loaded once at startup.
 //!
 //! Replaces scattered `std::env::var(...)` reads. All env vars start with
-//! `STATECRAFT_` and are documented in `SECURITY.md` and `README.md`.
+//! `PYLON_` and are documented in `SECURITY.md` and `README.md`.
 
 use std::time::Duration;
 
@@ -66,28 +66,28 @@ impl ServerConfig {
     /// defaults when a variable is unset.
     pub fn from_env(default_port: u16) -> Self {
         Self {
-            port: env_u16("STATECRAFT_PORT", default_port),
-            cors_origin: env_str("STATECRAFT_CORS_ORIGIN", "*"),
-            db_path: env_str("STATECRAFT_DB_PATH", "statecraft.db"),
-            manifest_path: env_str("STATECRAFT_MANIFEST", "statecraft.manifest.json"),
-            files_dir: env_str("STATECRAFT_FILES_DIR", "uploads"),
-            files_url_prefix: env_str("STATECRAFT_FILES_URL_PREFIX", "/api/files"),
-            session_db: std::env::var("STATECRAFT_SESSION_DB").ok(),
-            admin_token: std::env::var("STATECRAFT_ADMIN_TOKEN").ok(),
-            rate_limit_max: env_u32("STATECRAFT_RATE_LIMIT_MAX", 100),
-            rate_limit_window: Duration::from_secs(env_u64("STATECRAFT_RATE_LIMIT_WINDOW", 60)),
-            fn_rate_limit_max: env_u32("STATECRAFT_FN_RATE_LIMIT_MAX", 30),
-            fn_rate_limit_window: Duration::from_secs(env_u64("STATECRAFT_FN_RATE_LIMIT_WINDOW", 60)),
-            functions_dir: env_str("STATECRAFT_FUNCTIONS_DIR", "functions"),
-            functions_runtime: std::env::var("STATECRAFT_FUNCTIONS_RUNTIME").ok(),
-            is_dev: env_bool("STATECRAFT_DEV_MODE", true),
-            drain_timeout: Duration::from_secs(env_u64("STATECRAFT_DRAIN_SECS", 10)),
-            ai_provider: env_str("STATECRAFT_AI_PROVIDER", ""),
-            ai_api_key: env_str("STATECRAFT_AI_API_KEY", ""),
-            ai_model: env_str("STATECRAFT_AI_MODEL", ""),
-            ai_base_url: env_str("STATECRAFT_AI_BASE_URL", ""),
+            port: env_u16("PYLON_PORT", default_port),
+            cors_origin: env_str("PYLON_CORS_ORIGIN", "*"),
+            db_path: env_str("PYLON_DB_PATH", "pylon.db"),
+            manifest_path: env_str("PYLON_MANIFEST", "pylon.manifest.json"),
+            files_dir: env_str("PYLON_FILES_DIR", "uploads"),
+            files_url_prefix: env_str("PYLON_FILES_URL_PREFIX", "/api/files"),
+            session_db: std::env::var("PYLON_SESSION_DB").ok(),
+            admin_token: std::env::var("PYLON_ADMIN_TOKEN").ok(),
+            rate_limit_max: env_u32("PYLON_RATE_LIMIT_MAX", 100),
+            rate_limit_window: Duration::from_secs(env_u64("PYLON_RATE_LIMIT_WINDOW", 60)),
+            fn_rate_limit_max: env_u32("PYLON_FN_RATE_LIMIT_MAX", 30),
+            fn_rate_limit_window: Duration::from_secs(env_u64("PYLON_FN_RATE_LIMIT_WINDOW", 60)),
+            functions_dir: env_str("PYLON_FUNCTIONS_DIR", "functions"),
+            functions_runtime: std::env::var("PYLON_FUNCTIONS_RUNTIME").ok(),
+            is_dev: env_bool("PYLON_DEV_MODE", true),
+            drain_timeout: Duration::from_secs(env_u64("PYLON_DRAIN_SECS", 10)),
+            ai_provider: env_str("PYLON_AI_PROVIDER", ""),
+            ai_api_key: env_str("PYLON_AI_API_KEY", ""),
+            ai_model: env_str("PYLON_AI_MODEL", ""),
+            ai_base_url: env_str("PYLON_AI_BASE_URL", ""),
             workflow_runner_url: env_str(
-                "STATECRAFT_WORKFLOW_RUNNER_URL",
+                "PYLON_WORKFLOW_RUNNER_URL",
                 "http://127.0.0.1:9876/run",
             ),
         }
@@ -131,9 +131,9 @@ mod tests {
 
     #[test]
     fn env_overrides_default() {
-        std::env::set_var("STATECRAFT_PORT", "9999");
+        std::env::set_var("PYLON_PORT", "9999");
         let c = ServerConfig::from_env(4321);
-        std::env::remove_var("STATECRAFT_PORT");
+        std::env::remove_var("PYLON_PORT");
         assert_eq!(c.port, 9999);
     }
 }

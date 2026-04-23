@@ -1,6 +1,6 @@
 # Architecture
 
-A map of the statecraft codebase for new contributors. Pairs with [README.md](README.md)
+A map of the pylon codebase for new contributors. Pairs with [README.md](README.md)
 (user-facing) and [SECURITY.md](SECURITY.md) (operational hardening).
 
 ## High-level shape
@@ -12,7 +12,7 @@ A map of the statecraft codebase for new contributors. Pairs with [README.md](RE
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTP + WS + SSE
 ┌────────────────────────────▼────────────────────────────────────┐
-│  crates/cli  (statecraft dev | build | migrate | seed | deploy)    │
+│  crates/cli  (pylon dev | build | migrate | seed | deploy)    │
 └────────────────────────────┬────────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────────┐
@@ -98,14 +98,14 @@ and (eventually) on top of D1 in the Cloudflare Workers adapter.
 
 ### CLI
 
-- **`crates/cli`** — the `statecraft` binary. `main.rs` dispatches to
+- **`crates/cli`** — the `pylon` binary. `main.rs` dispatches to
   `commands/<verb>.rs`. JSON output mode for everything; structured logs to
   stderr via `init_tracing()`.
 
 ### TypeScript packages
 
-- **`packages/sdk`** — schema DSL + manifest builder. Run during `statecraft
-  codegen` to emit `statecraft.manifest.json`.
+- **`packages/sdk`** — schema DSL + manifest builder. Run during `pylon
+  codegen` to emit `pylon.manifest.json`.
 - **`packages/functions`** — `mutation(...)`, `query(...)`, `action(...)`
   helpers. The Bun runtime in `packages/functions/src/runtime.ts` reads NDJSON
   RPCs from stdin and dispatches to handlers.

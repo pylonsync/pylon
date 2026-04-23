@@ -1,7 +1,7 @@
-//! TypeScript function runtime for statecraft.
+//! TypeScript function runtime for pylon.
 //!
 //! This crate provides the Rust side of the bidirectional protocol between
-//! the statecraft runtime (Rust) and user-defined TypeScript functions (Bun/Deno).
+//! the pylon runtime (Rust) and user-defined TypeScript functions (Bun/Deno).
 //!
 //! # Architecture
 //!

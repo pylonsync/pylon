@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use statecraft_core::{AppManifest, Diagnostic, ExitCode, Severity};
+use pylon_kernel::{AppManifest, Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::manifest::{load_manifest, validate_all};
@@ -44,7 +44,7 @@ pub fn run_check(args: &[String], json_mode: bool) -> ExitCode {
         .next()
         .map(|s| s.as_str());
 
-    let manifest_path = path.unwrap_or("statecraft.manifest.json");
+    let manifest_path = path.unwrap_or("pylon.manifest.json");
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -122,7 +122,7 @@ pub fn run_diff(args: &[String], json_mode: bool) -> ExitCode {
                 code: "DIFF_MISSING_ARGS".into(),
                 message: "Two manifest paths are required".into(),
                 span: None,
-                hint: Some("Usage: statecraft schema diff <old-manifest> <new-manifest>".into()),
+                hint: Some("Usage: pylon schema diff <old-manifest> <new-manifest>".into()),
             }],
             json_mode,
         );
@@ -206,8 +206,8 @@ struct PushResult {
     database_path: Option<String>,
     baseline: &'static str,
     manifest_version: u32,
-    plan: statecraft_storage::SchemaPlan,
-    analysis: statecraft_storage::PlanAnalysis,
+    plan: pylon_storage::SchemaPlan,
+    analysis: pylon_storage::PlanAnalysis,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -305,7 +305,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                     message: "No manifest path provided".into(),
                     span: None,
                     hint: Some(
-                        "Usage: statecraft schema push <manifest> --dry-run|--sqlite <path> [--from <old>]"
+                        "Usage: pylon schema push <manifest> --dry-run|--sqlite <path> [--from <old>]"
                             .into(),
                     ),
                 }],
@@ -341,7 +341,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
     if dry_run {
         // Dry-run: report plan, do not apply.
         let baseline = if from_path.is_some() { "manifest" } else { "empty" };
-        let analysis = statecraft_storage::analyze_plan(&plan);
+        let analysis = pylon_storage::analyze_plan(&plan);
         let result = PushResult {
             code: "PUSH_DRY_RUN",
             dry_run: true,
@@ -374,7 +374,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
 
     if let Some(db_path) = sqlite_path {
         // SQLite apply mode.
-        let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
+        let adapter = match pylon_storage::sqlite::SqliteAdapter::open(db_path) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -415,7 +415,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             }
         };
 
-        let analysis = statecraft_storage::analyze_plan(&live_plan);
+        let analysis = pylon_storage::analyze_plan(&live_plan);
 
         // Block apply if the plan contains unsupported operations.
         if analysis.has_unsupported {
@@ -450,7 +450,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             return ExitCode::Error;
         }
 
-        let push_meta = statecraft_storage::sqlite::PushMetadata {
+        let push_meta = pylon_storage::sqlite::PushMetadata {
             manifest_version: manifest.manifest_version,
             app_version: &manifest.version,
             baseline,
@@ -507,7 +507,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else if let Some(pg_url) = postgres_url {
         // Postgres apply mode.
-        let mut adapter = match statecraft_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
+        let mut adapter = match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -545,7 +545,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
             }
         };
 
-        let analysis = statecraft_storage::analyze_plan(&pg_plan);
+        let analysis = pylon_storage::analyze_plan(&pg_plan);
 
         if analysis.has_unsupported {
             let result = PushResult {
@@ -628,7 +628,7 @@ fn build_plan(
     manifest: &AppManifest,
     from_path: Option<&str>,
     json_mode: bool,
-) -> Option<statecraft_storage::SchemaPlan> {
+) -> Option<pylon_storage::SchemaPlan> {
     if let Some(from) = from_path {
         let old_manifest = match load_manifest(from) {
             Ok(m) => m,
@@ -637,8 +637,8 @@ fn build_plan(
                 return None;
             }
         };
-        let adapter = statecraft_storage::DiffAdapter { from: old_manifest };
-        match statecraft_storage::StorageAdapter::plan_schema(&adapter, manifest) {
+        let adapter = pylon_storage::DiffAdapter { from: old_manifest };
+        match pylon_storage::StorageAdapter::plan_schema(&adapter, manifest) {
             Ok(p) => Some(p),
             Err(e) => {
                 print_diagnostics(
@@ -655,8 +655,8 @@ fn build_plan(
             }
         }
     } else {
-        let adapter = statecraft_storage::DryRunAdapter;
-        match statecraft_storage::StorageAdapter::plan_schema(&adapter, manifest) {
+        let adapter = pylon_storage::DryRunAdapter;
+        match pylon_storage::StorageAdapter::plan_schema(&adapter, manifest) {
             Ok(p) => Some(p),
             Err(e) => {
                 print_diagnostics(
@@ -675,7 +675,7 @@ fn build_plan(
     }
 }
 
-fn print_plan_human(plan: &statecraft_storage::SchemaPlan) {
+fn print_plan_human(plan: &pylon_storage::SchemaPlan) {
     if plan.is_empty() {
         println!();
         println!("  No operations needed.");
@@ -688,7 +688,7 @@ fn print_plan_human(plan: &statecraft_storage::SchemaPlan) {
     }
 }
 
-fn print_warnings_human(analysis: &statecraft_storage::PlanAnalysis) {
+fn print_warnings_human(analysis: &pylon_storage::PlanAnalysis) {
     if analysis.warnings.is_empty() {
         return;
     }
@@ -703,8 +703,8 @@ fn print_warnings_human(analysis: &statecraft_storage::PlanAnalysis) {
     }
 }
 
-fn format_operation(op: &statecraft_storage::SchemaOperation) -> String {
-    use statecraft_storage::SchemaOperation::*;
+fn format_operation(op: &pylon_storage::SchemaOperation) -> String {
+    use pylon_storage::SchemaOperation::*;
     match op {
         CreateEntity { name, fields } => {
             format!("CREATE entity {} ({} fields)", name, fields.len())
@@ -762,7 +762,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
                     code: "HISTORY_NO_TARGET".into(),
                     message: "No database target specified".into(),
                     span: None,
-                    hint: Some("Usage: statecraft schema history --sqlite <db-path> [--limit N] [--id <entry-id>]".into()),
+                    hint: Some("Usage: pylon schema history --sqlite <db-path> [--limit N] [--id <entry-id>]".into()),
                 }],
                 json_mode,
             );
@@ -803,7 +803,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
         None => None,
     };
 
-    let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
+    let adapter = match pylon_storage::sqlite::SqliteAdapter::open(db_path) {
         Ok(a) => a,
         Err(e) => {
             print_diagnostics(
@@ -880,7 +880,7 @@ pub fn run_history(args: &[String], json_mode: bool) -> ExitCode {
 }
 
 fn run_history_single(
-    adapter: &statecraft_storage::sqlite::SqliteAdapter,
+    adapter: &pylon_storage::sqlite::SqliteAdapter,
     entry_id: &str,
     db_path: &str,
     json_mode: bool,
@@ -959,7 +959,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
                 code: "INSPECT_NO_TARGET".into(),
                 message: "No database target specified".into(),
                 span: None,
-                hint: Some("Usage: statecraft schema inspect --sqlite <path> or --postgres <url>".into()),
+                hint: Some("Usage: pylon schema inspect --sqlite <path> or --postgres <url>".into()),
             }],
             json_mode,
         );
@@ -967,7 +967,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     let (snapshot, target_label) = if let Some(db_path) = sqlite_path {
-        let adapter = match statecraft_storage::sqlite::SqliteAdapter::open(db_path) {
+        let adapter = match pylon_storage::sqlite::SqliteAdapter::open(db_path) {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -1001,7 +1001,7 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else if let Some(pg_url) = postgres_url {
         let mut adapter =
-            match statecraft_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
+            match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
                 Ok(a) => a,
                 Err(e) => {
                     print_diagnostics(
@@ -1095,9 +1095,9 @@ fn compute_diff(old: &AppManifest, new: &AppManifest) -> Vec<DiffChange> {
     }
 
     // Entities
-    let old_entities: HashMap<&str, &statecraft_core::ManifestEntity> =
+    let old_entities: HashMap<&str, &pylon_kernel::ManifestEntity> =
         old.entities.iter().map(|e| (e.name.as_str(), e)).collect();
-    let new_entities: HashMap<&str, &statecraft_core::ManifestEntity> =
+    let new_entities: HashMap<&str, &pylon_kernel::ManifestEntity> =
         new.entities.iter().map(|e| (e.name.as_str(), e)).collect();
 
     let old_entity_names: BTreeSet<&str> = old_entities.keys().copied().collect();
@@ -1210,7 +1210,7 @@ fn diff_by_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::*;
+    use pylon_kernel::*;
 
     #[test]
     fn redact_dsn_hides_password() {

@@ -10,10 +10,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use statecraft_auth::OAuthStateBackend;
+use pylon_auth::OAuthStateBackend;
 use rusqlite::Connection;
 
-const TABLE: &str = "_statecraft_oauth_state";
+const TABLE: &str = "_pylon_oauth_state";
 
 pub struct SqliteOAuthBackend {
     conn: Arc<Mutex<Connection>>,

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use statecraft_core::{Diagnostic, ExitCode, Severity};
+use pylon_kernel::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
@@ -82,7 +82,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         message: "No entry file provided and no app.ts found in current directory"
                             .into(),
                         span: None,
-                        hint: Some("Usage: statecraft dev [app.ts] [--once]".into()),
+                        hint: Some("Usage: pylon dev [app.ts] [--once]".into()),
                     }],
                     json_mode,
                 );
@@ -168,7 +168,7 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
         };
         print_json(&output);
     } else {
-        println!("statecraft dev");
+        println!("pylon dev");
         println!();
         println!("  App:       {} v{}", manifest.name, manifest.version);
         println!("  Entry:     {entry_file}");
@@ -186,7 +186,7 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
             println!();
         }
 
-        println!("Schema valid. Use 'statecraft dev' (without --once) to start the dev server.");
+        println!("Schema valid. Use 'pylon dev' (without --once) to start the dev server.");
     }
 
     ExitCode::Ok
@@ -201,7 +201,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     let watch_dir = entry_path.parent().unwrap_or(Path::new("."));
 
     if !json_mode {
-        println!("statecraft dev");
+        println!("pylon dev");
         println!("  Watching: {} (*.ts)", watch_dir.display());
         println!("  Server:   http://localhost:{port}");
         println!();
@@ -214,10 +214,10 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     // Start dev server in background if initial build succeeded.
     if let Some(m) = manifest {
         // Keep the project root clean: machine-local dev data lives in a
-        // hidden `.statecraft/` folder alongside source, the same way
+        // hidden `.pylon/` folder alongside source, the same way
         // `.next/` or `target/` do. The sessions + jobs siblings that
         // the server derives from `db_path` follow automatically.
-        let data_dir = watch_dir.join(".statecraft");
+        let data_dir = watch_dir.join(".pylon");
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             if !json_mode {
                 eprintln!("[dev] Failed to create data dir {}: {e}", data_dir.display());
@@ -229,19 +229,19 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
         // Default uploads into the hidden data dir too so `examples/*/uploads/`
         // stops littering project roots. Operators can still override via
-        // STATECRAFT_FILES_DIR for production layouts.
-        if std::env::var("STATECRAFT_FILES_DIR").is_err() {
+        // PYLON_FILES_DIR for production layouts.
+        if std::env::var("PYLON_FILES_DIR").is_err() {
             let uploads = data_dir.join("uploads");
             // Safety: single-threaded here; server thread spawns below.
             unsafe {
-                std::env::set_var("STATECRAFT_FILES_DIR", uploads);
+                std::env::set_var("PYLON_FILES_DIR", uploads);
             }
         }
 
         // Auto-push schema to the dev database.
-        if let Ok(adapter) = statecraft_storage::sqlite::SqliteAdapter::open(&db_str) {
+        if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_str) {
             if let Ok(plan) = adapter.plan_from_live(&m) {
-                let meta = statecraft_storage::sqlite::PushMetadata {
+                let meta = pylon_storage::sqlite::PushMetadata {
                     manifest_version: m.manifest_version,
                     app_version: &m.version,
                     baseline: "dev",
@@ -255,7 +255,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         }
 
         // Open runtime against the persistent DB.
-        let runtime = match statecraft_runtime::Runtime::open(&db_str, m) {
+        let runtime = match pylon_runtime::Runtime::open(&db_str, m) {
             Ok(rt) => Arc::new(rt),
             Err(e) => {
                 if !json_mode {
@@ -267,7 +267,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
         let rt_clone = Arc::clone(&runtime);
         std::thread::spawn(move || {
-            let _ = statecraft_runtime::server::start(rt_clone, port);
+            let _ = pylon_runtime::server::start(rt_clone, port);
         });
     }
 
@@ -290,7 +290,7 @@ fn run_rebuild_and_get_manifest(
     entry_file: &str,
     json_mode: bool,
     count: &mut u32,
-) -> Option<statecraft_core::AppManifest> {
+) -> Option<pylon_kernel::AppManifest> {
     *count += 1;
     let n = *count;
 
@@ -454,17 +454,17 @@ fn run_rebuild(entry_file: &str, json_mode: bool, count: &mut u32) {
 fn write_generated_files(
     entry_file: &str,
     manifest_json: &str,
-    manifest: &statecraft_core::AppManifest,
+    manifest: &pylon_kernel::AppManifest,
 ) {
     let entry_path = Path::new(entry_file);
     let dir = entry_path.parent().unwrap_or(Path::new("."));
 
     // Write manifest.
-    let manifest_path = dir.join("statecraft.manifest.json");
+    let manifest_path = dir.join("pylon.manifest.json");
     let _ = std::fs::write(&manifest_path, format!("{manifest_json}\n"));
 
     // Write client bindings.
-    let client_path = dir.join("statecraft.client.ts");
+    let client_path = dir.join("pylon.client.ts");
     let client_ts = generate_client_ts(manifest);
     let _ = std::fs::write(&client_path, client_ts);
 }
@@ -478,7 +478,7 @@ fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
             if path.extension().and_then(|e| e.to_str()) == Some("ts") {
                 // Skip generated files to avoid infinite rebuild loops.
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("statecraft.") {
+                    if name.starts_with("pylon.") {
                         continue;
                     }
                 }

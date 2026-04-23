@@ -4,7 +4,7 @@
 //! used by the router crate, enabling the same routing logic to run on
 //! self-hosted servers and Cloudflare Workers alike.
 
-use statecraft_http::{DataError, DataStore};
+use pylon_http::{DataError, DataStore};
 
 use crate::Runtime;
 
@@ -13,7 +13,7 @@ use crate::Runtime;
 // ---------------------------------------------------------------------------
 
 impl DataStore for Runtime {
-    fn manifest(&self) -> &statecraft_core::AppManifest {
+    fn manifest(&self) -> &pylon_kernel::AppManifest {
         Runtime::manifest(self)
     }
 
@@ -198,8 +198,8 @@ pub struct WsSseNotifier {
     pub sse: Arc<SseHub>,
 }
 
-impl statecraft_router::ChangeNotifier for WsSseNotifier {
-    fn notify(&self, event: &statecraft_sync::ChangeEvent) {
+impl pylon_router::ChangeNotifier for WsSseNotifier {
+    fn notify(&self, event: &pylon_sync::ChangeEvent) {
         self.ws.broadcast(event);
         self.sse.broadcast(event);
     }
@@ -226,7 +226,7 @@ fn to_json_array<T: serde::Serialize>(val: T) -> serde_json::Value {
 
 use crate::rooms::RoomManager;
 
-impl statecraft_router::RoomOps for RoomManager {
+impl pylon_router::RoomOps for RoomManager {
     fn join(
         &self,
         room: &str,
@@ -292,7 +292,7 @@ impl statecraft_router::RoomOps for RoomManager {
 // Adapter: CachePlugin → CacheOps (newtype wrapper for orphan rule)
 // ---------------------------------------------------------------------------
 
-use statecraft_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::cache::CachePlugin;
 
 /// Adapter that routes router-level CRUD hook calls into the PluginRegistry.
 ///
@@ -303,14 +303,14 @@ use statecraft_plugin::builtin::cache::CachePlugin;
 /// only saw the `on_request` hook and never got a chance to observe or
 /// reject data-plane writes — a quiet correctness hole noted in the
 /// pentest review.
-pub struct PluginHooksAdapter(pub Arc<statecraft_plugin::PluginRegistry>);
+pub struct PluginHooksAdapter(pub Arc<pylon_plugin::PluginRegistry>);
 
-impl statecraft_router::PluginHookOps for PluginHooksAdapter {
+impl pylon_router::PluginHookOps for PluginHooksAdapter {
     fn before_insert(
         &self,
         entity: &str,
         data: &mut serde_json::Value,
-        auth: &statecraft_auth::AuthContext,
+        auth: &pylon_auth::AuthContext,
     ) -> Result<(), (u16, String, String)> {
         self.0
             .run_before_insert(entity, data, auth)
@@ -321,7 +321,7 @@ impl statecraft_router::PluginHookOps for PluginHooksAdapter {
         entity: &str,
         id: &str,
         data: &serde_json::Value,
-        auth: &statecraft_auth::AuthContext,
+        auth: &pylon_auth::AuthContext,
     ) {
         self.0.run_after_insert(entity, id, data, auth);
     }
@@ -330,7 +330,7 @@ impl statecraft_router::PluginHookOps for PluginHooksAdapter {
         entity: &str,
         id: &str,
         data: &mut serde_json::Value,
-        auth: &statecraft_auth::AuthContext,
+        auth: &pylon_auth::AuthContext,
     ) -> Result<(), (u16, String, String)> {
         self.0
             .run_before_update(entity, id, data, auth)
@@ -341,7 +341,7 @@ impl statecraft_router::PluginHookOps for PluginHooksAdapter {
         entity: &str,
         id: &str,
         data: &serde_json::Value,
-        auth: &statecraft_auth::AuthContext,
+        auth: &pylon_auth::AuthContext,
     ) {
         self.0.run_after_update(entity, id, data, auth);
     }
@@ -349,20 +349,20 @@ impl statecraft_router::PluginHookOps for PluginHooksAdapter {
         &self,
         entity: &str,
         id: &str,
-        auth: &statecraft_auth::AuthContext,
+        auth: &pylon_auth::AuthContext,
     ) -> Result<(), (u16, String, String)> {
         self.0
             .run_before_delete(entity, id, auth)
             .map_err(|e| (e.status, e.code, e.message))
     }
-    fn after_delete(&self, entity: &str, id: &str, auth: &statecraft_auth::AuthContext) {
+    fn after_delete(&self, entity: &str, id: &str, auth: &pylon_auth::AuthContext) {
         self.0.run_after_delete(entity, id, auth);
     }
 }
 
 pub struct CacheAdapter(pub Arc<CachePlugin>);
 
-impl statecraft_router::CacheOps for CacheAdapter {
+impl pylon_router::CacheOps for CacheAdapter {
     fn handle_command(&self, body: &str) -> (u16, String) {
         crate::cache_handlers::handle_cache_command(&self.0, body)
     }
@@ -384,7 +384,7 @@ use crate::pubsub::PubSubBroker;
 
 pub struct PubSubAdapter(pub Arc<PubSubBroker>);
 
-impl statecraft_router::PubSubOps for PubSubAdapter {
+impl pylon_router::PubSubOps for PubSubAdapter {
     fn handle_publish(&self, body: &str) -> (u16, String) {
         crate::cache_handlers::handle_pubsub_publish(&self.0, body)
     }
@@ -404,7 +404,7 @@ impl statecraft_router::PubSubOps for PubSubAdapter {
 
 use crate::jobs::{JobQueue, Priority};
 
-impl statecraft_router::JobOps for JobQueue {
+impl pylon_router::JobOps for JobQueue {
     fn enqueue(
         &self,
         name: &str,
@@ -451,7 +451,7 @@ impl statecraft_router::JobOps for JobQueue {
 
 use crate::scheduler::Scheduler;
 
-impl statecraft_router::SchedulerOps for Scheduler {
+impl pylon_router::SchedulerOps for Scheduler {
     fn list_tasks(&self) -> serde_json::Value {
         to_json_array(Scheduler::list_tasks(self))
     }
@@ -467,7 +467,7 @@ impl statecraft_router::SchedulerOps for Scheduler {
 
 use crate::workflows::WorkflowEngine;
 
-impl statecraft_router::WorkflowOps for WorkflowEngine {
+impl pylon_router::WorkflowOps for WorkflowEngine {
     fn definitions(&self) -> serde_json::Value {
         to_json_array(WorkflowEngine::definitions(self))
     }
@@ -518,7 +518,7 @@ impl statecraft_router::WorkflowOps for WorkflowEngine {
 // Adapter: FileStorage trait → FileOps
 // ---------------------------------------------------------------------------
 
-use statecraft_storage::files::{FileStorage, LocalFileStorage};
+use pylon_storage::files::{FileStorage, LocalFileStorage};
 
 /// Adapter that exposes a [`FileStorage`] backend through the router's [`FileOps`].
 pub struct FileOpsAdapter {
@@ -529,16 +529,16 @@ impl FileOpsAdapter {
     /// Create from environment variables.
     /// Defaults to local filesystem storage at `./uploads`.
     pub fn from_env() -> Self {
-        let dir = std::env::var("STATECRAFT_FILES_DIR").unwrap_or_else(|_| "uploads".into());
+        let dir = std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into());
         let url_prefix =
-            std::env::var("STATECRAFT_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into());
+            std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into());
         Self {
             storage: Arc::new(LocalFileStorage::new(&dir, &url_prefix)),
         }
     }
 }
 
-impl statecraft_router::FileOps for FileOpsAdapter {
+impl pylon_router::FileOps for FileOpsAdapter {
     fn upload(&self, _body: &str) -> (u16, String) {
         // The self-hosted server short-circuits /api/files/upload BEFORE the
         // request body is lossily coerced to a String, so binary uploads are
@@ -547,7 +547,7 @@ impl statecraft_router::FileOps for FileOpsAdapter {
         // that wouldn't carry binary data correctly.
         (
             400,
-            statecraft_router::json_error(
+            pylon_router::json_error(
                 "UPLOAD_NEEDS_BINARY",
                 "File uploads must use multipart/form-data or raw binary with X-Filename; this platform does not support string-body uploads",
             ),
@@ -558,9 +558,9 @@ impl statecraft_router::FileOps for FileOpsAdapter {
         match self.storage.get(id) {
             Ok(content) => (200, String::from_utf8_lossy(&content).into_owned()),
             Err(e) if e.code == "NOT_FOUND" => {
-                (404, statecraft_router::json_error("FILE_NOT_FOUND", &e.message))
+                (404, pylon_router::json_error("FILE_NOT_FOUND", &e.message))
             }
-            Err(e) => (400, statecraft_router::json_error(&e.code, &e.message)),
+            Err(e) => (400, pylon_router::json_error(&e.code, &e.message)),
         }
     }
 }
@@ -579,7 +579,7 @@ impl LocalFileOps {
 // Adapter: EmailTransport → EmailSender
 // ---------------------------------------------------------------------------
 
-use statecraft_auth::email::{ConsoleTransport, EmailTransport, HttpEmailTransport};
+use pylon_auth::email::{ConsoleTransport, EmailTransport, HttpEmailTransport};
 
 /// Picks an email backend based on environment variables.
 /// Falls back to `ConsoleTransport` (prints to stderr) when no provider is configured.
@@ -601,7 +601,7 @@ impl EmailAdapter {
     }
 }
 
-impl statecraft_router::EmailSender for EmailAdapter {
+impl pylon_router::EmailSender for EmailAdapter {
     fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
         self.transport
             .send(to, subject, body)
@@ -614,10 +614,10 @@ impl statecraft_router::EmailSender for EmailAdapter {
 // ---------------------------------------------------------------------------
 
 pub struct RuntimeOpenApiGenerator<'a> {
-    pub manifest: &'a statecraft_core::AppManifest,
+    pub manifest: &'a pylon_kernel::AppManifest,
 }
 
-impl<'a> statecraft_router::OpenApiGenerator for RuntimeOpenApiGenerator<'a> {
+impl<'a> pylon_router::OpenApiGenerator for RuntimeOpenApiGenerator<'a> {
     fn generate(&self, base_url: &str) -> String {
         let spec = crate::openapi::generate_openapi(self.manifest, base_url);
         serde_json::to_string(&spec).unwrap_or_else(|_| "{}".into())
@@ -631,11 +631,11 @@ impl<'a> statecraft_router::OpenApiGenerator for RuntimeOpenApiGenerator<'a> {
 /// Wraps any `Arc<dyn DynShardRegistry>` so the router can dispatch shard
 /// routes without knowing the concrete SimState type.
 pub struct ShardOpsAdapter {
-    pub registry: Arc<dyn statecraft_realtime::DynShardRegistry>,
+    pub registry: Arc<dyn pylon_realtime::DynShardRegistry>,
 }
 
-impl statecraft_router::ShardOps for ShardOpsAdapter {
-    fn get_shard(&self, id: &str) -> Option<Arc<dyn statecraft_realtime::DynShard>> {
+impl pylon_router::ShardOps for ShardOpsAdapter {
+    fn get_shard(&self, id: &str) -> Option<Arc<dyn pylon_realtime::DynShard>> {
         self.registry.get(id)
     }
 
@@ -654,14 +654,14 @@ mod find_runtime_tests {
 
     #[test]
     fn env_override_takes_precedence() {
-        let dir = std::env::temp_dir().join(format!("statecraft_rt_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_rt_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("custom_runtime.ts");
         std::fs::write(&path, "// test").unwrap();
 
-        std::env::set_var("STATECRAFT_FUNCTIONS_RUNTIME", path.to_str().unwrap());
+        std::env::set_var("PYLON_FUNCTIONS_RUNTIME", path.to_str().unwrap());
         let found = find_functions_runtime();
-        std::env::remove_var("STATECRAFT_FUNCTIONS_RUNTIME");
+        std::env::remove_var("PYLON_FUNCTIONS_RUNTIME");
 
         assert_eq!(found.as_deref(), path.to_str());
 
@@ -671,13 +671,13 @@ mod find_runtime_tests {
     #[test]
     fn returns_none_when_env_path_missing() {
         std::env::set_var(
-            "STATECRAFT_FUNCTIONS_RUNTIME",
+            "PYLON_FUNCTIONS_RUNTIME",
             "/tmp/definitely-does-not-exist-42.ts",
         );
         // May still find something in CWD (dev path), so we only assert the env
         // path isn't what gets returned.
         let found = find_functions_runtime();
-        std::env::remove_var("STATECRAFT_FUNCTIONS_RUNTIME");
+        std::env::remove_var("PYLON_FUNCTIONS_RUNTIME");
         assert_ne!(
             found.as_deref(),
             Some("/tmp/definitely-does-not-exist-42.ts")
@@ -730,7 +730,7 @@ pub struct TxStore<'a> {
     /// commits. Buffered here rather than pushed to ChangeLog + notifier
     /// immediately so a rollback doesn't emit events for writes that
     /// didn't actually land.
-    pending: std::cell::RefCell<Vec<statecraft_sync::ChangeEvent>>,
+    pending: std::cell::RefCell<Vec<pylon_sync::ChangeEvent>>,
 }
 
 impl<'a> TxStore<'a> {
@@ -746,7 +746,7 @@ impl<'a> TxStore<'a> {
     /// the caller is responsible for appending each event to the
     /// ChangeLog and broadcasting via the notifier. On rollback the
     /// caller just drops the buffer without calling this.
-    pub fn take_pending(&self) -> Vec<statecraft_sync::ChangeEvent> {
+    pub fn take_pending(&self) -> Vec<pylon_sync::ChangeEvent> {
         std::mem::take(&mut *self.pending.borrow_mut())
     }
 
@@ -754,12 +754,12 @@ impl<'a> TxStore<'a> {
         &self,
         entity: &str,
         row_id: &str,
-        kind: statecraft_sync::ChangeKind,
+        kind: pylon_sync::ChangeKind,
         data: Option<&serde_json::Value>,
     ) {
         self.pending
             .borrow_mut()
-            .push(statecraft_sync::ChangeEvent {
+            .push(pylon_sync::ChangeEvent {
                 seq: 0, // assigned by ChangeLog::append after commit
                 entity: entity.to_string(),
                 row_id: row_id.to_string(),
@@ -775,7 +775,7 @@ unsafe impl<'a> Sync for TxStore<'a> {}
 unsafe impl<'a> Send for TxStore<'a> {}
 
 impl<'a> DataStore for TxStore<'a> {
-    fn manifest(&self) -> &statecraft_core::AppManifest {
+    fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.runtime.manifest()
     }
 
@@ -787,7 +787,7 @@ impl<'a> DataStore for TxStore<'a> {
         // Buffer the event. If the outer mutation rolls back, the buffer
         // is dropped instead of flushed, so sync subscribers never see a
         // row that doesn't exist.
-        self.record(entity, &id, statecraft_sync::ChangeKind::Insert, Some(data));
+        self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(data));
         Ok(id)
     }
 
@@ -829,7 +829,7 @@ impl<'a> DataStore for TxStore<'a> {
             .update_with_conn(self.conn, entity, id, data)
             .map_err(into_data_error)?;
         if updated {
-            self.record(entity, id, statecraft_sync::ChangeKind::Update, Some(data));
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(data));
         }
         Ok(updated)
     }
@@ -840,7 +840,7 @@ impl<'a> DataStore for TxStore<'a> {
             .delete_with_conn(self.conn, entity, id)
             .map_err(into_data_error)?;
         if deleted {
-            self.record(entity, id, statecraft_sync::ChangeKind::Delete, None);
+            self.record(entity, id, pylon_sync::ChangeKind::Delete, None);
         }
         Ok(deleted)
     }
@@ -926,10 +926,10 @@ impl<'a> DataStore for TxStore<'a> {
 // Adapter: FnRunner → FnOps
 // ---------------------------------------------------------------------------
 
-use statecraft_functions::protocol::{AuthInfo as FnAuth, FnType};
-use statecraft_functions::registry::{FnDef, FnRegistry};
-use statecraft_functions::runner::{FnCallError, FnRunner};
-use statecraft_functions::trace::FnTrace;
+use pylon_functions::protocol::{AuthInfo as FnAuth, FnType};
+use pylon_functions::registry::{FnDef, FnRegistry};
+use pylon_functions::runner::{FnCallError, FnRunner};
+use pylon_functions::trace::FnTrace;
 
 /// Adapter that implements [`FnOps`] by delegating to a [`FnRunner`].
 ///
@@ -948,12 +948,12 @@ pub struct FnOpsImpl {
     /// functions silently bypass sync — WS subscribers see nothing until
     /// they manually refetch. Flushed post-COMMIT so rollbacks don't emit
     /// phantom events.
-    pub change_log: Arc<statecraft_sync::ChangeLog>,
+    pub change_log: Arc<pylon_sync::ChangeLog>,
     /// Where to broadcast change events after a function mutation commits.
-    pub notifier: Arc<dyn statecraft_router::ChangeNotifier>,
+    pub notifier: Arc<dyn pylon_router::ChangeNotifier>,
 }
 
-impl statecraft_router::FnOps for FnOpsImpl {
+impl pylon_router::FnOps for FnOpsImpl {
     fn get_fn(&self, name: &str) -> Option<FnDef> {
         self.registry.get(name)
     }
@@ -968,7 +968,7 @@ impl statecraft_router::FnOps for FnOpsImpl {
         args: serde_json::Value,
         auth: FnAuth,
         on_stream: Option<Box<dyn FnMut(&str) + Send>>,
-        request: Option<statecraft_functions::protocol::RequestInfo>,
+        request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<(serde_json::Value, FnTrace), FnCallError> {
         let def = self.registry.get(fn_name).ok_or_else(|| FnCallError {
             code: "FN_NOT_FOUND".into(),
@@ -1030,7 +1030,7 @@ impl statecraft_router::FnOps for FnOpsImpl {
                                     ev.kind.clone(),
                                     ev.data.clone(),
                                 );
-                                let event = statecraft_sync::ChangeEvent { seq, ..ev };
+                                let event = pylon_sync::ChangeEvent { seq, ..ev };
                                 self.notifier.notify(&event);
                             }
                             Ok(value)
@@ -1096,30 +1096,30 @@ impl statecraft_router::FnOps for FnOpsImpl {
 /// Resolve the path to the TypeScript function runtime script.
 ///
 /// Searches in order:
-/// 1. `$STATECRAFT_FUNCTIONS_RUNTIME` environment variable (if set and file exists)
-/// 2. `./node_modules/@statecraft/functions/src/runtime.ts` (npm-installed)
-/// 3. `./node_modules/@statecraft/functions/dist/runtime.js` (built)
-/// 4. `~/.statecraft/runtime.ts` (user install)
+/// 1. `$PYLON_FUNCTIONS_RUNTIME` environment variable (if set and file exists)
+/// 2. `./node_modules/@pylon/functions/src/runtime.ts` (npm-installed)
+/// 3. `./node_modules/@pylon/functions/dist/runtime.js` (built)
+/// 4. `~/.pylon/runtime.ts` (user install)
 /// 5. `packages/functions/src/runtime.ts` (dev monorepo)
 ///
 /// Returns `None` if none exist.
 pub fn find_functions_runtime() -> Option<String> {
-    if let Ok(env_path) = std::env::var("STATECRAFT_FUNCTIONS_RUNTIME") {
+    if let Ok(env_path) = std::env::var("PYLON_FUNCTIONS_RUNTIME") {
         if std::path::Path::new(&env_path).exists() {
             return Some(env_path);
         }
     }
 
     // Walk parent directories like Node.js resolution does, so running
-    // `statecraft dev` from an example sub-directory still finds the
+    // `pylon dev` from an example sub-directory still finds the
     // hoisted workspace package at the repo root. Without this, bun/npm
     // workspace users see "TypeScript function runtime is not configured"
     // and think the server is broken when it's just a CWD issue.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let relative_candidates = [
-        "node_modules/@statecraft/functions/src/runtime.ts",
-        "node_modules/@statecraft/functions/dist/runtime.js",
+        "node_modules/@pylon/functions/src/runtime.ts",
+        "node_modules/@pylon/functions/dist/runtime.js",
         // Monorepo dev: source tree at the workspace root.
         "packages/functions/src/runtime.ts",
     ];
@@ -1135,8 +1135,8 @@ pub fn find_functions_runtime() -> Option<String> {
         dir = current.parent();
     }
 
-    // Final fallback: user-wide install under ~/.statecraft.
-    let user_path = format!("{home}/.statecraft/runtime.ts");
+    // Final fallback: user-wide install under ~/.pylon.
+    let user_path = format!("{home}/.pylon/runtime.ts");
     if std::path::Path::new(&user_path).exists() {
         return Some(user_path);
     }
@@ -1147,10 +1147,10 @@ pub fn try_spawn_functions(
     runtime: Arc<Runtime>,
     job_queue: Arc<crate::jobs::JobQueue>,
     fn_rate_limiter: Arc<crate::rate_limit::RateLimiter>,
-    change_log: Arc<statecraft_sync::ChangeLog>,
-    notifier: Arc<dyn statecraft_router::ChangeNotifier>,
+    change_log: Arc<pylon_sync::ChangeLog>,
+    notifier: Arc<dyn pylon_router::ChangeNotifier>,
 ) -> Option<Arc<FnOpsImpl>> {
-    let fn_dir = std::env::var("STATECRAFT_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
+    let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     if !std::path::Path::new(&fn_dir).exists() {
         return None;
     }
@@ -1162,7 +1162,7 @@ pub fn try_spawn_functions(
                 "[functions] No TypeScript runtime script found. TypeScript functions will be unavailable."
             );
             tracing::warn!(
-                "[functions] Tried: $STATECRAFT_FUNCTIONS_RUNTIME, node_modules/@statecraft/functions/src/runtime.ts, ~/.statecraft/runtime.ts, packages/functions/src/runtime.ts"
+                "[functions] Tried: $PYLON_FUNCTIONS_RUNTIME, node_modules/@pylon/functions/src/runtime.ts, ~/.pylon/runtime.ts, packages/functions/src/runtime.ts"
             );
             return None;
         }
@@ -1239,7 +1239,7 @@ pub fn try_spawn_functions(
 /// through a cycle (hook stored on FnRunner ← held by FnOpsImpl). When the
 /// ops struct is dropped the hook becomes a no-op error.
 fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
-    use statecraft_functions::protocol::{AuthInfo, FnType};
+    use pylon_functions::protocol::{AuthInfo, FnType};
 
     let weak = Arc::downgrade(ops);
     ops.runner.set_nested_call_hook(Box::new(
@@ -1253,7 +1253,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                 None => {
                     return Err((
                         "RUNTIME_GONE".into(),
-                        "statecraft runtime is shutting down".into(),
+                        "pylon runtime is shutting down".into(),
                     ))
                 }
             };
@@ -1286,6 +1286,23 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                             if let Err(e) = conn_guard.execute("COMMIT", []) {
                                 let _ = conn_guard.execute("ROLLBACK", []);
                                 return Err(("COMMIT_FAILED".into(), e.to_string()));
+                            }
+                            // Flush change events after COMMIT so nested
+                            // mutations (action → runMutation(...)) broadcast
+                            // the same way top-level mutations do. Without
+                            // this, every write an action emits is invisible
+                            // to sync subscribers until the NEXT top-level
+                            // mutation lands — streaming UIs stay empty.
+                            for ev in tx_store.take_pending() {
+                                let seq = ops.change_log.append(
+                                    &ev.entity,
+                                    &ev.row_id,
+                                    ev.kind.clone(),
+                                    ev.data.clone(),
+                                );
+                                let event =
+                                    pylon_sync::ChangeEvent { seq, ..ev };
+                                ops.notifier.notify(&event);
                             }
                             Ok(value)
                         }
@@ -1326,7 +1343,7 @@ fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
     use std::time::Duration;
 
     std::thread::Builder::new()
-        .name("statecraft-fn-supervisor".into())
+        .name("pylon-fn-supervisor".into())
         .spawn(move || {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
@@ -1360,9 +1377,9 @@ fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
                         // how long failures have been compounding) and the
                         // component name.
                         let backoff_str = format!("{}", backoff.as_secs());
-                        statecraft_observability::report_error(
-                            &statecraft_observability::ErrorEvent {
-                                level: statecraft_observability::ErrorLevel::Error,
+                        pylon_observability::report_error(
+                            &pylon_observability::ErrorEvent {
+                                level: pylon_observability::ErrorLevel::Error,
                                 code: "FN_RESPAWN_FAILED",
                                 message: &e,
                                 context: &[

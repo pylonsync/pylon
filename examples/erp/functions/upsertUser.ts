@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Find-or-create a User row keyed by email. Identical pattern to the chat

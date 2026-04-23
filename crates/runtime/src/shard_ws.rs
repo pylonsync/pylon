@@ -1,6 +1,6 @@
 //! Bidirectional WebSocket server for real-time shards.
 //!
-//! Runs on its own port (typically `statecraft_port + 3`). Each connection:
+//! Runs on its own port (typically `pylon_port + 3`). Each connection:
 //!
 //! 1. Parses the request path for `?shard=<id>&sid=<subscriber>`.
 //! 2. Looks up the shard in the [`DynShardRegistry`].
@@ -10,7 +10,7 @@
 //! 6. Cleans up on disconnect.
 //!
 //! Each client gets its own dedicated thread. For larger deployments,
-//! swap in an async runtime; for statecraft's current scale, thread-per-conn
+//! swap in an async runtime; for pylon's current scale, thread-per-conn
 //! is simpler and fine.
 
 use std::net::{TcpListener, TcpStream};
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use statecraft_auth::SessionStore;
-use statecraft_realtime::{DynShardRegistry, ShardAuth, ShardError, SubscriberId};
+use pylon_auth::SessionStore;
+use pylon_realtime::{DynShardRegistry, ShardAuth, ShardError, SubscriberId};
 use tungstenite::{accept_hdr, handshake::server::Request, Message};
 
 use crate::ip_limit::IpConnCounter;
@@ -170,7 +170,7 @@ fn handle_connection(
 
     // Build the sink: every snapshot broadcast becomes a WS binary frame.
     let ws_for_sink = Arc::clone(&ws);
-    let sink: statecraft_realtime::SnapshotSink = Box::new(move |tick, bytes| {
+    let sink: pylon_realtime::SnapshotSink = Box::new(move |tick, bytes| {
         let mut payload = Vec::with_capacity(8 + bytes.len() + 2);
         payload.extend_from_slice(&tick.to_be_bytes());
         payload.extend_from_slice(bytes);
@@ -249,7 +249,7 @@ fn handle_connection(
 }
 
 fn process_input(
-    shard: &Arc<dyn statecraft_realtime::DynShard>,
+    shard: &Arc<dyn pylon_realtime::DynShard>,
     subscriber_id: &SubscriberId,
     shard_auth: &ShardAuth,
     text: &str,

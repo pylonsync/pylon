@@ -17,8 +17,8 @@
 
 use std::sync::Mutex;
 
-use statecraft_core::AppManifest;
-use statecraft_http::{DataError, DataStore};
+use pylon_kernel::AppManifest;
+use pylon_http::{DataError, DataStore};
 
 use crate::postgres::live::LivePostgresAdapter;
 

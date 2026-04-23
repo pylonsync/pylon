@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::Plugin;
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 use serde_json::Value;
 
 /// A search index entry.

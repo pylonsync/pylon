@@ -1,4 +1,4 @@
-//! statecraft-realtime — tick-driven, sharded, stateful simulations.
+//! pylon-realtime — tick-driven, sharded, stateful simulations.
 //!
 //! Provides a general-purpose [`Shard`] abstraction for any workload that is
 //! contention-limited on a single entity: game matches, MMO zones, RTS rooms,

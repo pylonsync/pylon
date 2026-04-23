@@ -1,5 +1,5 @@
 {
-  "name": "@statecraft/workflows",
+  "name": "@pylonsync/workflows",
   "publishConfig": { "access": "public" },
   "version": "0.1.0",
   "type": "module",

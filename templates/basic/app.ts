@@ -37,5 +37,5 @@ const manifest = buildManifest({
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: statecraft codegen app.ts
+// Used by: pylon codegen app.ts
 console.log(JSON.stringify(manifest, null, 2));

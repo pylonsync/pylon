@@ -1,10 +1,10 @@
-//! Cloudflare Workers adapter for statecraft.
+//! Cloudflare Workers adapter for pylon.
 //!
 //! # Architecture
 //!
 //! ```text
 //!   Browser ──► Cloudflare Worker
-//!                 ├─ statecraft_router::route()   — platform-agnostic routing
+//!                 ├─ pylon_router::route()   — platform-agnostic routing
 //!                 ├─ D1DataStore              — D1 SQL execution (SQLite)
 //!                 └─ Durable Object rooms      — WebSocket (future)
 //! ```

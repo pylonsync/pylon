@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# statecraft installer
+# pylon installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ericc59/agentdb/main/install.sh | bash
 #
 # Honors:
-#   STATECRAFT_VERSION   release tag to install (default: latest)
-#   STATECRAFT_INSTALL_DIR  install location (default: $HOME/.local/bin)
+#   PYLON_VERSION   release tag to install (default: latest)
+#   PYLON_INSTALL_DIR  install location (default: $HOME/.local/bin)
 
 set -euo pipefail
 
 REPO="ericc59/agentdb"
-INSTALL_DIR="${STATECRAFT_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${PYLON_INSTALL_DIR:-$HOME/.local/bin}"
 
 err() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[32m==>\033[0m %s\n' "$*"; }
@@ -35,17 +35,17 @@ esac
 target="${arch}-${os}"
 
 # Resolve version
-if [ -z "${STATECRAFT_VERSION:-}" ]; then
+if [ -z "${PYLON_VERSION:-}" ]; then
   info "Resolving latest release..."
-  STATECRAFT_VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+  PYLON_VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
     | grep '"tag_name"' \
     | head -n1 \
     | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')
-  [ -n "$STATECRAFT_VERSION" ] || err "could not resolve latest version"
+  [ -n "$PYLON_VERSION" ] || err "could not resolve latest version"
 fi
 
-archive="statecraft-${STATECRAFT_VERSION}-${target}.tar.gz"
-url="https://github.com/$REPO/releases/download/${STATECRAFT_VERSION}/${archive}"
+archive="pylon-${PYLON_VERSION}-${target}.tar.gz"
+url="https://github.com/$REPO/releases/download/${PYLON_VERSION}/${archive}"
 
 info "Downloading $url"
 tmp=$(mktemp -d)
@@ -56,14 +56,14 @@ curl -fSL "$url" -o "$tmp/$archive" || err "download failed: $url"
 info "Extracting..."
 tar -xzf "$tmp/$archive" -C "$tmp"
 
-# Find the statecraft binary (top of archive or in a subdir)
-binary="$(find "$tmp" -name statecraft -type f -perm -u+x | head -n1)"
-[ -n "$binary" ] || err "no statecraft binary found in archive"
+# Find the pylon binary (top of archive or in a subdir)
+binary="$(find "$tmp" -name pylon -type f -perm -u+x | head -n1)"
+[ -n "$binary" ] || err "no pylon binary found in archive"
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$binary" "$INSTALL_DIR/statecraft"
+install -m 0755 "$binary" "$INSTALL_DIR/pylon"
 
-info "Installed statecraft $STATECRAFT_VERSION to $INSTALL_DIR/statecraft"
+info "Installed pylon $PYLON_VERSION to $INSTALL_DIR/pylon"
 
 if ! printf '%s' ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
   printf '\n\033[33mwarning:\033[0m %s is not in your PATH\n' "$INSTALL_DIR" >&2
@@ -71,4 +71,4 @@ if ! printf '%s' ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
   printf '    export PATH="%s:$PATH"\n' "$INSTALL_DIR"
 fi
 
-"$INSTALL_DIR/statecraft" version || true
+"$INSTALL_DIR/pylon" version || true

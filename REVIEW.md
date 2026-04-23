@@ -130,7 +130,7 @@ route is unauthenticated.
   `crates/storage/src/sqlite.rs:198,217,341`.
 - **Medium — identifier allowlist is missing.** `quote_ident` accepts any
   string. Pathological names are creatable but introspection excludes names
-  starting with `_statecraft_`, so such tables become invisible to planning.
+  starting with `_pylon_`, so such tables become invisible to planning.
   `crates/storage/src/sqlite.rs:52,82,435`.
 - **Medium — corrupt history silently discarded** via `.ok()` on JSON
   parse. `crates/storage/src/sqlite.rs:268,306`.
@@ -205,7 +205,7 @@ route is unauthenticated.
 
 - **Critical — missing auth before routing on fast paths.**
   `/api/files/upload`, shard SSE, fn streaming, and AI streaming all run
-  BEFORE `pr.run_on_request()` and before `statecraft_router::route()`, so any
+  BEFORE `pr.run_on_request()` and before `pylon_router::route()`, so any
   plugin-layer auth/policy middleware is skipped entirely.
   `crates/runtime/src/server.rs:446,563,580,727,815,944,991`.
 - **High — body-size cap enforced after full read.** Both upload
@@ -222,7 +222,7 @@ route is unauthenticated.
 - **Medium — panic-prone `Header::from_bytes(...).unwrap()` on
   env-sourced CORS origin** at many sites.
   `crates/runtime/src/server.rs:291,388,999` and ~15 more.
-- **Medium — `STATECRAFT_CORS_ORIGIN` defaults to `*`** with `Authorization`
+- **Medium — `PYLON_CORS_ORIGIN` defaults to `*`** with `Authorization`
   allowed. In prod, any origin can drive bearer APIs.
   `crates/runtime/src/server.rs:291,711,800,925`.
 - **Medium — connection exhaustion / starvation.** Main loop is synchronous;
@@ -316,8 +316,8 @@ route is unauthenticated.
   `crates/cli/src/commands/codegen.rs:55`,
   `crates/cli/src/commands/dev.rs:125`.
 - **Medium — insecure deploy template.** Generated `docker-compose.yml`
-  hardcodes `postgres://statecraft:statecraft@db:5432/statecraft` and
-  `POSTGRES_PASSWORD=statecraft`.
+  hardcodes `postgres://pylon:pylon@db:5432/pylon` and
+  `POSTGRES_PASSWORD=pylon`.
   `crates/cli/src/commands/deploy.rs:144,154`.
 - **Low — ad-hoc argv parsing.** Drops any token starting with `-`
   (no `--` end-of-options); `codegen client` dispatches on second

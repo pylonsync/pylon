@@ -2,7 +2,7 @@ const STEPS = [
   {
     num: "01",
     title: "Laptop",
-    meta: "statecraft dev",
+    meta: "pylon dev",
     desc: "SQLite backend, hot-reload, type-safe client regen. Zero config to start.",
     tag: { label: "SQLite", accent: false },
   },

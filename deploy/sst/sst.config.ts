@@ -3,7 +3,7 @@
 export default $config({
   app(input) {
     return {
-      name: "statecraft",
+      name: "pylon",
       removal: input?.stage === "production" ? "retain" : "remove",
       home: "aws",
     };
@@ -35,9 +35,9 @@ export default $config({
       },
       environment: {
         DATABASE_URL: db.url,
-        STATECRAFT_PORT: "8080",
-        STATECRAFT_DEV_MODE: "false",
-        STATECRAFT_ADMIN_TOKEN: new sst.Secret("AdminToken").value,
+        PYLON_PORT: "8080",
+        PYLON_DEV_MODE: "false",
+        PYLON_ADMIN_TOKEN: new sst.Secret("AdminToken").value,
       },
       public: {
         ports: [

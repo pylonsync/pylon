@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// @statecraft/workflows — define durable, multi-step workflows in TypeScript
+// @pylonsync/workflows — define durable, multi-step workflows in TypeScript
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

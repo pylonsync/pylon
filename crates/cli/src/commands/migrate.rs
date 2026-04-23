@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 
 use crate::output;
 
@@ -12,7 +12,7 @@ const MIGRATIONS_DIR: &str = "migrations";
 
 const MIGRATE_SUBCOMMANDS: [&str; 6] = ["create", "list", "status", "plan", "apply", "auto"];
 
-const MIGRATIONS_TABLE: &str = "_statecraft_migrations";
+const MIGRATIONS_TABLE: &str = "_pylon_migrations";
 
 // ---------------------------------------------------------------------------
 // Entry point — dispatches to subcommands
@@ -63,7 +63,7 @@ fn run_create(positional: &[&str], json_mode: bool) -> ExitCode {
         Some(n) => *n,
         None => {
             output::print_error("migrate create requires a migration name");
-            eprintln!("  Usage: statecraft migrate create <name>");
+            eprintln!("  Usage: pylon migrate create <name>");
             return ExitCode::Usage;
         }
     };
@@ -146,7 +146,7 @@ fn run_list(json_mode: bool) -> ExitCode {
             println!("{}", "-".repeat(40));
             for m in &migrations {
                 // Without a DB connection we mark everything as pending.
-                // A future enhancement can check _statecraft_migrations table.
+                // A future enhancement can check _pylon_migrations table.
                 println!("{:04}   {:<12} {}", m.number, "pending", m.name);
             }
         }
@@ -269,7 +269,7 @@ fn parse_migration_filename(filename: &str) -> Option<MigrationInfo> {
 }
 
 fn print_migrate_usage() {
-    eprintln!("Usage: statecraft migrate <subcommand>");
+    eprintln!("Usage: pylon migrate <subcommand>");
     eprintln!();
     eprintln!("Subcommands:");
     eprintln!("  create <name>           Create a new SQL migration file");
@@ -290,8 +290,8 @@ fn print_migrate_usage() {
 // --rename-table and --rename-column flag parsing
 // ---------------------------------------------------------------------------
 
-fn parse_rename_hints(args: &[String]) -> statecraft_migrate::RenameHints {
-    let mut hints = statecraft_migrate::RenameHints::new();
+fn parse_rename_hints(args: &[String]) -> pylon_migrate::RenameHints {
+    let mut hints = pylon_migrate::RenameHints::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -326,7 +326,7 @@ fn parse_rename_hints(args: &[String]) -> statecraft_migrate::RenameHints {
 // migrate plan — diff current manifest against DB
 // ---------------------------------------------------------------------------
 
-fn run_plan(hints: &statecraft_migrate::RenameHints, json_mode: bool) -> ExitCode {
+fn run_plan(hints: &pylon_migrate::RenameHints, json_mode: bool) -> ExitCode {
     let (old, new) = match load_manifests() {
         Ok(x) => x,
         Err(e) => {
@@ -335,7 +335,7 @@ fn run_plan(hints: &statecraft_migrate::RenameHints, json_mode: bool) -> ExitCod
         }
     };
 
-    let plan = statecraft_migrate::diff_with_renames(&old, &new, hints);
+    let plan = pylon_migrate::diff_with_renames(&old, &new, hints);
 
     if json_mode {
         output::print_json(&serde_json::to_value(&plan).unwrap_or(serde_json::json!({})));
@@ -361,7 +361,7 @@ fn run_plan(hints: &statecraft_migrate::RenameHints, json_mode: bool) -> ExitCod
 // ---------------------------------------------------------------------------
 
 fn run_apply(
-    hints: &statecraft_migrate::RenameHints,
+    hints: &pylon_migrate::RenameHints,
     skip_confirm: bool,
     allow_destructive: bool,
     json_mode: bool,
@@ -374,7 +374,7 @@ fn run_apply(
         }
     };
 
-    let plan = statecraft_migrate::diff_with_renames(&old, &new, hints);
+    let plan = pylon_migrate::diff_with_renames(&old, &new, hints);
 
     if plan.is_empty() {
         if json_mode {
@@ -414,7 +414,7 @@ fn run_apply(
         }
     }
 
-    let db_path = std::env::var("STATECRAFT_DB_PATH").unwrap_or_else(|_| "statecraft.db".into());
+    let db_path = std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".into());
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -465,17 +465,17 @@ fn run_apply(
 // Manifest loading and DB state
 // ---------------------------------------------------------------------------
 
-fn load_manifests() -> Result<(statecraft_core::AppManifest, statecraft_core::AppManifest), String> {
+fn load_manifests() -> Result<(pylon_kernel::AppManifest, pylon_kernel::AppManifest), String> {
     // Current (on-disk) manifest.
-    let manifest_path = std::env::var("STATECRAFT_MANIFEST")
-        .unwrap_or_else(|_| "statecraft.manifest.json".into());
+    let manifest_path = std::env::var("PYLON_MANIFEST")
+        .unwrap_or_else(|_| "pylon.manifest.json".into());
     let current = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Cannot read manifest {manifest_path}: {e}"))?;
-    let new: statecraft_core::AppManifest = serde_json::from_str(&current)
+    let new: pylon_kernel::AppManifest = serde_json::from_str(&current)
         .map_err(|e| format!("Invalid manifest JSON: {e}"))?;
 
     // Previously-applied manifest (from DB). Empty if fresh DB.
-    let db_path = std::env::var("STATECRAFT_DB_PATH").unwrap_or_else(|_| "statecraft.db".into());
+    let db_path = std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".into());
     let old = if std::path::Path::new(&db_path).exists() {
         match rusqlite::Connection::open(&db_path) {
             Ok(conn) => load_applied_manifest(&conn).unwrap_or_else(|_| empty_manifest()),
@@ -488,7 +488,7 @@ fn load_manifests() -> Result<(statecraft_core::AppManifest, statecraft_core::Ap
     Ok((old, new))
 }
 
-fn load_applied_manifest(conn: &rusqlite::Connection) -> Result<statecraft_core::AppManifest, String> {
+fn load_applied_manifest(conn: &rusqlite::Connection) -> Result<pylon_kernel::AppManifest, String> {
     ensure_migrations_table(conn)?;
 
     let query = format!(
@@ -515,9 +515,9 @@ fn ensure_migrations_table(conn: &rusqlite::Connection) -> Result<(), String> {
     .map_err(|e| format!("Failed to create migrations table: {e}"))
 }
 
-fn empty_manifest() -> statecraft_core::AppManifest {
-    statecraft_core::AppManifest {
-        manifest_version: statecraft_core::MANIFEST_VERSION,
+fn empty_manifest() -> pylon_kernel::AppManifest {
+    pylon_kernel::AppManifest {
+        manifest_version: pylon_kernel::MANIFEST_VERSION,
         name: "".into(),
         version: "".into(),
         entities: vec![],
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn count_migrations_empty_dir() {
-        let dir = std::env::temp_dir().join("statecraft_test_empty_migrations");
+        let dir = std::env::temp_dir().join("pylon_test_empty_migrations");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn count_migrations_with_files() {
-        let dir = std::env::temp_dir().join("statecraft_test_count_migrations");
+        let dir = std::env::temp_dir().join("pylon_test_count_migrations");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn create_migration_file() {
-        let dir = std::env::temp_dir().join("statecraft_test_create_migration");
+        let dir = std::env::temp_dir().join("pylon_test_create_migration");
         let _ = std::fs::create_dir_all(&dir);
         // Clean any leftover files
         if let Ok(entries) = std::fs::read_dir(&dir) {

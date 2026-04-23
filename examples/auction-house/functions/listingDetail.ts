@@ -1,4 +1,4 @@
-import { query, v } from "@statecraft/functions";
+import { query, v } from "@pylonsync/functions";
 
 export default query({
   args: { listingId: v.id("Listing") },

@@ -3,13 +3,13 @@ import {
   createSyncEngine,
   type Row,
   type SyncEngineConfig,
-} from "@statecraft/sync";
+} from "@pylonsync/sync";
 import { useQuery, useQueryOne, useMutation } from "./hooks";
 
 // ---------------------------------------------------------------------------
 // db — one-liner API (like InstantDB's db.useQuery)
 //
-// Identical to @statecraft/react/db but imports hooks from the local RN module
+// Identical to @pylonsync/react/db but imports hooks from the local RN module
 // to avoid subpath resolution issues with Metro.
 // ---------------------------------------------------------------------------
 
@@ -17,10 +17,10 @@ let _sync: SyncEngine | null = null;
 let _started = false;
 
 /**
- * Initialize the statecraft client. Call once at app startup.
+ * Initialize the pylon client. Call once at app startup.
  *
  * ```ts
- * import { init } from "@statecraft/react-native";
+ * import { init } from "@pylonsync/react-native";
  * init({ baseUrl: "http://localhost:4321" });
  * ```
  */
@@ -51,7 +51,7 @@ function getSync(): SyncEngine {
  *
  * ```tsx
  * import { useSyncExternalStore } from "react";
- * import { db } from "@statecraft/react-native";
+ * import { db } from "@pylonsync/react-native";
  *
  * function TodoList() {
  *   const todos = useSyncExternalStore(...db.useQuery("Todo"));

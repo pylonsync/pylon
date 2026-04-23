@@ -16,7 +16,7 @@ export interface RoomSnapshot {
 }
 
 export interface UseRoomOptions {
-  /** Base URL of the statecraft server. */
+  /** Base URL of the pylon server. */
   baseUrl?: string;
   /** Auth token for API requests. */
   token?: string;
@@ -44,7 +44,7 @@ export interface UseRoomReturn {
 // ---------------------------------------------------------------------------
 // Hook
 //
-// Identical to the @statecraft/react version. Uses only React hooks and fetch,
+// Identical to the @pylonsync/react version. Uses only React hooks and fetch,
 // both available in React Native. Duplicated to avoid subpath import issues
 // with Metro bundler.
 // ---------------------------------------------------------------------------

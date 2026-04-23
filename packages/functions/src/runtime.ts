@@ -127,7 +127,7 @@ function nextOpId(callId: string): string {
 /**
  * Upper bound on how long an individual host → TS RPC (e.g. `ctx.db.get`)
  * can wait for a reply. The Rust side enforces its own per-handler timeout
- * (STATECRAFT_FN_CALL_TIMEOUT, default 30s), but if a protocol frame gets
+ * (PYLON_FN_CALL_TIMEOUT, default 30s), but if a protocol frame gets
  * truncated or dropped, the awaiting promise would hang forever. This is
  * the safety net.
  *
@@ -530,6 +530,9 @@ async function handleCall(msg: CallMessage): Promise<void> {
   const auth: AuthInfo = {
     userId: ((rawAuth.userId ?? rawAuth.user_id) as string | null | undefined) ?? null,
     isAdmin: Boolean(rawAuth.isAdmin ?? rawAuth.is_admin),
+    tenantId:
+      ((rawAuth.tenantId ?? rawAuth.tenant_id) as string | null | undefined) ??
+      null,
   };
 
   let ctx: QueryCtx | MutationCtx | ActionCtx;

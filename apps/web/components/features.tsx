@@ -55,7 +55,7 @@ export function Features() {
         <div className="section-label">What you get</div>
         <h2 className="section-title">Two lanes, one binary.</h2>
         <p className="section-sub">
-          Everything below ships in <code className="mono">statecraft</code>. No sidecars.
+          Everything below ships in <code className="mono">pylon</code>. No sidecars.
           No extra Redis. No separate realtime layer. Either lane is useful alone; together they&apos;re rare.
         </p>
 

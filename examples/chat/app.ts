@@ -1,4 +1,4 @@
-import { entity, field, policy, buildManifest } from "@statecraft/sdk";
+import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -161,5 +161,5 @@ const manifest = buildManifest({
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: statecraft codegen examples/chat/app.ts
+// Used by: pylon codegen examples/chat/app.ts
 console.log(JSON.stringify(manifest, null, 2));

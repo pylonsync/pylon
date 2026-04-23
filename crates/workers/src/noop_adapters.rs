@@ -4,19 +4,19 @@
 //! As Workers features are built out (Durable Object rooms, Queues jobs,
 //! etc.), these will be replaced with real implementations.
 
-use statecraft_http::DataError;
-use statecraft_router::{
+use pylon_http::DataError;
+use pylon_router::{
     CacheOps, FileOps, JobOps, OpenApiGenerator, PubSubOps, RoomOps, SchedulerOps,
     WorkflowOps,
 };
 
 /// Implements all router service traits with no-op stubs.
 pub struct NoopAll {
-    manifest: statecraft_core::AppManifest,
+    manifest: pylon_kernel::AppManifest,
 }
 
 impl NoopAll {
-    pub fn new(manifest: &statecraft_core::AppManifest) -> Self {
+    pub fn new(manifest: &pylon_kernel::AppManifest) -> Self {
         Self {
             manifest: manifest.clone(),
         }
@@ -74,21 +74,21 @@ impl RoomOps for NoopAll {
 
 impl CacheOps for NoopAll {
     fn handle_command(&self, _body: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
     }
 
     fn handle_get(&self, _key: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
     }
 
     fn handle_delete(&self, _key: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
     }
 }
 
 impl PubSubOps for NoopAll {
     fn handle_publish(&self, _body: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "PubSub not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "PubSub not available on this platform"))
     }
 
     fn handle_channels(&self) -> (u16, String) {
@@ -186,11 +186,11 @@ impl WorkflowOps for NoopAll {
 
 impl FileOps for NoopAll {
     fn upload(&self, _body: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "File uploads not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "File uploads not available on this platform"))
     }
 
     fn get_file(&self, _id: &str) -> (u16, String) {
-        (503, statecraft_router::json_error("NOT_AVAILABLE", "File storage not available on this platform"))
+        (503, pylon_router::json_error("NOT_AVAILABLE", "File storage not available on this platform"))
     }
 }
 

@@ -1,5 +1,5 @@
-export { defineRoute } from "@statecraft/sdk";
-export type { RouteMode, AppManifest } from "@statecraft/sdk";
+export { defineRoute } from "@pylonsync/sdk";
+export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 
 // React hooks — high-level ergonomic shape
 export {
@@ -52,6 +52,10 @@ export type {
   ShardClient,
 } from "./useShard";
 
+// Session hook — server-resolved user + tenant identity
+export { useSession } from "./useSession";
+export type { UseSessionReturn, ResolvedSession } from "./useSession";
+
 // One-liner API
 export { db, init } from "./db";
 
@@ -66,14 +70,14 @@ export {
   getServerData,
   LocalStore,
   MutationQueue,
-} from "@statecraft/sync";
+} from "@pylonsync/sync";
 export type {
   ChangeEvent,
   SyncCursor,
   PullResponse,
   HydrationData,
   Row,
-} from "@statecraft/sync";
+} from "@pylonsync/sync";
 
 // ---------------------------------------------------------------------------
 // Client context
@@ -114,8 +118,8 @@ export function getAppName(): string {
  * keep working without migration.
  */
 export function storageKey(slot: string): string {
-  if (_appName === "default") return `statecraft_${slot}`;
-  return `statecraft:${_appName}:${slot}`;
+  if (_appName === "default") return `pylon_${slot}`;
+  return `pylon:${_appName}:${slot}`;
 }
 
 export function configureClient(config: AgentDBClientConfig): void {
@@ -142,7 +146,7 @@ function maybeWarnDowngrade(baseUrl: string): void {
     const page = window.location?.protocol;
     if (page === "https:" && baseUrl.startsWith("http://")) {
       console.warn(
-        `[statecraft] configured baseUrl is http:// but page origin is https:// — auth traffic will be blocked or sent in plaintext: ${baseUrl}`,
+        `[pylon] configured baseUrl is http:// but page origin is https:// — auth traffic will be blocked or sent in plaintext: ${baseUrl}`,
       );
     }
   } catch {
@@ -170,7 +174,7 @@ function assertBaseUrlSafeForEnv(): void {
     host.endsWith(".localhost");
   if (!isLocal) {
     throw new Error(
-      "[statecraft] configureClient({ baseUrl }) must be called before any " +
+      "[pylon] configureClient({ baseUrl }) must be called before any " +
         "request when the app is not running on localhost. Using the " +
         "built-in http://localhost:4321 default in production would ship " +
         "user credentials to the wrong origin.",
@@ -360,7 +364,7 @@ export function startSessionAutoRefresh(
  */
 /**
  * Read the auth token from the browser. Falls back to `localStorage`
- * under the conventional `statecraft_token` key so components and hooks
+ * under the conventional `pylon_token` key so components and hooks
  * that don't explicitly carry auth still send it. Production apps that
  * use httpOnly cookies pass `credentials: "include"` via `configureClient`
  * instead; see docs/ops/DEPLOY.md.

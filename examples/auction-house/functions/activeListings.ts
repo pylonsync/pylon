@@ -1,4 +1,4 @@
-import { query } from "@statecraft/functions";
+import { query } from "@pylonsync/functions";
 
 export default query({
   args: {},

@@ -51,33 +51,33 @@ jobs:
           linker = "aarch64-linux-gnu-gcc"
           EOF
       - name: Build
-        run: cargo build --release --locked --bin statecraft --target ${{ matrix.target }}
-      # Artifact names must match what install.sh and Formula/statecraft.rb
-      # expect: statecraft-${TAG}-${TARGET}.{tar.gz,zip}
+        run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
+      # Artifact names must match what install.sh and Formula/pylon.rb
+      # expect: pylon-${TAG}-${TARGET}.{tar.gz,zip}
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../statecraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz statecraft
+          tar czf ../../../pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz pylon
       - name: Package (windows)
         if: matrix.archive == 'zip'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../statecraft-${{ github.ref_name }}-${{ matrix.target }}.zip statecraft.exe
+          7z a ../../../pylon-${{ github.ref_name }}-${{ matrix.target }}.zip pylon.exe
       - name: Compute SHA256 (unix)
         if: matrix.archive == 'tar.gz' && runner.os == 'Linux'
         run: |
-          sha256sum statecraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            > statecraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          sha256sum pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+            > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
       - name: Compute SHA256 (macOS)
         if: matrix.archive == 'tar.gz' && runner.os == 'macOS'
         run: |
-          shasum -a 256 statecraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
-            > statecraft-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          shasum -a 256 pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+            > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            statecraft-${{ github.ref_name }}-${{ matrix.target }}.*
+            pylon-${{ github.ref_name }}-${{ matrix.target }}.*
 
   docker:
     runs-on: ubuntu-latest
@@ -92,7 +92,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository_owner }}/statecraft
+          images: ghcr.io/${{ github.repository_owner }}/pylon
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

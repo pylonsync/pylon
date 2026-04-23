@@ -83,6 +83,10 @@ pub struct TraceBuilder {
     fn_name: String,
     fn_type: FnType,
     pub(crate) user_id: Option<String>,
+    /// Active tenant at call time. Threaded through so nested calls
+    /// (action → mutation) can inherit it when row-level policies gate
+    /// every write the action emits.
+    pub(crate) tenant_id: Option<String>,
     started_at: u64,
     start_instant: Instant,
     ops: Vec<OpTrace>,
@@ -98,6 +102,16 @@ impl TraceBuilder {
         fn_type: FnType,
         user_id: Option<String>,
     ) -> Self {
+        Self::new_with_tenant(call_id, fn_name, fn_type, user_id, None)
+    }
+
+    pub fn new_with_tenant(
+        call_id: String,
+        fn_name: String,
+        fn_type: FnType,
+        user_id: Option<String>,
+        tenant_id: Option<String>,
+    ) -> Self {
         let now_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -108,6 +122,7 @@ impl TraceBuilder {
             fn_name,
             fn_type,
             user_id,
+            tenant_id,
             started_at: now_epoch,
             start_instant: Instant::now(),
             ops: Vec::new(),
@@ -115,6 +130,12 @@ impl TraceBuilder {
             stream_chunks: 0,
             schedules: Vec::new(),
         }
+    }
+
+    /// Tenant at call time. Used by the nested-call path in the runner to
+    /// carry tenant id down to helper mutations an action invokes.
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
     }
 
     /// Record a completed DB operation.

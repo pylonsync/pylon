@@ -28,7 +28,7 @@ export interface PersistenceAdapter {
 export class AsyncStoragePersistence implements PersistenceAdapter {
   private prefix: string;
 
-  constructor(prefix = "statecraft") {
+  constructor(prefix = "pylon") {
     this.prefix = prefix;
   }
 

@@ -7,7 +7,7 @@
 //! - [`restore_or_init`] — look up or create a shard in a registry, using
 //!   a restore function that loads saved state from wherever the caller put it.
 //!
-//! The persistence *backend* is left to the caller — statecraft's DataStore,
+//! The persistence *backend* is left to the caller — pylon's DataStore,
 //! a file, Redis, whatever — because the state type `S` is user-defined
 //! and the right persistence strategy varies.
 

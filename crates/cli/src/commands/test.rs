@@ -1,13 +1,13 @@
-//! `statecraft test` — run tests against functions in an in-memory runtime.
+//! `pylon test` — run tests against functions in an in-memory runtime.
 //!
 //! Discovers `*.test.ts` files in the `functions/` and `tests/` directories,
-//! spawns Bun with the test runner, runs against an in-memory statecraft,
+//! spawns Bun with the test runner, runs against an in-memory pylon,
 //! and reports results.
 
 use std::path::Path;
 use std::process::Command;
 
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 
 use crate::output;
 
@@ -18,7 +18,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
-    let test_dir = std::env::var("STATECRAFT_TEST_DIR")
+    let test_dir = std::env::var("PYLON_TEST_DIR")
         .ok()
         .unwrap_or_else(|| {
             if Path::new("tests").exists() {
@@ -73,8 +73,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         // filename starting with `-` isn't parsed as a flag.
         let status = Command::new("bun")
             .args(["test", "--", file])
-            .env("STATECRAFT_IN_MEMORY", "1")
-            .env("STATECRAFT_DEV_MODE", "1")
+            .env("PYLON_IN_MEMORY", "1")
+            .env("PYLON_DEV_MODE", "1")
             .status();
 
         match status {
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn discovers_test_files() {
-        let dir = std::env::temp_dir().join(format!("statecraft_test_discover_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_test_discover_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.test.ts"), "// test").unwrap();
         std::fs::write(dir.join("b.ts"), "// not a test").unwrap();

@@ -14,12 +14,13 @@ import {
   configureClient,
   storageKey,
   useRoom,
+  useSession,
   type AggregateSpec,
-} from "@statecraft/react";
+} from "@pylonsync/react";
 
 const BASE_URL = "http://localhost:4321";
 // Namespace so the ERP doesn't inherit auth/replica state from the chat
-// demo (or any other Statecraft app) when they share a browser origin.
+// demo (or any other Pylon app) when they share a browser origin.
 init({ baseUrl: BASE_URL, appName: "erp" });
 configureClient({ baseUrl: BASE_URL, appName: "erp" });
 
@@ -169,6 +170,631 @@ const ORDER_STATUS_STYLE: Record<
 };
 
 // ---------------------------------------------------------------------------
+// Filter bar — Attio/Linear-style chip filters
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes one filterable column. `kind` drives which operators + editor
+ * UI show up. `options` supplies the `enum` choices (rendered as a
+ * checklist) — omit for free-form strings.
+ */
+type FilterFieldKind = "string" | "number" | "date" | "enum" | "boolean";
+type FilterField = {
+  key: string;
+  label: string;
+  kind: FilterFieldKind;
+  options?: { value: string; label: string }[];
+};
+
+/** One active filter condition. Persisted shape — easy to hydrate from URL. */
+type FilterCondition = {
+  field: string;
+  op: string;
+  // For multi-value ops like "is any of", value is an array. Otherwise
+  // scalar (string | number | boolean) or null (for is-empty).
+  value: unknown;
+};
+
+type FilterState = {
+  search: string;
+  conditions: FilterCondition[];
+};
+
+const EMPTY_FILTER: FilterState = { search: "", conditions: [] };
+
+const OPS_BY_KIND: Record<FilterFieldKind, { op: string; label: string }[]> = {
+  string: [
+    { op: "eq", label: "is" },
+    { op: "neq", label: "is not" },
+    { op: "contains", label: "contains" },
+    { op: "notContains", label: "does not contain" },
+    { op: "startsWith", label: "starts with" },
+    { op: "empty", label: "is empty" },
+    { op: "notEmpty", label: "is not empty" },
+  ],
+  number: [
+    { op: "eq", label: "=" },
+    { op: "neq", label: "≠" },
+    { op: "gt", label: ">" },
+    { op: "gte", label: "≥" },
+    { op: "lt", label: "<" },
+    { op: "lte", label: "≤" },
+  ],
+  date: [
+    { op: "after", label: "after" },
+    { op: "before", label: "before" },
+    { op: "between", label: "between" },
+    { op: "relative", label: "in the last" },
+  ],
+  enum: [
+    { op: "eq", label: "is" },
+    { op: "in", label: "is any of" },
+    { op: "neq", label: "is not" },
+  ],
+  boolean: [
+    { op: "eq", label: "is" },
+  ],
+};
+
+/**
+ * Translate UI filter state into the server's `$` operator filter DSL.
+ * Only the pieces that map 1:1 go server-side; the rest (`contains`,
+ * `empty`) we handle client-side after the initial pull, since that data
+ * is already in the sync replica.
+ *
+ * Returns `{ where }` suitable for `db.useQuery(entity, { where })`.
+ */
+function buildQueryFilter(
+  fields: FilterField[],
+  state: FilterState,
+): Record<string, unknown> {
+  const where: Record<string, unknown> = {};
+  for (const cond of state.conditions) {
+    const field = fields.find((f) => f.key === cond.field);
+    if (!field) continue;
+    switch (cond.op) {
+      case "eq":
+        where[cond.field] = cond.value;
+        break;
+      case "neq":
+        where[cond.field] = { $not: cond.value };
+        break;
+      case "gt":
+        where[cond.field] = { $gt: Number(cond.value) };
+        break;
+      case "gte":
+        where[cond.field] = { $gte: Number(cond.value) };
+        break;
+      case "lt":
+        where[cond.field] = { $lt: Number(cond.value) };
+        break;
+      case "lte":
+        where[cond.field] = { $lte: Number(cond.value) };
+        break;
+      case "contains":
+      case "startsWith":
+        // Server supports $like — but we apply client-side below for
+        // instant feedback against the local replica. Leave the server
+        // where untouched; applyFilterClient handles these.
+        break;
+      case "in":
+        if (Array.isArray(cond.value) && cond.value.length > 0) {
+          where[cond.field] = { $in: cond.value };
+        }
+        break;
+      case "after":
+        if (cond.value) where[cond.field] = { $gte: String(cond.value) };
+        break;
+      case "before":
+        if (cond.value) where[cond.field] = { $lte: String(cond.value) };
+        break;
+      case "relative": {
+        // value is "N:unit" — e.g. "7:day", "2:week"
+        const [nRaw, unit] = String(cond.value).split(":");
+        const n = Number(nRaw);
+        if (!isFinite(n) || n <= 0) break;
+        const ms: Record<string, number> = {
+          day: 86400_000,
+          week: 7 * 86400_000,
+          month: 30 * 86400_000,
+          year: 365 * 86400_000,
+        };
+        const delta = ms[unit] ?? 86400_000;
+        const cutoff = new Date(Date.now() - n * delta).toISOString();
+        where[cond.field] = { $gte: cutoff };
+        break;
+      }
+    }
+  }
+  return where;
+}
+
+/**
+ * Apply the purely-client-side conditions (contains, startsWith, empty,
+ * search) after the sync replica returns rows. Keeps the UX instant.
+ */
+function applyFilterClient<T extends Record<string, unknown>>(
+  rows: T[],
+  fields: FilterField[],
+  state: FilterState,
+): T[] {
+  let out = rows;
+  if (state.search.trim()) {
+    const q = state.search.trim().toLowerCase();
+    const searchable = fields
+      .filter((f) => f.kind === "string" || f.kind === "enum")
+      .map((f) => f.key);
+    out = out.filter((row) =>
+      searchable.some((k) =>
+        String(row[k] ?? "").toLowerCase().includes(q),
+      ),
+    );
+  }
+  for (const cond of state.conditions) {
+    switch (cond.op) {
+      case "contains": {
+        const v = String(cond.value ?? "").toLowerCase();
+        if (!v) break;
+        out = out.filter((r) =>
+          String(r[cond.field] ?? "").toLowerCase().includes(v),
+        );
+        break;
+      }
+      case "notContains": {
+        const v = String(cond.value ?? "").toLowerCase();
+        if (!v) break;
+        out = out.filter(
+          (r) => !String(r[cond.field] ?? "").toLowerCase().includes(v),
+        );
+        break;
+      }
+      case "startsWith": {
+        const v = String(cond.value ?? "").toLowerCase();
+        if (!v) break;
+        out = out.filter((r) =>
+          String(r[cond.field] ?? "").toLowerCase().startsWith(v),
+        );
+        break;
+      }
+      case "empty":
+        out = out.filter(
+          (r) => r[cond.field] === null || r[cond.field] === "" || r[cond.field] === undefined,
+        );
+        break;
+      case "notEmpty":
+        out = out.filter(
+          (r) =>
+            r[cond.field] !== null &&
+            r[cond.field] !== "" &&
+            r[cond.field] !== undefined,
+        );
+        break;
+    }
+  }
+  return out;
+}
+
+function formatChipValue(
+  field: FilterField,
+  cond: FilterCondition,
+): string {
+  if (cond.op === "empty") return "empty";
+  if (cond.op === "notEmpty") return "not empty";
+  if (cond.op === "relative") {
+    const [n, unit] = String(cond.value ?? "").split(":");
+    return `last ${n || "?"} ${unit || "day"}${n === "1" ? "" : "s"}`;
+  }
+  if (cond.op === "in" && Array.isArray(cond.value)) {
+    if (cond.value.length === 0) return "…";
+    if (cond.value.length <= 2) {
+      return cond.value
+        .map((v) => {
+          const opt = field.options?.find((o) => o.value === v);
+          return opt?.label ?? String(v);
+        })
+        .join(", ");
+    }
+    return `${cond.value.length} selected`;
+  }
+  const raw = String(cond.value ?? "…");
+  if (field.kind === "enum" && field.options) {
+    const opt = field.options.find((o) => o.value === raw);
+    if (opt) return opt.label;
+  }
+  return raw;
+}
+
+function FilterBar({
+  fields,
+  value,
+  onChange,
+}: {
+  fields: FilterField[];
+  value: FilterState;
+  onChange: (next: FilterState) => void;
+}) {
+  const [addOpen, setAddOpen] = useState(false);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const addRef = useRef<HTMLDivElement>(null);
+
+  // Click outside closes the "add" dropdown.
+  useEffect(() => {
+    if (!addOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (addRef.current && !addRef.current.contains(e.target as Node)) {
+        setAddOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [addOpen]);
+
+  function addCondition(field: FilterField) {
+    const firstOp = OPS_BY_KIND[field.kind][0];
+    const initialValue =
+      field.kind === "boolean"
+        ? true
+        : field.kind === "enum" && firstOp.op === "in"
+          ? []
+          : "";
+    onChange({
+      ...value,
+      conditions: [
+        ...value.conditions,
+        { field: field.key, op: firstOp.op, value: initialValue },
+      ],
+    });
+    setEditingIdx(value.conditions.length);
+    setAddOpen(false);
+  }
+
+  function updateCondition(idx: number, patch: Partial<FilterCondition>) {
+    onChange({
+      ...value,
+      conditions: value.conditions.map((c, i) =>
+        i === idx ? { ...c, ...patch } : c,
+      ),
+    });
+  }
+
+  function removeCondition(idx: number) {
+    onChange({
+      ...value,
+      conditions: value.conditions.filter((_, i) => i !== idx),
+    });
+  }
+
+  return (
+    <div className="filter-bar">
+      <div className="filter-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: "var(--text-dim)" }}>
+          <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+          <path d="M21 21l-4.35-4.35" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        <input
+          value={value.search}
+          onChange={(e) => onChange({ ...value, search: e.target.value })}
+          placeholder="Search…"
+        />
+      </div>
+      {value.conditions.map((cond, i) => {
+        const field = fields.find((f) => f.key === cond.field);
+        if (!field) return null;
+        const op = OPS_BY_KIND[field.kind].find((o) => o.op === cond.op);
+        return (
+          <FilterChip
+            key={i}
+            field={field}
+            cond={cond}
+            opLabel={op?.label ?? cond.op}
+            editing={editingIdx === i}
+            onEdit={() => setEditingIdx(i)}
+            onCloseEdit={() => setEditingIdx(null)}
+            onChange={(patch) => updateCondition(i, patch)}
+            onRemove={() => removeCondition(i)}
+          />
+        );
+      })}
+      <div className="popover-wrap" ref={addRef}>
+        <button className="filter-add" onClick={() => setAddOpen((v) => !v)}>
+          <IconPlus /> Filter
+        </button>
+        {addOpen && (
+          <div className="dropdown">
+            <div className="dropdown-section">Filter by</div>
+            {fields.map((f) => (
+              <div
+                key={f.key}
+                className="dropdown-item"
+                onClick={() => addCondition(f)}
+              >
+                {f.label}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {value.conditions.length > 0 && (
+        <button
+          className="btn btn-ghost"
+          style={{ padding: "4px 10px", fontSize: 12 }}
+          onClick={() => onChange({ ...value, conditions: [] })}
+        >
+          Clear
+        </button>
+      )}
+    </div>
+  );
+}
+
+function FilterChip({
+  field,
+  cond,
+  opLabel,
+  editing,
+  onEdit,
+  onCloseEdit,
+  onChange,
+  onRemove,
+}: {
+  field: FilterField;
+  cond: FilterCondition;
+  opLabel: string;
+  editing: boolean;
+  onEdit: () => void;
+  onCloseEdit: () => void;
+  onChange: (patch: Partial<FilterCondition>) => void;
+  onRemove: () => void;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!editing) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        onCloseEdit();
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [editing, onCloseEdit]);
+
+  const ops = OPS_BY_KIND[field.kind];
+  const [menu, setMenu] = useState<"op" | "val" | null>(null);
+  const takesValue = cond.op !== "empty" && cond.op !== "notEmpty";
+
+  return (
+    <div className="filter-chip" ref={wrapRef}>
+      <div className="filter-chip-seg key" title={field.label}>
+        {field.label}
+      </div>
+      <div className="popover-wrap" style={{ display: "inline-block" }}>
+        <div
+          className="filter-chip-seg op"
+          onClick={() => setMenu(menu === "op" ? null : "op")}
+        >
+          {opLabel}
+        </div>
+        {menu === "op" && (
+          <div className="dropdown">
+            {ops.map((o) => (
+              <div
+                key={o.op}
+                className={
+                  "dropdown-item" + (o.op === cond.op ? " selected" : "")
+                }
+                onClick={() => {
+                  // Reset value when switching between scalar and array ops.
+                  const nextValue =
+                    o.op === "in" && !Array.isArray(cond.value)
+                      ? []
+                      : o.op !== "in" && Array.isArray(cond.value)
+                        ? ""
+                        : o.op === "empty" || o.op === "notEmpty"
+                          ? null
+                          : cond.value;
+                  onChange({ op: o.op, value: nextValue });
+                  setMenu(null);
+                }}
+              >
+                {o.label}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {takesValue && (
+        <div className="popover-wrap" style={{ display: "inline-block" }}>
+          <div
+            className="filter-chip-seg val"
+            onClick={() => setMenu(menu === "val" ? null : "val")}
+          >
+            {formatChipValue(field, cond)}
+          </div>
+          {menu === "val" && (
+            <FilterValueEditor
+              field={field}
+              cond={cond}
+              onChange={(v) => onChange({ value: v })}
+              onClose={() => setMenu(null)}
+            />
+          )}
+        </div>
+      )}
+      <button
+        className="filter-chip-remove"
+        onClick={onRemove}
+        aria-label="Remove filter"
+        title="Remove"
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+          <path
+            d="M18 6L6 18M6 6l12 12"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+function FilterValueEditor({
+  field,
+  cond,
+  onChange,
+  onClose,
+}: {
+  field: FilterField;
+  cond: FilterCondition;
+  onChange: (v: unknown) => void;
+  onClose: () => void;
+}) {
+  if (field.kind === "enum" && field.options) {
+    if (cond.op === "in") {
+      const selected = Array.isArray(cond.value) ? (cond.value as string[]) : [];
+      const toggle = (v: string) => {
+        const next = selected.includes(v)
+          ? selected.filter((s) => s !== v)
+          : [...selected, v];
+        onChange(next);
+      };
+      return (
+        <div className="dropdown">
+          {field.options.map((o) => {
+            const on = selected.includes(o.value);
+            return (
+              <div
+                key={o.value}
+                className={"dropdown-item" + (on ? " selected" : "")}
+                onClick={() => toggle(o.value)}
+              >
+                <span style={{ width: 12 }}>{on ? "✓" : ""}</span>
+                {o.label}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    return (
+      <div className="dropdown">
+        {field.options.map((o) => (
+          <div
+            key={o.value}
+            className={
+              "dropdown-item" + (cond.value === o.value ? " selected" : "")
+            }
+            onClick={() => {
+              onChange(o.value);
+              onClose();
+            }}
+          >
+            {o.label}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (field.kind === "boolean") {
+    return (
+      <div className="dropdown">
+        {[
+          { v: true, label: "True" },
+          { v: false, label: "False" },
+        ].map((o) => (
+          <div
+            key={String(o.v)}
+            className={
+              "dropdown-item" + (cond.value === o.v ? " selected" : "")
+            }
+            onClick={() => {
+              onChange(o.v);
+              onClose();
+            }}
+          >
+            {o.label}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (field.kind === "date") {
+    if (cond.op === "relative") {
+      const [nRaw, unit] = String(cond.value ?? "7:day").split(":");
+      return (
+        <div className="dropdown" style={{ padding: 8 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              className="dropdown-input"
+              type="number"
+              min="1"
+              style={{ width: 70 }}
+              value={nRaw}
+              onChange={(e) =>
+                onChange(`${e.target.value || "1"}:${unit || "day"}`)
+              }
+            />
+            <select
+              className="select"
+              style={{ flex: 1 }}
+              value={unit || "day"}
+              onChange={(e) => onChange(`${nRaw || "1"}:${e.target.value}`)}
+            >
+              <option value="day">days</option>
+              <option value="week">weeks</option>
+              <option value="month">months</option>
+              <option value="year">years</option>
+            </select>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="dropdown" style={{ padding: 8 }}>
+        <input
+          className="dropdown-input"
+          type="date"
+          value={String(cond.value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </div>
+    );
+  }
+
+  if (field.kind === "number") {
+    return (
+      <div className="dropdown" style={{ padding: 8 }}>
+        <input
+          className="dropdown-input"
+          type="number"
+          autoFocus
+          value={String(cond.value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onClose()}
+        />
+      </div>
+    );
+  }
+
+  // String default
+  return (
+    <div className="dropdown" style={{ padding: 8 }}>
+      <input
+        className="dropdown-input"
+        autoFocus
+        value={String(cond.value ?? "")}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && onClose()}
+        placeholder="Value…"
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Root
 // ---------------------------------------------------------------------------
 
@@ -182,21 +808,17 @@ export function ErpApp() {
       return null;
     }
   });
-  const [activeOrgId, setActiveOrgId] = useState<string | null>(() => {
-    return localStorage.getItem(storageKey("active_org")) || null;
-  });
+  // Server session is the single source of truth for the active tenant.
+  // `useSession` fetches /api/auth/me, caches it on the engine, and
+  // notifies on change — including the replica reset when the tenant
+  // flips. We no longer mirror it in localStorage.
+  const { tenantId: activeOrgId } = useSession(db.sync);
   const [page, setPage] = useState<Page>("dashboard");
-
-  // Re-pull sync data when auth changes (login) so policies re-evaluate.
-  useEffect(() => {
-    if (currentUser) void db.sync.pull();
-  }, [currentUser?.id]);
 
   async function signOut() {
     const token = localStorage.getItem(storageKey("token"));
     localStorage.removeItem(storageKey("token"));
     localStorage.removeItem(storageKey("user"));
-    localStorage.removeItem(storageKey("active_org"));
     if (token) {
       fetch(`${BASE_URL}/api/auth/session`, {
         method: "DELETE",
@@ -204,10 +826,13 @@ export function ErpApp() {
       }).catch(() => {});
     }
     try {
-      indexedDB.deleteDatabase(`statecraft_sync_erp`);
+      indexedDB.deleteDatabase(`pylon_sync_erp`);
     } catch {}
     setCurrentUser(null);
-    setActiveOrgId(null);
+    // Token changed → sync engine picks it up on next pull (identity-
+    // change detection), but nudge it so useSession flips to anonymous
+    // immediately instead of waiting for the reconnect cycle.
+    await db.sync.notifySessionChanged();
   }
 
   async function selectOrg(orgId: string | null) {
@@ -225,11 +850,11 @@ export function ErpApp() {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message || `switch failed (${res.status})`);
     }
-    if (orgId) localStorage.setItem(storageKey("active_org"), orgId);
-    else localStorage.removeItem(storageKey("active_org"));
-    setActiveOrgId(orgId);
-    // Reset the replica so we pull fresh data under the new identity.
-    await db.sync.pull();
+    // Server session just flipped. `notifySessionChanged` re-reads
+    // /api/auth/me, trips the tenant-flip branch in the engine which
+    // resets the replica, and notifies subscribers — so `useSession`
+    // above re-renders with the new tenant and queries re-run.
+    await db.sync.notifySessionChanged();
   }
 
   if (!currentUser) return <Login onReady={setCurrentUser} />;
@@ -1121,11 +1746,29 @@ function Dashboard({ org }: { org: Organization }) {
 // Customers
 // ---------------------------------------------------------------------------
 
+const CUSTOMER_FILTER_FIELDS: FilterField[] = [
+  { key: "name", label: "Name", kind: "string" },
+  { key: "company", label: "Company", kind: "string" },
+  { key: "email", label: "Email", kind: "string" },
+  { key: "phone", label: "Phone", kind: "string" },
+  { key: "city", label: "City", kind: "string" },
+  { key: "state", label: "State", kind: "string" },
+  { key: "createdAt", label: "Added", kind: "date" },
+];
+
 function CustomersPage({ org }: { org: Organization }) {
+  const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
   const { data: customers } = db.useQuery<Customer>("Customer", {
-    where: { orgId: org.id },
+    where: {
+      orgId: org.id,
+      ...buildQueryFilter(CUSTOMER_FILTER_FIELDS, filter),
+    },
     orderBy: { createdAt: "desc" },
   });
+  const filtered = useMemo(
+    () => applyFilterClient(customers ?? [], CUSTOMER_FILTER_FIELDS, filter),
+    [customers, filter],
+  );
   const [addOpen, setAddOpen] = useState(false);
 
   return (
@@ -1142,11 +1785,22 @@ function CustomersPage({ org }: { org: Organization }) {
           Add customer
         </button>
       </div>
-      {(customers ?? []).length === 0 ? (
+      <FilterBar
+        fields={CUSTOMER_FILTER_FIELDS}
+        value={filter}
+        onChange={setFilter}
+      />
+      {filtered.length === 0 ? (
         <div className="empty">
-          <div className="empty-title">No customers yet</div>
+          <div className="empty-title">
+            {(customers ?? []).length === 0
+              ? "No customers yet"
+              : "No customers match these filters"}
+          </div>
           <div className="empty-body">
-            Add your first customer to start booking a project.
+            {(customers ?? []).length === 0
+              ? "Add your first customer to start booking a project."
+              : "Clear the filters or try a different search."}
           </div>
           <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
             Add customer
@@ -1164,7 +1818,7 @@ function CustomersPage({ org }: { org: Organization }) {
             </tr>
           </thead>
           <tbody>
-            {(customers ?? []).map((c) => (
+            {filtered.map((c) => (
               <tr key={c.id}>
                 <td style={{ fontWeight: 500 }}>{c.name}</td>
                 <td style={{ color: "var(--text-muted)" }}>
@@ -1880,17 +2534,41 @@ function AdjustStockModal({
 // Orders
 // ---------------------------------------------------------------------------
 
+const ORDER_FILTER_FIELDS: FilterField[] = [
+  { key: "number", label: "Number", kind: "string" },
+  {
+    key: "status",
+    label: "Status",
+    kind: "enum",
+    options: [
+      { value: "confirmed", label: "Designed" },
+      { value: "in_production", label: "In fabrication" },
+      { value: "ready", label: "Finishing" },
+      { value: "shipped", label: "Ready to install" },
+      { value: "delivered", label: "Installed" },
+      { value: "cancelled", label: "Cancelled" },
+    ],
+  },
+  { key: "total", label: "Total", kind: "number" },
+  { key: "subtotal", label: "Subtotal", kind: "number" },
+  { key: "createdAt", label: "Created", kind: "date" },
+  { key: "dueDate", label: "Due date", kind: "date" },
+];
+
 function OrdersPage({ org }: { org: Organization }) {
+  const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER);
   const { data: orders } = db.useQuery<Order>("Order", {
-    where: { orgId: org.id },
+    where: {
+      orgId: org.id,
+      ...buildQueryFilter(ORDER_FILTER_FIELDS, filter),
+    },
     orderBy: { createdAt: "desc" },
   });
-  const [addOpen, setAddOpen] = useState(false);
-  const [filter, setFilter] = useState<string>("all");
-
-  const filtered = (orders ?? []).filter(
-    (o) => filter === "all" || o.status === filter,
+  const filtered = useMemo(
+    () => applyFilterClient(orders ?? [], ORDER_FILTER_FIELDS, filter),
+    [orders, filter],
   );
+  const [addOpen, setAddOpen] = useState(false);
 
   return (
     <>
@@ -1906,31 +2584,22 @@ function OrdersPage({ org }: { org: Organization }) {
           New project
         </button>
       </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {[
-          "all",
-          "confirmed",
-          "in_production",
-          "ready",
-          "shipped",
-          "delivered",
-          "cancelled",
-        ].map((s) => (
-          <button
-            key={s}
-            className={"btn " + (filter === s ? "btn-secondary" : "btn-ghost")}
-            onClick={() => setFilter(s)}
-            style={{ textTransform: "capitalize" }}
-          >
-            {s === "all" ? "All" : ORDER_STATUS_STYLE[s]?.label || s}
-          </button>
-        ))}
-      </div>
+      <FilterBar
+        fields={ORDER_FILTER_FIELDS}
+        value={filter}
+        onChange={setFilter}
+      />
       {filtered.length === 0 ? (
         <div className="empty">
-          <div className="empty-title">No orders to show</div>
+          <div className="empty-title">
+            {(orders ?? []).length === 0
+              ? "No projects yet"
+              : "No projects match these filters"}
+          </div>
           <div className="empty-body">
-            Book a project once a consultation is signed.
+            {(orders ?? []).length === 0
+              ? "Book a project once a consultation is signed."
+              : "Adjust the filters above to see more."}
           </div>
           <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
             New project

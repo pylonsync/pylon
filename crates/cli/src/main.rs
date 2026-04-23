@@ -4,7 +4,7 @@ mod commands;
 mod manifest;
 mod output;
 
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 
 fn main() {
     init_tracing();
@@ -13,18 +13,18 @@ fn main() {
 
 /// Initialize structured logging.
 ///
-/// Reads the log level from `RUST_LOG` (e.g. `statecraft=debug,info`).
+/// Reads the log level from `RUST_LOG` (e.g. `pylon=debug,info`).
 /// Defaults to `info`. Output goes to stderr so logs and JSON output
 /// don't intermix on stdout.
 ///
-/// Format is controlled by `STATECRAFT_LOG_FORMAT`:
+/// Format is controlled by `PYLON_LOG_FORMAT`:
 /// - unset or `pretty` → human-readable compact output (dev default)
 /// - `json` → one JSON object per line (Datadog/Axiom/Sentry ingestible)
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
-    let format = std::env::var("STATECRAFT_LOG_FORMAT").unwrap_or_default();
+    let format = std::env::var("PYLON_LOG_FORMAT").unwrap_or_default();
     let builder = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -134,7 +134,7 @@ const SCHEMA_SUBCOMMANDS: [&str; 5] = [
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    println!("statecraft -- AI-native framework for web/mobile apps");
+    println!("pylon -- AI-native framework for web/mobile apps");
     println!();
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");

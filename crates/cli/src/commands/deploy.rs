@@ -1,4 +1,4 @@
-use statecraft_core::{Diagnostic, ExitCode, Severity};
+use pylon_kernel::{Diagnostic, ExitCode, Severity};
 
 use crate::manifest::{load_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
@@ -49,10 +49,10 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/statecraft /usr/local/bin/
-COPY --from=builder /app/statecraft.manifest.json /app/
+COPY --from=builder /app/target/release/pylon /usr/local/bin/
+COPY --from=builder /app/pylon.manifest.json /app/
 EXPOSE 4321
-CMD ["statecraft", "dev", "--once"]
+CMD ["pylon", "dev", "--once"]
 "#
     .to_string()
 }
@@ -81,13 +81,13 @@ compatibility_date = "2025-01-01"
 # Created database with: wrangler d1 create {app_name}-db
 # Then paste the database_id printed by wrangler below.
 [[d1_databases]]
-binding = "STATECRAFT_DB"
+binding = "PYLON_DB"
 database_name = "{app_name}-db"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 # Optional: persistent file storage via R2
 # [[r2_buckets]]
-# binding = "STATECRAFT_FILES"
+# binding = "PYLON_FILES"
 # bucket_name = "{app_name}-files"
 
 # Per-room WebSocket Durable Object (experimental)
@@ -101,15 +101,15 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 fn generate_systemd_unit(app_name: &str) -> String {
     format!(
         r#"[Unit]
-Description=statecraft ({app_name})
+Description=pylon ({app_name})
 After=network.target
 
 [Service]
 Type=simple
-User=statecraft
-Group=statecraft
-WorkingDirectory=/var/lib/statecraft
-ExecStart=/usr/local/bin/statecraft dev
+User=pylon
+Group=pylon
+WorkingDirectory=/var/lib/pylon
+ExecStart=/usr/local/bin/pylon dev
 Restart=on-failure
 RestartSec=5
 
@@ -118,15 +118,15 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/statecraft
+ReadWritePaths=/var/lib/pylon
 
 # Environment
-Environment=STATECRAFT_PORT=4321
-Environment=STATECRAFT_DB_PATH=/var/lib/statecraft/statecraft.db
-Environment=STATECRAFT_FILES_DIR=/var/lib/statecraft/uploads
-Environment=STATECRAFT_SESSION_DB=/var/lib/statecraft/sessions.db
-Environment=STATECRAFT_DEV_MODE=false
-# EnvironmentFile=/etc/statecraft/secrets  # STATECRAFT_ADMIN_TOKEN, OAuth keys, etc.
+Environment=PYLON_PORT=4321
+Environment=PYLON_DB_PATH=/var/lib/pylon/pylon.db
+Environment=PYLON_FILES_DIR=/var/lib/pylon/uploads
+Environment=PYLON_SESSION_DB=/var/lib/pylon/sessions.db
+Environment=PYLON_DEV_MODE=false
+# EnvironmentFile=/etc/pylon/secrets  # PYLON_ADMIN_TOKEN, OAuth keys, etc.
 
 [Install]
 WantedBy=multi-user.target
@@ -141,8 +141,8 @@ fn generate_docker_compose() -> String {
     ports:
       - "4321:4321"
     environment:
-      - DATABASE_URL=postgres://statecraft:statecraft@db:5432/statecraft
-      - STATECRAFT_ADMIN_TOKEN=${STATECRAFT_ADMIN_TOKEN}
+      - DATABASE_URL=postgres://pylon:pylon@db:5432/pylon
+      - PYLON_ADMIN_TOKEN=${PYLON_ADMIN_TOKEN}
     depends_on:
       db:
         condition: service_started
@@ -150,9 +150,9 @@ fn generate_docker_compose() -> String {
   db:
     image: postgres:16
     environment:
-      - POSTGRES_USER=statecraft
-      - POSTGRES_PASSWORD=statecraft
-      - POSTGRES_DB=statecraft
+      - POSTGRES_USER=pylon
+      - POSTGRES_PASSWORD=pylon
+      - POSTGRES_DB=pylon
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -173,7 +173,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
-    let manifest_path = positional.first().copied().unwrap_or("statecraft.manifest.json");
+    let manifest_path = positional.first().copied().unwrap_or("pylon.manifest.json");
 
     let out_dir = args
         .windows(2)
@@ -249,7 +249,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     // Write manifest to deploy dir.
-    let manifest_out = out_path.join("statecraft.manifest.json");
+    let manifest_out = out_path.join("pylon.manifest.json");
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
     if let Err(e) = std::fs::write(&manifest_out, format!("{manifest_json}\n")) {
         print_diagnostics(
@@ -267,13 +267,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     // Write client bindings.
     let client_ts = crate::client_codegen::generate_client_ts(&manifest);
-    let _ = std::fs::write(out_path.join("statecraft.client.ts"), &client_ts);
+    let _ = std::fs::write(out_path.join("pylon.client.ts"), &client_ts);
 
     // Generate static pages if any.
-    let static_pages = statecraft_staticgen::generate_static_pages(&manifest);
+    let static_pages = pylon_staticgen::generate_static_pages(&manifest);
     if !static_pages.is_empty() {
         let static_dir = out_path.join("static");
-        let _ = statecraft_staticgen::write_pages(&static_pages, &static_dir);
+        let _ = pylon_staticgen::write_pages(&static_pages, &static_dir);
     }
 
     // Write a small deploy info file.
@@ -298,8 +298,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // -----------------------------------------------------------------------
 
     let mut generated_files: Vec<String> = vec![
-        "statecraft.manifest.json".into(),
-        "statecraft.client.ts".into(),
+        "pylon.manifest.json".into(),
+        "pylon.client.ts".into(),
         "deploy.json".into(),
     ];
 
@@ -337,8 +337,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         DeployTarget::Systemd => {
             let app_name = sanitize_app_name(&manifest.name);
             let unit = generate_systemd_unit(&app_name);
-            write_or_fail(out_path, "statecraft.service", &unit, json_mode);
-            generated_files.push("statecraft.service".into());
+            write_or_fail(out_path, "pylon.service", &unit, json_mode);
+            generated_files.push("pylon.service".into());
         }
         DeployTarget::Default => {}
     }
@@ -369,8 +369,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         match target {
             DeployTarget::Docker => {
                 println!("To build and run:");
-                println!("  docker build -t statecraft-app {out_dir}/");
-                println!("  docker run -p 4321:4321 statecraft-app");
+                println!("  docker build -t pylon-app {out_dir}/");
+                println!("  docker run -p 4321:4321 pylon-app");
             }
             DeployTarget::Fly => {
                 println!("To deploy to Fly.io:");
@@ -391,21 +391,21 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             }
             DeployTarget::Systemd => {
                 println!("To install on a Linux VPS:");
-                println!("  sudo cp {out_dir}/statecraft.service /etc/systemd/system/");
-                println!("  sudo useradd --system --home /var/lib/statecraft statecraft");
-                println!("  sudo mkdir -p /var/lib/statecraft && sudo chown statecraft: /var/lib/statecraft");
-                println!("  sudo systemctl enable --now statecraft");
+                println!("  sudo cp {out_dir}/pylon.service /etc/systemd/system/");
+                println!("  sudo useradd --system --home /var/lib/pylon pylon");
+                println!("  sudo mkdir -p /var/lib/pylon && sudo chown pylon: /var/lib/pylon");
+                println!("  sudo systemctl enable --now pylon");
             }
             DeployTarget::Default => {
                 println!("To run the server:");
-                println!("  statecraft dev {manifest_path}");
+                println!("  pylon dev {manifest_path}");
                 println!();
                 println!("For containerized deployment, use --target:");
-                println!("  statecraft deploy --target docker     # Dockerfile");
-                println!("  statecraft deploy --target fly        # Dockerfile + fly.toml");
-                println!("  statecraft deploy --target compose    # docker-compose.yml + Dockerfile");
-                println!("  statecraft deploy --target workers    # Cloudflare wrangler.toml (experimental)");
-                println!("  statecraft deploy --target systemd    # systemd unit for VPS install");
+                println!("  pylon deploy --target docker     # Dockerfile");
+                println!("  pylon deploy --target fly        # Dockerfile + fly.toml");
+                println!("  pylon deploy --target compose    # docker-compose.yml + Dockerfile");
+                println!("  pylon deploy --target workers    # Cloudflare wrangler.toml (experimental)");
+                println!("  pylon deploy --target systemd    # systemd unit for VPS install");
             }
         }
     }
@@ -465,7 +465,7 @@ mod tests {
         assert!(df.contains("FROM debian:bookworm-slim"));
         assert!(df.contains("EXPOSE 4321"));
         assert!(df.contains("cargo build --release"));
-        assert!(df.contains("statecraft.manifest.json"));
+        assert!(df.contains("pylon.manifest.json"));
     }
 
     #[test]
@@ -482,8 +482,8 @@ mod tests {
         let dc = generate_docker_compose();
         assert!(dc.contains("services:"));
         assert!(dc.contains("postgres:16"));
-        assert!(dc.contains("DATABASE_URL=postgres://statecraft:statecraft@db:5432/statecraft"));
-        assert!(dc.contains("STATECRAFT_ADMIN_TOKEN"));
+        assert!(dc.contains("DATABASE_URL=postgres://pylon:pylon@db:5432/pylon"));
+        assert!(dc.contains("PYLON_ADMIN_TOKEN"));
         assert!(dc.contains("pgdata:"));
     }
 
@@ -510,14 +510,14 @@ mod tests {
         let w = generate_wrangler_toml("my-app");
         assert!(w.contains("name = \"my-app\""));
         assert!(w.contains("d1_databases"));
-        assert!(w.contains("STATECRAFT_DB"));
+        assert!(w.contains("PYLON_DB"));
         assert!(w.contains("compatibility_date"));
     }
 
     #[test]
     fn systemd_unit_contains_hardening() {
-        let u = generate_systemd_unit("statecraft-prod");
-        assert!(u.contains("ExecStart=/usr/local/bin/statecraft"));
+        let u = generate_systemd_unit("pylon-prod");
+        assert!(u.contains("ExecStart=/usr/local/bin/pylon"));
         assert!(u.contains("NoNewPrivileges=true"));
         assert!(u.contains("ProtectSystem=strict"));
         assert!(u.contains("WantedBy=multi-user.target"));

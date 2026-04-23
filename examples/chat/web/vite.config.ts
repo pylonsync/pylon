@@ -1,9 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Statecraft dev server runs on 4321 (HTTP) + 4322 (WS) + 4323 (SSE).
+// Pylon dev server runs on 4321 (HTTP) + 4322 (WS) + 4323 (SSE).
 // Vite serves the React UI on 5173. No proxy needed — the client calls the
-// statecraft API directly via CORS (dev mode allows any origin).
+// pylon API directly via CORS (dev mode allows any origin).
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -15,10 +15,10 @@ export default defineConfig({
   // to show up.
   optimizeDeps: {
     exclude: [
-      "@statecraft/sync",
-      "@statecraft/react",
-      "@statecraft/sdk",
-      "@statecraft/functions",
+      "@pylonsync/sync",
+      "@pylonsync/react",
+      "@pylonsync/sdk",
+      "@pylonsync/functions",
     ],
   },
 });

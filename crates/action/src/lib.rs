@@ -1,4 +1,4 @@
-use statecraft_core::{AppManifest, ManifestAction, ManifestField};
+use pylon_kernel::{AppManifest, ManifestAction, ManifestField};
 
 // ---------------------------------------------------------------------------
 // Action descriptor — runtime-facing action metadata
@@ -77,10 +77,10 @@ impl ActionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::ManifestField;
+    use pylon_kernel::ManifestField;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 

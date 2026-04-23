@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::Plugin;
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn persist_round_trip() {
-        let dir = std::env::temp_dir().join(format!("statecraft_vec_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_vec_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vec.json");
 

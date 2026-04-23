@@ -31,7 +31,7 @@ As of 2026, the Workers Paid plan ($5/mo base) includes:
 A client that polls `/api/sync/pull` every 500ms is 172,800 requests/day
 per client. 100 such clients = 17M/day → $5/day. **Fix**: use WebSocket
 push (Durable Objects on Workers), or widen the polling interval with
-jitter. statecraft's sync protocol supports cursor-based pulls — clients
+jitter. pylon's sync protocol supports cursor-based pulls — clients
 only pay for deltas, not a full list every tick.
 
 ### Loops inside a worker handler
@@ -44,7 +44,7 @@ quota. **Fix**: paginate writes; circuit-break on retry count; use
 ### Durable Object hot-spotting
 
 One room with 10k concurrent WS clients all pinned to one DO =
-1M+ DO requests/hour per room. **Fix**: shard rooms; `statecraft-workers`'
+1M+ DO requests/hour per room. **Fix**: shard rooms; `pylon-workers`'
 `RoomDO` wraps `DynShardRegistry`, so you can trivially split a "global
 chat" room into 100 regional rooms.
 
@@ -52,7 +52,7 @@ chat" room into 100 regional rooms.
 
 A `/api/entities/Todo` that isn't gated hits 404 for bots forever but
 still costs a Worker request per hit. **Fix**: Cloudflare's bot-fight
-mode + WAF rules for unauthenticated traffic on admin paths. statecraft's
+mode + WAF rules for unauthenticated traffic on admin paths. pylon's
 router returns 401/403 quickly for unauth'd non-public routes, but
 Cloudflare can block at the edge before the Worker even runs.
 
@@ -100,7 +100,7 @@ Cloudflare's analytics dashboard shows:
 - Subrequest count (every D1 or DO call counts)
 - Wall-clock time
 
-Plug these into your own dashboard. For statecraft specifically, watch:
+Plug these into your own dashboard. For pylon specifically, watch:
 
 - `/api/sync/pull` rate — anything > 10 req/sec/client is suspicious
 - `/api/entities/*` error rate — 403 spike = policy regression, 5xx = bug

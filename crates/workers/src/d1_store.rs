@@ -1,13 +1,13 @@
 //! [`DataStore`] implementation backed by Cloudflare D1.
 //!
 //! D1 speaks SQLite SQL, so the SQL generation here mirrors
-//! `statecraft-storage::sqlite`. The `D1Executor` trait abstracts the actual
+//! `pylon-storage::sqlite`. The `D1Executor` trait abstracts the actual
 //! execution layer so this module stays free of `worker` crate dependencies.
 //! The Workers fetch handler provides a concrete `D1Executor` that delegates
 //! to the real D1 bindings.
 
-use statecraft_core::{AppManifest, ManifestEntity};
-use statecraft_http::{DataError, DataStore};
+use pylon_kernel::{AppManifest, ManifestEntity};
+use pylon_http::{DataError, DataStore};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ impl<E: D1Executor> D1DataStore<E> {
     }
 }
 
-use statecraft_core::util::quote_ident;
+use pylon_kernel::util::quote_ident;
 
 fn generate_id() -> String {
     // Simple time-based ID. D1 runs in isolates with precise time.
@@ -526,12 +526,12 @@ mod tests {
 
     fn empty_manifest() -> AppManifest {
         AppManifest {
-            manifest_version: statecraft_core::MANIFEST_VERSION,
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
             entities: vec![ManifestEntity {
                 name: "Lot".into(),
-                fields: vec![statecraft_core::ManifestField {
+                fields: vec![pylon_kernel::ManifestField {
                     name: "title".into(),
                     field_type: "string".into(),
                     optional: false,

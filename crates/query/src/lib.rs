@@ -1,4 +1,4 @@
-use statecraft_core::{AppManifest, ManifestField, ManifestQuery};
+use pylon_kernel::{AppManifest, ManifestField, ManifestQuery};
 
 // ---------------------------------------------------------------------------
 // Query descriptor — runtime-facing query metadata
@@ -77,10 +77,10 @@ impl QueryRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::ManifestField;
+    use pylon_kernel::ManifestField;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 

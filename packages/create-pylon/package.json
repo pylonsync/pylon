@@ -1,9 +1,9 @@
 {
-  "name": "create-statecraft",
+  "name": "create-pylon",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "create-statecraft": "src/index.ts"
+    "create-pylon": "src/index.ts"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"

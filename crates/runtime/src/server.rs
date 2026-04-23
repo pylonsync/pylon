@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use statecraft_auth::SessionStore;
-use statecraft_http::HttpMethod;
-use statecraft_plugin::PluginRegistry;
-use statecraft_policy::PolicyEngine;
-use statecraft_sync::{ChangeKind, ChangeLog};
+use pylon_auth::SessionStore;
+use pylon_http::HttpMethod;
+use pylon_plugin::PluginRegistry;
+use pylon_policy::PolicyEngine;
+use pylon_sync::{ChangeKind, ChangeLog};
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::datastore::{CacheAdapter, EmailAdapter, LocalFileOps, PluginHooksAdapter, PubSubAdapter, RuntimeOpenApiGenerator, ShardOpsAdapter, WsSseNotifier};
@@ -18,8 +18,8 @@ use crate::ws::WsHub;
 use crate::Runtime;
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
-use statecraft_plugin::builtin::cache::CachePlugin;
-use statecraft_plugin::builtin::ai_proxy::{AiProxyPlugin, AiMessage};
+use pylon_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::ai_proxy::{AiProxyPlugin, AiMessage};
 use crate::pubsub::PubSubBroker;
 use crate::jobs::{JobQueue, JobResult, Worker};
 use crate::scheduler::Scheduler;
@@ -147,7 +147,7 @@ pub fn start_with_shards(
     runtime: Arc<Runtime>,
     port: u16,
     plugins: Option<Arc<PluginRegistry>>,
-    shard_registry: Arc<dyn statecraft_realtime::DynShardRegistry>,
+    shard_registry: Arc<dyn pylon_realtime::DynShardRegistry>,
 ) -> Result<(), String> {
     start_server(runtime, port, plugins, Some(shard_registry))
 }
@@ -156,13 +156,13 @@ fn start_server(
     runtime: Arc<Runtime>,
     port: u16,
     plugins: Option<Arc<PluginRegistry>>,
-    shard_registry: Option<Arc<dyn statecraft_realtime::DynShardRegistry>>,
+    shard_registry: Option<Arc<dyn pylon_realtime::DynShardRegistry>>,
 ) -> Result<(), String> {
     // Run the tracing-exporter hook BEFORE anything else emits spans. The
-    // operator registers it via `statecraft_observability::set_tracing_hook`
+    // operator registers it via `pylon_observability::set_tracing_hook`
     // at process init; here we invoke it exactly once on startup. No-op
     // if nothing was registered.
-    statecraft_observability::run_tracing_hook();
+    pylon_observability::run_tracing_hook();
 
     let addr = format!("0.0.0.0:{port}");
     let server = Server::http(&addr).map_err(|e| format!("Failed to start server: {e}"))?;
@@ -172,21 +172,21 @@ fn start_server(
     let _ = SERVER_HANDLE.set(Arc::clone(&server));
 
     let session_store = Arc::new(build_session_store(runtime.db_path().as_deref()));
-    let magic_codes = Arc::new(statecraft_auth::MagicCodeStore::new());
+    let magic_codes = Arc::new(pylon_auth::MagicCodeStore::new());
     // Persist OAuth state if a session DB is configured. Reuse the same path
     // (sessions and OAuth state are both small auth artifacts that should
     // outlive a restart). Falls back to in-memory if no DB path is set.
-    let oauth_state = Arc::new(match std::env::var("STATECRAFT_SESSION_DB").ok() {
+    let oauth_state = Arc::new(match std::env::var("PYLON_SESSION_DB").ok() {
         Some(path) => match crate::oauth_backend::SqliteOAuthBackend::open(&path) {
-            Ok(backend) => statecraft_auth::OAuthStateStore::with_backend(Box::new(backend)),
+            Ok(backend) => pylon_auth::OAuthStateStore::with_backend(Box::new(backend)),
             Err(e) => {
                 tracing::warn!(
                     "[auth] OAuth state SQLite backend unavailable: {e} — falling back to in-memory"
                 );
-                statecraft_auth::OAuthStateStore::new()
+                pylon_auth::OAuthStateStore::new()
             }
         },
-        None => statecraft_auth::OAuthStateStore::new(),
+        None => pylon_auth::OAuthStateStore::new(),
     });
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
@@ -231,14 +231,14 @@ fn start_server(
     // registry are responsible for their own limits.
     // Probe dev mode NOW — defined for real at line ~300 but plugin
     // registration below needs it. Same env-var, same logic.
-    let is_dev_early = std::env::var("STATECRAFT_DEV_MODE")
+    let is_dev_early = std::env::var("PYLON_DEV_MODE")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(true);
     let plugin_rl_max: u32 = if is_dev_early { 100_000 } else { 100 };
     let plugin_reg: Arc<PluginRegistry> = plugins.unwrap_or_else(|| {
         let mut reg = PluginRegistry::new(runtime.manifest().clone());
         reg.register(Arc::new(
-            statecraft_plugin::builtin::rate_limit::RateLimitPlugin::new(
+            pylon_plugin::builtin::rate_limit::RateLimitPlugin::new(
                 plugin_rl_max,
                 std::time::Duration::from_secs(60),
             ),
@@ -248,7 +248,7 @@ fn start_server(
         // an opt-in: drop the field on the entity and the plugin takes it
         // from there (stamps inserts, rejects cross-tenant writes).
         reg.register(Arc::new(
-            statecraft_plugin::builtin::tenant_scope::TenantScopePlugin::from_manifest(
+            pylon_plugin::builtin::tenant_scope::TenantScopePlugin::from_manifest(
                 runtime.manifest(),
             ),
         ));
@@ -273,17 +273,17 @@ fn start_server(
     // Persistent job store. Colocate with the app DB so `./app.db` gets
     // `./app.db.jobs.db` automatically — otherwise jobs land in CWD, which
     // is wherever the server was launched from (confusing and fragile).
-    // In-memory runtimes and the `STATECRAFT_JOBS_IN_MEMORY=1` opt-out both
+    // In-memory runtimes and the `PYLON_JOBS_IN_MEMORY=1` opt-out both
     // skip persistence.
-    let jobs_in_memory = std::env::var("STATECRAFT_JOBS_IN_MEMORY")
+    let jobs_in_memory = std::env::var("PYLON_JOBS_IN_MEMORY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
     if !jobs_in_memory {
-        let jobs_db_path = std::env::var("STATECRAFT_JOBS_DB").ok().unwrap_or_else(|| {
+        let jobs_db_path = std::env::var("PYLON_JOBS_DB").ok().unwrap_or_else(|| {
             runtime
                 .db_path()
                 .map(|p| format!("{p}.jobs.db"))
-                .unwrap_or_else(|| "statecraft.jobs.db".into())
+                .unwrap_or_else(|| "pylon.jobs.db".into())
         });
         match crate::job_store::JobStore::open(&jobs_db_path) {
             Ok(store) => {
@@ -307,12 +307,12 @@ fn start_server(
     // Register built-in framework jobs.
     {
         let cache_ref = Arc::clone(&cache);
-        job_queue.register("statecraft.cache.cleanup", Arc::new(move |_job| {
+        job_queue.register("pylon.cache.cleanup", Arc::new(move |_job| {
             cache_ref.cleanup_expired();
             JobResult::Success
         }));
         let rooms_ref = Arc::clone(&room_mgr);
-        job_queue.register("statecraft.rooms.cleanup", Arc::new(move |_job| {
+        job_queue.register("pylon.rooms.cleanup", Arc::new(move |_job| {
             rooms_ref.cleanup_idle();
             JobResult::Success
         }));
@@ -320,8 +320,8 @@ fn start_server(
 
     let scheduler = Arc::new(Scheduler::new(Arc::clone(&job_queue)));
     // Schedule built-in tasks.
-    let _ = scheduler.schedule("statecraft.cache.cleanup", "*/10 * * * *", Arc::new(|_| JobResult::Success));
-    let _ = scheduler.schedule("statecraft.rooms.cleanup", "*/5 * * * *", Arc::new(|_| JobResult::Success));
+    let _ = scheduler.schedule("pylon.cache.cleanup", "*/10 * * * *", Arc::new(|_| JobResult::Success));
+    let _ = scheduler.schedule("pylon.rooms.cleanup", "*/5 * * * *", Arc::new(|_| JobResult::Success));
 
     // Start 2 background workers.
     let _worker_handles: Vec<_> = (0..2)
@@ -335,7 +335,7 @@ fn start_server(
     let _scheduler_handle = Arc::clone(&scheduler).start();
 
     // Workflow engine: TS runner URL configurable via env, defaults to local Bun server.
-    let wf_runner_url = std::env::var("STATECRAFT_WORKFLOW_RUNNER_URL")
+    let wf_runner_url = std::env::var("PYLON_WORKFLOW_RUNNER_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:9876/run".to_string());
     let workflow_engine = Arc::new(WorkflowEngine::new(&wf_runner_url, 10_000));
 
@@ -346,22 +346,22 @@ fn start_server(
     //     bundle load + sync pulls + user clicks don't immediately 429.
     //     100/min blew through during a single login + first sync pull.
     //   - Prod: 600/min (10 req/sec average). Still tight, but a real app
-    //     should override with STATECRAFT_RATE_LIMIT_MAX anyway.
+    //     should override with PYLON_RATE_LIMIT_MAX anyway.
     //
-    // Override with STATECRAFT_RATE_LIMIT_MAX + STATECRAFT_RATE_LIMIT_WINDOW.
+    // Override with PYLON_RATE_LIMIT_MAX + PYLON_RATE_LIMIT_WINDOW.
     let default_rl_max = if is_dev_early { 100_000 } else { 600 };
-    let rl_max: u32 = std::env::var("STATECRAFT_RATE_LIMIT_MAX")
+    let rl_max: u32 = std::env::var("PYLON_RATE_LIMIT_MAX")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(default_rl_max);
-    let rl_window: u64 = std::env::var("STATECRAFT_RATE_LIMIT_WINDOW")
+    let rl_window: u64 = std::env::var("PYLON_RATE_LIMIT_WINDOW")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     let rate_limiter = Arc::new(RateLimiter::new(rl_max, rl_window));
 
     // Per-function rate limiter: separate bucket per (caller, function) pair.
     // Defaults to a stricter cap because functions are heavier than reads.
-    // Override via STATECRAFT_FN_RATE_LIMIT_MAX / STATECRAFT_FN_RATE_LIMIT_WINDOW.
-    let fn_rl_max: u32 = std::env::var("STATECRAFT_FN_RATE_LIMIT_MAX")
+    // Override via PYLON_FN_RATE_LIMIT_MAX / PYLON_FN_RATE_LIMIT_WINDOW.
+    let fn_rl_max: u32 = std::env::var("PYLON_FN_RATE_LIMIT_MAX")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-    let fn_rl_window: u64 = std::env::var("STATECRAFT_FN_RATE_LIMIT_WINDOW")
+    let fn_rl_window: u64 = std::env::var("PYLON_FN_RATE_LIMIT_WINDOW")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
     let fn_rate_limiter = Arc::new(RateLimiter::new(fn_rl_max, fn_rl_window));
 
@@ -372,7 +372,7 @@ fn start_server(
     // emit change events to WS + SSE subscribers on COMMIT. Without this,
     // functions write to the DB but sync clients never see the update
     // live — they only catch up on the next refetch.
-    let fn_notifier: Arc<dyn statecraft_router::ChangeNotifier> =
+    let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> =
         Arc::new(crate::datastore::WsSseNotifier {
             ws: Arc::clone(&ws_hub),
             sse: Arc::clone(&sse_hub),
@@ -386,7 +386,7 @@ fn start_server(
     );
 
     // Dev mode flag: when false, sensitive data (e.g. magic codes) is omitted from responses.
-    let is_dev = std::env::var("STATECRAFT_DEV_MODE").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let is_dev = std::env::var("PYLON_DEV_MODE").map(|v| v == "1" || v == "true").unwrap_or(true);
 
     // CORS origin. Defaults to `*` in dev for convenience; in prod we refuse
     // to start with a wildcard because the server sends `Access-Control-
@@ -394,13 +394,13 @@ fn start_server(
     // Bearer <session>`. The combination of `*` + credentials is a spec
     // violation that some browsers tolerate, and even when they don't it
     // lets any origin drive bearer-auth APIs.
-    let cors_origin = match std::env::var("STATECRAFT_CORS_ORIGIN") {
+    let cors_origin = match std::env::var("PYLON_CORS_ORIGIN") {
         Ok(v) => v,
         Err(_) if is_dev => "*".to_string(),
         Err(_) => {
             return Err(
-                "STATECRAFT_CORS_ORIGIN must be set in production (non-dev mode). \
-                Set it to your frontend's origin, or set STATECRAFT_DEV_MODE=true \
+                "PYLON_CORS_ORIGIN must be set in production (non-dev mode). \
+                Set it to your frontend's origin, or set PYLON_DEV_MODE=true \
                 for local development."
                     .into(),
             );
@@ -408,7 +408,7 @@ fn start_server(
     };
     if !is_dev && cors_origin == "*" {
         return Err(
-            "STATECRAFT_CORS_ORIGIN=\"*\" is refused in production mode. \
+            "PYLON_CORS_ORIGIN=\"*\" is refused in production mode. \
             Set it to an explicit origin (https://app.example.com)."
                 .into(),
         );
@@ -420,12 +420,12 @@ fn start_server(
         .is_err()
     {
         return Err(format!(
-            "STATECRAFT_CORS_ORIGIN={cors_origin:?} contains bytes that are not a valid HTTP header value"
+            "PYLON_CORS_ORIGIN={cors_origin:?} contains bytes that are not a valid HTTP header value"
         ));
     }
 
     // Admin token: read once at startup, not per-request.
-    let admin_token: Option<String> = std::env::var("STATECRAFT_ADMIN_TOKEN").ok();
+    let admin_token: Option<String> = std::env::var("PYLON_ADMIN_TOKEN").ok();
 
     // CSRF protection. Enforced inline at the HTTP layer because the plugin
     // trait's `on_request` hook doesn't see request headers. For
@@ -433,10 +433,10 @@ fn start_server(
     // Referer, against the allowlist.
     //
     // Allowlist resolution:
-    //   - STATECRAFT_CSRF_ORIGINS (comma-separated) if set
-    //   - otherwise STATECRAFT_CORS_ORIGIN (already validated above)
+    //   - PYLON_CSRF_ORIGINS (comma-separated) if set
+    //   - otherwise PYLON_CORS_ORIGIN (already validated above)
     //   - in dev, fall back to allow-any to avoid breaking local tooling.
-    let csrf_origins: Vec<String> = match std::env::var("STATECRAFT_CSRF_ORIGINS") {
+    let csrf_origins: Vec<String> = match std::env::var("PYLON_CSRF_ORIGINS") {
         Ok(v) => v
             .split(',')
             .map(|s| s.trim().to_string())
@@ -453,7 +453,7 @@ fn start_server(
             }
         }
     };
-    let csrf = Arc::new(statecraft_plugin::builtin::csrf::CsrfPlugin::new(
+    let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(
         csrf_origins,
     ));
 
@@ -483,7 +483,7 @@ fn start_server(
         });
     }
 
-    tracing::warn!("statecraft dev server listening on http://localhost:{port}");
+    tracing::warn!("pylon dev server listening on http://localhost:{port}");
     tracing::info!("  WebSocket: ws://localhost:{ws_port}");
     tracing::info!("  Studio: http://localhost:{port}/studio");
     tracing::info!("  API:    http://localhost:{port}/api/entities/<entity>");
@@ -568,7 +568,7 @@ fn start_server(
                                 .as_str()
                                 .strip_prefix("Bearer ")
                                 .map(|t| {
-                                    statecraft_auth::constant_time_eq(
+                                    pylon_auth::constant_time_eq(
                                         t.as_bytes(),
                                         admin_bytes,
                                     )
@@ -715,15 +715,15 @@ fn start_server(
                 let val = h.value.as_str();
                 val.strip_prefix("Bearer ").map(|t| t.to_string())
             });
-        let auth_ctx = if admin_token.is_some() && auth_token.is_some() && statecraft_auth::constant_time_eq(auth_token.as_deref().unwrap_or("").as_bytes(), admin_token.as_deref().unwrap_or("").as_bytes()) {
-            statecraft_auth::AuthContext::admin()
+        let auth_ctx = if admin_token.is_some() && auth_token.is_some() && pylon_auth::constant_time_eq(auth_token.as_deref().unwrap_or("").as_bytes(), admin_token.as_deref().unwrap_or("").as_bytes()) {
+            pylon_auth::AuthContext::admin()
         } else {
             ss.resolve(auth_token.as_deref())
         };
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---
         //
-        // `statecraft test` sets STATECRAFT_IN_MEMORY=1 + STATECRAFT_DEV_MODE=true.
+        // `pylon test` sets PYLON_IN_MEMORY=1 + PYLON_DEV_MODE=true.
         // The TS helper `resetDb()` posts here between `test(...)` blocks
         // to isolate cases. Gates:
         //   1. dev mode (production refuses outright)
@@ -875,12 +875,12 @@ fn start_server(
                 (filename, content_type, bytes)
             };
 
-            let storage = statecraft_storage::files::LocalFileStorage::new(
-                &std::env::var("STATECRAFT_FILES_DIR").unwrap_or_else(|_| "uploads".into()),
-                &std::env::var("STATECRAFT_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into()),
+            let storage = pylon_storage::files::LocalFileStorage::new(
+                &std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into()),
+                &std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into()),
             );
 
-            let (status, body) = match statecraft_storage::files::FileStorage::store(
+            let (status, body) = match pylon_storage::files::FileStorage::store(
                 &storage, &name, &payload, &ct,
             ) {
                 Ok(stored) => (
@@ -1047,13 +1047,13 @@ fn start_server(
                                     .as_nanos()
                             )
                         });
-                    let subscriber_id = statecraft_realtime::SubscriberId::new(sub_id);
+                    let subscriber_id = pylon_realtime::SubscriberId::new(sub_id);
 
                     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
                     let streaming_body = StreamingBody::new(rx);
 
                     let tx_clone = tx.clone();
-                    let sink: statecraft_realtime::SnapshotSink =
+                    let sink: pylon_realtime::SnapshotSink =
                         Box::new(move |tick: u64, bytes: &[u8]| {
                             // Format as SSE with an id: line carrying the tick
                             // number so clients can resume with Last-Event-ID.
@@ -1064,7 +1064,7 @@ fn start_server(
                             let _ = tx_clone.send(frame);
                         });
 
-                    let shard_auth = statecraft_realtime::ShardAuth {
+                    let shard_auth = pylon_realtime::ShardAuth {
                         user_id: auth_ctx.user_id.clone(),
                         is_admin: auth_ctx.is_admin,
                     };
@@ -1072,7 +1072,7 @@ fn start_server(
                         shard.add_subscriber(subscriber_id.clone(), sink, &shard_auth)
                     {
                         let (status, code) = match &e {
-                            statecraft_realtime::ShardError::Unauthorized(_) => (403u16, "UNAUTHORIZED"),
+                            pylon_realtime::ShardError::Unauthorized(_) => (403u16, "UNAUTHORIZED"),
                             _ => (429u16, "SUBSCRIBE_FAILED"),
                         };
                         let err = json_error(code, &e.to_string());
@@ -1159,7 +1159,7 @@ fn start_server(
                 // Mirror the router's gates so the streaming fast path doesn't
                 // become a way to bypass function auth / rate limits.
                 // 1. Function must exist (otherwise 404, not a hung SSE).
-                if statecraft_router::FnOps::get_fn(fn_ops.as_ref(), &fn_name).is_none() {
+                if pylon_router::FnOps::get_fn(fn_ops.as_ref(), &fn_name).is_none() {
                     let err = json_error(
                         "FN_NOT_FOUND",
                         &format!("Function \"{fn_name}\" is not registered"),
@@ -1177,7 +1177,7 @@ fn start_server(
                 // 2. Per-function rate limit (identity = user_id or "anon").
                 let identity = auth_ctx.user_id.as_deref().unwrap_or("anon");
                 if let Err(retry_after) =
-                    statecraft_router::FnOps::check_rate_limit(fn_ops.as_ref(), &fn_name, identity)
+                    pylon_router::FnOps::check_rate_limit(fn_ops.as_ref(), &fn_name, identity)
                 {
                     let body = format!(
                         r#"{{"error":{{"code":"RATE_LIMITED","message":"Function \"{fn_name}\" rate limit exceeded","retry_after_secs":{retry_after}}}}}"#
@@ -1196,9 +1196,10 @@ fn start_server(
                 let args: serde_json::Value =
                     serde_json::from_str(&body).unwrap_or(serde_json::json!({}));
 
-                let auth = statecraft_functions::protocol::AuthInfo {
+                let auth = pylon_functions::protocol::AuthInfo {
                     user_id: auth_ctx.user_id.clone(),
                     is_admin: auth_ctx.is_admin,
+                    tenant_id: auth_ctx.tenant_id.clone(),
                 };
 
                 let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -1213,7 +1214,7 @@ fn start_server(
                         let _ = tx_cb.send(sse.into_bytes());
                     });
 
-                    let result = statecraft_router::FnOps::call(
+                    let result = pylon_router::FnOps::call(
                         fn_ops_cl.as_ref(),
                         &fn_name,
                         args,
@@ -1280,13 +1281,13 @@ fn start_server(
                 mt.record_request("POST", 401);
                 continue;
             }
-            let ai_provider = std::env::var("STATECRAFT_AI_PROVIDER").unwrap_or_default();
-            let ai_key = std::env::var("STATECRAFT_AI_API_KEY").unwrap_or_default();
-            let ai_model = std::env::var("STATECRAFT_AI_MODEL").unwrap_or_default();
-            let ai_base = std::env::var("STATECRAFT_AI_BASE_URL").unwrap_or_default();
+            let ai_provider = std::env::var("PYLON_AI_PROVIDER").unwrap_or_default();
+            let ai_key = std::env::var("PYLON_AI_API_KEY").unwrap_or_default();
+            let ai_model = std::env::var("PYLON_AI_MODEL").unwrap_or_default();
+            let ai_base = std::env::var("PYLON_AI_BASE_URL").unwrap_or_default();
 
             if ai_key.is_empty() && ai_provider != "custom" {
-                let err = json_error("AI_NOT_CONFIGURED", "Set STATECRAFT_AI_PROVIDER and STATECRAFT_AI_API_KEY");
+                let err = json_error("AI_NOT_CONFIGURED", "Set PYLON_AI_PROVIDER and PYLON_AI_API_KEY");
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(503u16)
@@ -1405,16 +1406,16 @@ fn start_server(
         // Privileged admin UI. It renders the full schema and lets the
         // operator run mutations against the data browser. In production we
         // require an admin token; in dev mode we leave it open so
-        // `statecraft dev` remains friction-free for the single-user case.
+        // `pylon dev` remains friction-free for the single-user case.
         //
         // Serving a WWW-Authenticate Basic realm isn't useful here because
         // admin auth is bearer-token based. Callers get a 401 and should
-        // retry with `Authorization: Bearer <STATECRAFT_ADMIN_TOKEN>`.
+        // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
         let (status, response_body, content_type, is_studio) = if (url == "/studio" || url == "/studio/") && method == Method::Get {
             if !is_dev && !auth_ctx.is_admin {
                 let body = json_error(
                     "AUTH_REQUIRED",
-                    "/studio requires admin auth in production (set STATECRAFT_ADMIN_TOKEN and pass it as Bearer)",
+                    "/studio requires admin auth in production (set PYLON_ADMIN_TOKEN and pass it as Bearer)",
                 );
                 let response = with_security_headers(
                     Response::from_string(&body)
@@ -1427,13 +1428,13 @@ fn start_server(
                 continue;
             }
             let base = format!("http://localhost:{port}");
-            let html = statecraft_studio_api::generate_studio_html(rt.manifest(), &base);
+            let html = pylon_studio_api::generate_studio_html(rt.manifest(), &base);
             (200u16, html, "text/html", true)
         } else {
             // Run plugin middleware with per-request metadata so rate-limit
             // plugins can bucket by peer IP (not just user id) when the
             // caller is anonymous.
-            let meta = statecraft_plugin::RequestMeta {
+            let meta = pylon_plugin::RequestMeta {
                 peer_ip: peer_ip.as_str(),
             };
             if let Err(e) = pr.run_on_request_with_meta(method.as_str(), &url, &auth_ctx, &meta) {
@@ -1453,13 +1454,13 @@ fn start_server(
                 let cache_adapter = CacheAdapter(Arc::clone(&ca));
                 let pubsub_adapter = PubSubAdapter(Arc::clone(&ps));
                 let email_adapter = EmailAdapter::from_env();
-                let fn_ops: Option<&dyn statecraft_router::FnOps> =
-                    fn_ops_ref.as_deref().map(|f| f as &dyn statecraft_router::FnOps);
+                let fn_ops: Option<&dyn pylon_router::FnOps> =
+                    fn_ops_ref.as_deref().map(|f| f as &dyn pylon_router::FnOps);
                 let shard_adapter = shards_ref.as_ref().map(|reg| ShardOpsAdapter {
                     registry: Arc::clone(reg),
                 });
-                let shard_ops: Option<&dyn statecraft_router::ShardOps> =
-                    shard_adapter.as_ref().map(|a| a as &dyn statecraft_router::ShardOps);
+                let shard_ops: Option<&dyn pylon_router::ShardOps> =
+                    shard_adapter.as_ref().map(|a| a as &dyn pylon_router::ShardOps);
                 let plugin_hooks = PluginHooksAdapter(Arc::clone(&pr));
                 // Snapshot request headers as (name, value) pairs for the
                 // router to forward into webhook-invoked actions. Header
@@ -1470,7 +1471,7 @@ fn start_server(
                     .iter()
                     .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
                     .collect();
-                let router_ctx = statecraft_router::RouterContext {
+                let router_ctx = pylon_router::RouterContext {
                     store: rt.as_ref(),
                     session_store: &ss,
                     magic_codes: &mc,
@@ -1495,7 +1496,7 @@ fn start_server(
                     request_headers: &request_headers,
                 };
                 let http_method = HttpMethod::from_str(method.as_str());
-                let (s, b, _ct) = statecraft_router::route(&router_ctx, http_method, &url, &body, auth_token.as_deref());
+                let (s, b, _ct) = pylon_router::route(&router_ctx, http_method, &url, &body, auth_token.as_deref());
                 (s, b, "application/json", false)
             }
         };
@@ -1545,7 +1546,7 @@ fn start_server(
     // --- Drain phase ---
     // Stop accepting new work, let in-flight finish, close subsystems cleanly.
     let drain_timeout = std::time::Duration::from_secs(
-        std::env::var("STATECRAFT_DRAIN_SECS")
+        std::env::var("PYLON_DRAIN_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10),
@@ -1582,31 +1583,31 @@ fn start_server(
     Ok(())
 }
 
-// The route() function has been extracted to the `statecraft-router` crate.
-// See `statecraft_router::route()` for the platform-agnostic routing logic.
+// The route() function has been extracted to the `pylon-router` crate.
+// See `pylon_router::route()` for the platform-agnostic routing logic.
 // The server now delegates to it via a `RouterContext`.
 
 fn json_error(code: &str, message: &str) -> String {
-    statecraft_router::json_error(code, message)
+    pylon_router::json_error(code, message)
 }
 
 /// Build the session store. Persists by default for file-backed runtimes —
 /// sessions live in a sibling `<db>.sessions.db` file next to the app DB
-/// unless `STATECRAFT_SESSION_DB` overrides the path or
-/// `STATECRAFT_SESSION_IN_MEMORY=1` opts out. In-memory runtimes (tests)
+/// unless `PYLON_SESSION_DB` overrides the path or
+/// `PYLON_SESSION_IN_MEMORY=1` opts out. In-memory runtimes (tests)
 /// get an in-memory session store.
 ///
 /// This used to be opt-in, which silently broke every app after a server
 /// restart: tokens in browser localStorage resolved to anonymous, pulls
 /// came back empty under policy, and mutations 400'd with UNAUTHENTICATED.
 fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
-    if std::env::var("STATECRAFT_SESSION_IN_MEMORY")
+    if std::env::var("PYLON_SESSION_IN_MEMORY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)
     {
         return SessionStore::new();
     }
-    let explicit = std::env::var("STATECRAFT_SESSION_DB").ok();
+    let explicit = std::env::var("PYLON_SESSION_DB").ok();
     let default_path = app_db_path.map(|p| format!("{p}.sessions.db"));
     let path = match explicit.or(default_path) {
         Some(p) => p,
@@ -1614,12 +1615,12 @@ fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
     };
     match crate::session_backend::SqliteSessionBackend::open(&path) {
         Ok(backend) => {
-            tracing::info!("[statecraft] Session persistence enabled: {path}");
+            tracing::info!("[pylon] Session persistence enabled: {path}");
             SessionStore::with_backend(Box::new(backend))
         }
         Err(e) => {
             tracing::warn!(
-                "[statecraft] could not open session DB {path}: {e}. Falling back to in-memory sessions."
+                "[pylon] could not open session DB {path}: {e}. Falling back to in-memory sessions."
             );
             SessionStore::new()
         }

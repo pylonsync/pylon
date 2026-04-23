@@ -1,6 +1,6 @@
 //! SQLite-backed session persistence.
 //!
-//! Stores sessions in a dedicated `_statecraft_sessions` table so users don't
+//! Stores sessions in a dedicated `_pylon_sessions` table so users don't
 //! get logged out when the server restarts.
 //!
 //! The schema is intentionally minimal and under-engineered: every session
@@ -10,10 +10,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use statecraft_auth::{Session, SessionBackend};
+use pylon_auth::{Session, SessionBackend};
 use rusqlite::Connection;
 
-const TABLE: &str = "_statecraft_sessions";
+const TABLE: &str = "_pylon_sessions";
 
 /// Persistent session backend backed by a SQLite connection.
 ///
@@ -130,7 +130,7 @@ impl SessionBackend for SqliteSessionBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_auth::Session;
+    use pylon_auth::Session;
 
     #[test]
     fn roundtrip_save_load() {

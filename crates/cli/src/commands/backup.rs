@@ -1,33 +1,33 @@
-//! `statecraft backup` and `statecraft restore` — ship the database + uploads + manifest
+//! `pylon backup` and `pylon restore` — ship the database + uploads + manifest
 //! in and out of a single directory bundle.
 //!
 //! A backup bundle is just a directory:
 //!
 //! ```text
 //! <bundle>/
-//!   VERSION        — statecraft version used to produce this bundle
-//!   statecraft.db     — copy of the SQLite database
-//!   statecraft.db-wal — WAL file (if any) so the backup is consistent
+//!   VERSION        — pylon version used to produce this bundle
+//!   pylon.db     — copy of the SQLite database
+//!   pylon.db-wal — WAL file (if any) so the backup is consistent
 //!   manifest.json  — copy of the app manifest
-//!   uploads/       — everything under STATECRAFT_FILES_DIR
+//!   uploads/       — everything under PYLON_FILES_DIR
 //! ```
 //!
 //! Usage:
 //!
 //! ```sh
-//! statecraft backup ./backups/2026-04-19
-//! statecraft restore ./backups/2026-04-19
+//! pylon backup ./backups/2026-04-19
+//! pylon restore ./backups/2026-04-19
 //! ```
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 
 use crate::output::{print_error, print_json};
 
 const VERSION_FILE: &str = "VERSION";
-const DB_FILE: &str = "statecraft.db";
+const DB_FILE: &str = "pylon.db";
 const MANIFEST_FILE: &str = "manifest.json";
 const UPLOADS_DIR: &str = "uploads";
 
@@ -40,7 +40,7 @@ pub fn run_backup(args: &[String], json_mode: bool) -> ExitCode {
         Some(p) => p.clone(),
         None => {
             print_error("backup requires a target directory");
-            eprintln!("  Usage: statecraft backup <dir>");
+            eprintln!("  Usage: pylon backup <dir>");
             return ExitCode::Usage;
         }
     };
@@ -57,7 +57,7 @@ pub fn run_backup(args: &[String], json_mode: bool) -> ExitCode {
     // Write VERSION.
     if let Err(e) = fs::write(
         Path::new(&target).join(VERSION_FILE),
-        statecraft_core::VERSION,
+        pylon_kernel::VERSION,
     ) {
         print_error(&format!("Cannot write VERSION: {e}"));
         return ExitCode::Error;
@@ -126,7 +126,7 @@ pub fn run_restore(args: &[String], json_mode: bool) -> ExitCode {
         Some(p) => p.clone(),
         None => {
             print_error("restore requires a source directory");
-            eprintln!("  Usage: statecraft restore <dir>");
+            eprintln!("  Usage: pylon restore <dir>");
             return ExitCode::Usage;
         }
     };
@@ -227,15 +227,15 @@ pub fn run_restore(args: &[String], json_mode: bool) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn resolve_db_path() -> String {
-    std::env::var("STATECRAFT_DB_PATH").unwrap_or_else(|_| "statecraft.db".to_string())
+    std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".to_string())
 }
 
 fn resolve_manifest_path() -> String {
-    std::env::var("STATECRAFT_MANIFEST").unwrap_or_else(|_| "statecraft.manifest.json".to_string())
+    std::env::var("PYLON_MANIFEST").unwrap_or_else(|_| "pylon.manifest.json".to_string())
 }
 
 fn resolve_uploads_dir() -> String {
-    std::env::var("STATECRAFT_FILES_DIR").unwrap_or_else(|_| "uploads".to_string())
+    std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".to_string())
 }
 
 fn create_dir_all(path: &str) -> std::io::Result<()> {
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn copy_tree_roundtrip() {
         let tmp = std::env::temp_dir()
-            .join(format!("statecraft_backup_test_{}", std::process::id()));
+            .join(format!("pylon_backup_test_{}", std::process::id()));
         let src = tmp.join("src");
         let dst = tmp.join("dst");
         let _ = fs::remove_dir_all(&tmp);

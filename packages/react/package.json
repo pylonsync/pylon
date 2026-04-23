@@ -1,5 +1,5 @@
 {
-  "name": "@statecraft/react",
+  "name": "@pylonsync/react",
   "publishConfig": { "access": "public" },
   "version": "0.1.0",
   "type": "module",
@@ -10,8 +10,8 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@statecraft/sdk": "file:../sdk",
-    "@statecraft/sync": "file:../sync"
+    "@pylonsync/sdk": "file:../sdk",
+    "@pylonsync/sync": "file:../sync"
   },
   "peerDependencies": {
     "react": ">=18.0.0"

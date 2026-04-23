@@ -17,11 +17,11 @@ const QS_STEPS: {
     desc: "Grab the CLI with cargo. One binary — no services, no Docker required.",
     filename: "shell",
     lang: "sh",
-    code: `❯ cargo install statecraft-cli
-   Compiling statecraft-cli v0.8.2
+    code: `❯ cargo install pylon-cli
+   Compiling pylon-cli v0.8.2
     Finished release in 41.2s
-❯ statecraft --version
-statecraft 0.8.2`,
+❯ pylon --version
+pylon 0.8.2`,
   },
   {
     num: "02",
@@ -29,7 +29,7 @@ statecraft 0.8.2`,
     desc: "Scaffolds schema, server functions, and a typed client.",
     filename: "shell",
     lang: "sh",
-    code: `❯ statecraft init my-app
+    code: `❯ pylon init my-app
   ✓ schema.json
   ✓ functions/
   ✓ shards/
@@ -42,7 +42,7 @@ statecraft 0.8.2`,
     desc: "Starts the server, watches your code, regenerates the client on every save.",
     filename: "shell",
     lang: "sh",
-    code: `❯ statecraft dev
+    code: `❯ pylon dev
   schema  · 3 tables
   shards  · 0 rooms
   serving on http://localhost:4242
@@ -54,7 +54,7 @@ statecraft 0.8.2`,
     desc: "Mount the client anywhere you already have React. Queries are reactive by default.",
     filename: "App.tsx",
     lang: "tsx",
-    code: `import { AgentDBProvider, db } from "@/statecraft/client";
+    code: `import { AgentDBProvider, db } from "@/pylon/client";
 
 export default function App() {
   const tasks = db.useQuery("Task", { order: "desc" });

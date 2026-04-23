@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-policy"
+name = "pylon-policy"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,7 +8,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-auth = { path = "../auth" }
+pylon-kernel = { path = "../core" }
+pylon-auth = { path = "../auth" }
 serde_json = { workspace = true }
 
