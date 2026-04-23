@@ -18,7 +18,7 @@ Use this skill whenever:
 
 A Pylon app is four things, all in one process:
 
-1. **Entities** — typed tables declared in `app.ts` via the `@pylonsync/sdk` DSL. Pylon auto-migrates SQLite to match.
+1. **Entities** — typed tables declared in `app.ts` via the `@pylonsync/sdk` DSL. Pylon auto-migrates your database (SQLite by default, or Postgres via `DATABASE_URL`) to match.
 2. **Policies** — row-level access rules evaluated as string expressions. Live alongside entities.
 3. **Functions** — server TypeScript in `functions/*.ts`. Three flavors: `query`, `mutation`, `action`. RPC-called by the client.
 4. **Live queries** — `db.useQuery(...)` in React subscribes to results. Pylon restreams diffs on every relevant mutation.
@@ -377,7 +377,7 @@ pylon dev app.ts
 cd web && bun run dev
 ```
 
-The first `pylon dev` invocation creates `.pylon/dev.db` (SQLite) and runs auto-migration.
+The first `pylon dev` invocation creates `.pylon/dev.db` (SQLite) and runs auto-migration. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function code is identical either way.
 
 ## Deployment
 

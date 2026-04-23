@@ -47,11 +47,15 @@ Pylon collapses the stack. Writes go through the same runtime that serves reads 
 - Multiplayer games and worlds
 - Anything where two browsers need to see the same thing, now
 
+## Storage
+
+Pylon runs on **SQLite** or **Postgres**. SQLite is the default — a single file, zero setup, great for local dev and many production workloads (single-node, up to tens of GB). Switch to Postgres for horizontal scale, existing Postgres infra, or shared-nothing deployments. The schema, policies, functions, and client APIs are identical across both — set `PYLON_DB_URL=postgres://...` and Pylon uses the Postgres adapter.
+
 ## What it's not
 
-- A replacement for Postgres. Pylon uses SQLite under the hood; 10GB+ datasets with heavy analytics belong elsewhere.
 - A BaaS you rent. Pylon is self-hostable infrastructure. A managed cloud is planned but not yet shipped.
 - A full-stack framework. Pylon is the backend; pair it with Next.js, Vite, or any client.
+- An analytics engine. Heavy OLAP / warehouse workloads belong in ClickHouse, DuckDB, or BigQuery — Pylon is for transactional, realtime application state.
 
 ## How to read these docs
 
