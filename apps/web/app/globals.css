@@ -3,26 +3,46 @@
 :root {
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
-  --bg: #0a0a0b;
-  --bg-1: #0e0e10;
-  --bg-2: #111114;
-  --bg-3: #16161a;
-  --border: #1e1e22;
-  --border-2: #26262c;
-  --text: #ececee;
-  --text-2: #a0a0a8;
-  --text-3: #6a6a72;
-  --text-4: #44444a;
-  --accent: #7ab7ff;
-  --accent-2: #7ab7ff22;
-  --accent-3: #7ab7ff11;
+
+  /* Base surfaces — deeper near-black with subtle warm shift. */
+  --bg: #07070b;
+  --bg-1: #0b0b11;
+  --bg-2: #101018;
+  --bg-3: #16161e;
+  --border: #1c1c26;
+  --border-2: #2a2a36;
+
+  /* Text ramp */
+  --text: #f2f2f7;
+  --text-2: #a4a4b0;
+  --text-3: #6e6e7a;
+  --text-4: #44444e;
+
+  /* Primary accent — electric cyan. Reads as "crystal" + "power."
+     Pairs with near-black bg and white text without needing
+     another accent color. */
+  --accent: #00d9ff;
+  --accent-soft: rgba(0, 217, 255, 0.14);
+  --accent-ghost: rgba(0, 217, 255, 0.06);
+  --accent-dark: #0a3a48;
+
+  /* Secondary — warm magenta. Reserved for CTAs and gradient pops. */
+  --primary: #ff3d7f;
+  --primary-soft: rgba(255, 61, 127, 0.16);
+
+  /* Supporting accents for data viz / cursor colors */
   --green: #5ee6a6;
   --red: #ff6b6b;
-  --blue: #7ab7ff;
   --purple: #c89dff;
+  --amber: #ffb020;
+
+  /* Gradients */
+  --grad-accent: linear-gradient(135deg, #00d9ff 0%, #7c5cff 55%, #ff3d7f 100%);
+  --grad-text: linear-gradient(180deg, #ffffff 0%, #a4a4b0 130%);
 
   --radius: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
 
   --maxw: 1200px;
 }
@@ -49,8 +69,11 @@ body {
   letter-spacing: -0.005em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Layered ambient: cyan glow top-center, magenta glow off-axis,
+     base near-black. Kept subtle so it doesn't compete with content. */
   background:
-    radial-gradient(1200px 600px at 50% -10%, #0a1220 0%, transparent 60%),
+    radial-gradient(1200px 700px at 50% -15%, rgba(0, 217, 255, 0.10) 0%, transparent 55%),
+    radial-gradient(900px 500px at 90% 10%, rgba(255, 61, 127, 0.06) 0%, transparent 50%),
     var(--bg);
   min-height: 100vh;
   overflow-x: hidden;
@@ -120,13 +143,13 @@ pre,
 }
 
 .section-title {
-  font-size: 40px;
+  font-size: clamp(34px, 4.4vw, 52px);
   font-weight: 500;
-  line-height: 1.08;
-  letter-spacing: -0.025em;
-  margin: 0 0 16px 0;
+  line-height: 1.04;
+  letter-spacing: -0.03em;
+  margin: 0 0 18px 0;
   color: var(--text);
-  max-width: 720px;
+  max-width: 760px;
   text-wrap: balance;
 }
 
@@ -144,9 +167,9 @@ pre,
   position: sticky;
   top: 0;
   z-index: 50;
-  background: rgba(10, 10, 11, 0.72);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(7, 7, 11, 0.68);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   border-bottom: 1px solid var(--border);
 }
 
@@ -154,7 +177,25 @@ pre,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 56px;
+  height: 60px;
+}
+
+.nav-links a {
+  position: relative;
+  padding: 4px 0;
+}
+.nav-links a::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -2px;
+  height: 1px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 180ms ease;
+}
+.nav-links a:hover::after {
+  transform: scaleX(1);
 }
 
 .nav-left {
@@ -188,25 +229,23 @@ pre,
 .logo {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   font-weight: 600;
-  font-size: 15px;
-  letter-spacing: -0.01em;
+  font-size: 15.5px;
+  letter-spacing: -0.015em;
+  color: var(--text);
+  transition: color 140ms ease;
+}
+.logo:hover {
+  color: var(--accent);
 }
 
-.logo-mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  background: var(--accent);
-  color: #1a1208;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 13px;
-  display: grid;
-  place-items: center;
-  position: relative;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+.logo svg {
+  color: currentColor;
+  transition: filter 220ms ease;
+}
+.logo:hover svg {
+  filter: drop-shadow(0 0 8px rgba(0, 217, 255, 0.55));
 }
 
 /* ---------- CTA row ---------- */
@@ -217,27 +256,34 @@ pre,
   flex-wrap: wrap;
 }
 
-/* Install command button */
+/* Install command button — primary CTA, subtle cyan halo so it reads
+   as the focal action without a loud color block. */
 .install-cmd {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  height: 40px;
-  padding: 0 14px;
+  height: 42px;
+  padding: 0 16px;
   border: 1px solid var(--border-2);
-  border-radius: 7px;
-  background: var(--bg-2);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text);
   cursor: pointer;
-  transition: all 120ms;
+  transition: all 180ms ease;
   position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 0 0 rgba(0, 217, 255, 0);
 }
 
 .install-cmd:hover {
-  border-color: #3a3a42;
-  background: var(--bg-3);
+  border-color: rgba(0, 217, 255, 0.4);
+  background: var(--bg-2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 32px -4px rgba(0, 217, 255, 0.22);
 }
 
 .install-cmd .dollar {
@@ -276,36 +322,64 @@ pre,
 
 /* ---------- Hero ---------- */
 .hero {
-  padding: 72px 0 80px 0;
+  padding: 96px 0 96px 0;
   position: relative;
   overflow: hidden;
 }
 
+/* Ambient grid — same as before but finer, more structural. */
 .hero-grid-bg {
   position: absolute;
   inset: 0;
   background-image:
     linear-gradient(var(--border) 1px, transparent 1px),
     linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 64px 64px;
+  background-size: 72px 72px;
   background-position: -1px -1px;
-  mask-image: radial-gradient(1200px 500px at 50% 200px, #000 0%, transparent 75%);
-  -webkit-mask-image: radial-gradient(1200px 500px at 50% 200px, #000 0%, transparent 75%);
-  opacity: 0.45;
+  mask-image: radial-gradient(1200px 600px at 50% 260px, #000 0%, transparent 78%);
+  -webkit-mask-image: radial-gradient(1200px 600px at 50% 260px, #000 0%, transparent 78%);
+  opacity: 0.38;
   pointer-events: none;
+}
+
+/* Gradient blob behind the headline — the hero's hero. */
+.hero-glow {
+  position: absolute;
+  top: -180px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 900px;
+  height: 900px;
+  background:
+    radial-gradient(circle at 50% 50%,
+      rgba(0, 217, 255, 0.28) 0%,
+      rgba(124, 92, 255, 0.12) 35%,
+      transparent 60%);
+  filter: blur(40px);
+  pointer-events: none;
+  z-index: 0;
+  animation: slow-breathe 8s ease-in-out infinite;
+}
+
+@keyframes slow-breathe {
+  0%, 100% { opacity: 0.9; transform: translateX(-50%) scale(1); }
+  50% { opacity: 1; transform: translateX(-50%) scale(1.04); }
 }
 
 .hero-inner {
   position: relative;
+  z-index: 1;
 }
 
 .hero-eyebrow {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 10px 4px 4px;
+  padding: 4px 12px 4px 4px;
   border: 1px solid var(--border-2);
-  background: var(--bg-2);
+  background: rgba(16, 16, 24, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   border-radius: 100px;
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -314,12 +388,13 @@ pre,
 }
 
 .hero-eyebrow .chip {
-  padding: 2px 8px;
+  padding: 2px 9px;
   background: var(--accent);
-  color: #1a1208;
+  color: #001820;
   border-radius: 100px;
   font-weight: 600;
   letter-spacing: 0.02em;
+  font-size: 10.5px;
 }
 
 .hero-eyebrow .arrow {
@@ -327,26 +402,50 @@ pre,
 }
 
 .hero-h1 {
-  font-size: clamp(44px, 6.2vw, 76px);
-  line-height: 1.02;
-  letter-spacing: -0.035em;
+  font-size: clamp(52px, 7.4vw, 96px);
+  line-height: 0.98;
+  letter-spacing: -0.04em;
   font-weight: 500;
-  margin: 0 0 24px 0;
-  max-width: 960px;
+  margin: 0 0 28px 0;
+  max-width: 1000px;
   text-wrap: balance;
+  /* Subtle top-lit text: bright at the top, slightly dimmer at the bottom,
+     so the headline feels luminous against the dark bg. */
+  background: var(--grad-text);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .hero-h1 em {
   font-style: normal;
-  color: var(--accent);
+  background: var(--grad-accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  position: relative;
+}
+
+/* Subtle underline that glows like the accent — draws the eye without
+   being a button-looking underline. */
+.hero-h1 em::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -0.06em;
+  height: 2px;
+  background: var(--grad-accent);
+  opacity: 0.35;
+  border-radius: 2px;
 }
 
 .hero-sub {
-  font-size: 18px;
+  font-size: 19px;
   line-height: 1.55;
   color: var(--text-2);
-  max-width: 640px;
-  margin: 0 0 36px 0;
+  max-width: 660px;
+  margin: 0 0 40px 0;
   text-wrap: pretty;
 }
 
@@ -375,11 +474,24 @@ pre,
 
 /* ---------- Panels ---------- */
 .panel {
-  background: var(--bg-1);
+  background: linear-gradient(180deg, var(--bg-1), #0a0a10);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   overflow: hidden;
   position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 24px 56px -20px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 217, 255, 0.03);
+  transition: box-shadow 220ms ease, border-color 220ms ease;
+}
+.panel:hover {
+  border-color: rgba(0, 217, 255, 0.15);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 28px 60px -20px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(0, 217, 255, 0.08),
+    0 0 48px -16px rgba(0, 217, 255, 0.18);
 }
 
 .panel-header {

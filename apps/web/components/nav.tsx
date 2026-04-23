@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PylonMark } from "./pylon-logo";
 
 export function Nav() {
   return (
@@ -6,8 +7,8 @@ export function Nav() {
       <div className="container-page nav-inner">
         <div className="nav-left">
           <Link href="/" className="logo">
-            <span className="logo-mark">▲</span>
-            pylon
+            <PylonMark size={22} />
+            <span>Pylon</span>
           </Link>
           <div className="nav-links">
             <a href="#demo">Demo</a>
