@@ -1,0 +1,10 @@
+<svg viewBox="0 0 160 32" xmlns="http://www.w3.org/2000/svg" fill="#FFFFFF">
+  <g transform="translate(4, 0) scale(0.5)">
+    <path d="M24 2 L10 20 L24 32 Z" />
+    <path d="M24 2 L38 20 L24 32 Z" />
+    <path d="M24 32 L18 48 L24 62 L30 48 Z" />
+    <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+    <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+  </g>
+  <text x="34" y="22" font-family="Inter, -apple-system, sans-serif" font-size="18" font-weight="500" letter-spacing="-0.3">Pylon</text>
+</svg>

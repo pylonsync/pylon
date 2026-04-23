@@ -1,0 +1,151 @@
+---
+title: Quickstart
+description: "Ship a live app in five minutes."
+---
+
+This walkthrough builds a tiny collaborative note app — two browsers open, both see the same notes, writes sync instantly. You'll learn the full Pylon shape: entity, policy, function, live query.
+
+## 1. Install the CLI
+
+<CodeGroup>
+```bash macOS / Linux
+curl -fsSL https://pylon.dev/install.sh | bash
+```
+
+```bash From source
+cargo install --path crates/cli --locked
+```
+</CodeGroup>
+
+Verify:
+
+```bash
+pylon --version
+```
+
+## 2. Scaffold a new app
+
+```bash
+pylon init notes
+cd notes
+bun install
+```
+
+This creates:
+
+```
+notes/
+  app.ts             # schema, policies, manifest
+  functions/         # server functions (queries, mutations)
+  client/            # your UI code
+  web/               # Vite app mounting the client
+  package.json
+```
+
+## 3. Define the schema
+
+Edit `app.ts`:
+
+```ts
+import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+
+const Note = entity(
+  "Note",
+  {
+    title: field.string(),
+    body: field.richtext(),
+    authorId: field.string(),
+    updatedAt: field.datetime(),
+  },
+  {
+    indexes: [{ name: "by_author", fields: ["authorId"], unique: false }],
+  },
+);
+
+const notePolicy = policy({
+  name: "note_owner",
+  entity: "Note",
+  allowRead: "true",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId",
+});
+
+const manifest = buildManifest({
+  name: "notes",
+  version: "0.1.0",
+  entities: [Note],
+  policies: [notePolicy],
+  queries: [],
+  actions: [],
+  routes: [],
+});
+
+console.log(JSON.stringify(manifest, null, 2));
+```
+
+## 4. Add a server function
+
+Create `functions/createNote.ts`:
+
+```ts
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: {
+    title: v.string(),
+    body: v.string(),
+  },
+  async handler(ctx, args) {
+    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
+    const id = await ctx.db.insert("Note", {
+      title: args.title,
+      body: args.body,
+      authorId: ctx.auth.userId,
+      updatedAt: new Date().toISOString(),
+    });
+    return { id };
+  },
+});
+```
+
+## 5. Run it
+
+```bash
+pylon dev app.ts
+```
+
+Pylon watches `app.ts` and `functions/*.ts`, pushes schema changes to the local SQLite file, and serves the API on `http://localhost:4321`.
+
+In a second terminal:
+
+```bash
+cd web && bun run dev
+```
+
+Open two browser tabs at the Vite URL. Create a note in one — it appears in the other, live.
+
+## 6. What just happened
+
+- `app.ts` compiled to a manifest — the wire format Pylon's runtime consumes.
+- The manifest includes the `Note` entity's columns, indexes, and the row-level policy.
+- Pylon auto-migrated your SQLite file to match the schema.
+- `createNote.ts` was loaded by the functions runtime (bun) and registered as `/api/fn/createNote`.
+- The React client's `db.useQuery("Note")` subscribed to all notes. When you called `createNote`, the live query fan-out pushed the new row to every subscriber.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Entities" icon="table" href="/concepts/entities">
+    All the field types and index options.
+  </Card>
+  <Card title="Policies" icon="shield" href="/concepts/policies">
+    How row-level access rules work.
+  </Card>
+  <Card title="Live queries" icon="radio" href="/concepts/live-queries">
+    Subscriptions, filters, and fan-out.
+  </Card>
+  <Card title="Deploy" icon="rocket" href="/deploy/overview">
+    Ship to Fly, Cloudflare, or anywhere else.
+  </Card>
+</CardGroup>

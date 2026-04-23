@@ -1,0 +1,97 @@
+---
+title: Installation
+description: "Install the Pylon CLI and runtime."
+---
+
+## Requirements
+
+- **Bun** ≥ 1.0 (runs TypeScript functions + codegen)
+- **Node.js** ≥ 18 (optional, for client tooling)
+- **Rust** ≥ 1.82 (only if building from source)
+
+## Install the CLI
+
+<CodeGroup>
+```bash Install script
+curl -fsSL https://pylon.dev/install.sh | bash
+```
+
+```bash From source
+git clone https://github.com/pylonsync/pylon
+cd pylon
+cargo install --path crates/cli --locked
+```
+
+```bash Homebrew (coming soon)
+brew install pylonsync/tap/pylon
+```
+</CodeGroup>
+
+Verify:
+
+```bash
+pylon --version
+pylon doctor
+```
+
+`pylon doctor` checks that bun, node, and the supporting tooling are available.
+
+## Install Bun
+
+Pylon uses Bun to run TypeScript server functions and to bundle the client code generator. If you don't have it:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+## Client SDKs
+
+Install into your web app:
+
+<CodeGroup>
+```bash bun
+bun add @pylonsync/sdk @pylonsync/react
+```
+
+```bash npm
+npm install @pylonsync/sdk @pylonsync/react
+```
+
+```bash pnpm
+pnpm add @pylonsync/sdk @pylonsync/react
+```
+</CodeGroup>
+
+## Directory conventions
+
+A Pylon app usually looks like this:
+
+```
+my-app/
+  app.ts                 # schema + policies + manifest
+  functions/             # server functions (*.ts)
+  client/                # your React components
+  web/                   # Vite app (or Next.js, etc.)
+    package.json
+    vite.config.ts
+    src/main.tsx
+  package.json
+  pylon.manifest.json    # generated
+  pylon.client.ts        # generated
+```
+
+`pylon dev app.ts` watches `app.ts` + `functions/` and regenerates `pylon.manifest.json` + `pylon.client.ts` on every change.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PYLON_DB_PATH` | `.pylon/dev.db` | SQLite file location |
+| `PYLON_FILES_DIR` | `.pylon/uploads` | File upload storage |
+| `PYLON_CORS_ORIGIN` | `*` (dev only) | Allowed origin in prod |
+| `PYLON_DEV_MODE` | `true` | Dev-only behavior (generous rate limits, CORS `*`) |
+| `PYLON_PORT` | `4321` | HTTP port |
+| `PYLON_RATE_LIMIT_MAX` | `100` | Requests per window |
+| `PYLON_FN_RATE_LIMIT_MAX` | `30` | Function calls per window |
+
+See [Reference → CLI](/reference/cli) for the full list.

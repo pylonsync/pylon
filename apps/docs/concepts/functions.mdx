@@ -1,0 +1,152 @@
+---
+title: Functions
+description: "Queries, mutations, and actions — your server-side RPC."
+---
+
+A **function** is server TypeScript, RPC-callable from the client. Pylon runs them in a Bun process managed by the runtime.
+
+Three flavors:
+
+- **Query** — read-only, can subscribe to changes
+- **Mutation** — writes through the transactional path
+- **Action** — arbitrary side effects (HTTP calls, emails, file ops)
+
+## Writing a function
+
+Create a file in `functions/`:
+
+```ts
+// functions/createMessage.ts
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: {
+    roomId: v.id("Room"),
+    body: v.string(),
+  },
+  async handler(ctx, args) {
+    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
+    const id = await ctx.db.insert("Message", {
+      roomId: args.roomId,
+      authorId: ctx.auth.userId,
+      body: args.body,
+      sentAt: new Date().toISOString(),
+    });
+    return { id };
+  },
+});
+```
+
+The filename becomes the RPC name — `createMessage` is callable at `POST /api/fn/createMessage`.
+
+## Context object
+
+`ctx` gives you:
+
+```ts
+ctx.auth.userId   // string | null
+ctx.auth.email    // string | null
+ctx.auth.roles    // string[]
+
+ctx.db.insert(entity, data)
+ctx.db.get(entity, id)
+ctx.db.query(entity, filter?)
+ctx.db.update(entity, id, patch)
+ctx.db.delete(entity, id)
+ctx.db.transact(ops[])
+
+ctx.error(code, message)      // throw typed error
+ctx.schedule(delayMs, fn, args)  // delayed execution
+```
+
+## Validators
+
+`v.*` describes expected argument shapes:
+
+```ts
+v.string()              v.int()                v.float()
+v.boolean()             v.datetime()           v.id("User")
+v.optional(v.string())  v.array(v.string())    v.literal("open" | "closed")
+v.object({ k: v.string() })
+```
+
+See [SDK reference](/reference/validators) for the full list.
+
+## Queries
+
+```ts
+// functions/listIssues.ts
+import { query, v } from "@pylonsync/functions";
+
+export default query({
+  args: { teamId: v.id("Team") },
+  async handler(ctx, args) {
+    return ctx.db.query("Issue", { teamId: args.teamId });
+  },
+});
+```
+
+Queries are **live** by default — the React client subscribes and re-runs on relevant changes. See [Live queries](/concepts/live-queries).
+
+## Actions
+
+Use for side effects outside the database:
+
+```ts
+// functions/sendEmail.ts
+import { action, v } from "@pylonsync/functions";
+
+export default action({
+  args: { to: v.string(), subject: v.string() },
+  async handler(ctx, args) {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.RESEND_KEY}` },
+      body: JSON.stringify({ to: args.to, subject: args.subject }),
+    });
+    return { ok: true };
+  },
+});
+```
+
+Actions can read and write the database but are not transactional — if you need atomicity, use a mutation.
+
+## Calling functions from the client
+
+```tsx
+import { callFn } from "@pylonsync/react";
+
+async function onSend() {
+  const { id } = await callFn("createMessage", {
+    roomId: "01H...",
+    body: "hello",
+  });
+  console.log("created", id);
+}
+```
+
+## Errors
+
+Throw typed errors that propagate to the client with structured codes:
+
+```ts
+if (!ctx.auth.userId) {
+  throw ctx.error("UNAUTHENTICATED", "log in first");
+}
+if (msg.length > 2000) {
+  throw ctx.error("INVALID_ARGS", "message too long");
+}
+```
+
+The client receives `{ code, message }` and can render different UI per code. See [Error codes](/reference/errors) for the canonical list.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Live queries" icon="radio" href="/concepts/live-queries">
+    How query subscriptions stay in sync.
+  </Card>
+  <Card title="Validators" icon="check" href="/reference/validators">
+    All argument shapes `v.*` supports.
+  </Card>
+</CardGroup>

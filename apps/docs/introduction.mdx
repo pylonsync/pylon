@@ -1,0 +1,58 @@
+---
+title: Introduction
+description: "Pylon is a realtime backend framework. One binary, typed end-to-end, built for apps that need to sync."
+---
+
+## What is Pylon?
+
+Pylon is a realtime backend framework for applications that need shared, synchronized state — multiplayer tools, dashboards, CRMs, collaborative editors, chat, games. You define your schema, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, and a single binary to run.
+
+No separate realtime layer. No glue between your database, your API, and your WebSocket server. Everything is one system.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Build a live app in five minutes.
+  </Card>
+  <Card title="Core concepts" icon="book" href="/concepts/entities">
+    Entities, policies, functions, live queries.
+  </Card>
+  <Card title="Deploy" icon="rocket" href="/deploy/overview">
+    Ship to Fly, Cloudflare, or your own box.
+  </Card>
+  <Card title="Examples" icon="grid" href="/examples/overview">
+    CRM, ERP, chat, 3D — ten ready-to-run apps.
+  </Card>
+</CardGroup>
+
+## What you get
+
+- **Typed schema** — declare entities in TypeScript, get types everywhere.
+- **Row-level policies** — access rules next to your data, not in middleware.
+- **Server functions** — queries, mutations, actions, all RPC-callable from the client.
+- **Live queries** — `db.useQuery(...)` subscribes to results and updates on write.
+- **Auth** — email magic links, OAuth, guest sessions. No third-party SDK.
+- **One binary** — the runtime is a single Rust executable. Deploy anywhere.
+
+## Why another backend framework?
+
+Most realtime backends are three systems glued together: a database, an API server, and a realtime pub/sub layer. Keeping them in sync is a full-time job.
+
+Pylon collapses the stack. Writes go through the same runtime that serves reads and pushes updates. Live queries re-execute on the server when dependent rows change and stream diffs to subscribers. There's no denormalization, no cache invalidation, no manual fan-out.
+
+## What it's good for
+
+- SaaS apps with live dashboards
+- Internal tools, CRMs, ERPs
+- Collaborative editors
+- Multiplayer games and worlds
+- Anything where two browsers need to see the same thing, now
+
+## What it's not
+
+- A replacement for Postgres. Pylon uses SQLite under the hood; 10GB+ datasets with heavy analytics belong elsewhere.
+- A BaaS you rent. Pylon is self-hostable infrastructure. A managed cloud is planned but not yet shipped.
+- A full-stack framework. Pylon is the backend; pair it with Next.js, Vite, or any client.
+
+## How to read these docs
+
+Start with the [Quickstart](/quickstart) to feel the shape of a Pylon app in five minutes. Then [Core concepts](/concepts/entities) walks through entities, policies, functions, and live queries in depth. [Deploy](/deploy/overview) covers shipping to production. [Examples](/examples/overview) has ten end-to-end apps you can clone.
