@@ -350,6 +350,7 @@ mod tests {
             AuthInfo {
                 user_id: Some("user_1".into()),
                 is_admin: false,
+                tenant_id: None,
             },
         );
         let json = serde_json::to_string(&msg).unwrap();

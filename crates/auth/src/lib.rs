@@ -144,6 +144,7 @@ pub enum AuthMode {
 
 impl AuthMode {
     /// Parse from the manifest auth string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "public" => Some(AuthMode::Public),
@@ -469,6 +470,12 @@ pub struct OAuthRegistry {
     providers: std::collections::HashMap<String, OAuthConfig>,
 }
 
+impl Default for OAuthRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OAuthRegistry {
     pub fn new() -> Self {
         Self {
@@ -590,6 +597,12 @@ pub struct OAuthState {
     pub expires_at: u64,
 }
 
+impl Default for OAuthStateStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OAuthStateStore {
     pub fn new() -> Self {
         Self {
@@ -669,6 +682,12 @@ pub enum MagicCodeError {
     Expired,
     /// Another code was requested too recently. Wait and try again.
     Throttled { retry_after_secs: u64 },
+}
+
+impl Default for MagicCodeStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MagicCodeStore {
@@ -812,6 +831,12 @@ pub trait SessionBackend: Send + Sync {
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Session>>,
     backend: Option<Box<dyn SessionBackend>>,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStore {
