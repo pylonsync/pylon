@@ -315,13 +315,30 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                 hint: Some("Policy names must be unique".into()),
             });
         }
-        if policy.allow.is_empty() {
+        // A policy must have at least one allow expression, but it can be
+        // any of the per-action variants (allowRead, allowInsert,
+        // allowUpdate, allowDelete, allowWrite) or the universal `allow`
+        // fallback. A policy with no expressions at all is always-deny and
+        // almost certainly a bug.
+        let has_any_allow = !policy.allow.is_empty()
+            || policy.allow_read.as_deref().is_some_and(|s| !s.is_empty())
+            || policy.allow_insert.as_deref().is_some_and(|s| !s.is_empty())
+            || policy.allow_update.as_deref().is_some_and(|s| !s.is_empty())
+            || policy.allow_delete.as_deref().is_some_and(|s| !s.is_empty())
+            || policy.allow_write.as_deref().is_some_and(|s| !s.is_empty());
+        if !has_any_allow {
             diagnostics.push(Diagnostic {
                 severity: Severity::Error,
                 code: "POLICY_ALLOW_EMPTY".into(),
-                message: format!("Policy \"{}\" has an empty allow expression", policy.name),
+                message: format!(
+                    "Policy \"{}\" has no allow expression",
+                    policy.name
+                ),
                 span: None,
-                hint: Some("Provide an allow expression".into()),
+                hint: Some(
+                    "Provide at least one of allow, allowRead, allowInsert, allowUpdate, allowDelete, allowWrite"
+                        .into(),
+                ),
             });
         }
         if policy.entity.is_none() && policy.action.is_none() {

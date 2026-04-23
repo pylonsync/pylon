@@ -1435,10 +1435,38 @@ fn route_inner(
                 );
                 return (403, json_error("POLICY_DENIED", "Access denied by policy"));
             }
-            let spec = match parse_json(body) {
+            let mut spec = match parse_json(body) {
                 Ok(v) => v,
                 Err((s, b)) => return (s, b),
             };
+            // Tenant clamp — aggregates run raw SQL against the table and
+            // would otherwise leak cross-tenant totals. If the caller has
+            // an active tenant and the entity has an `orgId` column, force
+            // the WHERE clause to include `orgId == auth.tenantId`. Any
+            // client-supplied orgId is OVERWRITTEN by the server value, so
+            // a malicious payload can't sum orders from another tenant.
+            if let Some(tenant_id) = ctx.auth_ctx.tenant_id.as_deref() {
+                let manifest = ctx.store.manifest();
+                let has_org_id = manifest
+                    .entities
+                    .iter()
+                    .find(|e| e.name == entity)
+                    .map(|e| e.fields.iter().any(|f| f.name == "orgId"))
+                    .unwrap_or(false);
+                if has_org_id {
+                    if let Some(obj) = spec.as_object_mut() {
+                        let entry = obj
+                            .entry("where".to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(where_obj) = entry.as_object_mut() {
+                            where_obj.insert(
+                                "orgId".to_string(),
+                                serde_json::Value::String(tenant_id.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
             return match ctx.store.aggregate(entity, &spec) {
                 Ok(result) => (200, serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())),
                 Err(e) => (400, json_error(&e.code, &e.message)),

@@ -111,10 +111,10 @@ const Product = entity(
     category: field.string(), // "door" | "window" | "cabinet" | "other"
     sku: field.string().optional(),
     description: field.string().optional(),
-    basePrice: field.number(),
+    basePrice: field.float(),
     unit: field.string(), // "each" | "linear-ft" | "sq-ft"
     active: field.bool(),
-    leadTimeDays: field.number().optional(),
+    leadTimeDays: field.float().optional(),
     createdAt: field.datetime(),
   },
   {
@@ -136,11 +136,11 @@ const ProductOption = entity(
     name: field.string(),
     kind: field.string(), // "select" | "number" | "text"
     required: field.bool(),
-    priceModifier: field.number(), // added per-unit for this option when chosen
+    priceModifier: field.float(), // added per-unit for this option when chosen
     choicesJson: field.string().optional(), // JSON array for select kind
-    min: field.number().optional(),
-    max: field.number().optional(),
-    sortOrder: field.number(),
+    min: field.float().optional(),
+    max: field.float().optional(),
+    sortOrder: field.float(),
   },
   {
     indexes: [
@@ -158,9 +158,9 @@ const Material = entity(
     name: field.string(),
     sku: field.string().optional(),
     unit: field.string(), // "board-ft" | "each" | "ft" | "lb"
-    stockQty: field.number(),
-    reorderPoint: field.number(),
-    costPerUnit: field.number(),
+    stockQty: field.float(),
+    reorderPoint: field.float(),
+    costPerUnit: field.float(),
     supplier: field.string().optional(),
     notes: field.string().optional(),
     createdAt: field.datetime(),
@@ -179,7 +179,7 @@ const StockMovement = entity(
   {
     orgId: field.id("Organization"),
     materialId: field.id("Material"),
-    delta: field.number(), // positive = receipt, negative = consumption
+    delta: field.float(), // positive = receipt, negative = consumption
     reason: field.string(), // "receipt" | "issue" | "adjust" | "waste"
     reference: field.string().optional(), // order number or PO reference
     performedBy: field.id("User"),
@@ -204,9 +204,9 @@ const Quote = entity(
     number: field.string(), // "Q-2026-0001" — unique per org
     status: field.string(), // draft | sent | accepted | rejected | expired
     notes: field.string().optional(),
-    subtotal: field.number(),
-    tax: field.number(),
-    total: field.number(),
+    subtotal: field.float(),
+    tax: field.float(),
+    total: field.float(),
     validUntil: field.datetime().optional(),
     createdBy: field.id("User"),
     createdAt: field.datetime(),
@@ -229,10 +229,10 @@ const QuoteLine = entity(
     productId: field.id("Product"),
     description: field.string(),
     configJson: field.string().optional(), // serialized option choices
-    qty: field.number(),
-    unitPrice: field.number(),
-    lineTotal: field.number(),
-    sortOrder: field.number(),
+    qty: field.float(),
+    unitPrice: field.float(),
+    lineTotal: field.float(),
+    sortOrder: field.float(),
   },
   {
     indexes: [
@@ -249,9 +249,9 @@ const Order = entity(
     quoteId: field.id("Quote").optional(),
     number: field.string(), // "SO-2026-0001"
     status: field.string(), // confirmed | in_production | ready | shipped | delivered | cancelled
-    subtotal: field.number(),
-    tax: field.number(),
-    total: field.number(),
+    subtotal: field.float(),
+    tax: field.float(),
+    total: field.float(),
     notes: field.string().optional(),
     dueDate: field.datetime().optional(),
     shippedAt: field.datetime().optional(),
@@ -276,11 +276,11 @@ const OrderLine = entity(
     productId: field.id("Product"),
     description: field.string(),
     configJson: field.string().optional(),
-    qty: field.number(),
-    unitPrice: field.number(),
-    lineTotal: field.number(),
+    qty: field.float(),
+    unitPrice: field.float(),
+    lineTotal: field.float(),
     productionStatus: field.string(), // queued | in_progress | done
-    sortOrder: field.number(),
+    sortOrder: field.float(),
   },
   {
     indexes: [
@@ -290,6 +290,30 @@ const OrderLine = entity(
         fields: ["orgId", "productionStatus"],
         unique: false,
       },
+    ],
+  },
+);
+
+// ---- Analytics ------------------------------------------------------------
+
+// User-saved panels on the org's dashboard. `spec` is a JSON-encoded
+// AggregateSpec (entity + metric + groupBy + where). Keeping it as opaque
+// JSON lets the analytics DSL evolve without schema migrations.
+const DashboardPanel = entity(
+  "DashboardPanel",
+  {
+    orgId: field.id("Organization"),
+    title: field.string(),
+    entity: field.string(), // target entity name, e.g. "Order"
+    chartKind: field.string(), // "number" | "bar" | "line"
+    specJson: field.string(), // serialized AggregateSpec
+    sortOrder: field.float(),
+    createdBy: field.id("User"),
+    createdAt: field.datetime(),
+  },
+  {
+    indexes: [
+      { name: "by_org_sort", fields: ["orgId", "sortOrder"], unique: false },
     ],
   },
 );
@@ -369,6 +393,7 @@ const manifest = buildManifest({
     QuoteLine,
     Order,
     OrderLine,
+    DashboardPanel,
   ],
   queries: [],
   actions: [],
@@ -385,6 +410,7 @@ const manifest = buildManifest({
     orgScoped("QuoteLine"),
     orgScoped("Order"),
     orgScoped("OrderLine"),
+    orgScoped("DashboardPanel"),
   ],
   routes: [],
 });

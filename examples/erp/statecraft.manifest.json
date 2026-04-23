@@ -1,0 +1,1101 @@
+{
+  "manifest_version": 1,
+  "name": "erp",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Organization",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "slug",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "billingEmail",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "OrgMember",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "invitedBy",
+          "type": "id(User)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "joinedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_user",
+          "fields": [
+            "orgId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "OrgInvite",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "invitedBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "acceptedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_email",
+          "fields": [
+            "orgId",
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_email",
+          "fields": [
+            "email"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Customer",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "company",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "addressLine1",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "addressLine2",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "city",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "postal",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "notes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org",
+          "fields": [
+            "orgId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Product",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "category",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sku",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "basePrice",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "active",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "leadTimeDays",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_active",
+          "fields": [
+            "orgId",
+            "active"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_org_sku",
+          "fields": [
+            "orgId",
+            "sku"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "ProductOption",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "productId",
+          "type": "id(Product)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "required",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "priceModifier",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "choicesJson",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "min",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "max",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "sortOrder",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_product",
+          "fields": [
+            "productId",
+            "sortOrder"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Material",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sku",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "unit",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "stockQty",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "reorderPoint",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "costPerUnit",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "supplier",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "notes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org",
+          "fields": [
+            "orgId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "StockMovement",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "materialId",
+          "type": "id(Material)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "delta",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "reference",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "performedBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_material",
+          "fields": [
+            "materialId",
+            "createdAt"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Quote",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "customerId",
+          "type": "id(Customer)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "number",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "notes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "subtotal",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "tax",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "total",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "validUntil",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sentAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "decidedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_status",
+          "fields": [
+            "orgId",
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_org_number",
+          "fields": [
+            "orgId",
+            "number"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "QuoteLine",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "quoteId",
+          "type": "id(Quote)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "productId",
+          "type": "id(Product)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "configJson",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "qty",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "unitPrice",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lineTotal",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sortOrder",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_quote",
+          "fields": [
+            "quoteId",
+            "sortOrder"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Order",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "customerId",
+          "type": "id(Customer)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "quoteId",
+          "type": "id(Quote)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "number",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "subtotal",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "tax",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "total",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "notes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "dueDate",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "shippedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "deliveredAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "cancelledAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_status",
+          "fields": [
+            "orgId",
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_org_number",
+          "fields": [
+            "orgId",
+            "number"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "OrderLine",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "orderId",
+          "type": "id(Order)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "productId",
+          "type": "id(Product)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "configJson",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "qty",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "unitPrice",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lineTotal",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "productionStatus",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sortOrder",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_order",
+          "fields": [
+            "orderId",
+            "sortOrder"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_org_production",
+          "fields": [
+            "orgId",
+            "productionStatus"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "DashboardPanel",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "entity",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "chartKind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "specJson",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sortOrder",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_sort",
+          "fields": [
+            "orgId",
+            "sortOrder"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "organization_access",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.createdBy",
+      "allowDelete": "auth.userId == data.createdBy",
+      "entity": "Organization"
+    },
+    {
+      "name": "org_member_access",
+      "allowRead": "auth.userId == data.userId || auth.tenantId == data.orgId",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "OrgMember"
+    },
+    {
+      "name": "org_invite_access",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "OrgInvite"
+    },
+    {
+      "name": "Customer_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Customer"
+    },
+    {
+      "name": "Product_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Product"
+    },
+    {
+      "name": "ProductOption_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "ProductOption"
+    },
+    {
+      "name": "Material_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Material"
+    },
+    {
+      "name": "StockMovement_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "StockMovement"
+    },
+    {
+      "name": "Quote_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Quote"
+    },
+    {
+      "name": "QuoteLine_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "QuoteLine"
+    },
+    {
+      "name": "Order_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Order"
+    },
+    {
+      "name": "OrderLine_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "OrderLine"
+    },
+    {
+      "name": "DashboardPanel_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "DashboardPanel"
+    }
+  ]
+}

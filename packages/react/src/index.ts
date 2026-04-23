@@ -18,6 +18,7 @@ export {
   useUpdate,
   useDelete,
   useFn,
+  useAggregate,
 } from "./hooks";
 export type {
   QueryOptions,
@@ -30,6 +31,8 @@ export type {
   UsePaginatedQueryReturn,
   PaginatedQueryStatus,
   UseFnReturn,
+  AggregateSpec,
+  UseAggregateReturn,
 } from "./hooks";
 
 // Room hook
@@ -78,10 +81,20 @@ export type {
 
 export interface AgentDBClientConfig {
   baseUrl?: string;
+  /**
+   * App identifier used to namespace all client-side storage keys —
+   * localStorage (token, cached user, feature-flag toggles) and
+   * IndexedDB (sync replica). Two apps served from the same browser
+   * origin (different ports in dev, or the same domain in prod) must
+   * pick different names or they'll see each other's sessions and
+   * local replicas. Defaults to "default" for a single-app setup.
+   */
+  appName?: string;
 }
 
 let _baseUrl = "http://localhost:4321";
 let _baseUrlConfigured = false;
+let _appName = "default";
 
 /** Current effective base URL. Used by hooks (useRoom, useShard) that share
  *  the client config but don't have access to the module-private state. */
@@ -89,11 +102,30 @@ export function getBaseUrl(): string {
   return _baseUrl;
 }
 
+/** Current app name. Used by sync engine + storage helpers to namespace keys. */
+export function getAppName(): string {
+  return _appName;
+}
+
+/**
+ * Resolve the localStorage key for a conceptual slot (e.g. "token",
+ * "user") into its actual storage key. When `appName` is "default" we
+ * fall back to the legacy unprefixed key so older single-app setups
+ * keep working without migration.
+ */
+export function storageKey(slot: string): string {
+  if (_appName === "default") return `statecraft_${slot}`;
+  return `statecraft:${_appName}:${slot}`;
+}
+
 export function configureClient(config: AgentDBClientConfig): void {
   if (config.baseUrl) {
     _baseUrl = config.baseUrl;
     _baseUrlConfigured = true;
     maybeWarnDowngrade(config.baseUrl);
+  }
+  if (config.appName) {
+    _appName = config.appName;
   }
 }
 
@@ -335,7 +367,7 @@ export function startSessionAutoRefresh(
  */
 function currentAuthToken(): string | undefined {
   if (typeof window === "undefined" || !window.localStorage) return undefined;
-  return window.localStorage.getItem("statecraft_token") ?? undefined;
+  return window.localStorage.getItem(storageKey("token")) ?? undefined;
 }
 
 export async function callFn<T = unknown>(
