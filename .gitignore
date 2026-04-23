@@ -49,3 +49,11 @@ statecraft.*.db
 statecraft.*.db-*
 statecraft.jobs.db
 statecraft.jobs.db-*
+
+# Build caches / IDE state — never track
+.next/
+turbopack/
+.turbo/
+*.sst
+*.db-wal
+*.db-shm
