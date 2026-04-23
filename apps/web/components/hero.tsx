@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CodeLines } from "@/lib/highlight";
+import { CodeLines, type Lang } from "@/lib/highlight";
 
 function InstallCmd() {
   const [copied, setCopied] = React.useState(false);
@@ -400,7 +400,7 @@ function HeroDemo() {
 function CodeStack({
   files,
 }: {
-  files: { name: string; lang: string; langLabel: string; code: string }[];
+  files: { name: string; lang: Lang; langLabel: string; code: string }[];
 }) {
   const [active, setActive] = React.useState(0);
   const f = files[active];
