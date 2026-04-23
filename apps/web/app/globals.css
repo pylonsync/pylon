@@ -605,6 +605,347 @@ pre,
   background: var(--ok);
 }
 
+/* ==========================================================
+   Three-panel demo — Convex-style: Code | App UI / Data table
+   ========================================================== */
+.three-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  min-height: 460px;
+}
+
+@media (max-width: 900px) {
+  .three-panel {
+    grid-template-columns: 1fr;
+  }
+}
+
+.three-panel-code {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  min-height: 460px;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .three-panel-code {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+.three-panel-right {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 460px;
+  min-width: 0;
+}
+
+.three-panel-app {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+  min-height: 260px;
+}
+
+.three-panel-table {
+  background: var(--bg);
+  min-height: 180px;
+  max-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Code stack — tabbed file panel (matches Convex's code editor tabs) */
+.code-stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.code-stack-tabs {
+  display: flex;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.code-stack-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  border-right: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+  white-space: nowrap;
+}
+
+.code-stack-tab:hover {
+  color: var(--text-2);
+  background: var(--bg-2);
+}
+
+.code-stack-tab.active {
+  color: var(--text);
+  background: var(--bg);
+  border-bottom-color: var(--accent);
+}
+
+.code-stack-tab-lang {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border: 1px solid var(--border-2);
+  color: var(--text-3);
+  border-radius: 2px;
+}
+
+.code-stack-tab.active .code-stack-tab-lang {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.code-stack-body {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.code-stack-body pre {
+  padding: 18px 20px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  margin: 0;
+  color: var(--text);
+}
+
+/* Data table — bottom-right panel */
+.data-table {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.data-table-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.data-table-title {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.data-table-sub {
+  color: var(--text-3);
+}
+
+.data-table-scroll {
+  overflow: auto;
+  flex: 1;
+}
+
+.data-table-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.data-table-grid th {
+  text-align: left;
+  padding: 7px 12px;
+  color: var(--text-3);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+}
+
+.data-table-grid td {
+  padding: 7px 12px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.data-table-grid tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table-grid tr:hover td {
+  background: var(--bg-1);
+}
+
+.pill-ok,
+.pill-warn {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border-2);
+  border-radius: 2px;
+}
+
+.pill-ok {
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.pill-warn {
+  color: var(--accent);
+  border-color: rgba(139, 92, 246, 0.45);
+}
+
+/* Dashboard app panel */
+.dash-app {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+.dash-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+}
+
+.dash-head-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.dash-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.dash-metric {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.dash-metric-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.dash-metric-value {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text);
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+}
+
+.dash-metric-delta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  margin-top: 4px;
+}
+
+.dash-metric-delta.up {
+  color: var(--ok);
+}
+
+.dash-chart {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 3px;
+  align-items: flex-end;
+  height: 72px;
+  padding: 6px 2px 0;
+}
+
+.dash-bar {
+  background: var(--text-4);
+  transition: height 400ms cubic-bezier(0.2, 0.8, 0.2, 1), background 400ms;
+  min-height: 6px;
+  border-radius: 1px;
+}
+
+.dash-bar.live {
+  background: var(--accent);
+}
+
+.dash-chart-x {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-4);
+  padding: 0 4px;
+}
+
+/* Shard app fills its container with the canvas */
+.shard-app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.shard-app .game-canvas {
+  flex: 1;
+  aspect-ratio: unset;
+  min-height: 220px;
+}
+
+.dev-app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.dev-app .terminal {
+  margin: 0;
+  max-height: none;
+  flex: 1;
+}
+
+/* Override: the old chat-app had fixed height; in the new three-panel
+   layout we let the app fill the available space. */
+.three-panel-app .chat-app {
+  height: auto;
+  flex: 1;
+  min-height: 220px;
+}
+
 @media (max-width: 960px) {
   .hero-demo {
     grid-template-columns: 1fr;
@@ -871,36 +1212,44 @@ pre,
 }
 
 .code .kw,
+.code-stack-body .kw,
 .game-snippet .kw,
 .unusual-visual .kw {
   color: #e879a8;
 }
 .code .str,
+.code-stack-body .str,
 .game-snippet .str,
 .unusual-visual .str {
-  color: var(--accent);
+  color: #a78bfa;
 }
 .code .fn,
+.code-stack-body .fn,
 .game-snippet .fn {
   color: #67c2ff;
 }
-.code .type {
+.code .type,
+.code-stack-body .type {
   color: #7ee8a4;
 }
 .code .comment,
+.code-stack-body .comment,
 .game-snippet .comment {
   color: var(--text-4);
   font-style: italic;
 }
 .code .num,
+.code-stack-body .num,
 .game-snippet .num {
   color: #d4c77a;
 }
 .code .prop,
+.code-stack-body .prop,
 .game-snippet .prop {
   color: var(--text);
 }
 .code .dim,
+.code-stack-body .dim,
 .game-snippet .dim,
 .unusual-visual .dim {
   color: var(--text-3);
@@ -908,10 +1257,12 @@ pre,
 .unusual-visual .dim {
   color: var(--text-4);
 }
-.code .punct {
+.code .punct,
+.code-stack-body .punct {
   color: var(--text-3);
 }
-.code .global {
+.code .global,
+.code-stack-body .global {
   color: #d4c77a;
 }
 

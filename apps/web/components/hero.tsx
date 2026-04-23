@@ -334,45 +334,40 @@ onKeyDown("ArrowUp", () =>
   );
 }
 
-type DemoTab = "chat" | "shard" | "dev";
+type DemoTab = "chat" | "dashboard" | "shard" | "dev";
 
 function HeroDemo() {
-  const [tab, setTab] = React.useState<DemoTab>("chat");
+  const [tab, setTab] = React.useState<DemoTab>("dashboard");
 
   const meta: Record<DemoTab, { file: string; hook: string; status: string }> = {
+    dashboard: { file: "apps/admin/Dashboard.tsx", hook: "useAggregate", status: "live" },
     chat: { file: "apps/chat/App.tsx", hook: "useQuery", status: "live" },
     shard: { file: "shards/match.rs", hook: "useShard", status: "20 tps" },
     dev: { file: "~/pylon", hook: "pylon dev", status: "ready" },
   };
 
+  const tabs: { id: DemoTab; num: string; label: string; sub: string }[] = [
+    { id: "dashboard", num: "01", label: "Live dashboard", sub: "useAggregate" },
+    { id: "chat", num: "02", label: "Realtime chat", sub: "useQuery" },
+    { id: "shard", num: "03", label: "Game shard", sub: "useShard" },
+    { id: "dev", num: "04", label: "Dev server", sub: "pylon dev" },
+  ];
+
   return (
     <div className="hero-demo">
       <div className="panel">
         <div className="hero-demo-tabs">
-          <button
-            className={`hero-demo-tab ${tab === "chat" ? "active" : ""}`}
-            onClick={() => setTab("chat")}
-          >
-            <span className="hero-demo-tab-num">01</span>
-            <span className="hero-demo-tab-label">Realtime chat</span>
-            <span className="hero-demo-tab-sub">useQuery</span>
-          </button>
-          <button
-            className={`hero-demo-tab ${tab === "shard" ? "active" : ""}`}
-            onClick={() => setTab("shard")}
-          >
-            <span className="hero-demo-tab-num">02</span>
-            <span className="hero-demo-tab-label">Game shard</span>
-            <span className="hero-demo-tab-sub">useShard</span>
-          </button>
-          <button
-            className={`hero-demo-tab ${tab === "dev" ? "active" : ""}`}
-            onClick={() => setTab("dev")}
-          >
-            <span className="hero-demo-tab-num">03</span>
-            <span className="hero-demo-tab-label">Dev server</span>
-            <span className="hero-demo-tab-sub">pylon dev</span>
-          </button>
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              className={`hero-demo-tab ${tab === t.id ? "active" : ""}`}
+              onClick={() => setTab(t.id)}
+            >
+              <span className="hero-demo-tab-num">{t.num}</span>
+              <span className="hero-demo-tab-label">{t.label}</span>
+              <span className="hero-demo-tab-sub">{t.sub}</span>
+            </button>
+          ))}
         </div>
 
         <div className="panel-header">
@@ -389,6 +384,7 @@ function HeroDemo() {
 
         <div className="hero-demo-body">
           {tab === "chat" && <ChatDemoFull />}
+          {tab === "dashboard" && <DashboardDemoFull />}
           {tab === "shard" && <ShardDemoFull />}
           {tab === "dev" && <DevDemoFull />}
         </div>
@@ -397,21 +393,114 @@ function HeroDemo() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 3-panel Convex-style demo — Code (with schema tab) | App UI | Data table
+// ---------------------------------------------------------------------------
+
+function CodeStack({
+  files,
+}: {
+  files: { name: string; lang: string; langLabel: string; code: string }[];
+}) {
+  const [active, setActive] = React.useState(0);
+  const f = files[active];
+  return (
+    <div className="code-stack">
+      <div className="code-stack-tabs">
+        {files.map((file, i) => (
+          <button
+            key={file.name}
+            className={`code-stack-tab ${active === i ? "active" : ""}`}
+            onClick={() => setActive(i)}
+          >
+            <span className="code-stack-tab-lang">{file.langLabel}</span>
+            <span>{file.name}</span>
+          </button>
+        ))}
+      </div>
+      <div className="code-stack-body">
+        <pre style={{ margin: 0, fontFamily: "inherit" }}>
+          <CodeLines code={f.code} lang={f.lang} />
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function DataTable({
+  title,
+  tag,
+  columns,
+  rows,
+}: {
+  title: string;
+  tag: string;
+  columns: string[];
+  rows: (string | React.ReactNode)[][];
+}) {
+  return (
+    <div className="data-table">
+      <div className="data-table-head">
+        <span className="data-table-title">{title}</span>
+        <span className="data-table-sub">{tag}</span>
+      </div>
+      <div className="data-table-scroll">
+        <table className="data-table-grid">
+          <thead>
+            <tr>
+              {columns.map((c) => (
+                <th key={c}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => (
+                  <td key={j}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ThreePanel({
+  code,
+  appPanel,
+  tablePanel,
+}: {
+  code: React.ReactNode;
+  appPanel: React.ReactNode;
+  tablePanel: React.ReactNode;
+}) {
+  return (
+    <div className="three-panel">
+      <div className="three-panel-code">{code}</div>
+      <div className="three-panel-right">
+        <div className="three-panel-app">{appPanel}</div>
+        <div className="three-panel-table">{tablePanel}</div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Chat -----------------------------------------------------------------
+
 function ChatDemoFull() {
   return (
-    <div className="hero-demo-split">
-      <div className="hero-demo-left">
-        <ChatDemo />
-      </div>
-      <div className="hero-demo-right">
-        <div className="code-preview">
-          <div className="codeblock-header">
-            <span className="filename">apps/chat/Channel.tsx</span>
-            <span className="lang">TSX</span>
-          </div>
-          <div className="code">
-            <CodeLines
-              code={`import { db } from "@pylon/client";
+    <ThreePanel
+      code={
+        <CodeStack
+          files={[
+            {
+              name: "chat/Channel.tsx",
+              langLabel: "TSX",
+              lang: "ts",
+              code: `import { db } from "@pylon/client";
 
 export function Channel({ id }: { id: string }) {
   const messages = db.useQuery("Message", {
@@ -430,80 +519,13 @@ export function Channel({ id }: { id: string }) {
       } />
     </Pane>
   );
-}`}
-              lang="ts"
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ShardDemoFull() {
-  return (
-    <div className="hero-demo-split">
-      <div className="hero-demo-left" style={{ padding: 20 }}>
-        <GameCanvas />
-        <div className="hero-demo-meta">
-          <span className="hero-demo-meta-item">
-            <span className="hero-demo-meta-dot" /> 7 entities
-          </span>
-          <span className="hero-demo-meta-item">20 tps</span>
-          <span className="hero-demo-meta-item">area-of-interest 150m</span>
-        </div>
-      </div>
-      <div className="hero-demo-right">
-        <div className="code-preview">
-          <div className="codeblock-header">
-            <span className="filename">shards/match.rs</span>
-            <span className="lang">RUST</span>
-          </div>
-          <div className="code">
-            <CodeLines
-              code={`#[shard(tps = 20)]
-pub fn match_shard(state: &mut State, input: Input) {
-    for entity in state.entities.iter_mut() {
-        entity.apply(input.movement);
-        entity.tick();
-    }
-
-    state.aoi(150).broadcast(|e| e.snapshot());
-}
-
-// client: subscribes, renders, sends inputs.
-const { state, send } = useShard("match_1");`}
-              lang="rust"
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DevDemoFull() {
-  return (
-    <div className="hero-demo-split">
-      <div className="hero-demo-left">
-        <HeroTerminal />
-        <div className="hero-demo-meta" style={{ marginTop: 16 }}>
-          <span className="hero-demo-meta-item">
-            <span className="hero-demo-meta-dot" /> serving on :4242
-          </span>
-          <span className="hero-demo-meta-item">hot-reload on</span>
-          <span className="hero-demo-meta-item">41.2s cold start</span>
-        </div>
-      </div>
-      <div className="hero-demo-right">
-        <div className="code-preview">
-          <div className="codeblock-header">
-            <span className="filename">app.ts</span>
-            <span className="lang">TS</span>
-          </div>
-          <div className="code">
-            <CodeLines
-              code={`import { entity, v } from "@pylon/server";
+}`,
+            },
+            {
+              name: "app.ts",
+              langLabel: "TS",
+              lang: "ts",
+              code: `import { entity, v } from "@pylon/server";
 
 export const Message = entity({
   fields: {
@@ -515,13 +537,293 @@ export const Message = entity({
   indexes: [
     { on: ["channelId", "createdAt"] },
   ],
-});`}
-              lang="ts"
-            />
-          </div>
+  policy: {
+    read:  (ctx) => ctx.user != null,
+    write: (ctx, row) => row.authorId === ctx.user.id,
+  },
+});`,
+            },
+          ]}
+        />
+      }
+      appPanel={<ChatDemo />}
+      tablePanel={
+        <DataTable
+          title="Message"
+          tag="live · 3 rows"
+          columns={["_id", "authorId", "body", "createdAt"]}
+          rows={[
+            ["msg_7a1b…", "usr_maya", "shipping the v0.8 tick loop tonight", "3s ago"],
+            ["msg_7a1c…", "usr_jonas", "pulled it — tests pass on my laptop", "12s ago"],
+            ["msg_7a1d…", "usr_rhea", "useQuery fires in 4ms here", "1m ago"],
+          ]}
+        />
+      }
+    />
+  );
+}
+
+// ---- Dashboard ------------------------------------------------------------
+
+function DashboardApp() {
+  // Rotating "live" metrics — numbers tick up to feel alive.
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const t = setInterval(() => setTick((x) => x + 1), 1600);
+    return () => clearInterval(t);
+  }, []);
+  const revenue = 12439 + tick * 17;
+  const orders = 142 + Math.floor(tick / 3);
+  const online = 47 + (tick % 5);
+  const bars = [32, 48, 61, 58, 72, 84, 76, 92, 68, 74, 88, 96]
+    .map((v, i) => (i === 11 ? 40 + ((tick * 3) % 60) : v));
+
+  return (
+    <div className="dash-app">
+      <div className="dash-head">
+        <div className="dash-head-title">
+          <span className="mono text-dim" style={{ fontSize: 11 }}>#</span>
+          admin · overview
+        </div>
+        <span className="status-pill" style={{ padding: "3px 8px", fontSize: 10.5 }}>
+          <span className="dot" /> live
+        </span>
+      </div>
+      <div className="dash-metrics">
+        <div className="dash-metric">
+          <div className="dash-metric-label">Revenue (24h)</div>
+          <div className="dash-metric-value">${revenue.toLocaleString("en-US")}</div>
+          <div className="dash-metric-delta up">↑ 12.4%</div>
+        </div>
+        <div className="dash-metric">
+          <div className="dash-metric-label">Orders</div>
+          <div className="dash-metric-value">{orders}</div>
+          <div className="dash-metric-delta up">↑ 3 new</div>
+        </div>
+        <div className="dash-metric">
+          <div className="dash-metric-label">Online</div>
+          <div className="dash-metric-value">{online}</div>
+          <div className="dash-metric-delta">steady</div>
         </div>
       </div>
+      <div className="dash-chart">
+        {bars.map((h, i) => (
+          <div
+            key={i}
+            className={`dash-bar ${i === 11 ? "live" : ""}`}
+            style={{ height: `${h}%` }}
+          />
+        ))}
+      </div>
+      <div className="dash-chart-x">
+        <span>00</span><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span>
+      </div>
     </div>
+  );
+}
+
+function DashboardDemoFull() {
+  return (
+    <ThreePanel
+      code={
+        <CodeStack
+          files={[
+            {
+              name: "admin/Dashboard.tsx",
+              langLabel: "TSX",
+              lang: "ts",
+              code: `import { db } from "@pylon/client";
+
+export function Dashboard() {
+  const revenue = db.useAggregate("Order", {
+    sum: "total",
+    where: { createdAt: { gte: "-24h" } },
+  });
+  const orders = db.useQuery("Order", {
+    order: "desc", limit: 12,
+  });
+  const online = db.usePresence("admin");
+
+  return (
+    <Grid>
+      <Metric label="Revenue (24h)" value={revenue} />
+      <Metric label="Orders" value={orders.length} />
+      <Metric label="Online" value={online.count} />
+      <Chart series={orders.hourlyTotals()} />
+    </Grid>
+  );
+}`,
+            },
+            {
+              name: "app.ts",
+              langLabel: "TS",
+              lang: "ts",
+              code: `import { entity, v } from "@pylon/server";
+
+export const Order = entity({
+  fields: {
+    customerId: v.id("Customer"),
+    total:      v.money("USD"),
+    status:     v.enum(["pending", "paid", "refunded"]),
+    createdAt:  v.timestamp(),
+  },
+  indexes: [
+    { on: ["createdAt"] },
+    { on: ["status", "createdAt"] },
+  ],
+  aggregates: {
+    total: v.sum("total"),
+  },
+});`,
+            },
+          ]}
+        />
+      }
+      appPanel={<DashboardApp />}
+      tablePanel={
+        <DataTable
+          title="Order"
+          tag="live · 4 rows"
+          columns={["_id", "customer", "total", "status", "createdAt"]}
+          rows={[
+            ["ord_9f2a…", "Jordan Moss", "$89.00", <span key="1" className="pill-ok">paid</span>, "3s ago"],
+            ["ord_9f2b…", "Rhea Patel", "$145.00", <span key="2" className="pill-ok">paid</span>, "22s ago"],
+            ["ord_9f2c…", "Maya Torres", "$22.50", <span key="3" className="pill-warn">pending</span>, "1m ago"],
+            ["ord_9f2d…", "Alex Chen", "$312.00", <span key="4" className="pill-ok">paid</span>, "4m ago"],
+          ]}
+        />
+      }
+    />
+  );
+}
+
+// ---- Shard ----------------------------------------------------------------
+
+function ShardDemoFull() {
+  return (
+    <ThreePanel
+      code={
+        <CodeStack
+          files={[
+            {
+              name: "shards/match.rs",
+              langLabel: "RUST",
+              lang: "rust",
+              code: `#[shard(tps = 20)]
+pub fn match_shard(state: &mut State, input: Input) {
+    for entity in state.entities.iter_mut() {
+        entity.apply(input.movement);
+        entity.tick();
+    }
+
+    state.aoi(150).broadcast(|e| e.snapshot());
+}
+
+// client: subscribes, renders, sends inputs.
+const { state, send } = useShard("match_1");`,
+            },
+            {
+              name: "app.ts",
+              langLabel: "TS",
+              lang: "ts",
+              code: `import { shard, v } from "@pylon/server";
+
+export const Match = shard({
+  fields: {
+    matchId:  v.id("Match"),
+    entities: v.list(v.ref("Entity")),
+    tick:     v.u32(),
+  },
+  tps: 20,
+  aoi: { radius_m: 150 },
+});`,
+            },
+          ]}
+        />
+      }
+      appPanel={
+        <div className="shard-app">
+          <GameCanvas />
+        </div>
+      }
+      tablePanel={
+        <DataTable
+          title="Entity"
+          tag="live · 4 rows"
+          columns={["_id", "x", "y", "vel", "hp"]}
+          rows={[
+            ["ent_p1", "0.42", "0.38", "0.04", "98"],
+            ["ent_npc_a", "0.71", "0.62", "0.02", "100"],
+            ["ent_npc_b", "0.23", "0.84", "0.03", "100"],
+            ["ent_npc_c", "0.58", "0.19", "0.05", "72"],
+          ]}
+        />
+      }
+    />
+  );
+}
+
+// ---- Dev ------------------------------------------------------------------
+
+function DevDemoFull() {
+  return (
+    <ThreePanel
+      code={
+        <CodeStack
+          files={[
+            {
+              name: "app.ts",
+              langLabel: "TS",
+              lang: "ts",
+              code: `import { entity, v } from "@pylon/server";
+
+export const Message = entity({
+  fields: {
+    channelId: v.id("Channel"),
+    authorId:  v.id("User"),
+    body:      v.string().min(1).max(4000),
+    createdAt: v.timestamp(),
+  },
+  indexes: [
+    { on: ["channelId", "createdAt"] },
+  ],
+});`,
+            },
+            {
+              name: "pylon.json",
+              langLabel: "JSON",
+              lang: "ts",
+              code: `{
+  "name": "my-app",
+  "version": "0.1.0",
+  "storage": "sqlite:.pylon/dev.db",
+  "bindings": {
+    "client": "web/src/pylon.client.ts"
+  }
+}`,
+            },
+          ]}
+        />
+      }
+      appPanel={
+        <div className="dev-app">
+          <HeroTerminal />
+        </div>
+      }
+      tablePanel={
+        <DataTable
+          title="Schema"
+          tag="12 tables loaded"
+          columns={["name", "fields", "indexes", "policies"]}
+          rows={[
+            ["Message", "5", "1", "read, write"],
+            ["Channel", "4", "1", "read"],
+            ["User", "6", "2", "read, write"],
+            ["Session", "3", "1", "—"],
+          ]}
+        />
+      }
+    />
   );
 }
 
