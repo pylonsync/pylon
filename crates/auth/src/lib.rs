@@ -1218,8 +1218,8 @@ mod tests {
         assert_ne!(t1, t2);
         assert!(t1.starts_with("pylon_"));
         assert!(t2.starts_with("pylon_"));
-        // 256 bits = 64 hex chars + "pylon_" prefix (9 chars)
-        assert_eq!(t1.len(), 11 + 64);
+        // 256 bits = 64 hex chars + "pylon_" prefix (6 chars)
+        assert_eq!(t1.len(), 6 + 64);
     }
 
     // -- OAuth registry --
