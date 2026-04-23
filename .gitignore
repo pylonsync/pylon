@@ -42,3 +42,10 @@ pylon.jobs.db-*
 coverage/
 tmp/
 temp/
+
+# Legacy .statecraft/ runtime dirs and statecraft.*.db files — never commit.
+.statecraft/
+statecraft.*.db
+statecraft.*.db-*
+statecraft.jobs.db
+statecraft.jobs.db-*
