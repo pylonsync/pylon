@@ -7,8 +7,8 @@ scaling of writes is bounded. Reads scale across a connection pool.
 Re-run with:
 
 ```sh
-cargo bench -p statecraft-runtime --bench bench
-cargo bench -p statecraft-runtime --bench realtime_bench
+cargo bench -p pylon-runtime --bench bench
+cargo bench -p pylon-runtime --bench realtime_bench
 ```
 
 ## Data plane (single-writer SQLite)
@@ -68,7 +68,7 @@ depends on client count, message size, and TCP send buffers.
 **You can stay on SQLite when:**
 - Single-process deployment
 - Full DB fits comfortably in RAM for the read pool
-- You back up with `statecraft backup` on a schedule
+- You back up with `pylon backup` on a schedule
 
 ## What's NOT measured here
 
@@ -77,5 +77,5 @@ depends on client count, message size, and TCP send buffers.
 - Network RTT — production numbers will be bounded by network first
 - Shard tick budget for realtime game state — depends on `SimState::tick`
 
-For a real capacity estimate under your workload, run `statecraft bench`
+For a real capacity estimate under your workload, run `pylon bench`
 against a representative fixture and the manifest you'll ship with.

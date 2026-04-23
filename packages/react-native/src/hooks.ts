@@ -1,9 +1,9 @@
-import { SyncEngine, type Row } from "@statecraft/sync";
+import { SyncEngine, type Row } from "@pylonsync/sync";
 
 // ---------------------------------------------------------------------------
-// React Native hooks for statecraft
+// React Native hooks for pylon
 //
-// These are identical to the @statecraft/react hooks. They use only React and
+// These are identical to the @pylonsync/react hooks. They use only React and
 // the SyncEngine (which relies on fetch), both available in React Native.
 // We duplicate rather than import via subpath to avoid Metro resolution
 // issues with packages that don't declare explicit `exports`.

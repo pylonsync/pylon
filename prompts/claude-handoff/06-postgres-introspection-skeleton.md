@@ -1,4 +1,4 @@
-Use `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md` as shared context.
+Use `/Users/ericc59/Dev/pylon/prompts/claude-handoff/00-shared-context.md` as shared context.
 
 Goal:
 Add a Postgres introspection skeleton so the storage layer has a path toward parity with SQLite.

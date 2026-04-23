@@ -7,7 +7,7 @@
  *
  * @example
  * ```typescript
- * import { mutation, v } from "@statecraft/functions";
+ * import { mutation, v } from "@pylonsync/functions";
  *
  * export default mutation({
  *   args: {

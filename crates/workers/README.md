@@ -1,4 +1,4 @@
-# statecraft-workers
+# pylon-workers
 
 **Status: experimental / unverified.** This crate has been built and its
 unit tests pass, but it has never been deployed end-to-end to Cloudflare
@@ -54,7 +54,7 @@ surface without live testing. Use at your own risk.
 The safe subset you can depend on:
 
 ```rust
-use statecraft_workers::{D1DataStore, D1Executor, NoopAll};
+use pylon_workers::{D1DataStore, D1Executor, NoopAll};
 
 // Implement D1Executor for your own DB connection and get a working
 // DataStore for free:
@@ -66,7 +66,7 @@ let store = D1DataStore::new(MyExecutor { /* ... */ }, manifest);
 
 For deployment to actual Cloudflare Workers, we recommend waiting until
 this crate has been marked stable. Until then, self-hosting (via the
-`statecraft-runtime` crate) is the supported path.
+`pylon-runtime` crate) is the supported path.
 
 ## Tracking
 

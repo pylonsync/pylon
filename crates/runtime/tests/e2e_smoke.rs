@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
-use statecraft_runtime::Runtime;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_runtime::Runtime;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{client, Message};
 
@@ -69,7 +69,7 @@ fn start_server() -> (u16, Arc<Runtime>) {
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {
-        let _ = statecraft_runtime::server::start(rt2, port);
+        let _ = pylon_runtime::server::start(rt2, port);
     });
 
     // Wait for HTTP socket.

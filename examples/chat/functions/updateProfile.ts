@@ -1,4 +1,4 @@
-import { mutation, v } from "@statecraft/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Update your own profile. Scoped to ctx.auth.userId — you can't edit anyone

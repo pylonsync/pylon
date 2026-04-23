@@ -1,4 +1,4 @@
-//! Pluggable observability hooks for statecraft.
+//! Pluggable observability hooks for pylon.
 //!
 //! Two separate concerns live here:
 //!

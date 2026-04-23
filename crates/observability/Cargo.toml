@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-observability"
+name = "pylon-observability"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

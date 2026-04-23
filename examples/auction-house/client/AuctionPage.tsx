@@ -1,4 +1,4 @@
-import { init, db, useFn } from "@statecraft/react";
+import { init, db, useFn } from "@pylonsync/react";
 
 init({ baseUrl: "http://localhost:4321" });
 

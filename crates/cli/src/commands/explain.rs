@@ -1,4 +1,4 @@
-use statecraft_core::ExitCode;
+use pylon_kernel::ExitCode;
 
 use crate::manifest::load_manifest;
 use crate::output::{print_diagnostics, print_json};
@@ -10,7 +10,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .next()
         .map(|s| s.as_str());
 
-    let manifest_path = path.unwrap_or("statecraft.manifest.json");
+    let manifest_path = path.unwrap_or("pylon.manifest.json");
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,

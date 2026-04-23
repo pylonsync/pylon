@@ -1,4 +1,4 @@
-# Auction House — statecraft example
+# Auction House — pylon example
 
 A timed-auction marketplace. Demonstrates:
 
@@ -18,7 +18,7 @@ A timed-auction marketplace. Demonstrates:
 
 ```sh
 cd examples/auction-house
-statecraft dev
+pylon dev
 ```
 
 Open http://localhost:4321/studio to inspect entities.
@@ -27,7 +27,7 @@ Open http://localhost:4321/studio to inspect entities.
 
 | File | Why |
 |---|---|
-| `statecraft.manifest.json` | The data model and what's exposed |
+| `pylon.manifest.json` | The data model and what's exposed |
 | `functions/placeBid.ts` | The bidding transaction — every check inline |
 | `functions/settleListing.ts` | Atomic balance transfer |
 | `functions/createListing.ts` | Scheduling future work |

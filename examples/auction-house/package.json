@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "statecraft dev"
+    "dev": "pylon dev"
   },
   "dependencies": {
-    "@statecraft/functions": "workspace:*",
-    "@statecraft/react": "workspace:*",
-    "@statecraft/sdk": "workspace:*"
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sdk": "workspace:*"
   }
 }

@@ -9,8 +9,8 @@
 //! worker-build --release --features workers
 //! ```
 
-use statecraft_http::HttpMethod;
-use statecraft_router::{route, RouterContext};
+use pylon_http::HttpMethod;
+use pylon_router::{route, RouterContext};
 use worker::*;
 
 use crate::d1_store::{D1DataStore, D1Executor};
@@ -79,21 +79,21 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     // Load manifest from a KV/env binding.
     let manifest_json = env
-        .var("STATECRAFT_MANIFEST_JSON")
+        .var("PYLON_MANIFEST_JSON")
         .map(|v| v.to_string())
         .unwrap_or_else(|_| "{}".into());
-    let manifest: statecraft_core::AppManifest =
+    let manifest: pylon_kernel::AppManifest =
         serde_json::from_str(&manifest_json).unwrap_or_else(|_| empty_manifest());
 
-    let d1 = env.d1("STATECRAFT_DB")?;
+    let d1 = env.d1("PYLON_DB")?;
     let executor = WorkerD1Executor::new(d1);
     let store = D1DataStore::new(executor, manifest.clone());
 
-    let session_store = statecraft_auth::SessionStore::new();
-    let magic_codes = statecraft_auth::MagicCodeStore::new();
-    let oauth_state = statecraft_auth::OAuthStateStore::new();
-    let policy_engine = statecraft_policy::PolicyEngine::from_manifest(&manifest);
-    let change_log = statecraft_sync::ChangeLog::new();
+    let session_store = pylon_auth::SessionStore::new();
+    let magic_codes = pylon_auth::MagicCodeStore::new();
+    let oauth_state = pylon_auth::OAuthStateStore::new();
+    let policy_engine = pylon_policy::PolicyEngine::from_manifest(&manifest);
+    let change_log = pylon_sync::ChangeLog::new();
     let auth_ctx = session_store.resolve(auth_token.as_deref());
     let noop = NoopAll::new(&manifest);
     let email = NoopEmailSender;
@@ -105,7 +105,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         oauth_state: &oauth_state,
         policy_engine: &policy_engine,
         change_log: &change_log,
-        notifier: &statecraft_router::NoopNotifier,
+        notifier: &pylon_router::NoopNotifier,
         rooms: &noop,
         cache: &noop,
         pubsub: &noop,
@@ -117,7 +117,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         functions: None,
         email: &email,
         shards: None,
-        plugin_hooks: &statecraft_router::NoopPluginHooks,
+        plugin_hooks: &pylon_router::NoopPluginHooks,
         auth_ctx: &auth_ctx,
         is_dev: false,
         // Workers doesn't forward request headers into the router yet —
@@ -143,9 +143,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .with_headers(headers))
 }
 
-fn empty_manifest() -> statecraft_core::AppManifest {
-    statecraft_core::AppManifest {
-        manifest_version: statecraft_core::MANIFEST_VERSION,
+fn empty_manifest() -> pylon_kernel::AppManifest {
+    pylon_kernel::AppManifest {
+        manifest_version: pylon_kernel::MANIFEST_VERSION,
         name: "workers".into(),
         version: "0.1.0".into(),
         entities: vec![],
@@ -158,7 +158,7 @@ fn empty_manifest() -> statecraft_core::AppManifest {
 
 struct NoopEmailSender;
 
-impl statecraft_router::EmailSender for NoopEmailSender {
+impl pylon_router::EmailSender for NoopEmailSender {
     fn send(&self, _to: &str, _subject: &str, _body: &str) -> std::result::Result<(), String> {
         // Workers env can configure email via their own transport; a follow-up
         // will add a Workers-compatible HTTP transport using `fetch`.

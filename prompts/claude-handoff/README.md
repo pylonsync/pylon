@@ -1,6 +1,6 @@
 # Claude Handoff Prompts
 
-These prompts are for continuing `statecraft` development without re-deriving context from chat history.
+These prompts are for continuing `pylon` development without re-deriving context from chat history.
 
 Use order:
 

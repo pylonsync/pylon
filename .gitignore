@@ -17,21 +17,21 @@ dist/
 !.env.example
 !.env.*.example
 
-# Generated TS client — regenerated on every `statecraft dev`
+# Generated TS client — regenerated on every `pylon dev`
 agentdb.client.ts
 
-# Legacy dev-DB layout (pre .statecraft/). Keep for old checkouts.
+# Legacy dev-DB layout (pre .pylon/). Keep for old checkouts.
 agentdb.dev.db
-statecraft.dev.db
-statecraft.dev.db-*
-statecraft.dev.db.*
-statecraft.sessions.db
-statecraft.sessions.db-*
-statecraft.jobs.db
-statecraft.jobs.db-*
+pylon.dev.db
+pylon.dev.db-*
+pylon.dev.db.*
+pylon.sessions.db
+pylon.sessions.db-*
+pylon.jobs.db
+pylon.jobs.db-*
 
-# New layout: everything runtime-local under .statecraft/ next to app.ts
-.statecraft/
+# New layout: everything runtime-local under .pylon/ next to app.ts
+.pylon/
 
 # File uploads dumped at project root
 /uploads/

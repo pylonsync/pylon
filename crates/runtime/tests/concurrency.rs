@@ -1,4 +1,4 @@
-//! Concurrency stress tests for statecraft runtime.
+//! Concurrency stress tests for pylon runtime.
 //!
 //! These tests verify that all Mutex-based code is safe under contention and
 //! that concurrent operations do not lose data, deadlock, or panic.
@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField};
-use statecraft_runtime::jobs::JobQueue;
-use statecraft_runtime::rate_limit::RateLimiter;
-use statecraft_runtime::rooms::RoomManager;
-use statecraft_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
-use statecraft_runtime::Runtime;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_runtime::jobs::JobQueue;
+use pylon_runtime::rate_limit::RateLimiter;
+use pylon_runtime::rooms::RoomManager;
+use pylon_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
+use pylon_runtime::Runtime;
 
 // ---------------------------------------------------------------------------
 // Helpers

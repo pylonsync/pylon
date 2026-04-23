@@ -7,7 +7,7 @@ use crate::{
     ColumnSnapshot, FieldSpec, IndexSnapshot, SchemaOperation, SchemaPlan, SchemaSnapshot,
     StorageAdapter, StorageError, TableSnapshot,
 };
-use statecraft_core::AppManifest;
+use pylon_kernel::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Type mapping: manifest field types -> SQLite column types
@@ -169,7 +169,7 @@ impl StorageAdapter for SqliteAdapter {
 // Migration history
 // ---------------------------------------------------------------------------
 
-const HISTORY_TABLE: &str = "_statecraft_schema_history";
+const HISTORY_TABLE: &str = "_pylon_schema_history";
 
 /// A single row from the schema push history table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -484,7 +484,7 @@ impl SqliteAdapter {
         // Get all user tables, sorted for determinism.
         let mut stmt = self
             .conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_statecraft_%' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_pylon_%' ORDER BY name")
             .map_err(sqlite_err)?;
 
         let table_names: Vec<String> = stmt
@@ -592,7 +592,7 @@ fn sqlite_err(e: rusqlite::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::*;
+    use pylon_kernel::*;
 
     fn test_manifest() -> AppManifest {
         AppManifest {
@@ -1136,7 +1136,7 @@ mod tests {
         adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
 
         let snapshot = adapter.read_schema().unwrap();
-        assert!(!snapshot.tables.iter().any(|t| t.name.starts_with("_statecraft")));
+        assert!(!snapshot.tables.iter().any(|t| t.name.starts_with("_pylon")));
     }
 
     // -- read_history tests --

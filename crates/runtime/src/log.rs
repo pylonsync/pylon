@@ -204,7 +204,7 @@ pub fn init_logger(level: LogLevel) {
 pub fn logger() -> &'static Logger {
     LOGGER
         .get()
-        .expect("statecraft: logger not initialised — call init_logger() first")
+        .expect("pylon: logger not initialised — call init_logger() first")
 }
 
 // ---------------------------------------------------------------------------

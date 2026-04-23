@@ -1,6 +1,6 @@
 //! RESP (Redis Serialization Protocol) parser and serializer.
 //!
-//! Implements RESP2, the wire protocol used by Redis. This allows statecraft's
+//! Implements RESP2, the wire protocol used by Redis. This allows pylon's
 //! cache to be accessed by any standard Redis client library.
 //!
 //! # Wire format

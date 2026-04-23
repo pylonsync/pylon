@@ -64,10 +64,10 @@ pub enum HttpEmailProvider {
 impl HttpEmailTransport {
     /// Create from environment variables.
     ///
-    /// Reads: STATECRAFT_EMAIL_PROVIDER (sendgrid|resend|webhook),
-    /// STATECRAFT_EMAIL_API_KEY, STATECRAFT_EMAIL_FROM, STATECRAFT_EMAIL_ENDPOINT
+    /// Reads: PYLON_EMAIL_PROVIDER (sendgrid|resend|webhook),
+    /// PYLON_EMAIL_API_KEY, PYLON_EMAIL_FROM, PYLON_EMAIL_ENDPOINT
     pub fn from_env() -> Option<Self> {
-        let provider_str = std::env::var("STATECRAFT_EMAIL_PROVIDER").ok()?;
+        let provider_str = std::env::var("PYLON_EMAIL_PROVIDER").ok()?;
         let provider = match provider_str.as_str() {
             "sendgrid" => HttpEmailProvider::SendGrid,
             "resend" => HttpEmailProvider::Resend,
@@ -82,14 +82,14 @@ impl HttpEmailTransport {
             HttpEmailProvider::Resend => {
                 "https://api.resend.com/emails".to_string()
             }
-            HttpEmailProvider::Webhook => std::env::var("STATECRAFT_EMAIL_ENDPOINT").ok()?,
+            HttpEmailProvider::Webhook => std::env::var("PYLON_EMAIL_ENDPOINT").ok()?,
         };
 
         Some(Self {
             endpoint,
-            api_key: std::env::var("STATECRAFT_EMAIL_API_KEY").ok()?,
-            from: std::env::var("STATECRAFT_EMAIL_FROM")
-                .unwrap_or_else(|_| "noreply@statecraft.dev".into()),
+            api_key: std::env::var("PYLON_EMAIL_API_KEY").ok()?,
+            from: std::env::var("PYLON_EMAIL_FROM")
+                .unwrap_or_else(|_| "noreply@pylon.dev".into()),
             provider,
         })
     }
@@ -141,7 +141,7 @@ fn post_json(url: &str, api_key: &str, body: &str) -> Result<(), String> {
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(10))
         .timeout_write(std::time::Duration::from_secs(10))
-        .user_agent("statecraft/0.1")
+        .user_agent("pylon/0.1")
         .build();
 
     match agent

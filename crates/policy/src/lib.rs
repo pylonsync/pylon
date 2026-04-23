@@ -1,5 +1,5 @@
-use statecraft_auth::AuthContext;
-use statecraft_core::{AppManifest, ManifestPolicy};
+use pylon_auth::AuthContext;
+use pylon_kernel::{AppManifest, ManifestPolicy};
 
 // ---------------------------------------------------------------------------
 // Policy evaluation
@@ -951,7 +951,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::ManifestPolicy;
+    use pylon_kernel::ManifestPolicy;
 
     // -----------------------------------------------------------------------
     // New expression grammar: &&, ||, !, parens, nested paths
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 

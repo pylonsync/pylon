@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use statecraft_core::{AppManifest, ManifestEntity};
+use pylon_kernel::{AppManifest, ManifestEntity};
 use rusqlite::Connection;
 
 // ---------------------------------------------------------------------------
@@ -1408,7 +1408,7 @@ impl Runtime {
     // Aggregations — count, sum, avg, min, max, group by
     // -----------------------------------------------------------------------
 
-    /// Run an aggregation query. See [`statecraft_http::DataStore::aggregate`]
+    /// Run an aggregation query. See [`pylon_http::DataStore::aggregate`]
     /// for the spec shape.
     pub fn aggregate(
         &self,
@@ -1675,7 +1675,7 @@ impl Runtime {
 
 /// Generate a lex-sortable, monotonic-ish unique ID.
 ///
-/// Same shape as `statecraft_storage::postgres::generate_id` — fixed-width hex
+/// Same shape as `pylon_storage::postgres::generate_id` — fixed-width hex
 /// of nanoseconds + 8-hex per-process counter (40 chars total). The fixed
 /// width is what makes `WHERE id > $1 ORDER BY id` correct for cursor
 /// pagination: variable-width hex sorts incorrectly at width boundaries
@@ -1748,14 +1748,14 @@ fn row_to_json(row: &rusqlite::Row<'_>, field_names: &[String]) -> serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::{ManifestField, ManifestIndex};
+    use pylon_kernel::{ManifestField, ManifestIndex};
 
     fn test_manifest() -> AppManifest {
         AppManifest {
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
-            entities: vec![statecraft_core::ManifestEntity {
+            entities: vec![pylon_kernel::ManifestEntity {
                 name: "User".into(),
                 fields: vec![
                     ManifestField {
@@ -1796,7 +1796,7 @@ mod tests {
 
     #[test]
     fn reset_for_tests_refuses_file_db() {
-        let dir = std::env::temp_dir().join("statecraft-reset-refuse");
+        let dir = std::env::temp_dir().join("pylon-reset-refuse");
         let _ = std::fs::create_dir_all(&dir);
         let db_path = dir.join("db.sqlite");
         let _ = std::fs::remove_file(&db_path);
@@ -1926,7 +1926,7 @@ mod tests {
 
     #[test]
     fn open_creates_read_pool() {
-        let dir = std::env::temp_dir().join(format!("statecraft_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_read_pool.db");
 
@@ -1948,7 +1948,7 @@ mod tests {
     fn concurrent_reads_dont_block_on_write() {
         use std::sync::Arc;
 
-        let dir = std::env::temp_dir().join(format!("statecraft_conc_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_conc_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_concurrent.db");
 

@@ -1,4 +1,4 @@
-use statecraft_core::AppManifest;
+use pylon_kernel::AppManifest;
 
 /// Generate the Studio inspector as a full React + Tailwind app.
 /// Uses CDN imports so no build step needed.
@@ -115,7 +115,7 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{name} — statecraft Studio</title>
+  <title>{name} — pylon Studio</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- React 19 dropped UMD builds — the v19 URLs return 404 and Studio
        fails to boot with "ReactDOM is not defined". Pin to React 18
@@ -477,7 +477,7 @@ pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
         <div className="max-w-6xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-xl font-semibold">statecraft Studio</h1>
+              <h1 className="text-xl font-semibold">pylon Studio</h1>
               <p className="text-sm text-muted-foreground">{name} v{version}</p>
             </div>
             <div className="flex gap-2">
@@ -1074,7 +1074,7 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 
@@ -1082,7 +1082,7 @@ mod tests {
     fn generates_html() {
         let html = generate_studio_html(&test_manifest(), "http://localhost:4321");
         assert!(html.contains("<!DOCTYPE html>"));
-        assert!(html.contains("statecraft Studio"));
+        assert!(html.contains("pylon Studio"));
         assert!(html.contains("todo-app"));
         assert!(html.contains("tailwindcss"));
         assert!(html.contains("react"));

@@ -9,6 +9,9 @@
 export interface AuthInfo {
   userId: string | null;
   isAdmin: boolean;
+  /** Active tenant id (selected organization) for multi-tenant apps.
+   *  Null when the session hasn't selected one. */
+  tenantId: string | null;
 }
 
 // ---------------------------------------------------------------------------

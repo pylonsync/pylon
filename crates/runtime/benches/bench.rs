@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use statecraft_core::*;
-use statecraft_runtime::Runtime;
+use pylon_kernel::*;
+use pylon_runtime::Runtime;
 
 fn test_manifest() -> AppManifest {
-    serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json")).unwrap()
+    serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json")).unwrap()
 }
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
@@ -32,7 +32,7 @@ fn bench(name: &str, iterations: u32, f: impl Fn()) {
 }
 
 fn main() {
-    println!("\nstatecraft runtime benchmarks\n");
+    println!("\npylon runtime benchmarks\n");
 
     let rt = Runtime::in_memory(test_manifest()).unwrap();
 

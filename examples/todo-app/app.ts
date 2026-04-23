@@ -1,4 +1,4 @@
-import { entity, field, defineRoute, query, action, policy, buildManifest } from "@statecraft/sdk";
+import { entity, field, defineRoute, query, action, policy, buildManifest } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -114,5 +114,5 @@ const manifest = buildManifest({
 });
 
 // Emit canonical manifest JSON to stdout.
-// Used by: statecraft codegen examples/todo-app/app.ts
+// Used by: pylon codegen examples/todo-app/app.ts
 console.log(JSON.stringify(manifest, null, 2));

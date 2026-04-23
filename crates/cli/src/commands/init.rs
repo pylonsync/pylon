@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use statecraft_core::{Diagnostic, ExitCode, Severity};
+use pylon_kernel::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
@@ -49,7 +49,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "INIT_NO_PATH".into(),
                     message: "No target path provided".into(),
                     span: None,
-                    hint: Some("Usage: statecraft init <path> [--template basic]".into()),
+                    hint: Some("Usage: pylon init <path> [--template basic]".into()),
                 }],
                 json_mode,
             );
@@ -140,8 +140,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         "private": true,
         "type": "module",
         "scripts": {
-            "codegen": "statecraft codegen app.ts --out statecraft.manifest.json",
-            "doctor": "statecraft doctor statecraft.manifest.json",
+            "codegen": "pylon codegen app.ts --out pylon.manifest.json",
+            "doctor": "pylon doctor pylon.manifest.json",
             "check": "tsc -p tsconfig.json --noEmit"
         }
     }))
@@ -173,7 +173,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     let entry_path = target.join("app.ts");
-    let manifest_path = target.join("statecraft.manifest.json");
+    let manifest_path = target.join("pylon.manifest.json");
     let entry_str = entry_path.to_string_lossy().to_string();
 
     match run_bun_codegen(&entry_str) {
@@ -187,7 +187,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         message: format!("Files created but could not write manifest: {e}"),
                         span: None,
                         hint: Some(
-                            "Run 'statecraft codegen app.ts --out statecraft.manifest.json' manually"
+                            "Run 'pylon codegen app.ts --out pylon.manifest.json' manually"
                                 .into(),
                         ),
                     }],
@@ -198,7 +198,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             // Generate client bindings.
             if let Ok(manifest) = parse_manifest(&manifest_json, &entry_str) {
                 let client_ts = generate_client_ts(&manifest);
-                let client_path = target.join("statecraft.client.ts");
+                let client_path = target.join("pylon.client.ts");
                 let _ = std::fs::write(&client_path, client_ts);
             }
         }
@@ -214,12 +214,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 .unwrap_or(true);
             let hint = if bun_missing {
                 if cfg!(target_os = "windows") {
-                    "Install Bun first: powershell -c \"irm bun.sh/install.ps1 | iex\", then: statecraft codegen app.ts --out statecraft.manifest.json".to_string()
+                    "Install Bun first: powershell -c \"irm bun.sh/install.ps1 | iex\", then: pylon codegen app.ts --out pylon.manifest.json".to_string()
                 } else {
-                    "Install Bun first: curl -fsSL https://bun.sh/install | bash, then: statecraft codegen app.ts --out statecraft.manifest.json".to_string()
+                    "Install Bun first: curl -fsSL https://bun.sh/install | bash, then: pylon codegen app.ts --out pylon.manifest.json".to_string()
                 }
             } else {
-                "Run 'statecraft codegen app.ts --out statecraft.manifest.json' manually".to_string()
+                "Run 'pylon codegen app.ts --out pylon.manifest.json' manually".to_string()
             };
             print_diagnostics(
                 &[Diagnostic {
@@ -243,11 +243,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|(name, _)| format!("{target_display}/{name}"))
         .collect();
     if manifest_path.exists() {
-        file_list.push(format!("{target_display}/statecraft.manifest.json"));
+        file_list.push(format!("{target_display}/pylon.manifest.json"));
     }
-    let client_path = target.join("statecraft.client.ts");
+    let client_path = target.join("pylon.client.ts");
     if client_path.exists() {
-        file_list.push(format!("{target_display}/statecraft.client.ts"));
+        file_list.push(format!("{target_display}/pylon.client.ts"));
     }
 
     if json_mode {
@@ -264,16 +264,16 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             println!("  {name}");
         }
         if manifest_path.exists() {
-            println!("  statecraft.manifest.json");
+            println!("  pylon.manifest.json");
         }
         if client_path.exists() {
-            println!("  statecraft.client.ts");
+            println!("  pylon.client.ts");
         }
         println!();
         println!("Next steps:");
         println!("  cd {target_display}");
-        println!("  statecraft doctor statecraft.manifest.json");
-        println!("  statecraft explain statecraft.manifest.json");
+        println!("  pylon doctor pylon.manifest.json");
+        println!("  pylon explain pylon.manifest.json");
     }
 
     ExitCode::Ok

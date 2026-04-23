@@ -6,7 +6,7 @@ import { CodeLines } from "@/lib/highlight";
 function InstallCmd() {
   const [copied, setCopied] = React.useState(false);
   const onClick = () => {
-    const text = "cargo install statecraft-cli";
+    const text = "cargo install pylon-cli";
     navigator.clipboard?.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 1400);
@@ -18,7 +18,7 @@ function InstallCmd() {
       aria-label="Copy install command"
     >
       <span className="dollar">$</span>
-      <span>cargo install statecraft-cli</span>
+      <span>cargo install pylon-cli</span>
       <svg
         className="copy-ico"
         viewBox="0 0 24 24"
@@ -127,10 +127,10 @@ function ChatDemo() {
 
 function HeroTerminal() {
   const lines = [
-    { t: "prompt", v: "❯ ", c: "cargo install statecraft-cli" },
-    { t: "out", v: "   Compiling statecraft-cli v0.8.2" },
+    { t: "prompt", v: "❯ ", c: "cargo install pylon-cli" },
+    { t: "out", v: "   Compiling pylon-cli v0.8.2" },
     { t: "out-ok", v: "    Finished release in 41.2s" },
-    { t: "prompt", v: "❯ ", c: "statecraft dev" },
+    { t: "prompt", v: "❯ ", c: "pylon dev" },
     { t: "out", v: "  schema  · 12 tables loaded" },
     { t: "out", v: "  shards  · 4 rooms · area-of-interest: 64m" },
     { t: "out-accent", v: "  serving on http://localhost:4242" },

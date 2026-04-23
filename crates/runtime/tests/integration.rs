@@ -1,4 +1,4 @@
-//! Integration tests for the statecraft HTTP server.
+//! Integration tests for the pylon HTTP server.
 //!
 //! Each test starts a real in-memory server on a random port and exercises
 //! the API over plain HTTP using a minimal `TcpStream`-based client.
@@ -9,8 +9,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use statecraft_core::*;
-use statecraft_runtime::Runtime;
+use pylon_kernel::*;
+use pylon_runtime::Runtime;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -182,7 +182,7 @@ fn start_test_server() -> String {
 
     let rt = Arc::clone(&runtime);
     std::thread::spawn(move || {
-        let _ = statecraft_runtime::server::start(rt, port);
+        let _ = pylon_runtime::server::start(rt, port);
     });
 
     // Poll until the server is accepting connections.

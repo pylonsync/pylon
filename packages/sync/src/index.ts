@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// statecraft sync client — local-first sync engine
+// pylon sync client — local-first sync engine
 // ---------------------------------------------------------------------------
 
 export { IndexedDBPersistence, persistChange } from "./persistence";
@@ -21,6 +21,21 @@ export interface PullResponse {
   changes: ChangeEvent[];
   cursor: SyncCursor;
   has_more: boolean;
+}
+
+/**
+ * Server-resolved auth/session state. Shape mirrors what `/api/auth/me`
+ * returns (which is `AuthContext` from the Rust side, with camelCase
+ * normalization on the way out).
+ *
+ * `userId=null` means anonymous. `tenantId=null` means the user hasn't
+ * selected an org yet (or the backend is single-tenant).
+ */
+export interface ResolvedSession {
+  userId: string | null;
+  tenantId: string | null;
+  isAdmin: boolean;
+  roles: string[];
 }
 
 export interface PushResponse {
@@ -157,9 +172,13 @@ export class LocalStore {
 
     if (this._persistFn) {
       for (const change of changes) {
-        // Fire-and-forget: errors are caller-observable via the promise but
-        // we don't block the in-memory apply on disk I/O in the sync path.
-        void this._persistFn(change);
+        // Persist from the post-merge row in memory so updates don't
+        // overwrite the on-disk mirror with just the patched columns.
+        // `applyChange` already merged update.data into the existing row
+        // (see case "update" above); the raw `change.data` only contains
+        // the patch and would drop every other column on save.
+        const merged = this.hydrateFromMemory(change);
+        void this._persistFn(merged);
       }
     }
   }
@@ -177,9 +196,22 @@ export class LocalStore {
     }
     this.notify();
     if (this._persistFn) {
-      const results = changes.map((c) => this._persistFn!(c));
+      const results = changes.map((c) => this._persistFn!(this.hydrateFromMemory(c)));
       await Promise.all(results.map((r) => (r instanceof Promise ? r : Promise.resolve())));
     }
+  }
+
+  /**
+   * Reshape a change event so its `data` field matches the row as it now
+   * exists in memory after `applyChange` merged the patch. Persistence
+   * callers (IndexedDB) save the full row, which only works if they
+   * receive the full row. Deletes pass through untouched.
+   */
+  private hydrateFromMemory(change: ChangeEvent): ChangeEvent {
+    if (change.kind === "delete") return change;
+    const merged = this.tables.get(change.entity)?.get(change.row_id);
+    if (!merged) return change;
+    return { ...change, data: merged };
   }
 
   /** Set a persistence callback for auto-saving changes. The return type is
@@ -229,6 +261,18 @@ export class LocalStore {
     // server's real delete event arrives it will refresh the tombstone with
     // the authoritative seq (via `recordTombstone`'s max-of).
     this.recordTombstone(entity, id, Number.MAX_SAFE_INTEGER);
+    this.notify();
+  }
+
+  /**
+   * Drop every table + tombstone in-place, then notify. Used by the sync
+   * engine's `resetReplica()` on identity flip (token or tenant changed —
+   * the old replica reflects a different visible set). Kept on
+   * `LocalStore` so the `tables`/`tombstones` maps stay private.
+   */
+  clearAll(): void {
+    this.tables.clear();
+    this.tombstones.clear();
     this.notify();
   }
 }
@@ -391,7 +435,7 @@ export interface SyncEngineConfig {
 function generateClientId(): string {
   try {
     if (typeof window !== "undefined" && window.localStorage) {
-      const key = "statecraft:client_id";
+      const key = "pylon:client_id";
       const existing = window.localStorage.getItem(key);
       if (existing) return existing;
       const fresh = newUuidLike();
@@ -454,9 +498,39 @@ export class SyncEngine {
    * Uses `undefined` as the "never observed" sentinel so we can distinguish
    * "first pull ever" from "explicitly anonymous". A first pull doesn't
    * reset (nothing to reset), but every later transition — including
-   * null→token — does.
+   * null→token → does.
    */
   private lastSeenToken: string | null | undefined = undefined;
+
+  /**
+   * Latest server-resolved auth/session state. Refreshed on every pull()
+   * by fetching /api/auth/me in parallel. Exposed to consumers via
+   * `resolvedSession` so React hooks can subscribe via the store.
+   *
+   * Subscribers re-render when this updates — we reuse the store's
+   * notifier rather than introduce a second pub/sub so every change the
+   * app cares about goes through one channel.
+   */
+  private _resolvedSession: ResolvedSession = {
+    userId: null,
+    tenantId: null,
+    isAdmin: false,
+    roles: [],
+  };
+  private lastSeenTenant: string | null | undefined = undefined;
+
+  /**
+   * Timer for the "stable connection" check. On `onopen` we start a 5s
+   * timer; if the socket stays up that long we reset reconnectAttempts.
+   * If it closes first, the timer gets cleared and the backoff grows so
+   * the client can't hammer the server on auth failures.
+   */
+  private wsStableTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Read the cached resolved session. Null user = anonymous. */
+  resolvedSession(): ResolvedSession {
+    return this._resolvedSession;
+  }
 
   constructor(config: SyncEngineConfig) {
     this.config = config;
@@ -557,6 +631,12 @@ export class SyncEngine {
       }
     }
 
+    // Seed the server-resolved session before the first pull so
+    // `useSession` subscribers see the right tenant from frame one, and
+    // `lastSeenTenant` is populated before any subsequent flip can race
+    // with it.
+    await this.refreshResolvedSession();
+
     // Pull from server, then connect real-time transport.
     await this.pull();
 
@@ -606,18 +686,36 @@ export class SyncEngine {
     if (!this.running) return;
 
     const wsUrl = this.config.wsUrl ?? this.deriveWsUrl();
+    // Browser WebSocket has no header API — the server accepts the token
+    // as a `bearer.<percent-encoded-token>` subprotocol (RFC 6455 §1.9).
+    // Native clients can still set Authorization: Bearer via headers.
+    const token =
+      this.config.token ??
+      (typeof window !== "undefined" && window.localStorage
+        ? window.localStorage.getItem(this.tokenStorageKey()) ?? undefined
+        : undefined);
     try {
-      this.ws = new WebSocket(wsUrl);
+      if (token) {
+        const proto = `bearer.${encodeURIComponent(token)}`;
+        this.ws = new WebSocket(wsUrl, proto);
+      } else {
+        this.ws = new WebSocket(wsUrl);
+      }
     } catch {
       this.scheduleReconnect();
       return;
     }
 
+    // Backoff reset is delayed — a socket that opens then closes inside
+    // a few seconds (auth failure, server 1008) would otherwise let the
+    // reconnect loop fire at ~2/sec forever. Only call the connection
+    // "stable" after it's stayed up long enough to have been doing work.
     this.ws.onopen = () => {
-      // Reset backoff so the next drop starts fresh rather than inheriting
-      // the last storm's cooldown. Without this, long-lived sessions
-      // accumulate attempts across unrelated outages and hit the cap.
-      this.reconnectAttempts = 0;
+      if (this.wsStableTimer) clearTimeout(this.wsStableTimer);
+      this.wsStableTimer = setTimeout(() => {
+        this.reconnectAttempts = 0;
+        this.wsStableTimer = null;
+      }, 5_000);
     };
 
     this.ws.onmessage = (event) => {
@@ -651,6 +749,13 @@ export class SyncEngine {
 
     this.ws.onclose = () => {
       this.ws = null;
+      // Socket closed before the stable-window timer fired — treat this
+      // as an unstable connection and DO NOT reset reconnectAttempts.
+      // The growing backoff protects the server from a tight loop.
+      if (this.wsStableTimer) {
+        clearTimeout(this.wsStableTimer);
+        this.wsStableTimer = null;
+      }
       this.scheduleReconnect();
     };
 
@@ -763,9 +868,7 @@ export class SyncEngine {
    */
   async resetReplica(): Promise<void> {
     this.cursor = { last_seq: 0 };
-    this.store.tables.clear();
-    this.store.tombstones.clear();
-    this.store.notify();
+    this.store.clearAll();
     if (this.persistence) {
       try {
         await this.persistence.saveCursor(this.cursor);
@@ -782,7 +885,7 @@ export class SyncEngine {
    */
   private tokenStorageKey(): string {
     const app = this.config.appName || "default";
-    return app === "default" ? "statecraft_token" : `statecraft:${app}:token`;
+    return app === "default" ? "pylon_token" : `pylon:${app}:token`;
   }
 
   /** Current auth token from config or localStorage. Null when neither has one. */
@@ -805,6 +908,9 @@ export class SyncEngine {
       this.lastSeenToken !== tokenNow
     ) {
       await this.resetReplica();
+      // Token flipped → the cached tenant is for the previous user. Pull
+      // the fresh session in parallel with the cursor catch-up below.
+      void this.refreshResolvedSession();
     }
     this.lastSeenToken = tokenNow;
 
@@ -853,6 +959,79 @@ export class SyncEngine {
         await this.pull();
       }
     }
+  }
+
+  /**
+   * Fetch `/api/auth/me` and update the cached `_resolvedSession`. Callers:
+   *   - `start()` — initial load
+   *   - the token-flip branch in `pull()`
+   *   - `notifySessionChanged()` — app code invokes this after it mutates
+   *     server session state (login, logout, `/api/auth/select-org`) so the
+   *     cached session + React subscribers update immediately instead of
+   *     waiting for the next pull/reconnect cycle.
+   *
+   * On tenant flip this also resets the replica — same logic as the
+   * token-flip path, for the same reason (visible set changed).
+   */
+  async refreshResolvedSession(): Promise<void> {
+    try {
+      const res = await this.rawFetch("/api/auth/me");
+      if (!res.ok) return;
+      const raw = (await res.json()) as {
+        user_id?: string | null;
+        tenant_id?: string | null;
+        is_admin?: boolean;
+        roles?: string[];
+      };
+      const next: ResolvedSession = {
+        userId: raw.user_id ?? null,
+        tenantId: raw.tenant_id ?? null,
+        isAdmin: raw.is_admin ?? false,
+        roles: raw.roles ?? [],
+      };
+      const tenantNow = next.tenantId;
+      // First observation seeds lastSeenTenant without a reset — we have
+      // nothing to invalidate yet. Subsequent changes flip the replica.
+      if (
+        this.lastSeenTenant !== undefined &&
+        this.lastSeenTenant !== tenantNow
+      ) {
+        await this.resetReplica();
+      }
+      this.lastSeenTenant = tenantNow;
+      const prev = this._resolvedSession;
+      const changed =
+        prev.userId !== next.userId ||
+        prev.tenantId !== next.tenantId ||
+        prev.isAdmin !== next.isAdmin ||
+        prev.roles.join(",") !== next.roles.join(",");
+      if (changed) {
+        this._resolvedSession = next;
+        // Piggy-back on the store notifier so `useSession` re-renders via
+        // useSyncExternalStore without a second pub/sub channel.
+        this.store.notify();
+      }
+    } catch {
+      // Swallow — /api/auth/me errors are transient and the next pull
+      // will retry. Don't take down the sync loop for this.
+    }
+  }
+
+  private async rawFetch(path: string): Promise<Response> {
+    const headers: Record<string, string> = {};
+    const token = this.currentToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return fetch(`${this.config.baseUrl}${path}`, { headers });
+  }
+
+  /**
+   * Public alias for `refreshResolvedSession`. Call after anything that
+   * mutates the server session (sign-in, sign-out, `/api/auth/select-org`)
+   * so the cached session and React subscribers pick up the change without
+   * waiting for the next pull.
+   */
+  notifySessionChanged(): Promise<void> {
+    return this.refreshResolvedSession();
   }
 
   /**
@@ -1069,7 +1248,7 @@ export class SyncEngine {
     const headers: Record<string, string> = {};
     if (body) headers["Content-Type"] = "application/json";
     // Prefer the token explicitly configured on the engine; fall back to
-    // the conventional localStorage key that `@statecraft/react`'s auth
+    // the conventional localStorage key that `@pylonsync/react`'s auth
     // helpers store. Without this fallback, the sync engine runs as an
     // anonymous caller and gets rate-limited into a 429 reconnect storm
     // once the anon bucket fills.
@@ -1114,7 +1293,7 @@ export interface HydrationData {
 }
 
 /**
- * Server-side helper: fetch entities from the statecraft API and return
+ * Server-side helper: fetch entities from the pylon API and return
  * hydration data that can be passed to the client's SyncEngine.hydrate().
  *
  * Use this in Next.js server components, getServerSideProps, or route handlers.
@@ -1163,15 +1342,13 @@ export async function getServerData(
 // Convenience factory
 // ---------------------------------------------------------------------------
 
-/** Create a sync engine connected to the statecraft dev server. */
+/** Create a sync engine connected to the pylon dev server. */
 export function createSyncEngine(
   baseUrl = "http://localhost:4321",
-  options?: { token?: string; reconnectDelay?: number; wsUrl?: string }
+  options?: Partial<SyncEngineConfig>,
 ): SyncEngine {
   return new SyncEngine({
+    ...(options ?? {}),
     baseUrl,
-    token: options?.token,
-    reconnectDelay: options?.reconnectDelay,
-    wsUrl: options?.wsUrl,
   });
 }

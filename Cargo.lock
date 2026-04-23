@@ -1001,6 +1001,237 @@ dependencies = [
 ]
 
 [[package]]
+name = "pylon-action"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-auth"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "pylon-cli"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "pylon-migrate",
+ "pylon-plugin",
+ "pylon-runtime",
+ "pylon-schema",
+ "pylon-staticgen",
+ "pylon-storage",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pylon-functions"
+version = "0.1.0"
+dependencies = [
+ "pylon-http",
+ "pylon-kernel",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pylon-http"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-kernel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "pylon-migrate"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-observability"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pylon-plugin"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "hmac 0.12.1",
+ "pylon-auth",
+ "pylon-kernel",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "pylon-policy"
+version = "0.1.0"
+dependencies = [
+ "pylon-auth",
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-query"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-realtime"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "pylon-kernel",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pylon-router"
+version = "0.1.0"
+dependencies = [
+ "pylon-auth",
+ "pylon-functions",
+ "pylon-http",
+ "pylon-kernel",
+ "pylon-policy",
+ "pylon-realtime",
+ "pylon-sync",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pylon-runtime"
+version = "0.1.0"
+dependencies = [
+ "pylon-auth",
+ "pylon-functions",
+ "pylon-http",
+ "pylon-kernel",
+ "pylon-migrate",
+ "pylon-observability",
+ "pylon-plugin",
+ "pylon-policy",
+ "pylon-realtime",
+ "pylon-router",
+ "pylon-storage",
+ "pylon-studio-api",
+ "pylon-sync",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiny_http",
+ "tracing",
+ "tungstenite",
+]
+
+[[package]]
+name = "pylon-schema"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+]
+
+[[package]]
+name = "pylon-staticgen"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-storage"
+version = "0.1.0"
+dependencies = [
+ "postgres",
+ "pylon-http",
+ "pylon-kernel",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "pylon-studio-api"
+version = "0.1.0"
+dependencies = [
+ "pylon-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-sync"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pylon-workers"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "pylon-auth",
+ "pylon-http",
+ "pylon-kernel",
+ "pylon-policy",
+ "pylon-realtime",
+ "pylon-router",
+ "pylon-sync",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_json",
+ "wasm-bindgen",
+ "worker",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1365,237 +1596,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "statecraft-action"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-auth"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "statecraft-cli"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "statecraft-core",
- "statecraft-migrate",
- "statecraft-plugin",
- "statecraft-runtime",
- "statecraft-schema",
- "statecraft-staticgen",
- "statecraft-storage",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "statecraft-core"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "statecraft-functions"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "statecraft-core",
- "statecraft-http",
- "tracing",
-]
-
-[[package]]
-name = "statecraft-http"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-migrate"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-observability"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "statecraft-plugin"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "hmac 0.12.1",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "statecraft-auth",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-policy"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-auth",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-query"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-realtime"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "rmp-serde",
- "serde",
- "serde_json",
- "statecraft-core",
- "tracing",
-]
-
-[[package]]
-name = "statecraft-router"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "statecraft-auth",
- "statecraft-core",
- "statecraft-functions",
- "statecraft-http",
- "statecraft-policy",
- "statecraft-realtime",
- "statecraft-sync",
- "tracing",
-]
-
-[[package]]
-name = "statecraft-runtime"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.5",
- "rusqlite",
- "serde",
- "serde_json",
- "statecraft-auth",
- "statecraft-core",
- "statecraft-functions",
- "statecraft-http",
- "statecraft-migrate",
- "statecraft-observability",
- "statecraft-plugin",
- "statecraft-policy",
- "statecraft-realtime",
- "statecraft-router",
- "statecraft-storage",
- "statecraft-studio-api",
- "statecraft-sync",
- "tempfile",
- "tiny_http",
- "tracing",
- "tungstenite",
-]
-
-[[package]]
-name = "statecraft-schema"
-version = "0.1.0"
-dependencies = [
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-staticgen"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-storage"
-version = "0.1.0"
-dependencies = [
- "postgres",
- "rusqlite",
- "serde",
- "serde_json",
- "statecraft-core",
- "statecraft-http",
- "tracing",
-]
-
-[[package]]
-name = "statecraft-studio-api"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "statecraft-core",
-]
-
-[[package]]
-name = "statecraft-sync"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "statecraft-workers"
-version = "0.1.0"
-dependencies = [
- "futures",
- "serde",
- "serde-wasm-bindgen 0.6.5",
- "serde_json",
- "statecraft-auth",
- "statecraft-core",
- "statecraft-http",
- "statecraft-policy",
- "statecraft-realtime",
- "statecraft-router",
- "statecraft-sync",
- "wasm-bindgen",
- "worker",
-]
 
 [[package]]
 name = "stringprep"

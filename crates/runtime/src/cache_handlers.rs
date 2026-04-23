@@ -4,7 +4,7 @@
 //! They are used by both the main server (`/api/cache`, `/api/pubsub/*`) and
 //! the standalone cache server (`/cache`, `/pubsub/*`).
 
-use statecraft_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::cache::CachePlugin;
 use crate::pubsub::PubSubBroker;
 
 // ---------------------------------------------------------------------------

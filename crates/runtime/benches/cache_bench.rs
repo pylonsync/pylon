@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use statecraft_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::cache::CachePlugin;
 
 fn bench(name: &str, iterations: u32, mut f: impl FnMut()) {
     // Warmup.
@@ -27,7 +27,7 @@ fn bench(name: &str, iterations: u32, mut f: impl FnMut()) {
 }
 
 fn main() {
-    println!("\nstatecraft cache benchmarks\n");
+    println!("\npylon cache benchmarks\n");
 
     let cache = CachePlugin::new(1_000_000);
 

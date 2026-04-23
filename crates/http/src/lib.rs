@@ -88,7 +88,7 @@ impl std::error::Error for DataError {}
 /// All methods are synchronous to keep the trait `Send + Sync` and simple;
 /// Workers adapters can use `block_on` or similar bridging.
 pub trait DataStore: Send + Sync {
-    fn manifest(&self) -> &statecraft_core::AppManifest;
+    fn manifest(&self) -> &pylon_kernel::AppManifest;
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError>;
 

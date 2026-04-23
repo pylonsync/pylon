@@ -1,4 +1,4 @@
-//! Schema migration engine for statecraft.
+//! Schema migration engine for pylon.
 //!
 //! Diffs an old manifest against a new manifest and produces a list of
 //! SQL migration steps. Supports adding/removing entities, adding/removing
@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use statecraft_core::{AppManifest, ManifestEntity, ManifestField, ManifestIndex};
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestIndex};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -445,7 +445,7 @@ fn create_index_sql(entity_name: &str, idx: &ManifestIndex) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::*;
+    use pylon_kernel::*;
 
     fn manifest(entities: Vec<ManifestEntity>) -> AppManifest {
         AppManifest {

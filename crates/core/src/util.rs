@@ -1,6 +1,6 @@
 //! Shared utilities used across multiple crates.
 //!
-//! These live in `statecraft-core` because `core` has no I/O dependencies
+//! These live in `pylon-kernel` because `core` has no I/O dependencies
 //! and is already a dependency of every other crate.
 
 // ---------------------------------------------------------------------------

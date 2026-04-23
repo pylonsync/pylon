@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// @statecraft/react-native
+// @pylonsync/react-native
 //
-// React Native adapter for statecraft. Provides the same hook-based API as
-// @statecraft/react, plus RN-specific utilities for offline storage and
+// React Native adapter for pylon. Provides the same hook-based API as
+// @pylonsync/react, plus RN-specific utilities for offline storage and
 // network status monitoring.
 // ---------------------------------------------------------------------------
 
@@ -40,8 +40,8 @@ export { useNetworkStatus } from "./useNetworkStatus";
 export type { NetworkStatus } from "./useNetworkStatus";
 
 // Re-export from SDK
-export { defineRoute } from "@statecraft/sdk";
-export type { RouteMode, AppManifest } from "@statecraft/sdk";
+export { defineRoute } from "@pylonsync/sdk";
+export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 
 // Re-export sync engine for direct use
 export {
@@ -50,14 +50,14 @@ export {
   getServerData,
   LocalStore,
   MutationQueue,
-} from "@statecraft/sync";
+} from "@pylonsync/sync";
 export type {
   ChangeEvent,
   SyncCursor,
   PullResponse,
   HydrationData,
   Row,
-} from "@statecraft/sync";
+} from "@pylonsync/sync";
 
 // ---------------------------------------------------------------------------
 // Client context (direct API access without sync engine)

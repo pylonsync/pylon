@@ -7,7 +7,7 @@ pub mod sqlite;
 
 use std::fmt;
 
-use statecraft_core::AppManifest;
+use pylon_kernel::AppManifest;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -344,9 +344,9 @@ impl StorageAdapter for DiffAdapter {
     ) -> Result<SchemaPlan, StorageError> {
         let mut operations = Vec::new();
 
-        let old_entities: std::collections::HashMap<&str, &statecraft_core::ManifestEntity> =
+        let old_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> =
             self.from.entities.iter().map(|e| (e.name.as_str(), e)).collect();
-        let new_entities: std::collections::HashMap<&str, &statecraft_core::ManifestEntity> =
+        let new_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> =
             target.entities.iter().map(|e| (e.name.as_str(), e)).collect();
 
         // Removed entities
@@ -460,7 +460,7 @@ impl StorageAdapter for DiffAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::*;
+    use pylon_kernel::*;
 
     fn minimal_manifest() -> AppManifest {
         AppManifest {

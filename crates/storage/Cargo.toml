@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-storage"
+name = "pylon-storage"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,8 +8,8 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-http = { path = "../http" }
+pylon-kernel = { path = "../core" }
+pylon-http = { path = "../http" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }

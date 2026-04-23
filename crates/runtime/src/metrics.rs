@@ -107,25 +107,25 @@ impl Metrics {
         let options = self.requests_by_method.options.load(Ordering::Relaxed);
 
         format!(
-            "# HELP statecraft_uptime_seconds Server uptime in seconds.\n\
-             # TYPE statecraft_uptime_seconds gauge\n\
-             statecraft_uptime_seconds {uptime}\n\
-             # HELP statecraft_http_requests_total HTTP requests total.\n\
-             # TYPE statecraft_http_requests_total counter\n\
-             statecraft_http_requests_total {total}\n\
-             # HELP statecraft_http_requests_ok_total HTTP requests with 2xx/3xx status.\n\
-             # TYPE statecraft_http_requests_ok_total counter\n\
-             statecraft_http_requests_ok_total {ok}\n\
-             # HELP statecraft_http_requests_errors_total HTTP requests with 4xx/5xx status.\n\
-             # TYPE statecraft_http_requests_errors_total counter\n\
-             statecraft_http_requests_errors_total {err}\n\
-             # HELP statecraft_http_requests_by_method HTTP requests by method.\n\
-             # TYPE statecraft_http_requests_by_method counter\n\
-             statecraft_http_requests_by_method{{method=\"GET\"}} {get}\n\
-             statecraft_http_requests_by_method{{method=\"POST\"}} {post}\n\
-             statecraft_http_requests_by_method{{method=\"PATCH\"}} {patch}\n\
-             statecraft_http_requests_by_method{{method=\"DELETE\"}} {delete}\n\
-             statecraft_http_requests_by_method{{method=\"OPTIONS\"}} {options}\n"
+            "# HELP pylon_uptime_seconds Server uptime in seconds.\n\
+             # TYPE pylon_uptime_seconds gauge\n\
+             pylon_uptime_seconds {uptime}\n\
+             # HELP pylon_http_requests_total HTTP requests total.\n\
+             # TYPE pylon_http_requests_total counter\n\
+             pylon_http_requests_total {total}\n\
+             # HELP pylon_http_requests_ok_total HTTP requests with 2xx/3xx status.\n\
+             # TYPE pylon_http_requests_ok_total counter\n\
+             pylon_http_requests_ok_total {ok}\n\
+             # HELP pylon_http_requests_errors_total HTTP requests with 4xx/5xx status.\n\
+             # TYPE pylon_http_requests_errors_total counter\n\
+             pylon_http_requests_errors_total {err}\n\
+             # HELP pylon_http_requests_by_method HTTP requests by method.\n\
+             # TYPE pylon_http_requests_by_method counter\n\
+             pylon_http_requests_by_method{{method=\"GET\"}} {get}\n\
+             pylon_http_requests_by_method{{method=\"POST\"}} {post}\n\
+             pylon_http_requests_by_method{{method=\"PATCH\"}} {patch}\n\
+             pylon_http_requests_by_method{{method=\"DELETE\"}} {delete}\n\
+             pylon_http_requests_by_method{{method=\"OPTIONS\"}} {options}\n"
         )
     }
 }

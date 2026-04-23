@@ -1,4 +1,4 @@
-use statecraft_core::{Diagnostic, Severity};
+use pylon_kernel::{Diagnostic, Severity};
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------

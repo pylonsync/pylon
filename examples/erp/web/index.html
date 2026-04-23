@@ -265,6 +265,170 @@
       .table tr:last-child td { border-bottom: none; }
       .table tr:hover td { background: var(--surface-hover); }
 
+      /* Filter bar — Attio/Linear style chips */
+      .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 8px;
+        margin-bottom: 16px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      .filter-search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        flex: 1;
+        min-width: 200px;
+      }
+      .filter-search input {
+        flex: 1;
+        border: none;
+        outline: none;
+        background: transparent;
+        font-size: 13px;
+        color: var(--text);
+        padding: 6px 0;
+      }
+      .filter-search input::placeholder {
+        color: var(--text-placeholder);
+      }
+      .filter-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0;
+        font-size: 12px;
+        background: var(--surface-hover);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        overflow: hidden;
+        transition: border-color 100ms ease;
+      }
+      .filter-chip:hover {
+        border-color: var(--border-strong);
+      }
+      .filter-chip-seg {
+        padding: 5px 8px;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: background 80ms ease, color 80ms ease;
+      }
+      .filter-chip-seg:hover {
+        background: var(--surface-active);
+      }
+      .filter-chip-seg.key {
+        color: var(--text);
+        font-weight: 500;
+        border-right: 1px solid var(--border);
+      }
+      .filter-chip-seg.op {
+        color: var(--text-dim);
+        font-style: italic;
+        font-size: 11.5px;
+        border-right: 1px solid var(--border);
+      }
+      .filter-chip-seg.val {
+        color: var(--accent);
+        font-weight: 500;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .filter-chip-remove {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        color: var(--text-dim);
+        transition: color 80ms ease, background 80ms ease;
+      }
+      .filter-chip-remove:hover {
+        color: var(--danger);
+        background: var(--danger-soft);
+      }
+      .filter-add {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 10px;
+        font-size: 12px;
+        color: var(--text-muted);
+        background: transparent;
+        border: 1px dashed var(--border-strong);
+        border-radius: 7px;
+        transition: background 100ms ease, color 100ms ease,
+          border-color 100ms ease, border-style 100ms ease;
+      }
+      .filter-add:hover {
+        color: var(--text);
+        background: var(--surface-hover);
+        border-style: solid;
+      }
+
+      /* Dropdown used by filter editors */
+      .dropdown {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        min-width: 200px;
+        max-height: 320px;
+        overflow-y: auto;
+        padding: 4px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: var(--shadow-lg);
+        z-index: 40;
+        animation: fadeIn 80ms ease-out;
+      }
+      .dropdown-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        font-size: 13px;
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 80ms ease;
+      }
+      .dropdown-item:hover {
+        background: var(--surface-hover);
+      }
+      .dropdown-item.selected {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+      .dropdown-section {
+        padding: 6px 10px 2px;
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      .dropdown-input {
+        display: block;
+        width: 100%;
+        padding: 6px 8px;
+        font-size: 13px;
+        color: var(--text);
+        background: var(--surface-raised);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin: 4px 0;
+      }
+      .dropdown-input:focus {
+        border-color: var(--border-focus);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
       /* Pills */
       .pill {
         display: inline-flex;

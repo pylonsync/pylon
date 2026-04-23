@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::Plugin;
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 use serde_json::Value;
 
 use super::net_guard::is_private_ip;

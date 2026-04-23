@@ -32,7 +32,7 @@ pub struct McpContent {
     pub text: String,
 }
 
-/// MCP Server plugin. Exposes statecraft as an MCP server for AI agents.
+/// MCP Server plugin. Exposes pylon as an MCP server for AI agents.
 /// Provides tools for CRUD operations, queries, actions, and schema inspection.
 pub struct McpPlugin {
     app_name: String,
@@ -176,7 +176,7 @@ impl McpPlugin {
     pub fn resources(&self) -> Vec<McpResource> {
         let mut resources = vec![
             McpResource {
-                uri: "statecraft://schema".into(),
+                uri: "pylon://schema".into(),
                 name: "App Schema".into(),
                 description: "The full app manifest/schema".into(),
                 mime_type: "application/json".into(),
@@ -185,7 +185,7 @@ impl McpPlugin {
 
         for entity in &self.entities {
             resources.push(McpResource {
-                uri: format!("statecraft://entities/{entity}"),
+                uri: format!("pylon://entities/{entity}"),
                 name: format!("{entity} data"),
                 description: format!("All rows in the {entity} entity"),
                 mime_type: "application/json".into(),
@@ -198,9 +198,9 @@ impl McpPlugin {
     /// Generate the MCP server manifest (for tool discovery).
     pub fn server_info(&self) -> Value {
         serde_json::json!({
-            "name": format!("{}-statecraft", self.app_name),
+            "name": format!("{}-pylon", self.app_name),
             "version": "0.1.0",
-            "description": format!("MCP server for {} powered by statecraft", self.app_name),
+            "description": format!("MCP server for {} powered by pylon", self.app_name),
             "tools": self.tools().iter().map(|t| serde_json::json!({
                 "name": t.name,
                 "description": t.description,
@@ -250,8 +250,8 @@ mod tests {
         let resources = plugin.resources();
         // 1 schema + 2 entity resources
         assert_eq!(resources.len(), 3);
-        assert!(resources.iter().any(|r| r.uri == "statecraft://schema"));
-        assert!(resources.iter().any(|r| r.uri == "statecraft://entities/User"));
+        assert!(resources.iter().any(|r| r.uri == "pylon://schema"));
+        assert!(resources.iter().any(|r| r.uri == "pylon://entities/User"));
     }
 
     #[test]

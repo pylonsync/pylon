@@ -1,4 +1,4 @@
-//! Fuzz and property-based tests for statecraft parsers and data structures.
+//! Fuzz and property-based tests for pylon parsers and data structures.
 //!
 //! These tests feed arbitrary, malformed, and edge-case inputs to parsers
 //! and data structure APIs to verify they never panic -- they should return
@@ -6,11 +6,11 @@
 
 use std::io::{BufReader, Cursor};
 
-use statecraft_plugin::builtin::cache::CachePlugin;
-use statecraft_plugin::builtin::file_storage::FileStoragePlugin;
-use statecraft_runtime::cron::CronExpr;
-use statecraft_runtime::resp::parse_resp;
-use statecraft_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
+use pylon_plugin::builtin::cache::CachePlugin;
+use pylon_plugin::builtin::file_storage::FileStoragePlugin;
+use pylon_runtime::cron::CronExpr;
+use pylon_runtime::resp::parse_resp;
+use pylon_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
 
 // ---------------------------------------------------------------------------
 // RESP parser -- must never panic on arbitrary byte sequences
@@ -60,7 +60,7 @@ fn resp_parser_doesnt_panic_on_garbage() {
 /// back to bytes that parse to the same value.
 #[test]
 fn resp_roundtrip_property() {
-    use statecraft_runtime::resp::RespValue;
+    use pylon_runtime::resp::RespValue;
 
     let values = vec![
         RespValue::SimpleString(String::new()),
@@ -247,7 +247,7 @@ fn concurrent_cache_mixed_ops() {
 
 #[test]
 fn file_storage_rejects_traversal_variants() {
-    let dir = std::env::temp_dir().join("statecraft_fuzz_file_storage");
+    let dir = std::env::temp_dir().join("pylon_fuzz_file_storage");
     let storage = FileStoragePlugin::local(&dir).unwrap();
 
     let bad_ids = vec![

@@ -271,7 +271,7 @@ mod tests {
 
     /// Create a temporary directory for test isolation.
     fn test_dir(suffix: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("statecraft_file_storage_test_{suffix}"));
+        let dir = env::temp_dir().join(format!("pylon_file_storage_test_{suffix}"));
         // Ensure a clean slate.
         let _ = fs::remove_dir_all(&dir);
         dir

@@ -1,8 +1,8 @@
 /**
- * Test-side helpers for `statecraft test`.
+ * Test-side helpers for `pylon test`.
  *
  * The CLI already starts each test FILE with a fresh in-memory database
- * (`STATECRAFT_IN_MEMORY=1`), so tests across files never cross-contaminate.
+ * (`PYLON_IN_MEMORY=1`), so tests across files never cross-contaminate.
  * This module covers the finer-grained case: isolating individual
  * `test(...)` blocks within a single file.
  *
@@ -12,7 +12,7 @@
  * 2. **Automatic** — call `installTestIsolation()` at the top of the file
  *    and every `test()` block runs with a reset store.
  *
- * Both require the test file to run under `statecraft test` (not raw
+ * Both require the test file to run under `pylon test` (not raw
  * `bun test`), because resetDb talks to the server via HTTP.
  */
 
@@ -47,7 +47,7 @@ export async function resetDb(
     // isolation still succeed; tests that do will see pollution and fail
     // loudly on their own assertions. Log so authors can debug.
     // eslint-disable-next-line no-console
-    console.warn("[statecraft-test] resetDb skipped:", err?.message ?? err);
+    console.warn("[pylon-test] resetDb skipped:", err?.message ?? err);
   }
 }
 
@@ -64,7 +64,7 @@ export function installTestIsolation(
   } else {
     // eslint-disable-next-line no-console
     console.warn(
-      "[statecraft-test] installTestIsolation: no global beforeEach found — run via `statecraft test` or `bun test`",
+      "[pylon-test] installTestIsolation: no global beforeEach found — run via `pylon test` or `bun test`",
     );
   }
 }

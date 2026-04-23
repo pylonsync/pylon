@@ -1,6 +1,6 @@
 # Admin token rotation
 
-`STATECRAFT_ADMIN_TOKEN` authenticates every privileged route:
+`PYLON_ADMIN_TOKEN` authenticates every privileged route:
 - `/api/auth/session` in non-dev
 - `/api/auth/upgrade` in non-dev
 - `/api/admin/users/:id/export` (GDPR export)
@@ -14,13 +14,13 @@ rotate on any suspicion of compromise.
 
 ## Without downtime (two-token rotation)
 
-The server only reads `STATECRAFT_ADMIN_TOKEN` at startup. Rotation requires
+The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires
 a restart. To do it without dropping traffic:
 
 1. **Prepare**. Generate the new token:
 
    ```sh
-   openssl rand -hex 32 > /etc/statecraft/admin_token.new
+   openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
 2. **Deploy side-by-side**. Start a new instance with the new token, let
@@ -41,7 +41,7 @@ a restart. To do it without dropping traffic:
 1. Generate a new token — skip no-downtime, it's not worth the risk:
 
    ```sh
-   openssl rand -hex 32 > /etc/statecraft/admin_token.new
+   openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
 2. Revoke every active session and force re-login:
@@ -52,12 +52,12 @@ a restart. To do it without dropping traffic:
    ```
 
    If you can't reach the admin API with the old token, stop the
-   service and clear `STATECRAFT_SESSION_DB`:
+   service and clear `PYLON_SESSION_DB`:
 
    ```sh
-   systemctl stop statecraft
-   rm /var/lib/statecraft/sessions.db*
-   systemctl start statecraft
+   systemctl stop pylon
+   rm /var/lib/pylon/sessions.db*
+   systemctl start pylon
    ```
 
 3. Rotate OAuth secrets too — same blast radius if the admin account was

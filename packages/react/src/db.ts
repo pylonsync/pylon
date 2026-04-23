@@ -1,4 +1,4 @@
-import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@statecraft/sync";
+import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@pylonsync/sync";
 import {
   useQuery as useQueryHook,
   useQueryOne as useQueryOneHook,
@@ -31,10 +31,10 @@ let _sync: SyncEngine | null = null;
 let _started = false;
 
 /**
- * Initialize the statecraft client. Call once at app startup.
+ * Initialize the pylon client. Call once at app startup.
  *
  * ```ts
- * import { init } from "@statecraft/react";
+ * import { init } from "@pylonsync/react";
  * init({ baseUrl: "http://localhost:4321" });
  * ```
  */

@@ -17,7 +17,7 @@ export interface RoomSnapshot {
 }
 
 export interface UseRoomOptions {
-  /** Base URL of the statecraft server. */
+  /** Base URL of the pylon server. */
   baseUrl?: string;
   /** Auth token for API requests. */
   token?: string;
@@ -59,7 +59,7 @@ export interface UseRoomReturn {
  * ```
  */
 /**
- * Read the current statecraft token from localStorage, matching the
+ * Read the current pylon token from localStorage, matching the
  * convention used by `callFn` and the sync engine. Keeps the hook working
  * even when the caller doesn't explicitly thread a token — otherwise every
  * useRoom request hits the server as anonymous and 401s under any

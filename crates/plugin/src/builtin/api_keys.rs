@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use sha2::{Sha256, Digest};
 
 use crate::{Plugin, PluginError};
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 
 /// An API key with scoped permissions.
 ///
@@ -58,7 +58,7 @@ fn generate_key() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let bytes: [u8; 24] = rng.gen();
-    format!("statecraft_{}", hex_encode(&bytes))
+    format!("pylon_{}", hex_encode(&bytes))
 }
 
 impl ApiKeysPlugin {
@@ -181,7 +181,7 @@ mod tests {
     fn create_and_resolve() {
         let plugin = ApiKeysPlugin::new();
         let created = plugin.create_key("test-key", "user-1", vec!["read".into(), "write".into()]);
-        assert!(created.raw_key.starts_with("statecraft_"));
+        assert!(created.raw_key.starts_with("pylon_"));
 
         let ctx = plugin.resolve(&created.raw_key).unwrap();
         assert_eq!(ctx.user_id, Some("user-1".into()));
@@ -272,8 +272,8 @@ mod tests {
         let k1 = generate_key();
         let k2 = generate_key();
         assert_ne!(k1, k2);
-        assert!(k1.starts_with("statecraft_"));
-        // "statecraft_" (11) + 48 hex chars (24 bytes) = 59
+        assert!(k1.starts_with("pylon_"));
+        // "pylon_" (11) + 48 hex chars (24 bytes) = 59
         assert_eq!(k1.len(), 59);
     }
 

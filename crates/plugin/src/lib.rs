@@ -1,4 +1,4 @@
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 // Plugin trait — the core contract
 // ---------------------------------------------------------------------------
 
-/// A plugin extends statecraft with custom routes, lifecycle hooks, and entities.
+/// A plugin extends pylon with custom routes, lifecycle hooks, and entities.
 pub trait Plugin: Send + Sync {
     /// Unique name for this plugin.
     fn name(&self) -> &str;
@@ -89,7 +89,7 @@ pub trait Plugin: Send + Sync {
     fn on_session_create(&self, _user_id: &str, _token: &str) {}
 
     /// Additional manifest entities this plugin contributes.
-    fn entities(&self) -> Vec<statecraft_core::ManifestEntity> {
+    fn entities(&self) -> Vec<pylon_kernel::ManifestEntity> {
         vec![]
     }
 }
@@ -137,12 +137,12 @@ pub struct PluginRoute {
 
 /// Context passed to plugins on init.
 pub struct PluginContext {
-    pub manifest: statecraft_core::AppManifest,
+    pub manifest: pylon_kernel::AppManifest,
     pub data: Mutex<HashMap<String, Value>>,
 }
 
 impl PluginContext {
-    pub fn new(manifest: statecraft_core::AppManifest) -> Self {
+    pub fn new(manifest: pylon_kernel::AppManifest) -> Self {
         Self {
             manifest,
             data: Mutex::new(HashMap::new()),
@@ -170,7 +170,7 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
-    pub fn new(manifest: statecraft_core::AppManifest) -> Self {
+    pub fn new(manifest: pylon_kernel::AppManifest) -> Self {
         Self {
             plugins: Vec::new(),
             context: Arc::new(PluginContext::new(manifest)),
@@ -371,9 +371,9 @@ mod tests {
         }
     }
 
-    fn test_manifest() -> statecraft_core::AppManifest {
-        statecraft_core::AppManifest {
-            manifest_version: statecraft_core::MANIFEST_VERSION,
+    fn test_manifest() -> pylon_kernel::AppManifest {
+        pylon_kernel::AppManifest {
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
             entities: vec![],

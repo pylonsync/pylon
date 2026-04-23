@@ -6,9 +6,9 @@ export default defineConfig({
   server: { port: 5174 },
   optimizeDeps: {
     exclude: [
-      "@statecraft/sync",
-      "@statecraft/react",
-      "@statecraft/sdk",
+      "@pylonsync/sync",
+      "@pylonsync/react",
+      "@pylonsync/sdk",
     ],
   },
 });

@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-schema"
+name = "pylon-schema"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -8,5 +8,5 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-statecraft-core = { path = "../core" }
+pylon-kernel = { path = "../core" }
 

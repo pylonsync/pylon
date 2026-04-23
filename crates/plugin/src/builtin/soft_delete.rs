@@ -1,5 +1,5 @@
 use crate::{Plugin, PluginError};
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 
 /// Soft delete plugin. Converts deletes to updates that set `deletedAt`.
 /// Adds a before_delete hook that rejects the actual delete and instead

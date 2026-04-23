@@ -1,5 +1,5 @@
 {
-  "name": "@statecraft/example-erp-web",
+  "name": "@pylonsync/example-erp-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,9 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@statecraft/react": "file:../../../packages/react",
-    "@statecraft/sdk": "file:../../../packages/sdk",
-    "@statecraft/sync": "file:../../../packages/sync",
+    "@pylonsync/react": "file:../../../packages/react",
+    "@pylonsync/sdk": "file:../../../packages/sdk",
+    "@pylonsync/sync": "file:../../../packages/sync",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

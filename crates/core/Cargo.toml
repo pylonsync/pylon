@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-core"
+name = "pylon-kernel"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

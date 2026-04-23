@@ -137,7 +137,7 @@ impl JwtPlugin {
         let signing_input = format!("{}.{}", parts[0], parts[1]);
         let expected_sig = base64url_encode(&hmac_sha256(&self.secret, &signing_input));
 
-        if !statecraft_auth::constant_time_eq(parts[2].as_bytes(), expected_sig.as_bytes()) {
+        if !pylon_auth::constant_time_eq(parts[2].as_bytes(), expected_sig.as_bytes()) {
             return Err("Invalid signature".into());
         }
 

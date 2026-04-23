@@ -3,7 +3,7 @@
 //! These feed the SIZING.md table. Run with:
 //!
 //! ```sh
-//! cargo bench -p statecraft-runtime --bench realtime_bench
+//! cargo bench -p pylon-runtime --bench realtime_bench
 //! ```
 //!
 //! Three axes:
@@ -17,8 +17,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use statecraft_runtime::ws::WsHub;
-use statecraft_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
+use pylon_runtime::ws::WsHub;
+use pylon_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
 
 fn bench(name: &str, iterations: u32, mut f: impl FnMut()) {
     for _ in 0..10 {
@@ -53,7 +53,7 @@ fn sample_event(i: u64) -> ChangeEvent {
 }
 
 fn main() {
-    println!("\nstatecraft realtime benchmarks\n");
+    println!("\npylon realtime benchmarks\n");
 
     // -- ChangeLog append --
     let log = ChangeLog::new();

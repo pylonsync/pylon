@@ -18,7 +18,7 @@ function patternsFor(lang: Lang): Pattern[] {
         re: /\b(string|number|boolean|void|Promise|Array|Record|Partial|Pick)\b/,
       },
       { cls: "num", re: /\b\d+(\.\d+)?\b/ },
-      { cls: "global", re: /\b(db|statecraft|console|window|Math|JSON|Date)\b/ },
+      { cls: "global", re: /\b(db|pylon|console|window|Math|JSON|Date)\b/ },
       { cls: "fn", re: /\b([a-zA-Z_][a-zA-Z0-9_]*)(?=\s*\()/ },
     ];
   }
@@ -52,7 +52,7 @@ function patternsFor(lang: Lang): Pattern[] {
     { cls: "accent", re: /^[$❯>]\s/ },
     {
       cls: "kw",
-      re: /\b(cargo|statecraft|npm|pnpm|yarn|git|curl|cd|mkdir|export)\b/,
+      re: /\b(cargo|pylon|npm|pnpm|yarn|git|curl|cd|mkdir|export)\b/,
     },
     { cls: "num", re: /\b\d+\b/ },
   ];

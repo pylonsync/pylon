@@ -1,5 +1,5 @@
 [package]
-name = "statecraft-workers"
+name = "pylon-workers"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -13,13 +13,13 @@ default = []
 workers = ["dep:worker", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:futures"]
 
 [dependencies]
-statecraft-core = { path = "../core" }
-statecraft-http = { path = "../http" }
-statecraft-router = { path = "../router" }
-statecraft-auth = { path = "../auth" }
-statecraft-policy = { path = "../policy" }
-statecraft-sync = { path = "../sync" }
-statecraft-realtime = { path = "../realtime" }
+pylon-kernel = { path = "../core" }
+pylon-http = { path = "../http" }
+pylon-router = { path = "../router" }
+pylon-auth = { path = "../auth" }
+pylon-policy = { path = "../policy" }
+pylon-sync = { path = "../sync" }
+pylon-realtime = { path = "../realtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

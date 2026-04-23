@@ -154,16 +154,16 @@ pub struct S3Config {
 impl S3Config {
     /// Create from environment variables.
     ///
-    /// Reads: STATECRAFT_S3_BUCKET, STATECRAFT_S3_REGION, STATECRAFT_S3_ENDPOINT,
-    /// STATECRAFT_S3_ACCESS_KEY, STATECRAFT_S3_SECRET_KEY, STATECRAFT_S3_PUBLIC_URL
+    /// Reads: PYLON_S3_BUCKET, PYLON_S3_REGION, PYLON_S3_ENDPOINT,
+    /// PYLON_S3_ACCESS_KEY, PYLON_S3_SECRET_KEY, PYLON_S3_PUBLIC_URL
     pub fn from_env() -> Option<Self> {
         Some(Self {
-            bucket: std::env::var("STATECRAFT_S3_BUCKET").ok()?,
-            region: std::env::var("STATECRAFT_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
-            endpoint: std::env::var("STATECRAFT_S3_ENDPOINT").ok(),
-            access_key: std::env::var("STATECRAFT_S3_ACCESS_KEY").ok()?,
-            secret_key: std::env::var("STATECRAFT_S3_SECRET_KEY").ok()?,
-            public_url_prefix: std::env::var("STATECRAFT_S3_PUBLIC_URL").ok(),
+            bucket: std::env::var("PYLON_S3_BUCKET").ok()?,
+            region: std::env::var("PYLON_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+            endpoint: std::env::var("PYLON_S3_ENDPOINT").ok(),
+            access_key: std::env::var("PYLON_S3_ACCESS_KEY").ok()?,
+            secret_key: std::env::var("PYLON_S3_SECRET_KEY").ok()?,
+            public_url_prefix: std::env::var("PYLON_S3_PUBLIC_URL").ok(),
         })
     }
 }
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn local_store_and_get() {
-        let dir = std::env::temp_dir().join(format!("statecraft_files_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_files_{}", std::process::id()));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
         let stored = storage.store("test.txt", b"hello world", "text/plain").unwrap();
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn local_rejects_traversal() {
-        let dir = std::env::temp_dir().join(format!("statecraft_files2_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_files2_{}", std::process::id()));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
         assert!(storage.get("../etc/passwd").is_err());

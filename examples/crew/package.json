@@ -1,0 +1,10 @@
+{
+  "name": "@pylonsync/example-crew",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@pylonsync/functions": "file:../../packages/functions",
+    "@pylonsync/sdk": "file:../../packages/sdk"
+  }
+}

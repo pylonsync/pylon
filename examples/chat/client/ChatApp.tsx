@@ -1,5 +1,5 @@
 /**
- * Statecraft chat demo.
+ * Pylon chat demo.
  *
  * Exercises: auth sessions, live sync (messages), rooms (typing +
  * presence), reactions via toggleReaction, optimistic sends via
@@ -15,11 +15,11 @@ import {
   callFn,
   configureClient,
   storageKey,
-} from "@statecraft/react";
+} from "@pylonsync/react";
 
 const BASE_URL = "http://localhost:4321";
 // Give this app its own namespace so chat's auth + replica don't clobber
-// any other Statecraft app served from the same browser origin.
+// any other Pylon app served from the same browser origin.
 init({ baseUrl: BASE_URL, appName: "chat" });
 configureClient({ baseUrl: BASE_URL, appName: "chat" });
 
@@ -268,7 +268,7 @@ export function ChatApp() {
           localStorage.removeItem(storageKey("token"));
           localStorage.removeItem(storageKey("user"));
           try {
-            indexedDB.deleteDatabase(`statecraft_sync_chat`);
+            indexedDB.deleteDatabase(`pylon_sync_chat`);
           } catch {}
           setCurrentUser(null);
         }
@@ -345,7 +345,7 @@ export function ChatApp() {
       }).catch(() => {});
     }
     try {
-      indexedDB.deleteDatabase(`statecraft_sync_chat`);
+      indexedDB.deleteDatabase(`pylon_sync_chat`);
     } catch {}
     setCurrentUser(null);
     setActiveChannelId(null);
@@ -379,7 +379,7 @@ export function ChatApp() {
       ) : (
         <div className="main">
           <EmptyState
-            title="Welcome to Statecraft Chat"
+            title="Welcome to Pylon Chat"
             body="Pick a channel on the left or start a direct message."
           />
         </div>
@@ -506,7 +506,7 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
             />
           </svg>
         </div>
-        <div className="login-title">Sign in to Statecraft</div>
+        <div className="login-title">Sign in to Pylon</div>
         <div className="login-subtitle">
           Local-first chat, powered by live sync.
         </div>

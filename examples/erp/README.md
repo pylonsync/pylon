@@ -1,4 +1,4 @@
-# Statecraft ERP — Custom Fabrication
+# Pylon ERP — Custom Fabrication
 
 A multi-tenant B2B ERP for custom door / window / cabinet shops.
 Demonstrates organizations, roles, inventory, orders, and policy-gated
@@ -8,11 +8,11 @@ data access in a single-file app.
 
 ```bash
 # From the repo root:
-cargo build --release -p statecraft-cli
+cargo build --release -p pylon-cli
 
 # Terminal 1: dev server
 cd examples/erp
-../../target/release/statecraft dev
+../../target/release/pylon dev
 
 # Terminal 2: web UI
 cd examples/erp/web

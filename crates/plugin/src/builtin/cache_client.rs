@@ -1,6 +1,6 @@
 //! Remote cache client.
 //!
-//! Connects to a standalone statecraft cache server over HTTP. Provides the
+//! Connects to a standalone pylon cache server over HTTP. Provides the
 //! same logical API as [`CachePlugin`](super::cache::CachePlugin) so callers
 //! can swap between embedded and remote cache without changing application
 //! logic.
@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use statecraft_plugin::builtin::cache_client::RemoteCacheClient;
+//! use pylon_plugin::builtin::cache_client::RemoteCacheClient;
 //!
 //! let client = RemoteCacheClient::new("http://localhost:6380");
 //! client.set("greeting", "hello", None).unwrap();
@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-/// A client that connects to a remote statecraft cache server.
+/// A client that connects to a remote pylon cache server.
 ///
 /// Uses raw HTTP/1.1 over TCP to avoid pulling in heavy HTTP client
 /// dependencies. Each request opens a new connection (`Connection: close`).

@@ -46,7 +46,7 @@ pub trait ShardTransport: Send + Sync {
 
     /// Start accepting connections. Blocking — spawn in a thread/task.
     ///
-    /// The default `statecraft` server spawns one thread per transport. A
+    /// The default `pylon` server spawns one thread per transport. A
     /// Workers deployment doesn't need this — transports there are
     /// per-request handlers driven by the Workers fetch event loop.
     fn serve(&self, registry: Arc<dyn DynShardRegistry>);

@@ -13,7 +13,7 @@ import type {
 // Bumped DB_VERSION: version 2 adds a pendingMutations object store so the
 // offline queue survives restarts. The upgrade handler below creates it on
 // existing databases — users never lose their entity mirror.
-const DB_NAME = "statecraft_sync";
+const DB_NAME = "pylon_sync";
 const DB_VERSION = 2;
 const STORE_NAME = "entities";
 const CURSOR_STORE = "cursors";
@@ -94,6 +94,22 @@ export class IndexedDBPersistence {
     store.put({ _key: `${entity}:${id}`, entity, id, data });
     return new Promise((resolve) => {
       tx.oncomplete = () => resolve();
+    });
+  }
+
+  /** Fetch a row from IndexedDB by key. Used by `persistChange` on update
+   *  events to merge the patch against what's already on disk. */
+  async getRow(entity: string, id: string): Promise<Row | null> {
+    if (!this.db) return null;
+    const tx = this.db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(`${entity}:${id}`);
+    return new Promise((resolve) => {
+      request.onsuccess = () => {
+        const rec = request.result as { data?: Row } | undefined;
+        resolve(rec?.data ?? null);
+      };
+      request.onerror = () => resolve(null);
     });
   }
 
@@ -199,6 +215,10 @@ export async function persistChange(
     case "insert":
     case "update":
       if (change.data) {
+        // Callers upstream (LocalStore.applyChanges/Async) hydrate the
+        // change's `data` with the post-merge row from memory — so even
+        // on update the full row lands here. Overwriting is correct;
+        // pre-merge patches would have dropped unpatched columns.
         await persistence.saveRow(change.entity, change.row_id, change.data);
       }
       break;

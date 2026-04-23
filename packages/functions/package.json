@@ -1,7 +1,7 @@
 {
-  "name": "@statecraft/functions",
+  "name": "@pylonsync/functions",
   "version": "0.1.0",
-  "description": "TypeScript function runtime for statecraft — defines server-side queries, mutations, and actions.",
+  "description": "TypeScript function runtime for pylon — defines server-side queries, mutations, and actions.",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -13,7 +13,7 @@
     "./runtime": "./src/runtime.ts"
   },
   "bin": {
-    "statecraft-functions-runtime": "src/runtime.ts"
+    "pylon-functions-runtime": "src/runtime.ts"
   },
   "files": [
     "src",
@@ -24,7 +24,7 @@
     "build": "tsc"
   },
   "keywords": [
-    "statecraft",
+    "pylon",
     "typescript",
     "functions",
     "database"

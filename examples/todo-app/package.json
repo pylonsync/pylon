@@ -1,10 +1,10 @@
 {
-  "name": "@statecraft/example-todo-app",
+  "name": "@pylonsync/example-todo-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@statecraft/sdk": "workspace:*"
+    "@pylonsync/sdk": "workspace:*"
   },
   "scripts": {
     "generate-manifest": "bun run app.ts",

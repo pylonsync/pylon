@@ -1,4 +1,4 @@
-# Contributing to statecraft
+# Contributing to pylon
 
 Thanks for your interest! Here's how to get set up.
 
@@ -13,7 +13,7 @@ Clone and build:
 
 ```sh
 git clone https://github.com/ericc59/agentdb.git
-cd statecraft
+cd pylon
 cargo build
 bun install
 ```
@@ -30,7 +30,7 @@ servers. Unit tests run fine in parallel.
 Run the dev server against the todo example:
 
 ```sh
-cargo run -p statecraft-cli -- dev examples/todo-app/app.statecraft
+cargo run -p pylon-cli -- dev examples/todo-app/app.pylon
 ```
 
 ## Project layout
@@ -43,7 +43,7 @@ cargo run -p statecraft-cli -- dev examples/todo-app/app.statecraft
 - `crates/functions` — Rust side of the TypeScript function runtime
 - `crates/realtime` — sharded game/collab server
 - `crates/auth`, `crates/policy`, `crates/sync` — self-describing
-- `crates/cli` — the `statecraft` binary
+- `crates/cli` — the `pylon` binary
 - `packages/*` — TypeScript SDK, React hooks, Next.js adapters, function runtime
 
 ## Guidelines
@@ -66,7 +66,7 @@ faster than a rewrite.
 
 - **Bug reports:** include a minimal reproduction. A failing test is ideal.
 - **Feature requests:** describe the use case before the proposed API.
-- **Security vulnerabilities:** email security@statecraft.dev, not a GitHub issue.
+- **Security vulnerabilities:** email security@pylon.dev, not a GitHub issue.
   See `SECURITY.md`.
 
 ## Code style

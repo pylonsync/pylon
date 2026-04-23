@@ -1,14 +1,14 @@
-//! Platform-agnostic HTTP router for statecraft.
+//! Platform-agnostic HTTP router for pylon.
 //!
 //! This crate contains the pure routing logic that maps HTTP requests to
 //! data store operations. It has no I/O dependencies — no `tiny_http`,
 //! no `tungstenite`, no `rusqlite`. It works with any [`DataStore`]
 //! implementation (SQLite Runtime, Cloudflare D1, etc.).
 
-use statecraft_auth::{AuthContext, MagicCodeStore, OAuthStateStore, SessionStore};
-use statecraft_http::{DataError, DataStore, HttpMethod};
-use statecraft_policy::PolicyEngine;
-use statecraft_sync::{ChangeKind, ChangeLog, SyncCursor};
+use pylon_auth::{AuthContext, MagicCodeStore, OAuthStateStore, SessionStore};
+use pylon_http::{DataError, DataStore, HttpMethod};
+use pylon_policy::PolicyEngine;
+use pylon_sync::{ChangeKind, ChangeLog, SyncCursor};
 
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast
@@ -19,7 +19,7 @@ use statecraft_sync::{ChangeKind, ChangeLog, SyncCursor};
 /// On the self-hosted server this broadcasts to WebSocket + SSE hubs.
 /// On Workers this can be a no-op or post to a Durable Object.
 pub trait ChangeNotifier: Send + Sync {
-    fn notify(&self, event: &statecraft_sync::ChangeEvent);
+    fn notify(&self, event: &pylon_sync::ChangeEvent);
     fn notify_presence(&self, json: &str);
 }
 
@@ -27,7 +27,7 @@ pub trait ChangeNotifier: Send + Sync {
 pub struct NoopNotifier;
 
 impl ChangeNotifier for NoopNotifier {
-    fn notify(&self, _event: &statecraft_sync::ChangeEvent) {}
+    fn notify(&self, _event: &pylon_sync::ChangeEvent) {}
     fn notify_presence(&self, _json: &str) {}
 }
 
@@ -136,7 +136,7 @@ pub trait EmailSender: Send + Sync {
 /// Access to sharded real-time simulations (game matches, MMO zones, etc.).
 pub trait ShardOps: Send + Sync {
     /// Look up an existing shard by ID.
-    fn get_shard(&self, id: &str) -> Option<std::sync::Arc<dyn statecraft_realtime::DynShard>>;
+    fn get_shard(&self, id: &str) -> Option<std::sync::Arc<dyn pylon_realtime::DynShard>>;
 
     /// List IDs of active shards.
     fn list_shards(&self) -> Vec<String>;
@@ -247,10 +247,10 @@ impl PluginHookOps for NoopPluginHooks {
 /// actions run without transactions.
 pub trait FnOps: Send + Sync {
     /// Look up a registered function.
-    fn get_fn(&self, name: &str) -> Option<statecraft_functions::registry::FnDef>;
+    fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef>;
 
     /// List all registered functions.
-    fn list_fns(&self) -> Vec<statecraft_functions::registry::FnDef>;
+    fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef>;
 
     /// Execute a function. For streaming responses, `on_stream` is called for
     /// each chunk as it arrives from the function handler.
@@ -264,16 +264,16 @@ pub trait FnOps: Send + Sync {
         &self,
         fn_name: &str,
         args: serde_json::Value,
-        auth: statecraft_functions::protocol::AuthInfo,
+        auth: pylon_functions::protocol::AuthInfo,
         on_stream: Option<Box<dyn FnMut(&str) + Send>>,
-        request: Option<statecraft_functions::protocol::RequestInfo>,
+        request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<
-        (serde_json::Value, statecraft_functions::trace::FnTrace),
-        statecraft_functions::runner::FnCallError,
+        (serde_json::Value, pylon_functions::trace::FnTrace),
+        pylon_functions::runner::FnCallError,
     >;
 
     /// Recent traces for observability (newest first).
-    fn recent_traces(&self, limit: usize) -> Vec<statecraft_functions::trace::FnTrace>;
+    fn recent_traces(&self, limit: usize) -> Vec<pylon_functions::trace::FnTrace>;
 
     /// Check whether the caller is allowed to invoke this function right now.
     ///
@@ -530,7 +530,7 @@ fn route_inner(
         };
         let code = match ctx.magic_codes.try_create(&email) {
             Ok(c) => c,
-            Err(statecraft_auth::MagicCodeError::Throttled { retry_after_secs }) => {
+            Err(pylon_auth::MagicCodeError::Throttled { retry_after_secs }) => {
                 return (
                     429,
                     json_error_with_hint(
@@ -612,7 +612,7 @@ fn route_inner(
                     serde_json::json!({"token": session.token, "user_id": user_id, "expires_at": session.expires_at}).to_string(),
                 );
             }
-            Err(statecraft_auth::MagicCodeError::TooManyAttempts) => {
+            Err(pylon_auth::MagicCodeError::TooManyAttempts) => {
                 return (
                     429,
                     json_error(
@@ -628,7 +628,7 @@ fn route_inner(
 
     // GET /api/auth/providers
     if url == "/api/auth/providers" && method == HttpMethod::Get {
-        let registry = statecraft_auth::OAuthRegistry::from_env();
+        let registry = pylon_auth::OAuthRegistry::from_env();
         let providers: Vec<serde_json::Value> = ["google", "github"]
             .iter()
             .filter_map(|p| {
@@ -650,7 +650,7 @@ fn route_inner(
     if let Some(provider) = url.strip_prefix("/api/auth/login/") {
         let provider = provider.split('?').next().unwrap_or(provider);
         if method == HttpMethod::Get {
-            let registry = statecraft_auth::OAuthRegistry::from_env();
+            let registry = pylon_auth::OAuthRegistry::from_env();
             if let Some(config) = registry.get(provider) {
                 let state = ctx.oauth_state.create(provider);
                 return (
@@ -663,7 +663,7 @@ fn route_inner(
                 json_error_with_hint(
                     "PROVIDER_NOT_FOUND",
                     &format!("OAuth provider \"{provider}\" is not configured"),
-                    "Set STATECRAFT_OAUTH_GOOGLE_CLIENT_ID / STATECRAFT_OAUTH_GITHUB_CLIENT_ID environment variables",
+                    "Set PYLON_OAUTH_GOOGLE_CLIENT_ID / PYLON_OAUTH_GITHUB_CLIENT_ID environment variables",
                 ),
             );
         }
@@ -697,12 +697,12 @@ fn route_inner(
             // vouch for the email. Previously a legacy `{email, state}` path
             // allowed any caller who could fetch a state token to mint a
             // session for any email, which is account takeover. That path is
-            // gone except under STATECRAFT_DEV_MODE=true for integration tests
+            // gone except under PYLON_DEV_MODE=true for integration tests
             // that don't want to run a real provider.
             let code = data.get("code").and_then(|v| v.as_str());
 
             let (email, name) = if let Some(code) = code {
-                let registry = statecraft_auth::OAuthRegistry::from_env();
+                let registry = pylon_auth::OAuthRegistry::from_env();
                 let config = match registry.get(provider) {
                     Some(c) => c.clone(),
                     None => {
@@ -889,7 +889,7 @@ fn route_inner(
                     matches!(
                         ctx.policy_engine
                             .check_entity_read(&ev.entity, ctx.auth_ctx, ev.data.as_ref()),
-                        statecraft_policy::PolicyResult::Allowed
+                        pylon_policy::PolicyResult::Allowed
                     )
                 });
                 return (
@@ -897,7 +897,7 @@ fn route_inner(
                     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into()),
                 );
             }
-            Err(statecraft_sync::PullError::ResyncRequired { oldest_seq, .. }) => {
+            Err(pylon_sync::PullError::ResyncRequired { oldest_seq, .. }) => {
                 // Surfacing this to the client is the whole point of the new
                 // error variant — previously the server silently skipped
                 // the evicted range. Response shape is stable JSON so
@@ -952,7 +952,7 @@ fn route_inner(
         if let Some(err) = require_admin(ctx) {
             return err;
         }
-        let push_req: statecraft_sync::PushRequest = match serde_json::from_str(body) {
+        let push_req: pylon_sync::PushRequest = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
         };
@@ -1270,7 +1270,7 @@ fn route_inner(
         // A link is a mutation: it sets a foreign key on the source row.
         // Apply the same write policy as PATCH /api/entities/:name/:id.
         let check = ctx.policy_engine.check_entity_write(entity, ctx.auth_ctx, Some(&data));
-        if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = check {
+        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
             tracing::warn!(
                 "[policy] link on {entity} denied by \"{policy_name}\": {reason}"
             );
@@ -1294,7 +1294,7 @@ fn route_inner(
         let relation = data.get("relation").and_then(|v| v.as_str()).unwrap_or("");
 
         let check = ctx.policy_engine.check_entity_write(entity, ctx.auth_ctx, Some(&data));
-        if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = check {
+        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
             tracing::warn!(
                 "[policy] unlink on {entity} denied by \"{policy_name}\": {reason}"
             );
@@ -1391,7 +1391,7 @@ fn route_inner(
             let check = ctx
                 .policy_engine
                 .check_entity_read(parts[0], ctx.auth_ctx, None);
-            if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = check {
+            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
                 tracing::warn!(
                     "[policy] lookup on {} denied by \"{policy_name}\": {reason}",
                     parts[0]
@@ -1429,7 +1429,7 @@ fn route_inner(
             let check = ctx
                 .policy_engine
                 .check_entity_read(entity, ctx.auth_ctx, None);
-            if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = check {
+            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
                 tracing::warn!(
                     "[policy] aggregate on {entity} denied by \"{policy_name}\": {reason}"
                 );
@@ -1489,7 +1489,7 @@ fn route_inner(
                 let check = ctx
                     .policy_engine
                     .check_entity_read(entity_name, ctx.auth_ctx, None);
-                if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = check {
+                if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
                     tracing::warn!(
                         "[policy] graph query on {entity_name} denied by \"{policy_name}\": {reason}"
                     );
@@ -1525,7 +1525,7 @@ fn route_inner(
 
         let policy_check = ctx.policy_engine.check_action(action_name, ctx.auth_ctx, Some(&input));
         if !policy_check.is_allowed() {
-            if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
+            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
                 // Don't leak the raw allow expression to the client — it
                 // reveals role names, field names, and the shape of the
                 // access-control model. Log the full reason server-side
@@ -1981,9 +1981,9 @@ fn route_inner(
                 ctx.auth_ctx,
                 existing_row_for_policy.as_ref(),
             ),
-            _ => statecraft_policy::PolicyResult::Allowed,
+            _ => pylon_policy::PolicyResult::Allowed,
         };
-        if let statecraft_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
+        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
             tracing::warn!(
                 "[policy] {method:?} {entity_name} denied by \"{policy_name}\": {reason}"
             );
@@ -2249,7 +2249,7 @@ fn route_inner(
             // write transaction and can't safely handle arbitrary external
             // input; queries are read-only. The action type exists for
             // "external I/O, non-transactional" exactly like this case.
-            if def.fn_type != statecraft_functions::protocol::FnType::Action {
+            if def.fn_type != pylon_functions::protocol::FnType::Action {
                 return (
                     400,
                     json_error(
@@ -2259,9 +2259,10 @@ fn route_inner(
                 );
             }
 
-            let auth = statecraft_functions::protocol::AuthInfo {
+            let auth = pylon_functions::protocol::AuthInfo {
                 user_id: ctx.auth_ctx.user_id.clone(),
                 is_admin: ctx.auth_ctx.is_admin,
+                tenant_id: ctx.auth_ctx.tenant_id.clone(),
             };
 
             // Rate-limit on the action name so a bad signature check can't
@@ -2288,7 +2289,7 @@ fn route_inner(
                     })
                     .or_insert_with(|| value.clone());
             }
-            let request = statecraft_functions::protocol::RequestInfo {
+            let request = pylon_functions::protocol::RequestInfo {
                 method: format!("{:?}", method).to_uppercase(),
                 path: url.to_string(),
                 headers,
@@ -2348,9 +2349,10 @@ fn route_inner(
                 }
             };
 
-            let auth = statecraft_functions::protocol::AuthInfo {
+            let auth = pylon_functions::protocol::AuthInfo {
                 user_id: ctx.auth_ctx.user_id.clone(),
                 is_admin: ctx.auth_ctx.is_admin,
+                tenant_id: ctx.auth_ctx.tenant_id.clone(),
             };
 
             // Per-function rate limit. Identity is the user id when
@@ -2458,12 +2460,12 @@ fn route_inner(
                 let input_str = serde_json::to_string(&input)
                     .unwrap_or_else(|_| "null".into());
 
-                let shard_auth = statecraft_realtime::ShardAuth {
+                let shard_auth = pylon_realtime::ShardAuth {
                     user_id: ctx.auth_ctx.user_id.clone(),
                     is_admin: ctx.auth_ctx.is_admin,
                 };
                 return match shard.push_input_json(
-                    statecraft_realtime::SubscriberId::new(subscriber_id),
+                    pylon_realtime::SubscriberId::new(subscriber_id),
                     &input_str,
                     client_seq,
                     &shard_auth,
@@ -2472,7 +2474,7 @@ fn route_inner(
                         200,
                         serde_json::json!({"accepted": true, "seq": seq}).to_string(),
                     ),
-                    Err(statecraft_realtime::ShardError::Unauthorized(reason)) => {
+                    Err(pylon_realtime::ShardError::Unauthorized(reason)) => {
                         (403, json_error("UNAUTHORIZED", &reason))
                     }
                     Err(e) => (400, json_error("INPUT_REJECTED", &e.to_string())),
@@ -2807,7 +2809,7 @@ fn broadcast_change(
     kind: ChangeKind,
     data: Option<&serde_json::Value>,
 ) {
-    let event = statecraft_sync::ChangeEvent {
+    let event = pylon_sync::ChangeEvent {
         seq,
         entity: entity.to_string(),
         row_id: row_id.to_string(),
@@ -2875,7 +2877,7 @@ fn gdpr_export(ctx: &RouterContext, user_id: &str) -> (u16, String) {
 
     let envelope = serde_json::json!({
         "user_id": user_id,
-        "exported_at": statecraft_core::util::now_iso(),
+        "exported_at": pylon_kernel::util::now_iso(),
         "entities": entities,
     });
     (200, envelope.to_string())
@@ -2934,7 +2936,7 @@ fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
         "rows_deleted": deleted,
         "sessions_revoked": revoked,
         "errors": errors,
-        "purged_at": statecraft_core::util::now_iso(),
+        "purged_at": pylon_kernel::util::now_iso(),
     });
     (200, resp.to_string())
 }
@@ -2951,7 +2953,7 @@ fn require_admin(ctx: &RouterContext) -> Option<(u16, String)> {
             403,
             json_error(
                 "FORBIDDEN",
-                "this endpoint requires admin auth (STATECRAFT_ADMIN_TOKEN)",
+                "this endpoint requires admin auth (PYLON_ADMIN_TOKEN)",
             ),
         ))
     }
@@ -2995,7 +2997,7 @@ fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn chrono_now_iso() -> String {
-    statecraft_core::util::now_iso()
+    pylon_kernel::util::now_iso()
 }
 
 // ---------------------------------------------------------------------------
@@ -3010,12 +3012,12 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod auth_gate_tests {
     use super::*;
-    use statecraft_auth::{
+    use pylon_auth::{
         AuthContext, MagicCodeStore, OAuthStateStore, SessionStore,
     };
-    use statecraft_core::{AppManifest, MANIFEST_VERSION};
-    use statecraft_policy::PolicyEngine;
-    use statecraft_sync::ChangeLog;
+    use pylon_kernel::{AppManifest, MANIFEST_VERSION};
+    use pylon_policy::PolicyEngine;
+    use pylon_sync::ChangeLog;
 
     // -----------------------------------------------------------------------
     // Minimal stubs for every service trait so we can build a RouterContext
@@ -3025,7 +3027,7 @@ mod auth_gate_tests {
     struct StubDataStore {
         manifest: AppManifest,
     }
-    impl statecraft_http::DataStore for StubDataStore {
+    impl pylon_http::DataStore for StubDataStore {
         fn manifest(&self) -> &AppManifest {
             &self.manifest
         }
@@ -3033,20 +3035,20 @@ mod auth_gate_tests {
             &self,
             _entity: &str,
             _data: &serde_json::Value,
-        ) -> Result<String, statecraft_http::DataError> {
+        ) -> Result<String, pylon_http::DataError> {
             Ok("stub-id".to_string())
         }
         fn get_by_id(
             &self,
             _entity: &str,
             _id: &str,
-        ) -> Result<Option<serde_json::Value>, statecraft_http::DataError> {
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
             Ok(None)
         }
         fn list(
             &self,
             _entity: &str,
-        ) -> Result<Vec<serde_json::Value>, statecraft_http::DataError> {
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
         }
         fn list_after(
@@ -3054,7 +3056,7 @@ mod auth_gate_tests {
             _entity: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<serde_json::Value>, statecraft_http::DataError> {
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
         }
         fn update(
@@ -3062,14 +3064,14 @@ mod auth_gate_tests {
             _entity: &str,
             _id: &str,
             _data: &serde_json::Value,
-        ) -> Result<bool, statecraft_http::DataError> {
+        ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn delete(
             &self,
             _entity: &str,
             _id: &str,
-        ) -> Result<bool, statecraft_http::DataError> {
+        ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn lookup(
@@ -3077,7 +3079,7 @@ mod auth_gate_tests {
             _entity: &str,
             _field: &str,
             _value: &str,
-        ) -> Result<Option<serde_json::Value>, statecraft_http::DataError> {
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
             Ok(None)
         }
         fn link(
@@ -3086,7 +3088,7 @@ mod auth_gate_tests {
             _id: &str,
             _relation: &str,
             _target_id: &str,
-        ) -> Result<bool, statecraft_http::DataError> {
+        ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn unlink(
@@ -3094,26 +3096,26 @@ mod auth_gate_tests {
             _entity: &str,
             _id: &str,
             _relation: &str,
-        ) -> Result<bool, statecraft_http::DataError> {
+        ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn query_filtered(
             &self,
             _entity: &str,
             _filter: &serde_json::Value,
-        ) -> Result<Vec<serde_json::Value>, statecraft_http::DataError> {
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
         }
         fn query_graph(
             &self,
             _query: &serde_json::Value,
-        ) -> Result<serde_json::Value, statecraft_http::DataError> {
+        ) -> Result<serde_json::Value, pylon_http::DataError> {
             Ok(serde_json::json!({}))
         }
         fn transact(
             &self,
             _ops: &[serde_json::Value],
-        ) -> Result<(bool, Vec<serde_json::Value>), statecraft_http::DataError> {
+        ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
             Ok((true, Vec::new()))
         }
     }
@@ -3140,7 +3142,7 @@ mod auth_gate_tests {
             _room: &str,
             _user_id: &str,
             _data: Option<serde_json::Value>,
-        ) -> Result<(serde_json::Value, serde_json::Value), statecraft_http::DataError> {
+        ) -> Result<(serde_json::Value, serde_json::Value), pylon_http::DataError> {
             Ok((serde_json::json!({}), serde_json::json!({})))
         }
         fn leave(&self, _room: &str, _user_id: &str) -> Option<serde_json::Value> {

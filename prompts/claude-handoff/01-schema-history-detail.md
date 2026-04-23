@@ -1,20 +1,20 @@
-Use `/Users/ericc59/Dev/statecraft/prompts/claude-handoff/00-shared-context.md` as shared context.
+Use `/Users/ericc59/Dev/pylon/prompts/claude-handoff/00-shared-context.md` as shared context.
 
 Goal:
 Improve `schema history --sqlite` so history is more useful to operators and agents without redesigning the history system.
 
 Build this exact slice:
 
-1. Add `--limit <n>` to `statecraft schema history`
+1. Add `--limit <n>` to `pylon schema history`
 - support:
-  - `statecraft schema history --sqlite <db-path> --limit 10`
+  - `pylon schema history --sqlite <db-path> --limit 10`
   - optional `--json`
 - default remains full history
 - invalid values should fail clearly
 
 2. Add a single-entry mode
 - support:
-  - `statecraft schema history --sqlite <db-path> --id <entry-id>`
+  - `pylon schema history --sqlite <db-path> --id <entry-id>`
 - human mode should show the full entry
 - `--json` should emit the single history entry
 
@@ -43,6 +43,6 @@ Required verification:
 - `cargo test`
 - `bun run check`
 - create/apply a SQLite DB
-- `cargo run -p statecraft-cli -- schema history --sqlite /tmp/statecraft-test.db --limit 1`
-- `cargo run -p statecraft-cli -- schema history --sqlite /tmp/statecraft-test.db --json`
+- `cargo run -p pylon-cli -- schema history --sqlite /tmp/pylon-test.db --limit 1`
+- `cargo run -p pylon-cli -- schema history --sqlite /tmp/pylon-test.db --json`
 

@@ -1,0 +1,774 @@
+{
+  "manifest_version": 1,
+  "name": "linear",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Organization",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "slug",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "OrgMember",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "role",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "joinedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_user",
+          "fields": [
+            "orgId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Team",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "issueSequence",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_org_key",
+          "fields": [
+            "orgId",
+            "key"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "TeamMember",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "teamId",
+          "type": "id(Team)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "joinedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_team_user",
+          "fields": [
+            "teamId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Cycle",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "teamId",
+          "type": "id(Team)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "number",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "startsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "endsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_team_number",
+          "fields": [
+            "teamId",
+            "number"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "Project",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "teamId",
+          "type": "id(Team)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "leadId",
+          "type": "id(User)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "targetDate",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_team_status",
+          "fields": [
+            "teamId",
+            "status"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Label",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "teamId",
+          "type": "id(Team)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_team_name",
+          "fields": [
+            "teamId",
+            "name"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "Issue",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "teamId",
+          "type": "id(Team)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "number",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "state",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "priority",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "assigneeId",
+          "type": "id(User)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "creatorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "cycleId",
+          "type": "id(Cycle)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "projectId",
+          "type": "id(Project)",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "estimate",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "startedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "completedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "cancelledAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_team_state",
+          "fields": [
+            "teamId",
+            "state"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_team_number",
+          "fields": [
+            "teamId",
+            "number"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_assignee",
+          "fields": [
+            "assigneeId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_cycle",
+          "fields": [
+            "cycleId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_project",
+          "fields": [
+            "projectId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "IssueLabel",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "issueId",
+          "type": "id(Issue)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "labelId",
+          "type": "id(Label)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_issue_label",
+          "fields": [
+            "issueId",
+            "labelId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_label",
+          "fields": [
+            "labelId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Comment",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "issueId",
+          "type": "id(Issue)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "authorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "editedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_issue",
+          "fields": [
+            "issueId",
+            "createdAt"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "IssueActivity",
+      "fields": [
+        {
+          "name": "orgId",
+          "type": "id(Organization)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "issueId",
+          "type": "id(Issue)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "actorId",
+          "type": "id(User)",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "metaJson",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_issue",
+          "fields": [
+            "issueId",
+            "createdAt"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "organization_access",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.createdBy",
+      "allowDelete": "auth.userId == data.createdBy",
+      "entity": "Organization"
+    },
+    {
+      "name": "org_member_access",
+      "allowRead": "auth.userId == data.userId || auth.tenantId == data.orgId",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "OrgMember"
+    },
+    {
+      "name": "Team_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Team"
+    },
+    {
+      "name": "TeamMember_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "TeamMember"
+    },
+    {
+      "name": "Cycle_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Cycle"
+    },
+    {
+      "name": "Project_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Project"
+    },
+    {
+      "name": "Label_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Label"
+    },
+    {
+      "name": "Issue_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Issue"
+    },
+    {
+      "name": "IssueLabel_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "IssueLabel"
+    },
+    {
+      "name": "Comment_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "Comment"
+    },
+    {
+      "name": "IssueActivity_org_scoped",
+      "allowRead": "auth.tenantId == data.orgId",
+      "allowInsert": "auth.tenantId == data.orgId",
+      "allowUpdate": "auth.tenantId == data.orgId",
+      "allowDelete": "auth.tenantId == data.orgId",
+      "entity": "IssueActivity"
+    }
+  ]
+}

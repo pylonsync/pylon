@@ -31,7 +31,7 @@ export function Footer() {
           <div>
             <div className="logo" style={{ marginBottom: 14 }}>
               <span className="logo-mark">▲</span>
-              statecraft
+              pylon
             </div>
             <p
               style={{
@@ -76,7 +76,7 @@ export function Footer() {
         </div>
 
         <div className="footer-bottom">
-          <div>© 2026 statecraft contributors · MIT / Apache-2.0</div>
+          <div>© 2026 pylon contributors · MIT / Apache-2.0</div>
           <div style={{ display: "flex", gap: 16 }}>
             <span>v0.8.2</span>
             <span>commit 4e8f2a1</span>

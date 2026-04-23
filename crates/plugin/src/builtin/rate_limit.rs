@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::{Plugin, PluginError, RequestMeta};
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 
 /// Rate limiting plugin. Limits requests per IP/user within a time window.
 pub struct RateLimitPlugin {

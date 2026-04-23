@@ -14,7 +14,7 @@
 //!    returning an `Err` from the hook (the runtime translates this to a
 //!    403 response).
 //!
-//! This plugin does NOT enforce reads. Use `statecraft-policy` expressions for
+//! This plugin does NOT enforce reads. Use `pylon-policy` expressions for
 //! that — they have access to `auth.tenantId` and can scope `query` and
 //! `lookup` calls. The asymmetry is intentional: writes need the tenant id
 //! anyway (to stamp the row), so enforcing them here is free; reads need
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::Plugin;
-use statecraft_auth::AuthContext;
+use pylon_auth::AuthContext;
 
 /// Per-entity tenant scoping configuration.
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ impl TenantScopePlugin {
     /// `tenantId` field to an entity is the signal — no separate config
     /// step required. Apps that use a different field name (e.g. `orgId`)
     /// can still call [`scope_with_field`] after this to customize.
-    pub fn from_manifest(manifest: &statecraft_core::AppManifest) -> Self {
+    pub fn from_manifest(manifest: &pylon_kernel::AppManifest) -> Self {
         let mut plugin = Self::new();
         for entity in &manifest.entities {
             for field in &entity.fields {

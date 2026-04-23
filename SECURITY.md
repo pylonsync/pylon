@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 If you discover a security vulnerability, please **do not open a public issue**.
-Instead, email **security@statecraft.dev** with:
+Instead, email **security@pylon.dev** with:
 
 - A description of the vulnerability
 - Steps to reproduce
@@ -27,13 +27,13 @@ documented here so deployers can make informed decisions:
   slow OAuth providers is bounded but not zero. Deploy behind a reverse
   proxy that enforces request timeouts.
 - **Sessions are in-memory by default.** Restart = logout. Set
-  `STATECRAFT_SESSION_DB=<path>` to persist sessions to SQLite.
+  `PYLON_SESSION_DB=<path>` to persist sessions to SQLite.
 - **Rate limiting is per-process.** Multi-instance deployments need an
   external rate limiter (nginx, Cloudflare, etc.).
 - **Magic codes are 6 digits with 5-attempt cap and 60-second cooldown.**
   Code space is 10^6; 5 attempts means ~5e-6 chance of guessing per code.
   This is deliberate: codes are short enough to type from an email.
-- **CORS defaults to `*` in dev mode.** Set `STATECRAFT_CORS_ORIGIN` to a specific
+- **CORS defaults to `*` in dev mode.** Set `PYLON_CORS_ORIGIN` to a specific
   origin in production.
 - **Workers deployment is experimental.** Do not run sensitive workloads on
   the Workers target until it is marked stable.
@@ -45,16 +45,16 @@ documented here so deployers can make informed decisions:
 
 Set at minimum:
 
-- `STATECRAFT_ADMIN_TOKEN` — admin API token (long random string)
-- `STATECRAFT_CORS_ORIGIN` — specific origin, not `*`
-- `STATECRAFT_DEV_MODE=false`
-- `STATECRAFT_SESSION_DB=/var/lib/statecraft/sessions.db`
-- `STATECRAFT_DB_PATH=/var/lib/statecraft/statecraft.db`
-- `STATECRAFT_RATE_LIMIT_MAX=30` (default 100 is lenient)
+- `PYLON_ADMIN_TOKEN` — admin API token (long random string)
+- `PYLON_CORS_ORIGIN` — specific origin, not `*`
+- `PYLON_DEV_MODE=false`
+- `PYLON_SESSION_DB=/var/lib/pylon/sessions.db`
+- `PYLON_DB_PATH=/var/lib/pylon/pylon.db`
+- `PYLON_RATE_LIMIT_MAX=30` (default 100 is lenient)
 
 Recommended:
 
 - Run behind a reverse proxy that terminates TLS
 - Mount the data directory as a persistent volume
-- Enable `STATECRAFT_EMAIL_PROVIDER=sendgrid` or `resend` for magic-code delivery
-- Back up the database regularly (`statecraft backup <dir>`)
+- Enable `PYLON_EMAIL_PROVIDER=sendgrid` or `resend` for magic-code delivery
+- Back up the database regularly (`pylon backup <dir>`)

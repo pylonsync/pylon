@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use statecraft_core::AppManifest;
+use pylon_kernel::AppManifest;
 
 // ---------------------------------------------------------------------------
 // Static site generation
@@ -121,7 +121,7 @@ fn render_page(manifest: &AppManifest, route_path: &str, query_name: Option<&str
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{title}</title>
-  <script>window.__STATECRAFT_MANIFEST__ = {manifest_json};</script>
+  <script>window.__PYLON_MANIFEST__ = {manifest_json};</script>
 </head>
 <body>
   <h1>{app_name}</h1>
@@ -146,10 +146,10 @@ fn render_page(manifest: &AppManifest, route_path: &str, query_name: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use statecraft_core::*;
+    use pylon_kernel::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/statecraft.manifest.json"))
+        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
             .unwrap()
     }
 
@@ -254,14 +254,14 @@ mod tests {
 
         let pages = generate_static_pages(&m);
         assert_eq!(pages.len(), 1);
-        assert!(pages[0].html.contains("__STATECRAFT_MANIFEST__"));
+        assert!(pages[0].html.contains("__PYLON_MANIFEST__"));
         assert!(pages[0].html.contains("myapp"));
         assert!(pages[0].html.contains("allPosts"));
     }
 
     #[test]
     fn write_pages_rejects_parent_dir_traversal() {
-        let dir = std::env::temp_dir().join("statecraft-staticgen-traversal-test");
+        let dir = std::env::temp_dir().join("pylon-staticgen-traversal-test");
         let _ = std::fs::remove_dir_all(&dir);
         let pages = vec![StaticPage {
             path: "../../tmp/pwn.html".into(),
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn write_pages_rejects_absolute_path() {
-        let dir = std::env::temp_dir().join("statecraft-staticgen-abs-test");
+        let dir = std::env::temp_dir().join("pylon-staticgen-abs-test");
         let _ = std::fs::remove_dir_all(&dir);
         let pages = vec![StaticPage {
             path: "/tmp/pwn.html".into(),
@@ -304,7 +304,7 @@ mod tests {
         };
 
         let pages = generate_static_pages(&m);
-        let dir = std::env::temp_dir().join("statecraft-staticgen-test");
+        let dir = std::env::temp_dir().join("pylon-staticgen-test");
         let _ = std::fs::remove_dir_all(&dir);
 
         let count = write_pages(&pages, &dir).unwrap();

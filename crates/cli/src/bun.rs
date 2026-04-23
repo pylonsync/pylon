@@ -1,5 +1,5 @@
-use statecraft_core::Diagnostic;
-use statecraft_core::Severity;
+use pylon_kernel::Diagnostic;
+use pylon_kernel::Severity;
 
 use crate::manifest::parse_manifest;
 

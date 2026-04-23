@@ -1,5 +1,5 @@
 {
-  "name": "@statecraft/sdk",
+  "name": "@pylonsync/sdk",
   "publishConfig": { "access": "public" },
   "version": "0.1.0",
   "type": "module",
