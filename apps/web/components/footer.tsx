@@ -1,3 +1,5 @@
+import { PylonMark } from "./pylon-logo";
+
 export function Footer() {
   return (
     <footer className="footer" id="status">
@@ -30,8 +32,8 @@ export function Footer() {
         <div className="footer-grid">
           <div>
             <div className="logo" style={{ marginBottom: 14 }}>
-              <span className="logo-mark">▲</span>
-              pylon
+              <PylonMark size={22} />
+              <span>Pylon</span>
             </div>
             <p
               style={{

@@ -15,9 +15,21 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AgentDB — The backend for real-time apps and games",
+  metadataBase: new URL("https://pylonsync.com"),
+  title: "Pylon — The backend for real-time apps and games",
   description:
-    "Declarative schema, live sync, TypeScript functions, and tick-based game shards — as a single Rust binary.",
+    "Declarative schema, live sync, TypeScript functions, and tick-based game shards — as a single Rust binary. Self-host or deploy to Cloudflare Workers, idle at $0.",
+  icons: {
+    icon: "/brand/pylon-icon.svg",
+  },
+  openGraph: {
+    title: "Pylon — The backend for real-time apps and games",
+    description:
+      "Declarative schema, live sync, TypeScript functions, and tick-based game shards — as a single Rust binary.",
+    url: "https://pylonsync.com",
+    siteName: "Pylon",
+    type: "website",
+  },
 };
 
 export default function RootLayout({
