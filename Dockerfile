@@ -37,11 +37,19 @@ COPY --from=rust-builder /build/target/release/pylon /usr/local/bin/pylon
 COPY --from=rust-builder /build/packages /pylon/packages
 COPY --from=rust-builder /build/${APP} /app
 
-# Install workspace deps for the example (links @pylonsync/* from /pylon/packages).
+# Wire workspace deps into the app's node_modules. The example's
+# package.json uses `"@pylonsync/*": "workspace:*"` which bun would
+# normally resolve via the monorepo; we fake the same layout by
+# symlinking each package directory. `set -e` + `ln -sfn` so any
+# failure surfaces instead of being swallowed.
 WORKDIR /app
-RUN ln -s /pylon/packages/functions node_modules/@pylonsync/functions 2>/dev/null || true \
-    && ln -s /pylon/packages/sdk node_modules/@pylonsync/sdk 2>/dev/null || true \
-    && ln -s /pylon/packages/react node_modules/@pylonsync/react 2>/dev/null || true
+RUN set -e \
+    && mkdir -p node_modules/@pylonsync \
+    && ln -sfn /pylon/packages/sdk       node_modules/@pylonsync/sdk \
+    && ln -sfn /pylon/packages/functions node_modules/@pylonsync/functions \
+    && ln -sfn /pylon/packages/react     node_modules/@pylonsync/react \
+    && ln -sfn /pylon/packages/sync      node_modules/@pylonsync/sync \
+    && ls -la node_modules/@pylonsync
 
 RUN groupadd --system --gid 10001 pylon \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin pylon \
