@@ -20,7 +20,7 @@ export function Nav() {
         </div>
         <div className="nav-right">
           <a
-            href="#"
+            href="https://docs.pylonsync.com"
             className="text-mono text-dim"
             style={{ fontSize: 12, marginRight: 6 }}
           >
@@ -28,7 +28,9 @@ export function Nav() {
           </a>
           <a
             className="inline-flex items-center gap-2 h-[30px] px-[11px] text-[12.5px] rounded-[5px] border border-[color:var(--border-2)] text-[color:var(--text)] hover:bg-[color:var(--bg-2)] hover:border-[#33333a] transition-colors font-medium"
-            href="#"
+            href="https://github.com/pylonsync/pylon"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             <svg
               viewBox="0 0 24 24"
