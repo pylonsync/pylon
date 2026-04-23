@@ -912,6 +912,11 @@ mod tests {
             entity: entity.map(|s| s.into()),
             action: action.map(|s| s.into()),
             allow: allow.into(),
+            allow_read: None,
+            allow_insert: None,
+            allow_update: None,
+            allow_delete: None,
+            allow_write: None,
         }
     }
 
@@ -1043,7 +1048,12 @@ mod tests {
             entity: Some("NonExistent".into()),
             action: None,
             allow: "true".into(),
-        }];
+        allow_read: None,
+        allow_insert: None,
+        allow_update: None,
+        allow_delete: None,
+        allow_write: None,
+    }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "POLICY_ENTITY_NOT_FOUND"));
     }
@@ -1056,7 +1066,12 @@ mod tests {
             entity: None,
             action: Some("nonExistentAction".into()),
             allow: "true".into(),
-        }];
+        allow_read: None,
+        allow_insert: None,
+        allow_update: None,
+        allow_delete: None,
+        allow_write: None,
+    }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "POLICY_ACTION_NOT_FOUND"));
     }
@@ -1069,7 +1084,12 @@ mod tests {
             entity: Some("X".into()),
             action: None,
             allow: "true".into(),
-        }];
+        allow_read: None,
+        allow_insert: None,
+        allow_update: None,
+        allow_delete: None,
+        allow_write: None,
+    }];
         let diags = validate(&s);
         assert!(!diags
             .iter()
@@ -1088,7 +1108,12 @@ mod tests {
             entity: None,
             action: Some("doThing".into()),
             allow: "true".into(),
-        }];
+        allow_read: None,
+        allow_insert: None,
+        allow_update: None,
+        allow_delete: None,
+        allow_write: None,
+    }];
         let diags = validate(&s);
         assert!(!diags
             .iter()
@@ -1107,7 +1132,12 @@ mod tests {
             entity: Some("X".into()),
             action: Some("doThing".into()),
             allow: "true".into(),
-        }];
+        allow_read: None,
+        allow_insert: None,
+        allow_update: None,
+        allow_delete: None,
+        allow_write: None,
+    }];
         let diags = validate(&s);
         assert!(!diags.iter().any(|d| d.code.starts_with("POLICY_")));
     }

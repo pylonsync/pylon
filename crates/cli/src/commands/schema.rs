@@ -1399,6 +1399,11 @@ mod tests {
             entity: Some("User".into()),
             action: None,
             allow: "true".into(),
+            allow_read: None,
+            allow_insert: None,
+            allow_update: None,
+            allow_delete: None,
+            allow_write: None,
         });
         let new = minimal_manifest();
         let changes = compute_diff(&old, &new);
