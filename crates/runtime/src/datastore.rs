@@ -1066,6 +1066,9 @@ pub fn find_functions_runtime() -> Option<String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let relative_candidates = [
+        "node_modules/@pylonsync/functions/src/runtime.ts",
+        "node_modules/@pylonsync/functions/dist/runtime.js",
+        // Legacy name — keeps upgrades from the pre-rename era working.
         "node_modules/@pylon/functions/src/runtime.ts",
         "node_modules/@pylon/functions/dist/runtime.js",
         // Monorepo dev: source tree at the workspace root.
