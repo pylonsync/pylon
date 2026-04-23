@@ -60,6 +60,7 @@ ENV PYLON_DB_PATH=/data/pylon.db
 ENV PYLON_FILES_DIR=/data/uploads
 ENV PYLON_SESSION_DB=/data/sessions.db
 ENV PYLON_DEV_MODE=false
+ENV PYLON_FUNCTIONS_RUNTIME=/pylon/packages/functions/src/runtime.ts
 
 USER pylon:pylon
 EXPOSE 4321
