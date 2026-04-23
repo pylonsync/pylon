@@ -274,8 +274,8 @@ mod tests {
         let k2 = generate_key();
         assert_ne!(k1, k2);
         assert!(k1.starts_with("pylon_"));
-        // "pylon_" (11) + 48 hex chars (24 bytes) = 59
-        assert_eq!(k1.len(), 59);
+        // "pylon_" (6) + 48 hex chars (24 bytes) = 54
+        assert_eq!(k1.len(), 54);
     }
 
     #[test]
