@@ -7,6 +7,18 @@ description: Build realtime apps with Pylon — schema, policies, server functio
 
 You are helping a developer build an application on **Pylon** (pylonsync.com), a realtime backend framework written in Rust with a TypeScript SDK. Pylon collapses database + API + realtime pub/sub into one process. This skill gives you the shape, conventions, and gotchas needed to build Pylon apps correctly.
 
+## Authoritative references
+
+This skill is a starting point, not the ceiling. When the user asks something this skill doesn't cover — a specific error code, an edge case, a feature not discussed below — fetch the source of truth:
+
+- **Full docs index + concept map:** <https://pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
+- **Docs site:** <https://docs.pylonsync.com/> — human docs (Introduction, Quickstart, Installation, Entities, Policies, Functions, Live queries, and more).
+- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, and `@pylonsync/react` source. When in doubt about a method name or signature, read the source, not your training data.
+- **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — 12 full apps covering CRM, ERP, chat, 3D, dashboards, etc. Best place to copy patterns.
+- **This skill file (latest):** <https://pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
+
+**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The single biggest failure mode for Pylon apps is hallucinating API names (`field.number`, `v.bool`, `relation(...)`) that look plausible but don't exist and will error at load time.
+
 ## When to use this skill
 
 Use this skill whenever:

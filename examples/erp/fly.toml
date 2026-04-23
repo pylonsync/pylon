@@ -2,7 +2,7 @@ app = "pylon-erp"
 primary_region = "iad"
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "../../Dockerfile"
   [build.args]
     APP = "examples/erp"
 
