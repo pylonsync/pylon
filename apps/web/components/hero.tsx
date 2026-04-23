@@ -334,10 +334,200 @@ onKeyDown("ArrowUp", () =>
   );
 }
 
+type DemoTab = "chat" | "shard" | "dev";
+
+function HeroDemo() {
+  const [tab, setTab] = React.useState<DemoTab>("chat");
+
+  const meta: Record<DemoTab, { file: string; hook: string; status: string }> = {
+    chat: { file: "apps/chat/App.tsx", hook: "useQuery", status: "live" },
+    shard: { file: "shards/match.rs", hook: "useShard", status: "20 tps" },
+    dev: { file: "~/pylon", hook: "pylon dev", status: "ready" },
+  };
+
+  return (
+    <div className="hero-demo">
+      <div className="panel">
+        <div className="hero-demo-tabs">
+          <button
+            className={`hero-demo-tab ${tab === "chat" ? "active" : ""}`}
+            onClick={() => setTab("chat")}
+          >
+            <span className="hero-demo-tab-num">01</span>
+            <span className="hero-demo-tab-label">Realtime chat</span>
+            <span className="hero-demo-tab-sub">useQuery</span>
+          </button>
+          <button
+            className={`hero-demo-tab ${tab === "shard" ? "active" : ""}`}
+            onClick={() => setTab("shard")}
+          >
+            <span className="hero-demo-tab-num">02</span>
+            <span className="hero-demo-tab-label">Game shard</span>
+            <span className="hero-demo-tab-sub">useShard</span>
+          </button>
+          <button
+            className={`hero-demo-tab ${tab === "dev" ? "active" : ""}`}
+            onClick={() => setTab("dev")}
+          >
+            <span className="hero-demo-tab-num">03</span>
+            <span className="hero-demo-tab-label">Dev server</span>
+            <span className="hero-demo-tab-sub">pylon dev</span>
+          </button>
+        </div>
+
+        <div className="panel-header">
+          <div className="panel-header-left">
+            <span className="panel-dot" />
+            <span>{meta[tab].file}</span>
+          </div>
+          <div className="panel-header-right">
+            <span className="text-dim">{meta[tab].hook}</span>
+            <span className="text-dim">·</span>
+            <span className="text-accent">{meta[tab].status}</span>
+          </div>
+        </div>
+
+        <div className="hero-demo-body">
+          {tab === "chat" && <ChatDemoFull />}
+          {tab === "shard" && <ShardDemoFull />}
+          {tab === "dev" && <DevDemoFull />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatDemoFull() {
+  return (
+    <div className="hero-demo-split">
+      <div className="hero-demo-left">
+        <ChatDemo />
+      </div>
+      <div className="hero-demo-right">
+        <div className="code-preview">
+          <div className="codeblock-header">
+            <span className="filename">apps/chat/Channel.tsx</span>
+            <span className="lang">TSX</span>
+          </div>
+          <div className="code">
+            <CodeLines
+              code={`import { db } from "@pylon/client";
+
+export function Channel({ id }: { id: string }) {
+  const messages = db.useQuery("Message", {
+    where: { channelId: id },
+    order: "desc",
+    limit: 50,
+  });
+
+  const send = db.useMutation("send");
+
+  return (
+    <Pane>
+      <List items={messages ?? []} />
+      <Composer onSubmit={body =>
+        send({ channelId: id, body })
+      } />
+    </Pane>
+  );
+}`}
+              lang="ts"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ShardDemoFull() {
+  return (
+    <div className="hero-demo-split">
+      <div className="hero-demo-left" style={{ padding: 20 }}>
+        <GameCanvas />
+        <div className="hero-demo-meta">
+          <span className="hero-demo-meta-item">
+            <span className="hero-demo-meta-dot" /> 7 entities
+          </span>
+          <span className="hero-demo-meta-item">20 tps</span>
+          <span className="hero-demo-meta-item">area-of-interest 150m</span>
+        </div>
+      </div>
+      <div className="hero-demo-right">
+        <div className="code-preview">
+          <div className="codeblock-header">
+            <span className="filename">shards/match.rs</span>
+            <span className="lang">RUST</span>
+          </div>
+          <div className="code">
+            <CodeLines
+              code={`#[shard(tps = 20)]
+pub fn match_shard(state: &mut State, input: Input) {
+    for entity in state.entities.iter_mut() {
+        entity.apply(input.movement);
+        entity.tick();
+    }
+
+    state.aoi(150).broadcast(|e| e.snapshot());
+}
+
+// client: subscribes, renders, sends inputs.
+const { state, send } = useShard("match_1");`}
+              lang="rust"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DevDemoFull() {
+  return (
+    <div className="hero-demo-split">
+      <div className="hero-demo-left">
+        <HeroTerminal />
+        <div className="hero-demo-meta" style={{ marginTop: 16 }}>
+          <span className="hero-demo-meta-item">
+            <span className="hero-demo-meta-dot" /> serving on :4242
+          </span>
+          <span className="hero-demo-meta-item">hot-reload on</span>
+          <span className="hero-demo-meta-item">41.2s cold start</span>
+        </div>
+      </div>
+      <div className="hero-demo-right">
+        <div className="code-preview">
+          <div className="codeblock-header">
+            <span className="filename">app.ts</span>
+            <span className="lang">TS</span>
+          </div>
+          <div className="code">
+            <CodeLines
+              code={`import { entity, v } from "@pylon/server";
+
+export const Message = entity({
+  fields: {
+    channelId: v.id("Channel"),
+    authorId:  v.id("User"),
+    body:      v.string().min(1).max(4000),
+    createdAt: v.timestamp(),
+  },
+  indexes: [
+    { on: ["channelId", "createdAt"] },
+  ],
+});`}
+              lang="ts"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Hero() {
   return (
     <section className="hero">
-      <div className="hero-glow" />
       <div className="hero-grid-bg" />
       <div className="container-page hero-inner">
         <div className="hero-eyebrow">
@@ -363,43 +553,7 @@ export function Hero() {
           <GithubButton />
         </div>
 
-        <div className="hero-demo">
-          <div className="panel">
-            <div className="panel-header">
-              <div className="panel-header-left">
-                <span className="panel-dot" />
-                <span>apps/chat/App.tsx</span>
-              </div>
-              <div className="panel-header-right">
-                <span className="text-dim">useQuery</span>
-                <span className="text-dim">·</span>
-                <span className="text-accent">live</span>
-              </div>
-            </div>
-            <div className="panel-body">
-              <ChatDemo />
-              <HeroTerminal />
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-header">
-              <div className="panel-header-left">
-                <span className="panel-dot" />
-                <span>shards/match.rs</span>
-              </div>
-              <div className="panel-header-right">
-                <span className="text-dim">useShard</span>
-                <span className="text-dim">·</span>
-                <span className="text-accent">20 tps</span>
-              </div>
-            </div>
-            <div className="game-wrap">
-              <GameCanvas />
-              <GameSnippet />
-            </div>
-          </div>
-        </div>
+        <HeroDemo />
       </div>
     </section>
   );
