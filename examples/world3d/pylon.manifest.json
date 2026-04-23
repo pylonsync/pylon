@@ -1,0 +1,101 @@
+{
+  "manifest_version": 1,
+  "name": "world3d",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Avatar",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "x",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "z",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "heading",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "emote",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "isBot",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lastSeenAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_bot",
+          "fields": [
+            "isBot"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "avatar_ownership",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.userId || data.isBot == true",
+      "allowDelete": "auth.userId == data.userId",
+      "entity": "Avatar"
+    }
+  ]
+}

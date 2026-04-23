@@ -23,7 +23,7 @@ const Counter = entity(
   "Counter",
   {
     label: field.string(),
-    value: field.number(),
+    value: field.int(),
     updatedAt: field.datetime(),
   },
   {
@@ -40,11 +40,11 @@ const Sample = entity(
   "Sample",
   {
     runId: field.string(),
-    atSec: field.number(),
-    mutations: field.number(),
-    p50ms: field.number(),
-    p95ms: field.number(),
-    p99ms: field.number(),
+    atSec: field.int(),
+    mutations: field.int(),
+    p50ms: field.float(),
+    p95ms: field.float(),
+    p99ms: field.float(),
   },
   {
     indexes: [

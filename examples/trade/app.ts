@@ -26,11 +26,11 @@ const Ticker = entity(
     symbol: field.string().unique(),
     name: field.string(),
     sector: field.string(),
-    price: field.number(),
-    openPrice: field.number(),
-    dayHigh: field.number(),
-    dayLow: field.number(),
-    volume: field.number(),
+    price: field.float(),
+    openPrice: field.float(),
+    dayHigh: field.float(),
+    dayLow: field.float(),
+    volume: field.int(),
     updatedAt: field.datetime(),
   },
   {
@@ -47,8 +47,8 @@ const Trade = entity(
   "Trade",
   {
     symbol: field.string(),
-    price: field.number(),
-    qty: field.number(),
+    price: field.float(),
+    qty: field.int(),
     at: field.datetime(),
   },
   {

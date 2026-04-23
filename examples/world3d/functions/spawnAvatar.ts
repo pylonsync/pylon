@@ -18,7 +18,7 @@ export default mutation({
   args: {
     userId: v.string(),
     name: v.optional(v.string()),
-    isBot: v.optional(v.bool()),
+    isBot: v.optional(v.boolean()),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
