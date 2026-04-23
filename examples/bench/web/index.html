@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pylon Bench</title>
+    <link rel="preconnect" href="https://rsms.me/" />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <style>
+      :root {
+        --bg: #141414;
+        --bg-1: #1a1a1a;
+        --bg-2: #1f1f1f;
+        --bg-3: #252525;
+        --border: #262626;
+        --border-2: #323232;
+        --text: #f8fafc;
+        --text-2: #b8b8c0;
+        --text-3: #7a7a82;
+        --text-4: #4a4a52;
+        --accent: #8b5cf6;
+        --accent-hover: #a78bfa;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --danger: #f87171;
+        --font-sans: "Inter", -apple-system, system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        font-size: 13.5px;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font-family: inherit; cursor: pointer; background: none; border: none; color: inherit; }
+
+      .bn-app {
+        display: grid;
+        grid-template-rows: 56px 1fr;
+        height: 100%;
+      }
+
+      .bn-topbar {
+        display: flex; align-items: center; gap: 24px;
+        padding: 0 20px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg);
+      }
+      .bn-brand {
+        display: flex; align-items: center; gap: 10px;
+        font-weight: 500;
+        font-family: var(--font-mono);
+        font-size: 13px;
+      }
+      .bn-status {
+        margin-left: auto;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--text-2);
+        display: flex; align-items: center; gap: 8px;
+      }
+      .bn-status b { color: var(--text); font-weight: 500; }
+      .bn-sep { color: var(--text-4); }
+      .bn-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: var(--text-4);
+      }
+      .bn-dot.on {
+        background: var(--ok);
+        box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18);
+        animation: pulse 1.6s infinite ease-in-out;
+      }
+      @keyframes pulse {
+        50% { opacity: 0.55; }
+      }
+
+      .bn-body {
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        min-height: 0;
+      }
+
+      /* ---- Left config + counters column ---- */
+      .bn-left {
+        border-right: 1px solid var(--border);
+        overflow-y: auto;
+        padding: 0;
+      }
+      .bn-section {
+        padding: 20px;
+        border-bottom: 1px solid var(--border);
+      }
+      .bn-section-title {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin-bottom: 14px;
+      }
+
+      .bn-knob { margin-bottom: 16px; }
+      .bn-knob-head {
+        display: flex; justify-content: space-between;
+        font-family: var(--font-mono);
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+      .bn-knob-label { color: var(--text-2); }
+      .bn-knob-value { color: var(--text); font-weight: 500; }
+      .bn-knob-range {
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .bn-hint {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        margin-top: 6px;
+      }
+      .bn-hint b { color: var(--accent); }
+
+      .bn-btn-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .bn-btn {
+        padding: 8px 14px;
+        font-size: 12.5px;
+        font-weight: 500;
+        border: 1px solid var(--border-2);
+        background: var(--bg-1);
+        color: var(--text);
+        flex: 1;
+      }
+      .bn-btn:hover:not(:disabled) { background: var(--bg-2); }
+      .bn-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .bn-btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
+      .bn-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+      .bn-btn.danger {
+        color: var(--danger);
+        border-color: rgba(248, 113, 113, 0.4);
+      }
+      .bn-btn.danger:hover { background: rgba(248, 113, 113, 0.08); }
+
+      .bn-counters {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      .bn-counter {
+        display: flex; justify-content: space-between;
+        padding: 8px 10px;
+        background: var(--bg-1);
+        border: 1px solid var(--border);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+      }
+      .bn-counter-label { color: var(--text-3); }
+      .bn-counter-value { color: var(--text); font-variant-numeric: tabular-nums; }
+      .bn-empty {
+        grid-column: 1 / -1;
+        padding: 16px;
+        color: var(--text-4);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        text-align: center;
+      }
+
+      /* ---- Right metrics + chart column ---- */
+      .bn-right {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .bn-metrics {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      @media (max-width: 1100px) {
+        .bn-metrics { grid-template-columns: repeat(4, 1fr); }
+      }
+      .bn-metric {
+        padding: 18px 20px;
+        border-right: 1px solid var(--border);
+      }
+      .bn-metric:last-child { border-right: none; }
+      .bn-metric-label {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin-bottom: 4px;
+      }
+      .bn-metric-value {
+        font-size: 22px;
+        font-weight: 400;
+        letter-spacing: -0.02em;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+        font-family: var(--font-mono);
+      }
+      .bn-metric-sub {
+        font-size: 12px;
+        color: var(--text-3);
+        margin-left: 4px;
+      }
+      .bn-metric.ok .bn-metric-value { color: var(--ok); }
+      .bn-metric.warn .bn-metric-value { color: var(--warn); }
+
+      /* ---- Chart ---- */
+      .bn-chart-wrap {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        padding: 16px 20px 20px;
+      }
+      .bn-chart-legend {
+        display: flex;
+        gap: 18px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        margin-bottom: 10px;
+        align-items: center;
+      }
+      .bn-chart-legend span {
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .bn-legend-bar {
+        width: 10px; height: 10px;
+        background: rgba(139, 92, 246, 0.55);
+        display: inline-block;
+      }
+      .bn-legend-line {
+        width: 14px; height: 2px;
+        display: inline-block;
+      }
+      .bn-legend-line.line-p50 { background: var(--ok); }
+      .bn-legend-line.line-p95 { background: var(--accent); }
+      .bn-legend-win { margin-left: auto; }
+      .bn-chart {
+        flex: 1;
+        width: 100%;
+        min-height: 0;
+        background: var(--bg-1);
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
