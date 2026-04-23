@@ -1,0 +1,58 @@
+# Pylon
+
+> Pylon is a realtime backend framework. You define entities, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, row-level security, and a single Rust binary to run anywhere. One system instead of three glued together (database + API + realtime pub/sub).
+
+Pylon is best for apps where two browsers need to see the same thing instantly: dashboards, CRMs, collaborative editors, multiplayer games, chat. Pylon uses SQLite under the hood — excellent for up to ~10 GB of data; not a Postgres replacement for heavy analytics.
+
+The system has four primitives: entities (typed tables), policies (row-level access rules evaluated as expressions), functions (queries/mutations/actions authored in TypeScript and RPC-called by the client), and live queries (subscriptions that restream results when dependent rows change). All four live in one process.
+
+## Docs
+
+- [Introduction](https://pylonsync.com/docs): What Pylon is, who it's for, how to read the docs.
+- [Quickstart](https://pylonsync.com/docs/quickstart): Ship a live-syncing app in five minutes — schema, policy, function, live query.
+- [Installation](https://pylonsync.com/docs/installation): CLI install, requirements (Bun, Rust for source builds), directory conventions, env vars.
+
+## Core concepts
+
+- [Entities](https://pylonsync.com/docs/concepts/entities): Declaring typed tables — `field.string/int/float/boolean/datetime/richtext/id()`, indexes, modifiers. Note: `field.number()` does NOT exist — use `field.float()` or `field.int()`.
+- [Policies](https://pylonsync.com/docs/concepts/policies): Row-level access rules with expressions referencing `auth.*`, `data.*`, `existing.*`. Omitted actions are denied by default. Server functions bypass policies.
+- [Functions](https://pylonsync.com/docs/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators: `v.string()`, `v.int()`, `v.float()`, `v.boolean()` (NOT `v.bool`), `v.datetime()`, `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`.
+- [Live queries](https://pylonsync.com/docs/concepts/live-queries): How `db.useQuery` subscribes and fan-outs update on writes. Subscriptions respect policies. Use indexed filter columns for fast fan-out.
+
+## Packages
+
+- `@pylonsync/sdk` — schema DSL: `entity()`, `field.*`, `policy()`, `buildManifest()`.
+- `@pylonsync/functions` — server function DSL: `query()`, `mutation()`, `action()`, validators (`v.*`).
+- `@pylonsync/react` — client hooks: `db.useQuery`, `db.useOne`, `callFn`, `init`, `configureClient`, `storageKey`, `useSession`.
+
+## Runtime
+
+- Single Rust binary `pylon`. Dev: `pylon dev app.ts` watches schema + functions, runs SQLite on `.pylon/dev.db`, serves HTTP on `:4321`.
+- WebSocket for live queries; HTTP POST `/api/fn/<name>` for function RPC; `/api/entities/<Entity>` for direct CRUD (policy-checked).
+- Env vars: `PYLON_DB_PATH`, `PYLON_FILES_DIR`, `PYLON_CORS_ORIGIN`, `PYLON_PORT`, `PYLON_DEV_MODE`, `PYLON_RATE_LIMIT_MAX`, `PYLON_FN_RATE_LIMIT_MAX`.
+
+## Deploy
+
+- **Fly.io** — recommended for the architecture. Single binary + SQLite volume + WebSockets is Fly's happy path. LiteFS for multi-region SQLite replication. `fly deploy . --config examples/<app>/fly.toml`. Autostop machines → idle cost near zero.
+- **Cloudflare Workers** — true edge/$0 idle. WASM adapter + D1 + Durable Objects. Experimental; see `crates/workers/`.
+- **Docker / Compose / systemd / SST** — `pylon deploy --target docker|compose|systemd|sst` scaffolds config. Any host that runs Docker works.
+
+## Examples (under `examples/`)
+
+- [CRM](https://github.com/pylonsync/pylon/tree/main/examples/crm): Contacts, deals, pipelines — classic Salesforce-style app.
+- [ERP](https://github.com/pylonsync/pylon/tree/main/examples/erp): Inventory, orders, invoices, multi-org.
+- [Linear](https://github.com/pylonsync/pylon/tree/main/examples/linear): Issue tracker with teams, cycles, projects.
+- [Chat](https://github.com/pylonsync/pylon/tree/main/examples/chat): Threads + messages + presence.
+- [World3D](https://github.com/pylonsync/pylon/tree/main/examples/world3d): Three.js avatar world — live position sync.
+- [Forge](https://github.com/pylonsync/pylon/tree/main/examples/forge): Collaborative 3D scene editor.
+- [Arena](https://github.com/pylonsync/pylon/tree/main/examples/arena): Mass-multiplayer dot world — scale test.
+- [Trade](https://github.com/pylonsync/pylon/tree/main/examples/trade): Market dashboard with live ticks.
+- [Bench](https://github.com/pylonsync/pylon/tree/main/examples/bench): In-browser load test for Pylon.
+- [Stage](https://github.com/pylonsync/pylon/tree/main/examples/stage): Live performance staging environment.
+- [Auction House](https://github.com/pylonsync/pylon/tree/main/examples/auction-house): Real-time bidding.
+- [Todo](https://github.com/pylonsync/pylon/tree/main/examples/todo-app): Minimal reference app.
+
+## Optional
+
+- [GitHub](https://github.com/pylonsync/pylon): Source, issues, releases.
+- [Changelog](https://github.com/pylonsync/pylon/releases): Per-version notes.

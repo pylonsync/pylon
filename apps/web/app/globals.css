@@ -1996,3 +1996,154 @@ pre,
 .text-accent {
   color: var(--accent);
 }
+
+/* ==========================================================
+   Claude Code skill page
+   ========================================================== */
+.skill-page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  padding: 72px 24px 120px;
+}
+.skill-shell {
+  max-width: 900px;
+  margin: 0 auto;
+}
+.skill-back {
+  display: inline-block;
+  margin-bottom: 36px;
+  font-size: 13px;
+  color: var(--text-3);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+}
+.skill-back:hover { color: var(--text); }
+.skill-title {
+  font-size: clamp(44px, 6vw, 68px);
+  font-weight: 300;
+  letter-spacing: -0.03em;
+  line-height: 1.04;
+  margin: 0 0 20px;
+}
+.skill-title-accent {
+  color: var(--accent-hover);
+  font-style: italic;
+  font-weight: 300;
+}
+.skill-lede {
+  font-size: 18px;
+  color: var(--text-2);
+  line-height: 1.55;
+  max-width: 680px;
+  margin: 0 0 48px;
+}
+.skill-install {
+  margin: 0 0 36px;
+  padding: 24px 28px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+}
+.skill-h2 {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-hover);
+  margin: 0 0 16px;
+}
+.skill-steps {
+  margin: 0;
+  padding: 0 0 0 20px;
+  color: var(--text-2);
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+.skill-steps li { margin-bottom: 6px; }
+.skill-steps code,
+.skill-hint code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.skill-hint {
+  margin: 18px 0 0;
+  font-size: 13px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.skill-card {
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.skill-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.skill-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.skill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+.skill-file { color: var(--text); font-weight: 500; }
+.skill-dim { color: var(--text-3); }
+.skill-card-actions { display: flex; gap: 8px; }
+.skill-btn {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 14px;
+  border: 1px solid var(--border-2);
+  background: var(--bg-3);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  letter-spacing: -0.005em;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.skill-btn-ghost { background: transparent; color: var(--text-2); }
+.skill-btn-ghost:hover { color: var(--text); background: var(--bg-3); }
+.skill-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+.skill-btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+.skill-pre {
+  margin: 0;
+  padding: 24px;
+  overflow-x: auto;
+  max-height: 680px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--bg-1);
+}
+.skill-pre code {
+  font-family: inherit;
+  white-space: pre;
+  color: inherit;
+}
