@@ -76,7 +76,8 @@ impl Plugin for SlugifyPlugin {
         if let Some(config) = self.configs.get(entity) {
             if let Some(obj) = data.as_object_mut() {
                 // Only generate if target field is not already set.
-                let target_exists = obj.get(&config.target)
+                let target_exists = obj
+                    .get(&config.target)
                     .map(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
                     .unwrap_or(false);
 
@@ -119,7 +120,9 @@ mod tests {
         plugin.add("Post", "title", "slug");
 
         let mut data = serde_json::json!({"title": "My First Blog Post"});
-        plugin.before_insert("Post", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Post", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert_eq!(data["slug"], "my-first-blog-post");
     }
 
@@ -129,7 +132,9 @@ mod tests {
         plugin.add("Post", "title", "slug");
 
         let mut data = serde_json::json!({"title": "My Post", "slug": "custom-slug"});
-        plugin.before_insert("Post", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Post", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert_eq!(data["slug"], "custom-slug");
     }
 
@@ -137,7 +142,9 @@ mod tests {
     fn no_config_for_entity_passes() {
         let plugin = SlugifyPlugin::new();
         let mut data = serde_json::json!({"title": "Test"});
-        plugin.before_insert("Unknown", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Unknown", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert!(data.get("slug").is_none());
     }
 
@@ -147,7 +154,9 @@ mod tests {
         plugin.add("Post", "title", "slug");
 
         let mut data = serde_json::json!({"body": "no title here"});
-        plugin.before_insert("Post", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Post", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert!(data.get("slug").is_none());
     }
 }

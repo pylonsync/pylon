@@ -81,7 +81,8 @@ impl TenantScopePlugin {
 
     /// Mark `entity` as tenant-scoped using the default `tenantId` field.
     pub fn scope(&mut self, entity: impl Into<String>) -> &mut Self {
-        self.scopes.insert(entity.into(), TenantScopeConfig::default());
+        self.scopes
+            .insert(entity.into(), TenantScopeConfig::default());
         self
     }
 
@@ -207,7 +208,8 @@ mod tests {
     fn unscoped_entity_passes_through() {
         let p = TenantScopePlugin::new();
         let mut data = json!({"name": "x"});
-        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "t1")).unwrap();
+        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "t1"))
+            .unwrap();
         assert_eq!(data["name"], "x");
         assert!(data.get("tenantId").is_none());
     }
@@ -217,7 +219,8 @@ mod tests {
         let mut p = TenantScopePlugin::new();
         p.scope("Doc");
         let mut data = json!({"title": "hi"});
-        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA")).unwrap();
+        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA"))
+            .unwrap();
         assert_eq!(data["tenantId"], "tA");
     }
 
@@ -226,7 +229,8 @@ mod tests {
         let mut p = TenantScopePlugin::new();
         p.scope("Doc");
         let mut data = json!({"tenantId": "explicit"});
-        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA")).unwrap();
+        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA"))
+            .unwrap();
         assert_eq!(data["tenantId"], "explicit");
     }
 
@@ -246,7 +250,8 @@ mod tests {
         let mut p = TenantScopePlugin::new();
         p.scope("Doc");
         let row = json!({"tenantId": "tA", "title": "x"});
-        p.check_write("Doc", &row, &auth_with_tenant("u1", "tA")).unwrap();
+        p.check_write("Doc", &row, &auth_with_tenant("u1", "tA"))
+            .unwrap();
     }
 
     #[test]
@@ -276,7 +281,8 @@ mod tests {
         let mut p = TenantScopePlugin::new();
         p.scope_with_field("Doc", "orgId");
         let mut data = json!({});
-        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA")).unwrap();
+        p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA"))
+            .unwrap();
         assert_eq!(data["orgId"], "tA");
         assert!(data.get("tenantId").is_none());
     }

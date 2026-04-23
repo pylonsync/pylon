@@ -63,12 +63,7 @@ impl Scheduler {
 
     /// Register a cron task. The handler will also be registered with the job
     /// queue so that workers can execute it.
-    pub fn schedule(
-        &self,
-        name: &str,
-        cron_expr: &str,
-        handler: JobHandler,
-    ) -> Result<(), String> {
+    pub fn schedule(&self, name: &str, cron_expr: &str, handler: JobHandler) -> Result<(), String> {
         let cron = CronExpr::parse(cron_expr)?;
 
         // Register handler with job queue so workers can pick it up.

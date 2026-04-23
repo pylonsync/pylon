@@ -129,10 +129,8 @@ impl PubSubBroker {
     /// subscriber counts.
     pub fn channels(&self) -> Vec<(String, usize)> {
         let subs = self.subscriptions.lock().unwrap();
-        let mut result: Vec<(String, usize)> = subs
-            .iter()
-            .map(|(ch, s)| (ch.clone(), s.len()))
-            .collect();
+        let mut result: Vec<(String, usize)> =
+            subs.iter().map(|(ch, s)| (ch.clone(), s.len())).collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
         result
     }
@@ -170,10 +168,7 @@ impl PubSubBroker {
                 .collect()
         };
 
-        let all_channels: Vec<String> = matching
-            .into_iter()
-            .chain(history_channels)
-            .collect();
+        let all_channels: Vec<String> = matching.into_iter().chain(history_channels).collect();
 
         // We need to create a shared callback that can be used across
         // multiple subscriptions. We wrap it in an Arc.
@@ -228,7 +223,16 @@ fn now_iso() -> String {
     let month_days: [i64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut m = 0usize;
     for (i, &md) in month_days.iter().enumerate() {
@@ -306,9 +310,12 @@ mod tests {
         let broker = PubSubBroker::new(10);
         let count = Arc::new(AtomicUsize::new(0));
         let c = Arc::clone(&count);
-        broker.subscribe("chat", Box::new(move |_msg| {
-            c.fetch_add(1, Ordering::SeqCst);
-        }));
+        broker.subscribe(
+            "chat",
+            Box::new(move |_msg| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
         let notified = broker.publish("chat", "hello");
         assert_eq!(notified, 1);
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -327,9 +334,12 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         for _ in 0..5 {
             let c = Arc::clone(&count);
-            broker.subscribe("events", Box::new(move |_msg| {
-                c.fetch_add(1, Ordering::SeqCst);
-            }));
+            broker.subscribe(
+                "events",
+                Box::new(move |_msg| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
         }
         let notified = broker.publish("events", "boom");
         assert_eq!(notified, 5);
@@ -341,9 +351,12 @@ mod tests {
         let broker = PubSubBroker::new(10);
         let count = Arc::new(AtomicUsize::new(0));
         let c = Arc::clone(&count);
-        let id = broker.subscribe("ch", Box::new(move |_msg| {
-            c.fetch_add(1, Ordering::SeqCst);
-        }));
+        let id = broker.subscribe(
+            "ch",
+            Box::new(move |_msg| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
 
         broker.publish("ch", "first");
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -441,9 +454,12 @@ mod tests {
 
         let count = Arc::new(AtomicUsize::new(0));
         let c = Arc::clone(&count);
-        let ids = broker.psubscribe("user:*", Box::new(move |_msg| {
-            c.fetch_add(1, Ordering::SeqCst);
-        }));
+        let ids = broker.psubscribe(
+            "user:*",
+            Box::new(move |_msg| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
         assert_eq!(ids.len(), 2); // user:1 and user:2
 
         broker.publish("user:1", "hello");
@@ -456,9 +472,12 @@ mod tests {
         let broker = PubSubBroker::new(10);
         let received = Arc::new(Mutex::new(None::<PubSubMessage>));
         let r = Arc::clone(&received);
-        broker.subscribe("meta", Box::new(move |msg| {
-            *r.lock().unwrap() = Some(msg.clone());
-        }));
+        broker.subscribe(
+            "meta",
+            Box::new(move |msg| {
+                *r.lock().unwrap() = Some(msg.clone());
+            }),
+        );
         broker.publish("meta", "payload");
 
         let msg = received.lock().unwrap().clone().unwrap();

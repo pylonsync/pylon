@@ -435,10 +435,21 @@ mod tests {
     fn on_request_middleware() {
         struct BlockAdmin;
         impl Plugin for BlockAdmin {
-            fn name(&self) -> &str { "block-admin" }
-            fn on_request(&self, _method: &str, path: &str, _auth: &AuthContext) -> Result<(), PluginError> {
+            fn name(&self) -> &str {
+                "block-admin"
+            }
+            fn on_request(
+                &self,
+                _method: &str,
+                path: &str,
+                _auth: &AuthContext,
+            ) -> Result<(), PluginError> {
                 if path.starts_with("/api/admin") {
-                    Err(PluginError { code: "FORBIDDEN".into(), message: "Admin access denied".into(), status: 403 })
+                    Err(PluginError {
+                        code: "FORBIDDEN".into(),
+                        message: "Admin access denied".into(),
+                        status: 403,
+                    })
                 } else {
                     Ok(())
                 }
@@ -449,8 +460,12 @@ mod tests {
         registry.register(Arc::new(BlockAdmin));
 
         let auth = AuthContext::anonymous();
-        assert!(registry.run_on_request("GET", "/api/entities/Todo", &auth).is_ok());
-        assert!(registry.run_on_request("GET", "/api/admin/users", &auth).is_err());
+        assert!(registry
+            .run_on_request("GET", "/api/entities/Todo", &auth)
+            .is_ok());
+        assert!(registry
+            .run_on_request("GET", "/api/admin/users", &auth)
+            .is_err());
     }
 
     #[test]
@@ -463,7 +478,11 @@ mod tests {
 
     #[test]
     fn plugin_error_display() {
-        let err = PluginError { code: "TEST".into(), message: "msg".into(), status: 400 };
+        let err = PluginError {
+            code: "TEST".into(),
+            message: "msg".into(),
+            status: 400,
+        };
         assert_eq!(format!("{err}"), "[TEST] msg");
     }
 }

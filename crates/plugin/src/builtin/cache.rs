@@ -150,11 +150,7 @@ impl CachePlugin {
 
     /// Remove a key if it is expired. Returns true if the key was removed.
     /// Caller must already hold the store lock.
-    fn remove_if_expired(
-        &self,
-        store: &mut HashMap<String, CacheEntry>,
-        key: &str,
-    ) -> bool {
+    fn remove_if_expired(&self, store: &mut HashMap<String, CacheEntry>, key: &str) -> bool {
         let expired = store.get(key).map(|e| e.is_expired()).unwrap_or(false);
         if expired {
             store.remove(key);
@@ -624,10 +620,7 @@ impl CachePlugin {
                 self.evict_lru(&mut store);
                 let mut set = HashSet::new();
                 set.insert(member.to_string());
-                store.insert(
-                    key.to_string(),
-                    CacheEntry::new(CacheValue::Set(set), None),
-                );
+                store.insert(key.to_string(), CacheEntry::new(CacheValue::Set(set), None));
                 true
             }
         }
@@ -1031,10 +1024,8 @@ impl CachePlugin {
             Some(entry) => {
                 entry.touch();
                 if let CacheValue::SortedSet(zset) = &entry.value {
-                    let mut members: Vec<(String, f64)> = zset
-                        .iter()
-                        .map(|(m, s)| (m.clone(), *s))
-                        .collect();
+                    let mut members: Vec<(String, f64)> =
+                        zset.iter().map(|(m, s)| (m.clone(), *s)).collect();
                     members.sort_by(|a, b| {
                         a.1.partial_cmp(&b.1)
                             .unwrap_or(std::cmp::Ordering::Equal)
@@ -1534,13 +1525,7 @@ mod tests {
         c.zadd("z", 1.0, "a");
         c.zadd("z", 2.0, "b");
         let range = c.zrange("z", 0, 1);
-        assert_eq!(
-            range,
-            vec![
-                ("a".to_string(), 1.0),
-                ("b".to_string(), 2.0),
-            ]
-        );
+        assert_eq!(range, vec![("a".to_string(), 1.0), ("b".to_string(), 2.0),]);
     }
 
     #[test]

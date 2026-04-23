@@ -9,13 +9,13 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
 use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
 use pylon_runtime::Runtime;
+use serde_json::Value;
 
 fn test_manifest() -> AppManifest {
     AppManifest {
@@ -52,9 +52,8 @@ fn available_port() -> u16 {
     static NEXT: AtomicU16 = AtomicU16::new(43_000);
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
-        let ok = (0..4).all(|off| {
-            std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok()
-        });
+        let ok = (0..4)
+            .all(|off| std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok());
         if ok {
             return base;
         }
@@ -77,7 +76,13 @@ fn start_server(rt: Arc<Runtime>) -> u16 {
     port
 }
 
-fn http(port: u16, method: &str, path: &str, auth: Option<&str>, body: Option<&str>) -> (u16, String) {
+fn http(
+    port: u16,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    body: Option<&str>,
+) -> (u16, String) {
     let body_str = body.unwrap_or("");
     let mut hdrs = format!(
         "Host: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",

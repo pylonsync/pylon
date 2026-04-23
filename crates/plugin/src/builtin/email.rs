@@ -64,12 +64,8 @@ fn smtp_send(config: &SmtpConfig, msg: &EmailMessage) -> Result<(), String> {
     }
 
     let stream = TcpStream::connect(&addr).map_err(|e| format!("SMTP connect failed: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
     let mut reader = BufReader::new(
         stream
@@ -111,8 +107,7 @@ fn smtp_send(config: &SmtpConfig, msg: &EmailMessage) -> Result<(), String> {
     read_line(&mut reader, &mut line)?;
 
     // RCPT TO
-    write!(writer, "RCPT TO:<{}>\r\n", msg.to)
-        .map_err(|e| format!("SMTP write failed: {e}"))?;
+    write!(writer, "RCPT TO:<{}>\r\n", msg.to).map_err(|e| format!("SMTP write failed: {e}"))?;
     read_line(&mut reader, &mut line)?;
 
     // DATA
@@ -234,7 +229,9 @@ mod tests {
     #[test]
     fn send_magic_code_formats_correctly() {
         let plugin = EmailPlugin::dev();
-        plugin.send_magic_code("user@example.com", "123456").unwrap();
+        plugin
+            .send_magic_code("user@example.com", "123456")
+            .unwrap();
 
         let history = plugin.sent_history();
         assert_eq!(history.len(), 1);

@@ -112,11 +112,7 @@ impl WorkflowEngine {
     }
 
     /// Start a new workflow instance. Returns the instance ID.
-    pub fn start(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-    ) -> Result<String, String> {
+    pub fn start(&self, name: &str, input: serde_json::Value) -> Result<String, String> {
         let defs = self.definitions.lock().unwrap();
         let def = defs
             .get(name)
@@ -163,9 +159,7 @@ impl WorkflowEngine {
 
         // Terminal states: nothing to do.
         match instance.status {
-            WorkflowStatus::Completed
-            | WorkflowStatus::Failed
-            | WorkflowStatus::Cancelled => {
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
                 return Ok(instance.status);
             }
             WorkflowStatus::Sleeping => {
@@ -210,9 +204,7 @@ impl WorkflowEngine {
                 .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
 
             match instance.status {
-                WorkflowStatus::Completed
-                | WorkflowStatus::Failed
-                | WorkflowStatus::Cancelled => {
+                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled => {
                     return Ok(instance.status.clone());
                 }
                 _ => {}
@@ -230,9 +222,7 @@ impl WorkflowEngine {
         data: serde_json::Value,
     ) -> Result<(), String> {
         let mut instances = self.instances.lock().unwrap();
-        let inst = instances
-            .get_mut(workflow_id)
-            .ok_or("Workflow not found")?;
+        let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
 
         if inst.status != WorkflowStatus::WaitingForEvent {
             return Err("Workflow is not waiting for an event".into());
@@ -266,9 +256,7 @@ impl WorkflowEngine {
     /// Cancel a workflow.
     pub fn cancel(&self, workflow_id: &str) -> Result<(), String> {
         let mut instances = self.instances.lock().unwrap();
-        let inst = instances
-            .get_mut(workflow_id)
-            .ok_or("Workflow not found")?;
+        let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
         inst.status = WorkflowStatus::Cancelled;
         inst.completed_at = Some(now_iso());
         Ok(())
@@ -397,9 +385,7 @@ impl WorkflowEngine {
                     error: None,
                     started_at: Some(now_iso()),
                     completed_at: Some(now_iso()),
-                    duration_ms: response
-                        .get("duration_ms")
-                        .and_then(|v| v.as_u64()),
+                    duration_ms: response.get("duration_ms").and_then(|v| v.as_u64()),
                     retry_count: 0,
                 });
                 inst.current_step += 1;
@@ -488,10 +474,7 @@ impl WorkflowEngine {
     }
 
     /// Call the TypeScript workflow runner via HTTP.
-    fn call_runner(
-        &self,
-        request: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    fn call_runner(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
@@ -519,9 +502,7 @@ impl WorkflowEngine {
 
         let mut stream = TcpStream::connect(host_port)
             .map_err(|e| format!("Failed to connect to workflow runner: {e}"))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
         stream
             .write_all(http_request.as_bytes())
             .map_err(|e| format!("Write failed: {e}"))?;
@@ -530,8 +511,7 @@ impl WorkflowEngine {
         stream.read_to_string(&mut response).ok();
 
         let body = response.split("\r\n\r\n").nth(1).unwrap_or("{}");
-        serde_json::from_str(body)
-            .map_err(|e| format!("Failed to parse runner response: {e}"))
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse runner response: {e}"))
     }
 }
 
@@ -627,9 +607,7 @@ mod tests {
     #[test]
     fn start_unknown_workflow_errors() {
         let e = engine();
-        let err = e
-            .start("nonexistent", serde_json::json!({}))
-            .unwrap_err();
+        let err = e.start("nonexistent", serde_json::json!({})).unwrap_err();
         assert!(err.contains("not registered"));
     }
 
@@ -638,9 +616,7 @@ mod tests {
     #[test]
     fn step_complete_advances_workflow() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let status = e
             .advance_with_response(
@@ -660,7 +636,10 @@ mod tests {
         assert_eq!(inst.steps.len(), 1);
         assert_eq!(inst.steps[0].name, "create_account");
         assert_eq!(inst.steps[0].status, StepStatus::Completed);
-        assert_eq!(inst.steps[0].output, Some(serde_json::json!({"account_id": 42})));
+        assert_eq!(
+            inst.steps[0].output,
+            Some(serde_json::json!({"account_id": 42}))
+        );
         assert_eq!(inst.steps[0].duration_ms, Some(120));
         assert!(inst.started_at.is_some());
     }
@@ -668,9 +647,7 @@ mod tests {
     #[test]
     fn multiple_steps_advance_sequentially() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         e.advance_with_response(
             &id,
@@ -696,9 +673,7 @@ mod tests {
     #[test]
     fn sleep_sets_wake_at_and_status() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let status = e
             .advance_with_response(
@@ -722,9 +697,7 @@ mod tests {
     #[test]
     fn wake_sleeping_wakes_expired_workflows() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         // Sleep for 0 seconds (immediately expired).
         e.advance_with_response(
@@ -744,9 +717,7 @@ mod tests {
     #[test]
     fn wake_sleeping_does_not_wake_future_timers() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         e.advance_with_response(
             &id,
@@ -766,9 +737,7 @@ mod tests {
     #[test]
     fn wait_event_and_send_event() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let status = e
             .advance_with_response(
@@ -778,8 +747,12 @@ mod tests {
             .unwrap();
         assert_eq!(status, WorkflowStatus::WaitingForEvent);
 
-        e.send_event(&id, "user_confirmed", serde_json::json!({"confirmed": true}))
-            .unwrap();
+        e.send_event(
+            &id,
+            "user_confirmed",
+            serde_json::json!({"confirmed": true}),
+        )
+        .unwrap();
 
         let inst = e.get(&id).unwrap();
         assert_eq!(inst.status, WorkflowStatus::Running);
@@ -794,9 +767,7 @@ mod tests {
     #[test]
     fn send_event_wrong_name_errors() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         e.advance_with_response(
             &id,
@@ -813,9 +784,7 @@ mod tests {
     #[test]
     fn send_event_not_waiting_errors() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let err = e
             .send_event(&id, "anything", serde_json::json!({}))
@@ -828,9 +797,7 @@ mod tests {
     #[test]
     fn cancel_sets_status_and_completed_at() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         e.cancel(&id).unwrap();
 
@@ -851,9 +818,7 @@ mod tests {
     #[test]
     fn complete_sets_output_and_status() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let status = e
             .advance_with_response(
@@ -871,9 +836,7 @@ mod tests {
     #[test]
     fn advance_completed_workflow_returns_status() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         e.advance_with_response(
             &id,
@@ -895,9 +858,7 @@ mod tests {
     #[test]
     fn failure_retries_up_to_max() {
         let e = engine(); // max_retries = 3
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         // First 3 failures should retry (not mark workflow as Failed).
         for i in 0..3 {
@@ -911,7 +872,11 @@ mod tests {
                     }),
                 )
                 .unwrap();
-            assert_eq!(status, WorkflowStatus::Running, "retry {i} should keep running");
+            assert_eq!(
+                status,
+                WorkflowStatus::Running,
+                "retry {i} should keep running"
+            );
         }
 
         // 4th failure exceeds max_retries, workflow should fail.
@@ -937,9 +902,7 @@ mod tests {
     #[test]
     fn failure_then_success_works() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         // Fail once.
         e.advance_with_response(
@@ -1014,12 +977,8 @@ mod tests {
     #[test]
     fn list_filters_by_status() {
         let e = engine();
-        let id1 = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
-        let _id2 = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id1 = e.start("onboarding", serde_json::json!({})).unwrap();
+        let _id2 = e.start("onboarding", serde_json::json!({})).unwrap();
 
         // Complete one.
         e.advance_with_response(
@@ -1041,15 +1000,10 @@ mod tests {
     #[test]
     fn unknown_action_returns_error() {
         let e = engine();
-        let id = e
-            .start("onboarding", serde_json::json!({}))
-            .unwrap();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
 
         let err = e
-            .advance_with_response(
-                &id,
-                serde_json::json!({"action": "bogus"}),
-            )
+            .advance_with_response(&id, serde_json::json!({"action": "bogus"}))
             .unwrap_err();
         assert!(err.contains("Unknown action"));
     }

@@ -36,7 +36,8 @@ impl SearchPlugin {
 
     /// Register an entity and its searchable fields.
     pub fn add(&mut self, entity: &str, fields: Vec<String>) {
-        self.configs.insert(entity.to_string(), SearchConfig { fields });
+        self.configs
+            .insert(entity.to_string(), SearchConfig { fields });
     }
 
     /// Search across all indexed entities. Returns matching rows.
@@ -127,9 +128,24 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Buy milk"}), &AuthContext::anonymous());
-        plugin.after_insert("Todo", "t2", &serde_json::json!({"title": "Buy bread"}), &AuthContext::anonymous());
-        plugin.after_insert("Todo", "t3", &serde_json::json!({"title": "Walk the dog"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Buy milk"}),
+            &AuthContext::anonymous(),
+        );
+        plugin.after_insert(
+            "Todo",
+            "t2",
+            &serde_json::json!({"title": "Buy bread"}),
+            &AuthContext::anonymous(),
+        );
+        plugin.after_insert(
+            "Todo",
+            "t3",
+            &serde_json::json!({"title": "Walk the dog"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("buy");
         assert_eq!(results.len(), 2);
@@ -144,8 +160,18 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Buy organic milk"}), &AuthContext::anonymous());
-        plugin.after_insert("Todo", "t2", &serde_json::json!({"title": "Buy regular milk"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Buy organic milk"}),
+            &AuthContext::anonymous(),
+        );
+        plugin.after_insert(
+            "Todo",
+            "t2",
+            &serde_json::json!({"title": "Buy regular milk"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("organic milk");
         assert_eq!(results.len(), 1);
@@ -157,7 +183,12 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "IMPORTANT TASK"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "IMPORTANT TASK"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("important");
         assert_eq!(results.len(), 1);
@@ -168,8 +199,18 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Old title"}), &AuthContext::anonymous());
-        plugin.after_update("Todo", "t1", &serde_json::json!({"title": "New title"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Old title"}),
+            &AuthContext::anonymous(),
+        );
+        plugin.after_update(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "New title"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("old");
         assert_eq!(results.len(), 0);
@@ -183,7 +224,12 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Deletable"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Deletable"}),
+            &AuthContext::anonymous(),
+        );
         plugin.after_delete("Todo", "t1", &AuthContext::anonymous());
 
         let results = plugin.search("deletable");
@@ -195,7 +241,12 @@ mod tests {
         let mut plugin = SearchPlugin::new();
         plugin.add("User", vec!["displayName".into(), "email".into()]);
 
-        plugin.after_insert("User", "u1", &serde_json::json!({"displayName": "Alice", "email": "alice@test.com"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "User",
+            "u1",
+            &serde_json::json!({"displayName": "Alice", "email": "alice@test.com"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("alice");
         assert_eq!(results.len(), 1);
@@ -207,7 +258,12 @@ mod tests {
     #[test]
     fn search_no_config_no_index() {
         let plugin = SearchPlugin::new();
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Test"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Test"}),
+            &AuthContext::anonymous(),
+        );
         let results = plugin.search("test");
         assert_eq!(results.len(), 0);
     }
@@ -216,7 +272,12 @@ mod tests {
     fn search_empty_query() {
         let mut plugin = SearchPlugin::new();
         plugin.add("Todo", vec!["title".into()]);
-        plugin.after_insert("Todo", "t1", &serde_json::json!({"title": "Test"}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({"title": "Test"}),
+            &AuthContext::anonymous(),
+        );
 
         let results = plugin.search("");
         assert_eq!(results.len(), 1); // empty query matches all

@@ -74,13 +74,7 @@ impl VectorSearchPlugin {
     }
 
     /// Upsert a vector for `(entity, row_id)`.
-    pub fn index(
-        &self,
-        entity: &str,
-        row_id: &str,
-        vector: Vec<f32>,
-        metadata: Option<Value>,
-    ) {
+    pub fn index(&self, entity: &str, row_id: &str, vector: Vec<f32>, metadata: Option<Value>) {
         let norm = l2_norm(&vector);
         let row = VectorRow {
             entity: entity.into(),
@@ -97,12 +91,7 @@ impl VectorSearchPlugin {
     }
 
     /// Find the k most similar vectors. Optionally restrict to one entity.
-    pub fn search(
-        &self,
-        query: &[f32],
-        k: usize,
-        entity_filter: Option<&str>,
-    ) -> Vec<VectorHit> {
+    pub fn search(&self, query: &[f32], k: usize, entity_filter: Option<&str>) -> Vec<VectorHit> {
         if query.is_empty() {
             return vec![];
         }
@@ -120,8 +109,7 @@ impl VectorSearchPlugin {
                     && r.norm > 0.0
             })
             .map(|r| {
-                let dot: f32 =
-                    r.vector.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                let dot: f32 = r.vector.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
                 let score = dot / (r.norm * q_norm);
                 VectorHit {
                     entity: r.entity.clone(),
@@ -133,7 +121,11 @@ impl VectorSearchPlugin {
             .collect();
 
         // Highest score first.
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(k);
         hits
     }
@@ -247,7 +239,12 @@ mod tests {
         let path = dir.join("vec.json");
 
         let p1 = VectorSearchPlugin::new().with_persist_path(&path);
-        p1.index("Doc", "x", vec![0.5, 0.5], Some(serde_json::json!({"t": "hi"})));
+        p1.index(
+            "Doc",
+            "x",
+            vec![0.5, 0.5],
+            Some(serde_json::json!({"t": "hi"})),
+        );
         drop(p1);
 
         let p2 = VectorSearchPlugin::new().with_persist_path(&path);

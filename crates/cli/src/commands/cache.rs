@@ -13,8 +13,8 @@
 //! pylon cache [--port 6380] [--resp-port 6379] [--resp-only] [--max-keys 100000] [--max-history 100]
 //! ```
 
-use pylon_kernel::ExitCode;
 use crate::output::print_error;
+use pylon_kernel::ExitCode;
 
 const DEFAULT_PORT: u16 = 6380;
 const DEFAULT_RESP_PORT: u16 = 6379;
@@ -84,7 +84,9 @@ fn print_usage() {
     println!("  --resp-port <port>     RESP (Redis protocol) port (default: {DEFAULT_RESP_PORT})");
     println!("  --resp-only            Only start the RESP server, no HTTP");
     println!("  --max-keys <n>         Maximum cached keys (default: {DEFAULT_MAX_KEYS})");
-    println!("  --max-history <n>      Max pub/sub history per channel (default: {DEFAULT_MAX_HISTORY})");
+    println!(
+        "  --max-history <n>      Max pub/sub history per channel (default: {DEFAULT_MAX_HISTORY})"
+    );
     println!("  --help                 Show this message");
     println!();
     println!("HTTP endpoints:");

@@ -20,10 +20,7 @@ use serde::Serialize;
 #[serde(tag = "type")]
 pub enum MigrationStep {
     #[serde(rename = "create_table")]
-    CreateTable {
-        entity: String,
-        sql: String,
-    },
+    CreateTable { entity: String, sql: String },
     #[serde(rename = "drop_table")]
     DropTable {
         entity: String,
@@ -74,8 +71,13 @@ impl MigrationStep {
     pub fn is_destructive(&self) -> bool {
         matches!(
             self,
-            MigrationStep::DropTable { destructive: true, .. }
-                | MigrationStep::DropColumn { destructive: true, .. }
+            MigrationStep::DropTable {
+                destructive: true,
+                ..
+            } | MigrationStep::DropColumn {
+                destructive: true,
+                ..
+            }
         )
     }
 
@@ -172,11 +174,7 @@ pub fn diff(old: &AppManifest, new: &AppManifest) -> MigrationPlan {
 }
 
 /// Like [`diff`] but emits SQL for the given dialect.
-pub fn diff_for_dialect(
-    old: &AppManifest,
-    new: &AppManifest,
-    dialect: Dialect,
-) -> MigrationPlan {
+pub fn diff_for_dialect(old: &AppManifest, new: &AppManifest, dialect: Dialect) -> MigrationPlan {
     diff_full(old, new, &RenameHints::default(), dialect)
 }
 
@@ -330,8 +328,7 @@ fn diff_entity(
 
     // Removed fields (DROP COLUMN) — skip renamed-away.
     for field in &old.fields {
-        if !new_fields.contains(field.name.as_str())
-            && !renamed_old_field.contains_key(&field.name)
+        if !new_fields.contains(field.name.as_str()) && !renamed_old_field.contains_key(&field.name)
         {
             steps.push(MigrationStep::DropColumn {
                 entity: entity_name.to_string(),
@@ -460,7 +457,11 @@ mod tests {
         }
     }
 
-    fn entity(name: &str, fields: Vec<ManifestField>, indexes: Vec<ManifestIndex>) -> ManifestEntity {
+    fn entity(
+        name: &str,
+        fields: Vec<ManifestField>,
+        indexes: Vec<ManifestIndex>,
+    ) -> ManifestEntity {
         ManifestEntity {
             name: name.into(),
             fields,
@@ -500,7 +501,9 @@ mod tests {
         let new = manifest(vec![entity("User", vec![field("email", "string")], vec![])]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::CreateTable { entity, .. } if entity == "User"));
+        assert!(
+            matches!(&plan.steps[0], MigrationStep::CreateTable { entity, .. } if entity == "User")
+        );
         assert!(!plan.has_destructive);
     }
 
@@ -510,55 +513,93 @@ mod tests {
         let new = manifest(vec![]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::DropTable { entity, destructive: true, .. } if entity == "User"));
+        assert!(
+            matches!(&plan.steps[0], MigrationStep::DropTable { entity, destructive: true, .. } if entity == "User")
+        );
         assert!(plan.has_destructive);
     }
 
     #[test]
     fn new_field_adds_column() {
         let old = manifest(vec![entity("User", vec![field("email", "string")], vec![])]);
-        let new = manifest(vec![entity("User", vec![field("email", "string"), field("name", "string")], vec![])]);
+        let new = manifest(vec![entity(
+            "User",
+            vec![field("email", "string"), field("name", "string")],
+            vec![],
+        )]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::AddColumn { entity, field, .. } if entity == "User" && field == "name"));
+        assert!(
+            matches!(&plan.steps[0], MigrationStep::AddColumn { entity, field, .. } if entity == "User" && field == "name")
+        );
     }
 
     #[test]
     fn removed_field_drops_column() {
-        let old = manifest(vec![entity("User", vec![field("email", "string"), field("name", "string")], vec![])]);
+        let old = manifest(vec![entity(
+            "User",
+            vec![field("email", "string"), field("name", "string")],
+            vec![],
+        )]);
         let new = manifest(vec![entity("User", vec![field("email", "string")], vec![])]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::DropColumn { destructive: true, .. }));
+        assert!(matches!(
+            &plan.steps[0],
+            MigrationStep::DropColumn {
+                destructive: true,
+                ..
+            }
+        ));
         assert!(plan.has_destructive);
     }
 
     #[test]
     fn new_index_creates_index() {
         let old = manifest(vec![entity("User", vec![field("email", "string")], vec![])]);
-        let new = manifest(vec![entity("User", vec![field("email", "string")], vec![index("idx_email", vec!["email"], true)])]);
+        let new = manifest(vec![entity(
+            "User",
+            vec![field("email", "string")],
+            vec![index("idx_email", vec!["email"], true)],
+        )]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::CreateIndex { index, .. } if index == "idx_email"));
+        assert!(
+            matches!(&plan.steps[0], MigrationStep::CreateIndex { index, .. } if index == "idx_email")
+        );
     }
 
     #[test]
     fn removed_index_drops_index() {
-        let old = manifest(vec![entity("User", vec![field("email", "string")], vec![index("idx_email", vec!["email"], true)])]);
+        let old = manifest(vec![entity(
+            "User",
+            vec![field("email", "string")],
+            vec![index("idx_email", vec!["email"], true)],
+        )]);
         let new = manifest(vec![entity("User", vec![field("email", "string")], vec![])]);
         let plan = diff(&old, &new);
         assert_eq!(plan.steps.len(), 1);
-        assert!(matches!(&plan.steps[0], MigrationStep::DropIndex { index, .. } if index == "idx_email"));
+        assert!(
+            matches!(&plan.steps[0], MigrationStep::DropIndex { index, .. } if index == "idx_email")
+        );
     }
 
     #[test]
     fn complex_migration() {
         let old = manifest(vec![
-            entity("User", vec![field("email", "string"), field("age", "int")], vec![]),
+            entity(
+                "User",
+                vec![field("email", "string"), field("age", "int")],
+                vec![],
+            ),
             entity("Post", vec![field("title", "string")], vec![]),
         ]);
         let new = manifest(vec![
-            entity("User", vec![field("email", "string"), field("name", "string")], vec![index("idx_email", vec!["email"], true)]),
+            entity(
+                "User",
+                vec![field("email", "string"), field("name", "string")],
+                vec![index("idx_email", vec!["email"], true)],
+            ),
             entity("Comment", vec![field("body", "string")], vec![]),
         ]);
 
@@ -566,16 +607,20 @@ mod tests {
 
         // Should have: create Comment, drop Post, add name column, drop age column, create index
         assert!(plan.has_destructive);
-        let step_types: Vec<&str> = plan.steps.iter().map(|s| match s {
-            MigrationStep::CreateTable { .. } => "create_table",
-            MigrationStep::DropTable { .. } => "drop_table",
-            MigrationStep::AddColumn { .. } => "add_column",
-            MigrationStep::DropColumn { .. } => "drop_column",
-            MigrationStep::CreateIndex { .. } => "create_index",
-            MigrationStep::DropIndex { .. } => "drop_index",
-            MigrationStep::RenameTable { .. } => "rename_table",
-            MigrationStep::RenameColumn { .. } => "rename_column",
-        }).collect();
+        let step_types: Vec<&str> = plan
+            .steps
+            .iter()
+            .map(|s| match s {
+                MigrationStep::CreateTable { .. } => "create_table",
+                MigrationStep::DropTable { .. } => "drop_table",
+                MigrationStep::AddColumn { .. } => "add_column",
+                MigrationStep::DropColumn { .. } => "drop_column",
+                MigrationStep::CreateIndex { .. } => "create_index",
+                MigrationStep::DropIndex { .. } => "drop_index",
+                MigrationStep::RenameTable { .. } => "rename_table",
+                MigrationStep::RenameColumn { .. } => "rename_column",
+            })
+            .collect();
 
         assert!(step_types.contains(&"create_table"));
         assert!(step_types.contains(&"drop_table"));
@@ -587,16 +632,24 @@ mod tests {
     #[test]
     fn table_rename_with_hint_emits_rename_step_not_drop() {
         let old = manifest(vec![entity("Post", vec![field("title", "string")], vec![])]);
-        let new = manifest(vec![entity("Article", vec![field("title", "string")], vec![])]);
+        let new = manifest(vec![entity(
+            "Article",
+            vec![field("title", "string")],
+            vec![],
+        )]);
         let hints = RenameHints::new().rename_table("Post", "Article");
         let plan = diff_with_renames(&old, &new, &hints);
         assert!(!plan.has_destructive, "rename must not be destructive");
-        let kinds: Vec<&str> = plan.steps.iter().map(|s| match s {
-            MigrationStep::RenameTable { .. } => "rename",
-            MigrationStep::CreateTable { .. } => "create",
-            MigrationStep::DropTable { .. } => "drop",
-            _ => "other",
-        }).collect();
+        let kinds: Vec<&str> = plan
+            .steps
+            .iter()
+            .map(|s| match s {
+                MigrationStep::RenameTable { .. } => "rename",
+                MigrationStep::CreateTable { .. } => "create",
+                MigrationStep::DropTable { .. } => "drop",
+                _ => "other",
+            })
+            .collect();
         assert!(kinds.contains(&"rename"));
         assert!(!kinds.contains(&"create"));
         assert!(!kinds.contains(&"drop"));
@@ -605,7 +658,11 @@ mod tests {
     #[test]
     fn column_rename_with_hint_emits_rename_step_not_drop() {
         let old = manifest(vec![entity("User", vec![field("name", "string")], vec![])]);
-        let new = manifest(vec![entity("User", vec![field("displayName", "string")], vec![])]);
+        let new = manifest(vec![entity(
+            "User",
+            vec![field("displayName", "string")],
+            vec![],
+        )]);
         let hints = RenameHints::new().rename_column("User", "name", "displayName");
         let plan = diff_with_renames(&old, &new, &hints);
         assert!(!plan.has_destructive);
@@ -618,7 +675,11 @@ mod tests {
     #[test]
     fn rename_table_then_rename_column_inside_it() {
         let old = manifest(vec![entity("Post", vec![field("title", "string")], vec![])]);
-        let new = manifest(vec![entity("Article", vec![field("headline", "string")], vec![])]);
+        let new = manifest(vec![entity(
+            "Article",
+            vec![field("headline", "string")],
+            vec![],
+        )]);
         let hints = RenameHints::new()
             .rename_table("Post", "Article")
             .rename_column("Article", "title", "headline");
@@ -643,7 +704,11 @@ mod tests {
         // Sanity check that the old behavior is preserved when no hints are
         // supplied — it MUST stay destructive so users get warned.
         let old = manifest(vec![entity("Post", vec![field("title", "string")], vec![])]);
-        let new = manifest(vec![entity("Article", vec![field("title", "string")], vec![])]);
+        let new = manifest(vec![entity(
+            "Article",
+            vec![field("title", "string")],
+            vec![],
+        )]);
         let plan = diff(&old, &new);
         assert!(plan.has_destructive);
     }
@@ -667,7 +732,10 @@ mod tests {
         assert!(sql_pg.contains("TIMESTAMPTZ"));
         assert!(sql_pg.contains("INTEGER"));
         assert!(sql_pg.contains("DOUBLE PRECISION"));
-        assert!(!sql_pg.contains("REAL"), "Postgres should NOT use SQLite's REAL");
+        assert!(
+            !sql_pg.contains("REAL"),
+            "Postgres should NOT use SQLite's REAL"
+        );
 
         let plan_sqlite = diff_for_dialect(&m_old, &m_new, Dialect::Sqlite);
         let sql_sqlite = plan_sqlite.sql_statements().join(" ");

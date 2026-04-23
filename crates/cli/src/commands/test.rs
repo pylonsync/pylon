@@ -18,15 +18,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
-    let test_dir = std::env::var("PYLON_TEST_DIR")
-        .ok()
-        .unwrap_or_else(|| {
-            if Path::new("tests").exists() {
-                "tests".into()
-            } else {
-                "functions".into()
-            }
-        });
+    let test_dir = std::env::var("PYLON_TEST_DIR").ok().unwrap_or_else(|| {
+        if Path::new("tests").exists() {
+            "tests".into()
+        } else {
+            "functions".into()
+        }
+    });
 
     if !Path::new(&test_dir).exists() {
         output::print_error(&format!("No test directory found: {test_dir}"));
@@ -98,9 +96,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     "error": e.to_string(),
                 }));
                 if !json_mode {
-                    eprintln!(
-                        "    error: could not run bun (is it installed?): {e}"
-                    );
+                    eprintln!("    error: could not run bun (is it installed?): {e}");
                 }
             }
         }

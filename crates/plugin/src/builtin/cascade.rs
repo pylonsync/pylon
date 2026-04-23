@@ -65,7 +65,10 @@ impl Plugin for CascadePlugin {
             for rule in rules {
                 // Queue a "find and delete children" marker.
                 // The runtime needs to: SELECT id FROM child WHERE foreign_key = parent_id, then DELETE each.
-                pending.push((rule.child.clone(), format!("__cascade__{}={}", rule.foreign_key, id)));
+                pending.push((
+                    rule.child.clone(),
+                    format!("__cascade__{}={}", rule.foreign_key, id),
+                ));
             }
         }
     }

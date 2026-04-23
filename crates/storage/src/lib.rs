@@ -83,7 +83,10 @@ pub struct SchemaPlan {
 impl SchemaPlan {
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
-            || self.operations.iter().all(|op| matches!(op, SchemaOperation::Noop))
+            || self
+                .operations
+                .iter()
+                .all(|op| matches!(op, SchemaOperation::Noop))
     }
 }
 
@@ -124,8 +127,11 @@ pub struct IndexSnapshot {
 pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> SchemaPlan {
     use std::collections::{HashMap, HashSet};
 
-    let existing_tables: HashMap<&str, &TableSnapshot> =
-        snapshot.tables.iter().map(|t| (t.name.as_str(), t)).collect();
+    let existing_tables: HashMap<&str, &TableSnapshot> = snapshot
+        .tables
+        .iter()
+        .map(|t| (t.name.as_str(), t))
+        .collect();
 
     let mut operations = Vec::new();
 
@@ -226,7 +232,10 @@ pub fn analyze_plan(plan: &SchemaPlan) -> PlanAnalysis {
                 has_unsupported = true;
                 warnings.push(PlanWarning {
                     code: "DESTRUCTIVE_REMOVE_ENTITY".into(),
-                    message: format!("Removing entity \"{}\" will drop the table and all its data", name),
+                    message: format!(
+                        "Removing entity \"{}\" will drop the table and all its data",
+                        name
+                    ),
                 });
             }
             SchemaOperation::RemoveField { entity, field_name } => {
@@ -234,14 +243,20 @@ pub fn analyze_plan(plan: &SchemaPlan) -> PlanAnalysis {
                 has_unsupported = true;
                 warnings.push(PlanWarning {
                     code: "DESTRUCTIVE_REMOVE_FIELD".into(),
-                    message: format!("Removing field \"{}.{}\" will drop the column and its data", entity, field_name),
+                    message: format!(
+                        "Removing field \"{}.{}\" will drop the column and its data",
+                        entity, field_name
+                    ),
                 });
             }
             SchemaOperation::RemoveIndex { entity, name } => {
                 has_unsupported = true;
                 warnings.push(PlanWarning {
                     code: "UNSUPPORTED_REMOVE_INDEX".into(),
-                    message: format!("Removing index \"{}.{}\" is not supported by the SQLite adapter", entity, name),
+                    message: format!(
+                        "Removing index \"{}.{}\" is not supported by the SQLite adapter",
+                        entity, name
+                    ),
                 });
             }
             _ => {}
@@ -261,16 +276,10 @@ pub fn analyze_plan(plan: &SchemaPlan) -> PlanAnalysis {
 
 pub trait StorageAdapter {
     /// Produce a plan that would bring storage in line with the target manifest.
-    fn plan_schema(
-        &self,
-        target: &AppManifest,
-    ) -> Result<SchemaPlan, StorageError>;
+    fn plan_schema(&self, target: &AppManifest) -> Result<SchemaPlan, StorageError>;
 
     /// Apply a schema plan. Not implemented by dry-run adapters.
-    fn apply_schema(
-        &self,
-        _plan: &SchemaPlan,
-    ) -> Result<(), StorageError> {
+    fn apply_schema(&self, _plan: &SchemaPlan) -> Result<(), StorageError> {
         Err(StorageError {
             code: "APPLY_NOT_IMPLEMENTED".into(),
             message: "This adapter does not support applying schemas".into(),
@@ -287,10 +296,7 @@ pub trait StorageAdapter {
 pub struct DryRunAdapter;
 
 impl StorageAdapter for DryRunAdapter {
-    fn plan_schema(
-        &self,
-        target: &AppManifest,
-    ) -> Result<SchemaPlan, StorageError> {
+    fn plan_schema(&self, target: &AppManifest) -> Result<SchemaPlan, StorageError> {
         let mut operations = Vec::new();
 
         for entity in &target.entities {
@@ -338,16 +344,20 @@ pub struct DiffAdapter {
 }
 
 impl StorageAdapter for DiffAdapter {
-    fn plan_schema(
-        &self,
-        target: &AppManifest,
-    ) -> Result<SchemaPlan, StorageError> {
+    fn plan_schema(&self, target: &AppManifest) -> Result<SchemaPlan, StorageError> {
         let mut operations = Vec::new();
 
-        let old_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> =
-            self.from.entities.iter().map(|e| (e.name.as_str(), e)).collect();
-        let new_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> =
-            target.entities.iter().map(|e| (e.name.as_str(), e)).collect();
+        let old_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> = self
+            .from
+            .entities
+            .iter()
+            .map(|e| (e.name.as_str(), e))
+            .collect();
+        let new_entities: std::collections::HashMap<&str, &pylon_kernel::ManifestEntity> = target
+            .entities
+            .iter()
+            .map(|e| (e.name.as_str(), e))
+            .collect();
 
         // Removed entities
         for name in old_entities.keys() {
@@ -515,7 +525,12 @@ mod tests {
 
         assert_eq!(plan.operations.len(), 2);
         match &plan.operations[1] {
-            SchemaOperation::AddIndex { entity, name, fields, unique } => {
+            SchemaOperation::AddIndex {
+                entity,
+                name,
+                fields,
+                unique,
+            } => {
                 assert_eq!(entity, "User");
                 assert_eq!(name, "by_email");
                 assert_eq!(fields, &vec!["email".to_string()]);
@@ -739,7 +754,10 @@ mod tests {
 
     #[test]
     fn storage_error_display() {
-        let err = StorageError { code: "TEST".into(), message: "msg".into() };
+        let err = StorageError {
+            code: "TEST".into(),
+            message: "msg".into(),
+        };
         assert_eq!(format!("{err}"), "[TEST] msg");
     }
 
@@ -768,8 +786,18 @@ mod tests {
             tables: vec![TableSnapshot {
                 name: "User".into(),
                 columns: vec![
-                    ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                    ColumnSnapshot { name: "email".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: true,
+                    },
+                    ColumnSnapshot {
+                        name: "email".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
                 ],
                 indexes: vec![],
             }],
@@ -781,8 +809,18 @@ mod tests {
             entities: vec![ManifestEntity {
                 name: "User".into(),
                 fields: vec![
-                    ManifestField { name: "email".into(), field_type: "string".into(), optional: false, unique: true },
-                    ManifestField { name: "name".into(), field_type: "string".into(), optional: false, unique: false },
+                    ManifestField {
+                        name: "email".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: true,
+                    },
+                    ManifestField {
+                        name: "name".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                    },
                 ],
                 indexes: vec![],
                 relations: vec![],
@@ -802,8 +840,18 @@ mod tests {
             tables: vec![TableSnapshot {
                 name: "User".into(),
                 columns: vec![
-                    ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                    ColumnSnapshot { name: "email".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: true,
+                    },
+                    ColumnSnapshot {
+                        name: "email".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
                 ],
                 indexes: vec![], // no indexes
             }],
@@ -814,10 +862,17 @@ mod tests {
             version: "0.1.0".into(),
             entities: vec![ManifestEntity {
                 name: "User".into(),
-                fields: vec![
-                    ManifestField { name: "email".into(), field_type: "string".into(), optional: false, unique: true },
-                ],
-                indexes: vec![ManifestIndex { name: "by_email".into(), fields: vec!["email".into()], unique: true }],
+                fields: vec![ManifestField {
+                    name: "email".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: true,
+                }],
+                indexes: vec![ManifestIndex {
+                    name: "by_email".into(),
+                    fields: vec!["email".into()],
+                    unique: true,
+                }],
                 relations: vec![],
             }],
             routes: vec![],
@@ -826,7 +881,10 @@ mod tests {
             policies: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
-        assert!(plan.operations.iter().any(|op| matches!(op, SchemaOperation::AddIndex { name, .. } if name == "by_email")));
+        assert!(plan
+            .operations
+            .iter()
+            .any(|op| matches!(op, SchemaOperation::AddIndex { name, .. } if name == "by_email")));
     }
 
     // -- SchemaPlan::is_empty --
@@ -839,7 +897,12 @@ mod tests {
 
     #[test]
     fn plan_with_real_ops_not_empty() {
-        let plan = SchemaPlan { operations: vec![SchemaOperation::CreateEntity { name: "X".into(), fields: vec![] }] };
+        let plan = SchemaPlan {
+            operations: vec![SchemaOperation::CreateEntity {
+                name: "X".into(),
+                fields: vec![],
+            }],
+        };
         assert!(!plan.is_empty());
     }
 
@@ -847,7 +910,9 @@ mod tests {
 
     #[test]
     fn plan_analysis_serializable() {
-        let analysis = analyze_plan(&SchemaPlan { operations: vec![SchemaOperation::RemoveEntity { name: "X".into() }] });
+        let analysis = analyze_plan(&SchemaPlan {
+            operations: vec![SchemaOperation::RemoveEntity { name: "X".into() }],
+        });
         let json = serde_json::to_string(&analysis).unwrap();
         assert!(json.contains("DESTRUCTIVE_REMOVE_ENTITY"));
     }

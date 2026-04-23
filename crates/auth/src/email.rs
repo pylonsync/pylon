@@ -76,20 +76,15 @@ impl HttpEmailTransport {
         };
 
         let endpoint = match provider {
-            HttpEmailProvider::SendGrid => {
-                "https://api.sendgrid.com/v3/mail/send".to_string()
-            }
-            HttpEmailProvider::Resend => {
-                "https://api.resend.com/emails".to_string()
-            }
+            HttpEmailProvider::SendGrid => "https://api.sendgrid.com/v3/mail/send".to_string(),
+            HttpEmailProvider::Resend => "https://api.resend.com/emails".to_string(),
             HttpEmailProvider::Webhook => std::env::var("PYLON_EMAIL_ENDPOINT").ok()?,
         };
 
         Some(Self {
             endpoint,
             api_key: std::env::var("PYLON_EMAIL_API_KEY").ok()?,
-            from: std::env::var("PYLON_EMAIL_FROM")
-                .unwrap_or_else(|_| "noreply@pylon.dev".into()),
+            from: std::env::var("PYLON_EMAIL_FROM").unwrap_or_else(|_| "noreply@pylon.dev".into()),
             provider,
         })
     }
@@ -97,33 +92,27 @@ impl HttpEmailTransport {
     /// Build the JSON body for the provider's API.
     pub fn build_body(&self, to: &str, subject: &str, body: &str) -> String {
         match self.provider {
-            HttpEmailProvider::SendGrid => {
-                serde_json::json!({
-                    "personalizations": [{"to": [{"email": to}]}],
-                    "from": {"email": self.from},
-                    "subject": subject,
-                    "content": [{"type": "text/plain", "value": body}]
-                })
-                .to_string()
-            }
-            HttpEmailProvider::Resend => {
-                serde_json::json!({
-                    "from": self.from,
-                    "to": [to],
-                    "subject": subject,
-                    "text": body
-                })
-                .to_string()
-            }
-            HttpEmailProvider::Webhook => {
-                serde_json::json!({
-                    "to": to,
-                    "from": self.from,
-                    "subject": subject,
-                    "body": body
-                })
-                .to_string()
-            }
+            HttpEmailProvider::SendGrid => serde_json::json!({
+                "personalizations": [{"to": [{"email": to}]}],
+                "from": {"email": self.from},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}]
+            })
+            .to_string(),
+            HttpEmailProvider::Resend => serde_json::json!({
+                "from": self.from,
+                "to": [to],
+                "subject": subject,
+                "text": body
+            })
+            .to_string(),
+            HttpEmailProvider::Webhook => serde_json::json!({
+                "to": to,
+                "from": self.from,
+                "subject": subject,
+                "body": body
+            })
+            .to_string(),
         }
     }
 }
@@ -131,7 +120,8 @@ impl HttpEmailTransport {
 impl EmailTransport for HttpEmailTransport {
     fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError> {
         let body_json = self.build_body(to, subject, body);
-        post_json(&self.endpoint, &self.api_key, &body_json).map_err(|message| EmailError { message })
+        post_json(&self.endpoint, &self.api_key, &body_json)
+            .map_err(|message| EmailError { message })
     }
 }
 

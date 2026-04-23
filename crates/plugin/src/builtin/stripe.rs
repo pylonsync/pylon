@@ -88,7 +88,10 @@ pub fn verify_signature(
     let expected_hex = hex_encode(&expected);
 
     // Constant-time compare against any matching v1 signature.
-    if sigs.iter().any(|s| ct_eq(s.as_bytes(), expected_hex.as_bytes())) {
+    if sigs
+        .iter()
+        .any(|s| ct_eq(s.as_bytes(), expected_hex.as_bytes()))
+    {
         Ok(())
     } else {
         Err(SignatureError::InvalidSignature)
@@ -122,7 +125,10 @@ impl StripeEvent {
     }
 
     pub fn object_id(&self) -> Option<&str> {
-        self.data.get("object").and_then(|o| o.get("id")).and_then(|v| v.as_str())
+        self.data
+            .get("object")
+            .and_then(|o| o.get("id"))
+            .and_then(|v| v.as_str())
     }
 }
 
@@ -179,7 +185,11 @@ impl StripePlugin {
         }
     }
 
-    pub fn verify_webhook(&self, header: &str, payload: &[u8]) -> Result<StripeEvent, SignatureError> {
+    pub fn verify_webhook(
+        &self,
+        header: &str,
+        payload: &[u8],
+    ) -> Result<StripeEvent, SignatureError> {
         verify_signature(
             header,
             payload,

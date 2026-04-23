@@ -34,9 +34,7 @@ impl CsrfPlugin {
     /// Check whether `origin` is in the allowlist. A wildcard entry (`"*"`)
     /// matches every origin.
     fn is_allowed_origin(&self, origin: &str) -> bool {
-        self.allowed_origins
-            .iter()
-            .any(|o| o == origin || o == "*")
+        self.allowed_origins.iter().any(|o| o == origin || o == "*")
     }
 
     /// Extract the origin portion (`scheme://host[:port]`) from a full URL
@@ -179,9 +177,7 @@ mod tests {
         assert!(csrf
             .check("POST", Some("https://anything.example.com"), None)
             .is_ok());
-        assert!(csrf
-            .check("DELETE", Some("http://evil.com"), None)
-            .is_ok());
+        assert!(csrf.check("DELETE", Some("http://evil.com"), None).is_ok());
     }
 
     // -- Referer extraction --

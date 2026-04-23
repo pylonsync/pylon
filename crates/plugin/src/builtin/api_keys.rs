@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 use crate::{Plugin, PluginError};
 use pylon_auth::AuthContext;
@@ -104,7 +104,8 @@ impl ApiKeysPlugin {
     pub fn resolve(&self, key: &str) -> Option<AuthContext> {
         let h = hash_key(key);
         let keys = self.keys.lock().unwrap();
-        keys.get(&h).map(|k| AuthContext::authenticated(k.user_id.clone()))
+        keys.get(&h)
+            .map(|k| AuthContext::authenticated(k.user_id.clone()))
     }
 
     /// Returns true if the raw key still exists in the store. Use this to

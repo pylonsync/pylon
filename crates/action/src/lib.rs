@@ -35,7 +35,11 @@ impl ActionDescriptor {
     pub fn from_manifest(ma: &ManifestAction) -> Self {
         Self {
             name: ma.name.clone(),
-            input: ma.input.iter().map(InputField::from_manifest_field).collect(),
+            input: ma
+                .input
+                .iter()
+                .map(InputField::from_manifest_field)
+                .collect(),
         }
     }
 }
@@ -80,8 +84,10 @@ mod tests {
     use pylon_kernel::ManifestField;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]

@@ -15,10 +15,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let positional: Vec<&str> = args
         .iter()
         .filter(|a| {
-            !a.starts_with('-')
-                && *a != "codegen"
-                && *a != "client"
-                && Some(a.as_str()) != out_path
+            !a.starts_with('-') && *a != "codegen" && *a != "client" && Some(a.as_str()) != out_path
         })
         .map(|s| s.as_str())
         .collect();
@@ -32,9 +29,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "CODEGEN_CLIENT_NO_MANIFEST".into(),
                     message: "No manifest path provided".into(),
                     span: None,
-                    hint: Some(
-                        "Usage: pylon codegen client <manifest> --out <path>".into(),
-                    ),
+                    hint: Some("Usage: pylon codegen client <manifest> --out <path>".into()),
                 }],
                 json_mode,
             );

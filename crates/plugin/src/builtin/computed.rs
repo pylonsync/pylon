@@ -119,7 +119,11 @@ mod tests {
         plugin.add("User", "initials", |row| {
             let first = row.get("firstName").and_then(|v| v.as_str()).unwrap_or("");
             let last = row.get("lastName").and_then(|v| v.as_str()).unwrap_or("");
-            let i = format!("{}{}", first.chars().next().unwrap_or(' '), last.chars().next().unwrap_or(' '));
+            let i = format!(
+                "{}{}",
+                first.chars().next().unwrap_or(' '),
+                last.chars().next().unwrap_or(' ')
+            );
             Value::String(i.trim().to_string())
         });
         plugin.add("User", "emailDomain", |row| {

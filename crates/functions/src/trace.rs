@@ -96,12 +96,7 @@ pub struct TraceBuilder {
 }
 
 impl TraceBuilder {
-    pub fn new(
-        call_id: String,
-        fn_name: String,
-        fn_type: FnType,
-        user_id: Option<String>,
-    ) -> Self {
+    pub fn new(call_id: String, fn_name: String, fn_type: FnType, user_id: Option<String>) -> Self {
         Self::new_with_tenant(call_id, fn_name, fn_type, user_id, None)
     }
 
@@ -262,7 +257,11 @@ impl TraceLog {
         let mut result = Vec::with_capacity(take);
 
         // Walk backwards from the most recent write position.
-        let start = if ring.write_pos == 0 { len - 1 } else { ring.write_pos - 1 };
+        let start = if ring.write_pos == 0 {
+            len - 1
+        } else {
+            ring.write_pos - 1
+        };
         let mut i = start;
         for _ in 0..take {
             result.push(ring.buf[i].clone());

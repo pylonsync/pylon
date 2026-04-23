@@ -54,8 +54,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     };
 
     // Parse as JSON object: { "EntityName": [ {row}, ... ], ... }
-    let seed_data: BTreeMap<String, Vec<serde_json::Value>> = match serde_json::from_str(&content)
-    {
+    let seed_data: BTreeMap<String, Vec<serde_json::Value>> = match serde_json::from_str(&content) {
         Ok(d) => d,
         Err(e) => {
             print_diagnostics(
@@ -64,9 +63,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "SEED_INVALID_JSON".into(),
                     message: format!("Invalid JSON in {file_path}: {e}"),
                     span: None,
-                    hint: Some(
-                        "Expected format: { \"Entity\": [ {row}, ... ], ... }".to_string(),
-                    ),
+                    hint: Some("Expected format: { \"Entity\": [ {row}, ... ], ... }".to_string()),
                 }],
                 json_mode,
             );
@@ -89,9 +86,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         count += 1;
                         total += 1;
                     } else {
-                        errors.push(format!(
-                            "{entity}: HTTP {status} — {resp_body}",
-                        ));
+                        errors.push(format!("{entity}: HTTP {status} — {resp_body}",));
                     }
                 }
                 Err(e) => {
@@ -162,8 +157,7 @@ fn http_post(
     token: Option<&str>,
 ) -> Result<(u16, String), String> {
     let addr = format!("{host}:{port}");
-    let mut stream =
-        TcpStream::connect(&addr).map_err(|e| format!("connect to {addr}: {e}"))?;
+    let mut stream = TcpStream::connect(&addr).map_err(|e| format!("connect to {addr}: {e}"))?;
 
     // Set a generous timeout so we don't hang forever on a stuck server.
     let timeout = std::time::Duration::from_secs(30);
@@ -207,11 +201,7 @@ fn http_post(
         .unwrap_or(0);
 
     // Extract body: everything after the first blank line (\r\n\r\n).
-    let resp_body = response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
+    let resp_body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
     Ok((status, resp_body))
 }

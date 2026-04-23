@@ -30,8 +30,8 @@
 
 #![cfg(feature = "postgres-live")]
 
-use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
 use pylon_http::DataStore;
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
 use pylon_storage::pg_datastore::PostgresDataStore;
 
 fn require_pg_url() -> Option<String> {
@@ -78,7 +78,10 @@ fn crud_roundtrip() {
     let store = PostgresDataStore::connect(&url, test_manifest()).expect("connect");
 
     let id = store
-        .insert("PgTodo", &serde_json::json!({"title": "buy milk", "done": false}))
+        .insert(
+            "PgTodo",
+            &serde_json::json!({"title": "buy milk", "done": false}),
+        )
         .expect("insert");
 
     let row = store.get_by_id("PgTodo", &id).expect("get").expect("row");

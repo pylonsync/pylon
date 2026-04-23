@@ -20,7 +20,7 @@ pub enum RespValue {
     SimpleString(String),
     Error(String),
     Integer(i64),
-    BulkString(Option<String>), // None = null bulk string
+    BulkString(Option<String>),    // None = null bulk string
     Array(Option<Vec<RespValue>>), // None = null array
 }
 
@@ -288,10 +288,7 @@ mod tests {
         let val = parse(input).unwrap();
         assert_eq!(
             val,
-            RespValue::Array(Some(vec![
-                RespValue::bulk("foo"),
-                RespValue::bulk("bar"),
-            ]))
+            RespValue::Array(Some(vec![RespValue::bulk("foo"), RespValue::bulk("bar"),]))
         );
     }
 
@@ -390,10 +387,7 @@ mod tests {
         assert_eq!(RespValue::ok(), RespValue::SimpleString("OK".into()));
         assert_eq!(RespValue::null(), RespValue::BulkString(None));
         assert_eq!(RespValue::int(5), RespValue::Integer(5));
-        assert_eq!(
-            RespValue::err("fail"),
-            RespValue::Error("ERR fail".into())
-        );
+        assert_eq!(RespValue::err("fail"), RespValue::Error("ERR fail".into()));
         assert_eq!(
             RespValue::array(vec![RespValue::int(1)]),
             RespValue::Array(Some(vec![RespValue::Integer(1)]))

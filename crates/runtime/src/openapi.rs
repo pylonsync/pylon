@@ -13,26 +13,29 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     // Fixed paths
     // -----------------------------------------------------------------------
 
-    paths.insert("/health".into(), json!({
-        "get": {
-            "operationId": "healthCheck",
-            "summary": "Health check",
-            "tags": ["system"],
-            "responses": {
-                "200": {
-                    "description": "Server is healthy",
-                    "content": { "application/json": { "schema": {
-                        "type": "object",
-                        "properties": {
-                            "status": { "type": "string" },
-                            "version": { "type": "string" },
-                            "uptime_secs": { "type": "integer" }
-                        }
-                    }}}
+    paths.insert(
+        "/health".into(),
+        json!({
+            "get": {
+                "operationId": "healthCheck",
+                "summary": "Health check",
+                "tags": ["system"],
+                "responses": {
+                    "200": {
+                        "description": "Server is healthy",
+                        "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": { "type": "string" },
+                                "version": { "type": "string" },
+                                "uptime_secs": { "type": "integer" }
+                            }
+                        }}}
+                    }
                 }
             }
-        }
-    }));
+        }),
+    );
 
     paths.insert("/api/manifest".into(), json!({
         "get": {
@@ -158,8 +161,16 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     for (path, op_id, summary) in [
         ("/api/rooms/join", "joinRoom", "Join a room"),
         ("/api/rooms/leave", "leaveRoom", "Leave a room"),
-        ("/api/rooms/presence", "updatePresence", "Update presence in a room"),
-        ("/api/rooms/broadcast", "broadcastToRoom", "Broadcast a message to a room"),
+        (
+            "/api/rooms/presence",
+            "updatePresence",
+            "Update presence in a room",
+        ),
+        (
+            "/api/rooms/broadcast",
+            "broadcastToRoom",
+            "Broadcast a message to a room",
+        ),
     ] {
         paths.insert(path.into(), json!({
             "post": {
@@ -474,20 +485,23 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     // Shared schemas
     // -----------------------------------------------------------------------
 
-    schemas.insert("Error".into(), json!({
-        "type": "object",
-        "properties": {
-            "error": {
-                "type": "object",
-                "properties": {
-                    "code": { "type": "string" },
-                    "message": { "type": "string" },
-                    "hint": { "type": "string" }
-                },
-                "required": ["code", "message"]
+    schemas.insert(
+        "Error".into(),
+        json!({
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": { "type": "string" },
+                        "message": { "type": "string" },
+                        "hint": { "type": "string" }
+                    },
+                    "required": ["code", "message"]
+                }
             }
-        }
-    }));
+        }),
+    );
 
     // -----------------------------------------------------------------------
     // Assemble final spec
@@ -585,7 +599,7 @@ fn build_fields_schema(fields: &[pylon_kernel::ManifestField]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pylon_kernel::{ManifestEntity, ManifestField, ManifestIndex, ManifestAction};
+    use pylon_kernel::{ManifestAction, ManifestEntity, ManifestField, ManifestIndex};
 
     fn sample_manifest() -> AppManifest {
         AppManifest {
@@ -596,21 +610,65 @@ mod tests {
                 ManifestEntity {
                     name: "User".into(),
                     fields: vec![
-                        ManifestField { name: "email".into(), field_type: "string".into(), optional: false, unique: true },
-                        ManifestField { name: "age".into(), field_type: "int".into(), optional: true, unique: false },
-                        ManifestField { name: "score".into(), field_type: "float".into(), optional: true, unique: false },
-                        ManifestField { name: "active".into(), field_type: "bool".into(), optional: false, unique: false },
-                        ManifestField { name: "createdAt".into(), field_type: "datetime".into(), optional: true, unique: false },
-                        ManifestField { name: "bio".into(), field_type: "richtext".into(), optional: true, unique: false },
+                        ManifestField {
+                            name: "email".into(),
+                            field_type: "string".into(),
+                            optional: false,
+                            unique: true,
+                        },
+                        ManifestField {
+                            name: "age".into(),
+                            field_type: "int".into(),
+                            optional: true,
+                            unique: false,
+                        },
+                        ManifestField {
+                            name: "score".into(),
+                            field_type: "float".into(),
+                            optional: true,
+                            unique: false,
+                        },
+                        ManifestField {
+                            name: "active".into(),
+                            field_type: "bool".into(),
+                            optional: false,
+                            unique: false,
+                        },
+                        ManifestField {
+                            name: "createdAt".into(),
+                            field_type: "datetime".into(),
+                            optional: true,
+                            unique: false,
+                        },
+                        ManifestField {
+                            name: "bio".into(),
+                            field_type: "richtext".into(),
+                            optional: true,
+                            unique: false,
+                        },
                     ],
-                    indexes: vec![ManifestIndex { name: "email_idx".into(), fields: vec!["email".into()], unique: true }],
+                    indexes: vec![ManifestIndex {
+                        name: "email_idx".into(),
+                        fields: vec!["email".into()],
+                        unique: true,
+                    }],
                     relations: vec![],
                 },
                 ManifestEntity {
                     name: "Post".into(),
                     fields: vec![
-                        ManifestField { name: "title".into(), field_type: "string".into(), optional: false, unique: false },
-                        ManifestField { name: "authorId".into(), field_type: "id(User)".into(), optional: false, unique: false },
+                        ManifestField {
+                            name: "title".into(),
+                            field_type: "string".into(),
+                            optional: false,
+                            unique: false,
+                        },
+                        ManifestField {
+                            name: "authorId".into(),
+                            field_type: "id(User)".into(),
+                            optional: false,
+                            unique: false,
+                        },
                     ],
                     indexes: vec![],
                     relations: vec![],
@@ -618,15 +676,23 @@ mod tests {
             ],
             routes: vec![],
             queries: vec![],
-            actions: vec![
-                ManifestAction {
-                    name: "PublishPost".into(),
-                    input: vec![
-                        ManifestField { name: "postId".into(), field_type: "id(Post)".into(), optional: false, unique: false },
-                        ManifestField { name: "notify".into(), field_type: "bool".into(), optional: true, unique: false },
-                    ],
-                },
-            ],
+            actions: vec![ManifestAction {
+                name: "PublishPost".into(),
+                input: vec![
+                    ManifestField {
+                        name: "postId".into(),
+                        field_type: "id(Post)".into(),
+                        optional: false,
+                        unique: false,
+                    },
+                    ManifestField {
+                        name: "notify".into(),
+                        field_type: "bool".into(),
+                        optional: true,
+                        unique: false,
+                    },
+                ],
+            }],
             policies: vec![],
         }
     }
@@ -638,7 +704,10 @@ mod tests {
         assert_eq!(spec["openapi"], "3.0.3");
         assert_eq!(spec["info"]["title"], "TestApp");
         assert_eq!(spec["info"]["version"], "0.1.0");
-        assert!(spec["info"]["description"].as_str().unwrap().contains("TestApp"));
+        assert!(spec["info"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("TestApp"));
         assert_eq!(spec["servers"][0]["url"], "http://localhost:3000");
         assert!(spec["paths"].is_object());
         assert!(spec["components"]["schemas"].is_object());
@@ -660,14 +729,32 @@ mod tests {
         let paths = spec["paths"].as_object().unwrap();
 
         // User entity
-        assert!(paths.contains_key("/api/entities/user"), "missing collection path for User");
-        assert!(paths.contains_key("/api/entities/user/{id}"), "missing item path for User");
-        assert!(paths.contains_key("/api/entities/user/cursor"), "missing cursor path for User");
+        assert!(
+            paths.contains_key("/api/entities/user"),
+            "missing collection path for User"
+        );
+        assert!(
+            paths.contains_key("/api/entities/user/{id}"),
+            "missing item path for User"
+        );
+        assert!(
+            paths.contains_key("/api/entities/user/cursor"),
+            "missing cursor path for User"
+        );
 
         // Post entity
-        assert!(paths.contains_key("/api/entities/post"), "missing collection path for Post");
-        assert!(paths.contains_key("/api/entities/post/{id}"), "missing item path for Post");
-        assert!(paths.contains_key("/api/entities/post/cursor"), "missing cursor path for Post");
+        assert!(
+            paths.contains_key("/api/entities/post"),
+            "missing collection path for Post"
+        );
+        assert!(
+            paths.contains_key("/api/entities/post/{id}"),
+            "missing item path for Post"
+        );
+        assert!(
+            paths.contains_key("/api/entities/post/cursor"),
+            "missing cursor path for Post"
+        );
 
         // Collection path has GET and POST
         let user_collection = &paths["/api/entities/user"];
@@ -686,7 +773,10 @@ mod tests {
         let spec = generate_openapi(&sample_manifest(), "/");
         let paths = spec["paths"].as_object().unwrap();
 
-        assert!(paths.contains_key("/api/actions/publishpost"), "missing action path");
+        assert!(
+            paths.contains_key("/api/actions/publishpost"),
+            "missing action path"
+        );
         let action_path = &paths["/api/actions/publishpost"];
         assert!(action_path.get("post").is_some());
         assert_eq!(action_path["post"]["operationId"], "executePublishPost");
@@ -697,7 +787,10 @@ mod tests {
         let spec = generate_openapi(&sample_manifest(), "/");
         let schemas = spec["components"]["schemas"].as_object().unwrap();
 
-        assert!(schemas.contains_key("PublishPostInput"), "missing action input schema");
+        assert!(
+            schemas.contains_key("PublishPostInput"),
+            "missing action input schema"
+        );
         let input = &schemas["PublishPostInput"];
         assert!(input["properties"]["postId"].is_object());
         assert!(input["properties"]["notify"].is_object());

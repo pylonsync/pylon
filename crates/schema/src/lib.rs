@@ -115,10 +115,7 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,
                     code: "FIELD_NAME_EMPTY".into(),
-                    message: format!(
-                        "Field has an empty name in entity \"{}\"",
-                        entity.name
-                    ),
+                    message: format!("Field has an empty name in entity \"{}\"", entity.name),
                     span: None,
                     hint: Some("Give the field a non-empty name".into()),
                 });
@@ -134,9 +131,7 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                         field.name, entity.name
                     ),
                     span: None,
-                    hint: Some(
-                        "Field names must be unique within an entity".into(),
-                    ),
+                    hint: Some("Field names must be unique within an entity".into()),
                 });
             }
         }
@@ -151,10 +146,7 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,
                     code: "INDEX_NAME_EMPTY".into(),
-                    message: format!(
-                        "Index has an empty name in entity \"{}\"",
-                        entity.name
-                    ),
+                    message: format!("Index has an empty name in entity \"{}\"", entity.name),
                     span: None,
                     hint: Some("Give the index a non-empty name".into()),
                 });
@@ -196,7 +188,9 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                             index.name, entity.name, index_field
                         ),
                         span: None,
-                        hint: Some("Index fields must reference declared fields on the entity".into()),
+                        hint: Some(
+                            "Index fields must reference declared fields on the entity".into(),
+                        ),
                     });
                 }
             }
@@ -225,17 +219,29 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
 
     // Validate id(...) references in query/action input fields
     validate_manifest_field_id_refs(
-        &schema.queries.iter().flat_map(|q| {
-            q.input.iter().map(move |f| (&q.name, &f.name, &f.field_type))
-        }).collect::<Vec<_>>(),
+        &schema
+            .queries
+            .iter()
+            .flat_map(|q| {
+                q.input
+                    .iter()
+                    .map(move |f| (&q.name, &f.name, &f.field_type))
+            })
+            .collect::<Vec<_>>(),
         "query",
         &seen_entity_names,
         &mut diagnostics,
     );
     validate_manifest_field_id_refs(
-        &schema.actions.iter().flat_map(|a| {
-            a.input.iter().map(move |f| (&a.name, &f.name, &f.field_type))
-        }).collect::<Vec<_>>(),
+        &schema
+            .actions
+            .iter()
+            .flat_map(|a| {
+                a.input
+                    .iter()
+                    .map(move |f| (&a.name, &f.name, &f.field_type))
+            })
+            .collect::<Vec<_>>(),
         "action",
         &seen_entity_names,
         &mut diagnostics,
@@ -322,9 +328,18 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
         // almost certainly a bug.
         let has_any_allow = !policy.allow.is_empty()
             || policy.allow_read.as_deref().is_some_and(|s| !s.is_empty())
-            || policy.allow_insert.as_deref().is_some_and(|s| !s.is_empty())
-            || policy.allow_update.as_deref().is_some_and(|s| !s.is_empty())
-            || policy.allow_delete.as_deref().is_some_and(|s| !s.is_empty())
+            || policy
+                .allow_insert
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            || policy
+                .allow_update
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            || policy
+                .allow_delete
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
             || policy.allow_write.as_deref().is_some_and(|s| !s.is_empty());
         if !has_any_allow {
             diagnostics.push(Diagnostic {
@@ -550,7 +565,9 @@ pub fn validate_manifest_version(manifest: &AppManifest) -> Vec<Diagnostic> {
                 manifest.manifest_version, MANIFEST_VERSION
             ),
             span: None,
-            hint: Some(format!("Regenerate the manifest with the current SDK (version {MANIFEST_VERSION})")),
+            hint: Some(format!(
+                "Regenerate the manifest with the current SDK (version {MANIFEST_VERSION})"
+            )),
         });
     }
     diagnostics
@@ -718,8 +735,16 @@ mod tests {
     fn duplicate_entity_name() {
         let schema = Schema {
             entities: vec![
-                Entity { name: "Post".into(), fields: vec![], indexes: vec![] },
-                Entity { name: "Post".into(), fields: vec![], indexes: vec![] },
+                Entity {
+                    name: "Post".into(),
+                    fields: vec![],
+                    indexes: vec![],
+                },
+                Entity {
+                    name: "Post".into(),
+                    fields: vec![],
+                    indexes: vec![],
+                },
             ],
             queries: vec![],
             actions: vec![],
@@ -787,10 +812,20 @@ mod tests {
     #[test]
     fn duplicate_query_name() {
         let schema = Schema {
-            entities: vec![Entity { name: "X".into(), fields: vec![], indexes: vec![] }],
+            entities: vec![Entity {
+                name: "X".into(),
+                fields: vec![],
+                indexes: vec![],
+            }],
             queries: vec![
-                ManifestQuery { name: "getPost".into(), input: vec![] },
-                ManifestQuery { name: "getPost".into(), input: vec![] },
+                ManifestQuery {
+                    name: "getPost".into(),
+                    input: vec![],
+                },
+                ManifestQuery {
+                    name: "getPost".into(),
+                    input: vec![],
+                },
             ],
             actions: vec![],
             policies: vec![],
@@ -803,11 +838,21 @@ mod tests {
     #[test]
     fn duplicate_action_name() {
         let schema = Schema {
-            entities: vec![Entity { name: "X".into(), fields: vec![], indexes: vec![] }],
+            entities: vec![Entity {
+                name: "X".into(),
+                fields: vec![],
+                indexes: vec![],
+            }],
             queries: vec![],
             actions: vec![
-                ManifestAction { name: "createPost".into(), input: vec![] },
-                ManifestAction { name: "createPost".into(), input: vec![] },
+                ManifestAction {
+                    name: "createPost".into(),
+                    input: vec![],
+                },
+                ManifestAction {
+                    name: "createPost".into(),
+                    input: vec![],
+                },
             ],
             policies: vec![],
             routes: vec![],
@@ -819,8 +864,15 @@ mod tests {
     #[test]
     fn empty_query_name() {
         let schema = Schema {
-            entities: vec![Entity { name: "X".into(), fields: vec![], indexes: vec![] }],
-            queries: vec![ManifestQuery { name: "".into(), input: vec![] }],
+            entities: vec![Entity {
+                name: "X".into(),
+                fields: vec![],
+                indexes: vec![],
+            }],
+            queries: vec![ManifestQuery {
+                name: "".into(),
+                input: vec![],
+            }],
             actions: vec![],
             policies: vec![],
             routes: vec![],
@@ -832,9 +884,16 @@ mod tests {
     #[test]
     fn empty_action_name() {
         let schema = Schema {
-            entities: vec![Entity { name: "X".into(), fields: vec![], indexes: vec![] }],
+            entities: vec![Entity {
+                name: "X".into(),
+                fields: vec![],
+                indexes: vec![],
+            }],
             queries: vec![],
-            actions: vec![ManifestAction { name: "".into(), input: vec![] }],
+            actions: vec![ManifestAction {
+                name: "".into(),
+                input: vec![],
+            }],
             policies: vec![],
             routes: vec![],
         };
@@ -842,7 +901,12 @@ mod tests {
         assert!(diags.iter().any(|d| d.code == "ACTION_NAME_EMPTY"));
     }
 
-    fn make_policy(name: &str, entity: Option<&str>, action: Option<&str>, allow: &str) -> ManifestPolicy {
+    fn make_policy(
+        name: &str,
+        entity: Option<&str>,
+        action: Option<&str>,
+        allow: &str,
+    ) -> ManifestPolicy {
         ManifestPolicy {
             name: name.into(),
             entity: entity.map(|s| s.into()),
@@ -853,7 +917,11 @@ mod tests {
 
     fn base_schema() -> Schema {
         Schema {
-            entities: vec![Entity { name: "X".into(), fields: vec![], indexes: vec![] }],
+            entities: vec![Entity {
+                name: "X".into(),
+                fields: vec![],
+                indexes: vec![],
+            }],
             queries: vec![],
             actions: vec![],
             policies: vec![],
@@ -864,9 +932,16 @@ mod tests {
     #[test]
     fn valid_policy() {
         let mut s = base_schema();
-        s.policies = vec![make_policy("canRead", Some("X"), None, "auth.userId != null")];
+        s.policies = vec![make_policy(
+            "canRead",
+            Some("X"),
+            None,
+            "auth.userId != null",
+        )];
         let diags = validate(&s);
-        assert!(!diags.iter().any(|d| d.severity == Severity::Error && d.code.starts_with("POLICY_")));
+        assert!(!diags
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.code.starts_with("POLICY_")));
     }
 
     #[test]
@@ -907,7 +982,10 @@ mod tests {
     #[test]
     fn route_with_valid_query_and_auth() {
         let mut s = base_schema();
-        s.queries = vec![ManifestQuery { name: "allX".into(), input: vec![] }];
+        s.queries = vec![ManifestQuery {
+            name: "allX".into(),
+            input: vec![],
+        }];
         s.routes = vec![ManifestRoute {
             path: "/x".into(),
             mode: "server".into(),
@@ -993,13 +1071,18 @@ mod tests {
             allow: "true".into(),
         }];
         let diags = validate(&s);
-        assert!(!diags.iter().any(|d| d.code.starts_with("POLICY_ENTITY") || d.code.starts_with("POLICY_ACTION")));
+        assert!(!diags
+            .iter()
+            .any(|d| d.code.starts_with("POLICY_ENTITY") || d.code.starts_with("POLICY_ACTION")));
     }
 
     #[test]
     fn policy_valid_action_ref() {
         let mut s = base_schema();
-        s.actions = vec![ManifestAction { name: "doThing".into(), input: vec![] }];
+        s.actions = vec![ManifestAction {
+            name: "doThing".into(),
+            input: vec![],
+        }];
         s.policies = vec![ManifestPolicy {
             name: "p1".into(),
             entity: None,
@@ -1007,13 +1090,18 @@ mod tests {
             allow: "true".into(),
         }];
         let diags = validate(&s);
-        assert!(!diags.iter().any(|d| d.code.starts_with("POLICY_ENTITY") || d.code.starts_with("POLICY_ACTION")));
+        assert!(!diags
+            .iter()
+            .any(|d| d.code.starts_with("POLICY_ENTITY") || d.code.starts_with("POLICY_ACTION")));
     }
 
     #[test]
     fn policy_valid_both_entity_and_action() {
         let mut s = base_schema();
-        s.actions = vec![ManifestAction { name: "doThing".into(), input: vec![] }];
+        s.actions = vec![ManifestAction {
+            name: "doThing".into(),
+            input: vec![],
+        }];
         s.policies = vec![ManifestPolicy {
             name: "p1".into(),
             entity: Some("X".into()),
@@ -1071,7 +1159,10 @@ mod tests {
     #[test]
     fn route_param_missing_from_query_input() {
         let mut s = base_schema();
-        s.queries = vec![ManifestQuery { name: "getX".into(), input: vec![] }];
+        s.queries = vec![ManifestQuery {
+            name: "getX".into(),
+            input: vec![],
+        }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "ROUTE_PARAM_NOT_IN_QUERY"));
@@ -1101,8 +1192,16 @@ mod tests {
                 name: "Post".into(),
                 fields: vec![make_field("title", FieldType::String)],
                 indexes: vec![
-                    Index { name: "idx".into(), fields: vec!["title".into()], unique: false },
-                    Index { name: "idx".into(), fields: vec!["title".into()], unique: false },
+                    Index {
+                        name: "idx".into(),
+                        fields: vec!["title".into()],
+                        unique: false,
+                    },
+                    Index {
+                        name: "idx".into(),
+                        fields: vec!["title".into()],
+                        unique: false,
+                    },
                 ],
             }],
             queries: vec![],
@@ -1120,9 +1219,11 @@ mod tests {
             entities: vec![Entity {
                 name: "Post".into(),
                 fields: vec![make_field("title", FieldType::String)],
-                indexes: vec![
-                    Index { name: "idx".into(), fields: vec!["nonexistent".into()], unique: false },
-                ],
+                indexes: vec![Index {
+                    name: "idx".into(),
+                    fields: vec!["nonexistent".into()],
+                    unique: false,
+                }],
             }],
             queries: vec![],
             actions: vec![],
@@ -1139,9 +1240,11 @@ mod tests {
             entities: vec![Entity {
                 name: "Post".into(),
                 fields: vec![make_field("title", FieldType::String)],
-                indexes: vec![
-                    Index { name: "idx".into(), fields: vec![], unique: false },
-                ],
+                indexes: vec![Index {
+                    name: "idx".into(),
+                    fields: vec![],
+                    unique: false,
+                }],
             }],
             queries: vec![],
             actions: vec![],
@@ -1161,13 +1264,11 @@ mod tests {
                     make_field("authorId", FieldType::Id("User".into())),
                     make_field("createdAt", FieldType::Datetime),
                 ],
-                indexes: vec![
-                    Index {
-                        name: "by_author_date".into(),
-                        fields: vec!["authorId".into(), "createdAt".into()],
-                        unique: false,
-                    },
-                ],
+                indexes: vec![Index {
+                    name: "by_author_date".into(),
+                    fields: vec!["authorId".into(), "createdAt".into()],
+                    unique: false,
+                }],
             }],
             queries: vec![],
             actions: vec![],
@@ -1184,9 +1285,11 @@ mod tests {
             entities: vec![Entity {
                 name: "Post".into(),
                 fields: vec![make_field("title", FieldType::String)],
-                indexes: vec![
-                    Index { name: "".into(), fields: vec!["title".into()], unique: false },
-                ],
+                indexes: vec![Index {
+                    name: "".into(),
+                    fields: vec!["title".into()],
+                    unique: false,
+                }],
             }],
             queries: vec![],
             actions: vec![],
@@ -1223,7 +1326,11 @@ mod tests {
     fn entity_field_valid_id_ref() {
         let schema = Schema {
             entities: vec![
-                Entity { name: "User".into(), fields: vec![], indexes: vec![] },
+                Entity {
+                    name: "User".into(),
+                    fields: vec![],
+                    indexes: vec![],
+                },
                 Entity {
                     name: "Post".into(),
                     fields: vec![make_field("authorId", FieldType::Id("User".into()))],
@@ -1269,8 +1376,9 @@ mod tests {
             }],
         }];
         let diags = validate(&s);
-        assert!(diags.iter().any(|d| d.code == "FIELD_ID_TARGET_NOT_FOUND"
-            && d.message.contains("query")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code == "FIELD_ID_TARGET_NOT_FOUND" && d.message.contains("query")));
     }
 
     #[test]
@@ -1286,8 +1394,9 @@ mod tests {
             }],
         }];
         let diags = validate(&s);
-        assert!(diags.iter().any(|d| d.code == "FIELD_ID_TARGET_NOT_FOUND"
-            && d.message.contains("action")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code == "FIELD_ID_TARGET_NOT_FOUND" && d.message.contains("action")));
     }
 
     #[test]
@@ -1404,7 +1513,10 @@ mod tests {
 
     // -- Field type validation tests --
 
-    fn make_manifest_entity(name: &str, fields: Vec<pylon_kernel::ManifestField>) -> pylon_kernel::ManifestEntity {
+    fn make_manifest_entity(
+        name: &str,
+        fields: Vec<pylon_kernel::ManifestField>,
+    ) -> pylon_kernel::ManifestEntity {
         pylon_kernel::ManifestEntity {
             name: name.into(),
             fields,
@@ -1428,23 +1540,27 @@ mod tests {
 
     #[test]
     fn valid_scalar_types_accepted() {
-        let m = make_test_manifest(vec![make_manifest_entity("X", vec![
-            make_manifest_field("a", "string", false),
-            make_manifest_field("b", "int", false),
-            make_manifest_field("c", "float", false),
-            make_manifest_field("d", "bool", false),
-            make_manifest_field("e", "datetime", false),
-            make_manifest_field("f", "richtext", false),
-        ])]);
+        let m = make_test_manifest(vec![make_manifest_entity(
+            "X",
+            vec![
+                make_manifest_field("a", "string", false),
+                make_manifest_field("b", "int", false),
+                make_manifest_field("c", "float", false),
+                make_manifest_field("d", "bool", false),
+                make_manifest_field("e", "datetime", false),
+                make_manifest_field("f", "richtext", false),
+            ],
+        )]);
         let diags = validate_field_types(&m);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
     }
 
     #[test]
     fn invalid_entity_field_type() {
-        let m = make_test_manifest(vec![make_manifest_entity("X", vec![
-            make_manifest_field("a", "strng", false),
-        ])]);
+        let m = make_test_manifest(vec![make_manifest_entity(
+            "X",
+            vec![make_manifest_field("a", "strng", false)],
+        )]);
         let diags = validate_field_types(&m);
         assert!(diags.iter().any(|d| d.code == "FIELD_TYPE_UNKNOWN"));
     }
@@ -1457,8 +1573,9 @@ mod tests {
             input: vec![make_manifest_field("x", "boolean", false)],
         }];
         let diags = validate_field_types(&m);
-        assert!(diags.iter().any(|d| d.code == "INPUT_FIELD_TYPE_UNKNOWN"
-            && d.message.contains("query")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code == "INPUT_FIELD_TYPE_UNKNOWN" && d.message.contains("query")));
     }
 
     #[test]
@@ -1469,24 +1586,27 @@ mod tests {
             input: vec![make_manifest_field("x", "date_time", false)],
         }];
         let diags = validate_field_types(&m);
-        assert!(diags.iter().any(|d| d.code == "INPUT_FIELD_TYPE_UNKNOWN"
-            && d.message.contains("action")));
+        assert!(diags
+            .iter()
+            .any(|d| d.code == "INPUT_FIELD_TYPE_UNKNOWN" && d.message.contains("action")));
     }
 
     #[test]
     fn valid_id_type_accepted() {
-        let m = make_test_manifest(vec![make_manifest_entity("X", vec![
-            make_manifest_field("ref", "id(X)", false),
-        ])]);
+        let m = make_test_manifest(vec![make_manifest_entity(
+            "X",
+            vec![make_manifest_field("ref", "id(X)", false)],
+        )]);
         let diags = validate_field_types(&m);
         assert!(diags.is_empty());
     }
 
     #[test]
     fn malformed_id_type_rejected() {
-        let m = make_test_manifest(vec![make_manifest_entity("X", vec![
-            make_manifest_field("ref", "id(", false),
-        ])]);
+        let m = make_test_manifest(vec![make_manifest_entity(
+            "X",
+            vec![make_manifest_field("ref", "id(", false)],
+        )]);
         let diags = validate_field_types(&m);
         assert!(diags.iter().any(|d| d.code == "FIELD_TYPE_UNKNOWN"));
     }

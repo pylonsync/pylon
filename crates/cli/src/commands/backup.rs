@@ -55,10 +55,7 @@ pub fn run_backup(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     // Write VERSION.
-    if let Err(e) = fs::write(
-        Path::new(&target).join(VERSION_FILE),
-        pylon_kernel::VERSION,
-    ) {
+    if let Err(e) = fs::write(Path::new(&target).join(VERSION_FILE), pylon_kernel::VERSION) {
         print_error(&format!("Cannot write VERSION: {e}"));
         return ExitCode::Error;
     }
@@ -97,7 +94,11 @@ pub fn run_backup(args: &[String], json_mode: bool) -> ExitCode {
     let mut copied_files = 0u64;
     if Path::new(&uploads_dir).exists() {
         let uploads_target = Path::new(&target).join(UPLOADS_DIR);
-        if let Err(e) = copy_tree(&PathBuf::from(&uploads_dir), &uploads_target, &mut copied_files) {
+        if let Err(e) = copy_tree(
+            &PathBuf::from(&uploads_dir),
+            &uploads_target,
+            &mut copied_files,
+        ) {
             print_error(&format!("Cannot copy uploads: {e}"));
             return ExitCode::Error;
         }
@@ -131,8 +132,7 @@ pub fn run_restore(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    let confirm_flag =
-        args.iter().any(|a| a == "--yes" || a == "-y");
+    let confirm_flag = args.iter().any(|a| a == "--yes" || a == "-y");
 
     if !Path::new(&source).exists() {
         print_error(&format!("Source directory not found: {source}"));
@@ -198,7 +198,11 @@ pub fn run_restore(args: &[String], json_mode: bool) -> ExitCode {
     let uploads_src = Path::new(&source).join(UPLOADS_DIR);
     if uploads_src.exists() {
         let _ = fs::remove_dir_all(&uploads_dir); // clean replace
-        if let Err(e) = copy_tree(&uploads_src, &PathBuf::from(&uploads_dir), &mut restored_files) {
+        if let Err(e) = copy_tree(
+            &uploads_src,
+            &PathBuf::from(&uploads_dir),
+            &mut restored_files,
+        ) {
             print_error(&format!("Cannot restore uploads: {e}"));
             return ExitCode::Error;
         }
@@ -265,8 +269,7 @@ mod tests {
 
     #[test]
     fn copy_tree_roundtrip() {
-        let tmp = std::env::temp_dir()
-            .join(format!("pylon_backup_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("pylon_backup_test_{}", std::process::id()));
         let src = tmp.join("src");
         let dst = tmp.join("dst");
         let _ = fs::remove_dir_all(&tmp);

@@ -259,7 +259,6 @@ impl Plugin for FileStoragePlugin {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -324,7 +323,9 @@ mod tests {
             .upload(b"abc", "image/png", "photo.png")
             .expect("upload should succeed");
 
-        let meta = plugin.get_metadata(&info.id).expect("metadata should exist");
+        let meta = plugin
+            .get_metadata(&info.id)
+            .expect("metadata should exist");
         assert_eq!(meta.content_type, "image/png");
         assert_eq!(meta.original_name, "photo.png");
         assert_eq!(meta.size, 3);

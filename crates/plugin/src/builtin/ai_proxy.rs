@@ -10,9 +10,19 @@ use std::time::Duration;
 /// Supported AI providers.
 #[derive(Debug, Clone)]
 pub enum AiProvider {
-    Anthropic { api_key: String, model: String },
-    OpenAI { api_key: String, model: String },
-    Custom { base_url: String, api_key: String, model: Option<String> },
+    Anthropic {
+        api_key: String,
+        model: String,
+    },
+    OpenAI {
+        api_key: String,
+        model: String,
+    },
+    Custom {
+        base_url: String,
+        api_key: String,
+        model: Option<String>,
+    },
 }
 
 /// A single message in a conversation.
@@ -94,7 +104,11 @@ impl AiProxyPlugin {
             provider: AiProvider::Custom {
                 base_url: base_url.to_string(),
                 api_key: api_key.to_string(),
-                model: if model.is_empty() { None } else { Some(model.to_string()) },
+                model: if model.is_empty() {
+                    None
+                } else {
+                    Some(model.to_string())
+                },
             },
         }
     }
@@ -120,9 +134,11 @@ impl AiProxyPlugin {
             AiProvider::OpenAI { api_key, model } => {
                 self.stream_openai(api_key, model, messages, on_chunk)
             }
-            AiProvider::Custom { base_url, api_key, model } => {
-                self.stream_custom(base_url, api_key, model.as_deref(), messages, on_chunk)
-            }
+            AiProvider::Custom {
+                base_url,
+                api_key,
+                model,
+            } => self.stream_custom(base_url, api_key, model.as_deref(), messages, on_chunk),
         }
     }
 
@@ -352,9 +368,7 @@ impl AiProxyPlugin {
             let mut err_body = vec![0u8; 4096];
             let n = reader.read(&mut err_body).unwrap_or(0);
             let err_text = String::from_utf8_lossy(&err_body[..n]);
-            return Err(format!(
-                "Provider returned HTTP {status_code}: {err_text}"
-            ));
+            return Err(format!("Provider returned HTTP {status_code}: {err_text}"));
         }
 
         // Read SSE data lines.
@@ -472,7 +486,11 @@ mod tests {
     fn creates_custom_provider() {
         let plugin = AiProxyPlugin::custom("http://localhost:11434/v1/chat/completions", "key");
         match plugin.provider() {
-            AiProvider::Custom { base_url, api_key, model } => {
+            AiProvider::Custom {
+                base_url,
+                api_key,
+                model,
+            } => {
                 assert_eq!(base_url, "http://localhost:11434/v1/chat/completions");
                 assert_eq!(api_key, "key");
                 assert!(model.is_none());
@@ -485,7 +503,11 @@ mod tests {
     fn creates_custom_provider_with_model() {
         let plugin = AiProxyPlugin::custom_with_model("http://localhost:11434", "key", "llama3");
         match plugin.provider() {
-            AiProvider::Custom { base_url, api_key, model } => {
+            AiProvider::Custom {
+                base_url,
+                api_key,
+                model,
+            } => {
                 assert_eq!(base_url, "http://localhost:11434");
                 assert_eq!(api_key, "key");
                 assert_eq!(model.as_deref(), Some("llama3"));

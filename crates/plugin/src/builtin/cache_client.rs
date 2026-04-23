@@ -58,12 +58,8 @@ impl RemoteCacheClient {
 
         let mut stream = TcpStream::connect(&self.host_port)
             .map_err(|e| format!("Cache connection to {} failed: {e}", self.host_port))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .ok();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
         stream
             .write_all(request.as_bytes())
@@ -78,10 +74,7 @@ impl RemoteCacheClient {
             .map_err(|e| format!("Read failed: {e}"))?;
 
         // Parse HTTP response -- body comes after the first blank line.
-        let body_str = response
-            .split("\r\n\r\n")
-            .nth(1)
-            .unwrap_or("{}");
+        let body_str = response.split("\r\n\r\n").nth(1).unwrap_or("{}");
         serde_json::from_str(body_str).map_err(|e| format!("Parse failed: {e}"))
     }
 
@@ -94,9 +87,7 @@ impl RemoteCacheClient {
 
         let mut stream = TcpStream::connect(&self.host_port)
             .map_err(|e| format!("Cache connection to {} failed: {e}", self.host_port))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
         stream
             .write_all(request.as_bytes())
@@ -134,15 +125,13 @@ impl RemoteCacheClient {
     /// GET key
     pub fn get_key(&self, key: &str) -> Result<Option<String>, String> {
         let result = self.execute(serde_json::json!({"cmd": "GET", "key": key}))?;
-        Ok(result
-            .get("result")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str().map(|s| s.to_string())
-                }
-            }))
+        Ok(result.get("result").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        }))
     }
 
     /// DEL key
@@ -195,9 +184,8 @@ impl RemoteCacheClient {
 
     /// INCRBY key amount
     pub fn incrby(&self, key: &str, amount: i64) -> Result<i64, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "INCRBY", "key": key, "amount": amount}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "INCRBY", "key": key, "amount": amount}))?;
         result
             .get("result")
             .and_then(|v| v.as_i64())
@@ -225,18 +213,15 @@ impl RemoteCacheClient {
 
     /// GETSET key value
     pub fn getset(&self, key: &str, value: &str) -> Result<Option<String>, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "GETSET", "key": key, "value": value}),
-        )?;
-        Ok(result
-            .get("result")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str().map(|s| s.to_string())
-                }
-            }))
+        let result =
+            self.execute(serde_json::json!({"cmd": "GETSET", "key": key, "value": value}))?;
+        Ok(result.get("result").and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.to_string())
+            }
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -355,9 +340,8 @@ impl RemoteCacheClient {
 
     /// SISMEMBER key member
     pub fn sismember(&self, key: &str, member: &str) -> Result<bool, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "SISMEMBER", "key": key, "member": member}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "SISMEMBER", "key": key, "member": member}))?;
         Ok(result
             .get("result")
             .and_then(|v| v.as_bool())
@@ -388,9 +372,8 @@ impl RemoteCacheClient {
 
     /// HGET key field
     pub fn hget(&self, key: &str, field: &str) -> Result<Option<String>, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "HGET", "key": key, "field": field}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "HGET", "key": key, "field": field}))?;
         Ok(result.get("result").and_then(|v| {
             if v.is_null() {
                 None
@@ -402,9 +385,8 @@ impl RemoteCacheClient {
 
     /// HDEL key field
     pub fn hdel(&self, key: &str, field: &str) -> Result<bool, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "HDEL", "key": key, "field": field}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "HDEL", "key": key, "field": field}))?;
         Ok(result
             .get("result")
             .and_then(|v| v.as_bool())
@@ -427,9 +409,8 @@ impl RemoteCacheClient {
 
     /// HEXISTS key field
     pub fn hexists(&self, key: &str, field: &str) -> Result<bool, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "HEXISTS", "key": key, "field": field}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "HEXISTS", "key": key, "field": field}))?;
         Ok(result
             .get("result")
             .and_then(|v| v.as_bool())
@@ -501,23 +482,17 @@ impl RemoteCacheClient {
 
     /// ZSCORE key member
     pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "ZSCORE", "key": key, "member": member}),
-        )?;
-        Ok(result.get("result").and_then(|v| {
-            if v.is_null() {
-                None
-            } else {
-                v.as_f64()
-            }
-        }))
+        let result =
+            self.execute(serde_json::json!({"cmd": "ZSCORE", "key": key, "member": member}))?;
+        Ok(result
+            .get("result")
+            .and_then(|v| if v.is_null() { None } else { v.as_f64() }))
     }
 
     /// ZRANK key member
     pub fn zrank(&self, key: &str, member: &str) -> Result<Option<usize>, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "ZRANK", "key": key, "member": member}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "ZRANK", "key": key, "member": member}))?;
         Ok(result.get("result").and_then(|v| {
             if v.is_null() {
                 None
@@ -570,8 +545,7 @@ impl RemoteCacheClient {
 
     /// KEYS pattern
     pub fn keys(&self, pattern: &str) -> Result<Vec<String>, String> {
-        let result =
-            self.execute(serde_json::json!({"cmd": "KEYS", "pattern": pattern}))?;
+        let result = self.execute(serde_json::json!({"cmd": "KEYS", "pattern": pattern}))?;
         Ok(result
             .get("result")
             .and_then(|v| v.as_array())
@@ -586,20 +560,15 @@ impl RemoteCacheClient {
     /// TTL key
     pub fn ttl(&self, key: &str) -> Result<Option<u64>, String> {
         let result = self.execute(serde_json::json!({"cmd": "TTL", "key": key}))?;
-        Ok(result.get("result").and_then(|v| {
-            if v.is_null() {
-                None
-            } else {
-                v.as_u64()
-            }
-        }))
+        Ok(result
+            .get("result")
+            .and_then(|v| if v.is_null() { None } else { v.as_u64() }))
     }
 
     /// EXPIRE key seconds
     pub fn expire(&self, key: &str, seconds: u64) -> Result<bool, String> {
-        let result = self.execute(
-            serde_json::json!({"cmd": "EXPIRE", "key": key, "seconds": seconds}),
-        )?;
+        let result =
+            self.execute(serde_json::json!({"cmd": "EXPIRE", "key": key, "seconds": seconds}))?;
         Ok(result
             .get("result")
             .and_then(|v| v.as_bool())
@@ -689,11 +658,7 @@ impl RemoteCacheClient {
     }
 
     /// Get message history for a channel.
-    pub fn history(
-        &self,
-        channel: &str,
-        limit: usize,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    pub fn history(&self, channel: &str, limit: usize) -> Result<Vec<serde_json::Value>, String> {
         let path = format!("/pubsub/history/{channel}?limit={limit}");
         let result = self.get(&path)?;
         Ok(result

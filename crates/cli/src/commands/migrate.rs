@@ -69,11 +69,10 @@ fn run_create(positional: &[&str], json_mode: bool) -> ExitCode {
     };
 
     // Validate: name should be alphanumeric + underscores only.
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        output::print_error("migration name must contain only alphanumeric characters and underscores");
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        output::print_error(
+            "migration name must contain only alphanumeric characters and underscores",
+        );
         return ExitCode::Usage;
     }
 
@@ -218,7 +217,8 @@ fn count_migrations(dir: &Path) -> u32 {
 
 /// Read and sort migration `.sql` filenames from the directory.
 fn read_migration_files(dir: &Path) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("Cannot read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("Cannot read {}: {e}", dir.display()))?;
 
     let mut names: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -239,7 +239,9 @@ fn read_migration_files(dir: &Path) -> Result<Vec<String>, String> {
 /// Parse migration filenames into structured info.
 fn read_migrations(dir: &Path) -> Result<Vec<MigrationInfo>, String> {
     if !dir.exists() {
-        return Err(format!("No migrations directory found ({MIGRATIONS_DIR}/)."));
+        return Err(format!(
+            "No migrations directory found ({MIGRATIONS_DIR}/)."
+        ));
     }
 
     let files = read_migration_files(dir)?;
@@ -344,12 +346,18 @@ fn run_plan(hints: &pylon_migrate::RenameHints, json_mode: bool) -> ExitCode {
     } else {
         eprintln!("Migration plan ({} steps):", plan.steps.len());
         for step in &plan.steps {
-            let marker = if step.is_destructive() { " [DESTRUCTIVE]" } else { "" };
+            let marker = if step.is_destructive() {
+                " [DESTRUCTIVE]"
+            } else {
+                ""
+            };
             eprintln!("  {}{marker}", step.sql());
         }
         if plan.has_destructive {
             eprintln!();
-            eprintln!("Note: plan includes destructive operations. Use --allow-destructive with apply.");
+            eprintln!(
+                "Note: plan includes destructive operations. Use --allow-destructive with apply."
+            );
         }
     }
 
@@ -386,7 +394,9 @@ fn run_apply(
     }
 
     if plan.has_destructive && !allow_destructive {
-        output::print_error("Plan contains destructive operations. Re-run with --allow-destructive to proceed.");
+        output::print_error(
+            "Plan contains destructive operations. Re-run with --allow-destructive to proceed.",
+        );
         for step in &plan.steps {
             if step.is_destructive() {
                 eprintln!("  [DESTRUCTIVE] {}", step.sql());
@@ -440,13 +450,8 @@ fn run_apply(
     // Record the new manifest snapshot.
     let manifest_json = serde_json::to_string(&new).unwrap_or_default();
     let _ = conn.execute(
-        &format!(
-            "INSERT INTO {MIGRATIONS_TABLE} (applied_at, manifest) VALUES (?1, ?2)"
-        ),
-        rusqlite::params![
-            chrono_now_iso(),
-            manifest_json,
-        ],
+        &format!("INSERT INTO {MIGRATIONS_TABLE} (applied_at, manifest) VALUES (?1, ?2)"),
+        rusqlite::params![chrono_now_iso(), manifest_json,],
     );
 
     if json_mode {
@@ -467,12 +472,12 @@ fn run_apply(
 
 fn load_manifests() -> Result<(pylon_kernel::AppManifest, pylon_kernel::AppManifest), String> {
     // Current (on-disk) manifest.
-    let manifest_path = std::env::var("PYLON_MANIFEST")
-        .unwrap_or_else(|_| "pylon.manifest.json".into());
+    let manifest_path =
+        std::env::var("PYLON_MANIFEST").unwrap_or_else(|_| "pylon.manifest.json".into());
     let current = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Cannot read manifest {manifest_path}: {e}"))?;
-    let new: pylon_kernel::AppManifest = serde_json::from_str(&current)
-        .map_err(|e| format!("Invalid manifest JSON: {e}"))?;
+    let new: pylon_kernel::AppManifest =
+        serde_json::from_str(&current).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
 
     // Previously-applied manifest (from DB). Empty if fresh DB.
     let db_path = std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".into());
@@ -491,16 +496,13 @@ fn load_manifests() -> Result<(pylon_kernel::AppManifest, pylon_kernel::AppManif
 fn load_applied_manifest(conn: &rusqlite::Connection) -> Result<pylon_kernel::AppManifest, String> {
     ensure_migrations_table(conn)?;
 
-    let query = format!(
-        "SELECT manifest FROM {MIGRATIONS_TABLE} ORDER BY applied_at DESC LIMIT 1"
-    );
-    let manifest_json: Option<String> = conn
-        .query_row(&query, [], |row| row.get(0))
-        .ok();
+    let query = format!("SELECT manifest FROM {MIGRATIONS_TABLE} ORDER BY applied_at DESC LIMIT 1");
+    let manifest_json: Option<String> = conn.query_row(&query, [], |row| row.get(0)).ok();
 
     match manifest_json {
-        Some(json) => serde_json::from_str(&json)
-            .map_err(|e| format!("Corrupted migration state: {e}")),
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|e| format!("Corrupted migration state: {e}"))
+        }
         None => Ok(empty_manifest()),
     }
 }
@@ -558,9 +560,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=b.len() {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }

@@ -186,11 +186,7 @@ impl Runtime {
             });
         }
         let conn = self.lock_write_conn()?;
-        let entity_names: Vec<String> = self
-            .entities
-            .values()
-            .map(|e| e.name.clone())
-            .collect();
+        let entity_names: Vec<String> = self.entities.values().map(|e| e.name.clone()).collect();
         for name in entity_names {
             let sql = format!("DELETE FROM {}", quote_ident(&name));
             let _ = conn.execute(&sql, []);
@@ -210,7 +206,11 @@ impl Runtime {
         Self::from_connection(conn, manifest, true)
     }
 
-    fn from_connection(conn: Connection, manifest: AppManifest, is_in_memory: bool) -> Result<Self, RuntimeError> {
+    fn from_connection(
+        conn: Connection,
+        manifest: AppManifest,
+        is_in_memory: bool,
+    ) -> Result<Self, RuntimeError> {
         // Enable WAL mode for better concurrency.
         conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
 
@@ -280,8 +280,7 @@ impl Runtime {
                 .collect();
             if !text_fields.is_empty() {
                 let fts_name = format!("{}_fts", entity.name);
-                let quoted_cols: Vec<String> =
-                    text_fields.iter().map(|f| quote_ident(f)).collect();
+                let quoted_cols: Vec<String> = text_fields.iter().map(|f| quote_ident(f)).collect();
                 let fts_sql = format!(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5({}, content={}, content_rowid='rowid')",
                     quote_ident(&fts_name),
@@ -306,10 +305,14 @@ impl Runtime {
                     let tbl = quote_ident(&entity.name);
                     let ftb = quote_ident(&fts_name);
                     let cols_list = quoted_cols.join(", ");
-                    let new_list: Vec<String> =
-                        text_fields.iter().map(|f| format!("new.{}", quote_ident(f))).collect();
-                    let old_list: Vec<String> =
-                        text_fields.iter().map(|f| format!("old.{}", quote_ident(f))).collect();
+                    let new_list: Vec<String> = text_fields
+                        .iter()
+                        .map(|f| format!("new.{}", quote_ident(f)))
+                        .collect();
+                    let old_list: Vec<String> = text_fields
+                        .iter()
+                        .map(|f| format!("old.{}", quote_ident(f)))
+                        .collect();
 
                     let trigger_ai = quote_ident(&format!("{}_ai", fts_name));
                     let trigger_ad = quote_ident(&format!("{}_ad", fts_name));
@@ -392,9 +395,7 @@ impl Runtime {
     }
 
     /// Expose the write connection mutex for transactional operations.
-    pub fn lock_conn_pub(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
+    pub fn lock_conn_pub(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
         self.lock_write_conn()
     }
 
@@ -443,10 +444,11 @@ impl Runtime {
         );
 
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        conn.execute(&sql, params.as_slice()).map_err(|e| RuntimeError {
-            code: "INSERT_FAILED".into(),
-            message: format!("Insert into {entity} failed: {e}"),
-        })?;
+        conn.execute(&sql, params.as_slice())
+            .map_err(|e| RuntimeError {
+                code: "INSERT_FAILED".into(),
+                message: format!("Insert into {entity} failed: {e}"),
+            })?;
 
         Ok(id)
     }
@@ -460,25 +462,16 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let sql = format!(
-            "SELECT * FROM {} WHERE \"id\" = ?1",
-            quote_ident(entity)
-        );
+        let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(entity));
         let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
 
-        let columns: Vec<String> = ent
-            .fields
-            .iter()
-            .map(|f| f.name.clone())
-            .collect();
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
         let result = stmt
-            .query_row(rusqlite::params![id], |row| {
-                Ok(row_to_json(row, &columns))
-            })
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
             .ok();
 
         Ok(result)
@@ -489,10 +482,7 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let sql = format!(
-            "SELECT * FROM {} ORDER BY \"id\"",
-            quote_ident(entity)
-        );
+        let sql = format!("SELECT * FROM {} ORDER BY \"id\"", quote_ident(entity));
         let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
@@ -535,16 +525,10 @@ impl Runtime {
                     "SELECT * FROM {} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2",
                     table
                 ),
-                vec![
-                    Box::new(cursor.to_string()),
-                    Box::new(limit as i64),
-                ],
+                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
             ),
             None => (
-                format!(
-                    "SELECT * FROM {} ORDER BY \"id\" LIMIT ?1",
-                    table
-                ),
+                format!("SELECT * FROM {} ORDER BY \"id\" LIMIT ?1", table),
                 vec![Box::new(limit as i64)],
             ),
         };
@@ -614,10 +598,12 @@ impl Runtime {
         );
 
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        let affected = conn.execute(&sql, params.as_slice()).map_err(|e| RuntimeError {
-            code: "UPDATE_FAILED".into(),
-            message: format!("Update {entity}/{id} failed: {e}"),
-        })?;
+        let affected = conn
+            .execute(&sql, params.as_slice())
+            .map_err(|e| RuntimeError {
+                code: "UPDATE_FAILED".into(),
+                message: format!("Update {entity}/{id} failed: {e}"),
+            })?;
 
         Ok(affected > 0)
     }
@@ -627,14 +613,13 @@ impl Runtime {
         let _ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
-        let sql = format!(
-            "DELETE FROM {} WHERE \"id\" = ?1",
-            quote_ident(entity)
-        );
-        let affected = conn.execute(&sql, rusqlite::params![id]).map_err(|e| RuntimeError {
-            code: "DELETE_FAILED".into(),
-            message: format!("Delete {entity}/{id} failed: {e}"),
-        })?;
+        let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
+        let affected = conn
+            .execute(&sql, rusqlite::params![id])
+            .map_err(|e| RuntimeError {
+                code: "DELETE_FAILED".into(),
+                message: format!("Delete {entity}/{id} failed: {e}"),
+            })?;
 
         Ok(affected > 0)
     }
@@ -657,15 +642,12 @@ impl Runtime {
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let result = conn
-            .prepare(&sql)
+        let result = conn.prepare(&sql).ok().and_then(|mut stmt| {
+            stmt.query_row(rusqlite::params![value], |row| {
+                Ok(row_to_json(row, &columns))
+            })
             .ok()
-            .and_then(|mut stmt| {
-                stmt.query_row(rusqlite::params![value], |row| {
-                    Ok(row_to_json(row, &columns))
-                })
-                .ok()
-            });
+        });
 
         Ok(result)
     }
@@ -695,12 +677,7 @@ impl Runtime {
     }
 
     /// Unlink a relation by setting the foreign-key field to null.
-    pub fn unlink(
-        &self,
-        entity: &str,
-        id: &str,
-        relation: &str,
-    ) -> Result<bool, RuntimeError> {
+    pub fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, RuntimeError> {
         let ent = self.require_entity(entity)?;
 
         let rel = ent
@@ -726,7 +703,10 @@ impl Runtime {
         let conn = self.lock_read_conn()?;
 
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
-        let obj = filter.as_object().unwrap_or(&serde_json::Map::new()).clone();
+        let obj = filter
+            .as_object()
+            .unwrap_or(&serde_json::Map::new())
+            .clone();
 
         let mut where_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -777,10 +757,7 @@ impl Runtime {
                             fts = quote_ident(&fts),
                             ent = quote_ident(entity),
                         );
-                        where_clauses.push(format!(
-                            "{} MATCH ?{idx}",
-                            quote_ident(&fts)
-                        ));
+                        where_clauses.push(format!("{} MATCH ?{idx}", quote_ident(&fts)));
                         values.push(Box::new(q.to_string()));
                         fts_order = true;
                         idx += 1;
@@ -820,10 +797,7 @@ impl Runtime {
                                 }
                                 "$like" => {
                                     where_clauses.push(format!("{quoted_key} LIKE ?{idx}"));
-                                    let pattern = format!(
-                                        "%{}%",
-                                        op_val.as_str().unwrap_or("")
-                                    );
+                                    let pattern = format!("%{}%", op_val.as_str().unwrap_or(""));
                                     values.push(Box::new(pattern));
                                     idx += 1;
                                 }
@@ -868,9 +842,7 @@ impl Runtime {
         if order_clause.is_empty() {
             order_clause = if fts_order {
                 // FTS joins default-order by bm25 relevance.
-                " ORDER BY bm25(".to_string()
-                    + &quote_ident(&format!("{}_fts", entity))
-                    + ")"
+                " ORDER BY bm25(".to_string() + &quote_ident(&format!("{}_fts", entity)) + ")"
             } else {
                 format!(" ORDER BY {}.\"id\"", quote_ident(entity))
             };
@@ -929,11 +901,15 @@ impl Runtime {
             let _ent = self.require_entity(entity_name)?;
 
             // Apply where clause if present.
-            let filter = query_opts.get("where").cloned().unwrap_or(serde_json::json!({}));
+            let filter = query_opts
+                .get("where")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             let rows = self.query_filtered(entity_name, &filter)?;
 
             // Apply includes (relations) if present.
-            let rows = if let Some(include) = query_opts.get("include").and_then(|v| v.as_object()) {
+            let rows = if let Some(include) = query_opts.get("include").and_then(|v| v.as_object())
+            {
                 // Internal invariant: if query_filtered succeeded above, the
                 // entity must exist. Previously this used .unwrap() which
                 // would panic if the invariant broke — a panic inside the
@@ -949,17 +925,23 @@ impl Runtime {
                     .map(|mut row| {
                         for (rel_name, _sub_query) in include {
                             if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
-                                let fk_value = row.get(&rel.field).and_then(|v| v.as_str()).map(|s| s.to_string());
+                                let fk_value = row
+                                    .get(&rel.field)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
                                 if let Some(fk) = fk_value {
                                     if rel.many {
                                         // One-to-many: find rows in target where field matches id.
                                         let sub_filter = serde_json::json!({ &rel.field: &fk });
-                                        if let Ok(related) = self.query_filtered(&rel.target, &sub_filter) {
+                                        if let Ok(related) =
+                                            self.query_filtered(&rel.target, &sub_filter)
+                                        {
                                             row[rel_name] = serde_json::json!(related);
                                         }
                                     } else {
                                         // One-to-one / many-to-one: get by id.
-                                        if let Ok(Some(related)) = self.get_by_id(&rel.target, &fk) {
+                                        if let Ok(Some(related)) = self.get_by_id(&rel.target, &fk)
+                                        {
                                             row[rel_name] = related;
                                         }
                                     }
@@ -1009,7 +991,9 @@ impl Runtime {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id.clone())];
         let mut idx = 2;
         for (key, val) in obj {
-            if key == "id" { continue; }
+            if key == "id" {
+                continue;
+            }
             validate_column_name(key, ent)?;
             col_names.push(quote_ident(key));
             placeholders.push(format!("?{idx}"));
@@ -1019,13 +1003,16 @@ impl Runtime {
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            quote_ident(entity), col_names.join(", "), placeholders.join(", ")
+            quote_ident(entity),
+            col_names.join(", "),
+            placeholders.join(", ")
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        conn.execute(&sql, params.as_slice()).map_err(|e| RuntimeError {
-            code: "INSERT_FAILED".into(),
-            message: format!("Insert into {entity} failed: {e}"),
-        })?;
+        conn.execute(&sql, params.as_slice())
+            .map_err(|e| RuntimeError {
+                code: "INSERT_FAILED".into(),
+                message: format!("Insert into {entity} failed: {e}"),
+            })?;
         Ok(id)
     }
 
@@ -1047,24 +1034,31 @@ impl Runtime {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
         for (key, val) in obj {
-            if key == "id" { continue; }
+            if key == "id" {
+                continue;
+            }
             validate_column_name(key, ent)?;
             set_clauses.push(format!("{} = ?{idx}", quote_ident(key)));
             values.push(json_to_sql(val));
             idx += 1;
         }
-        if set_clauses.is_empty() { return Ok(false); }
+        if set_clauses.is_empty() {
+            return Ok(false);
+        }
 
         values.push(Box::new(id.to_string()));
         let sql = format!(
             "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
-            quote_ident(entity), set_clauses.join(", ")
+            quote_ident(entity),
+            set_clauses.join(", ")
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        let affected = conn.execute(&sql, params.as_slice()).map_err(|e| RuntimeError {
-            code: "UPDATE_FAILED".into(),
-            message: format!("Update {entity}/{id} failed: {e}"),
-        })?;
+        let affected = conn
+            .execute(&sql, params.as_slice())
+            .map_err(|e| RuntimeError {
+                code: "UPDATE_FAILED".into(),
+                message: format!("Update {entity}/{id} failed: {e}"),
+            })?;
         Ok(affected > 0)
     }
 
@@ -1077,10 +1071,12 @@ impl Runtime {
     ) -> Result<bool, RuntimeError> {
         let _ent = self.require_entity(entity)?;
         let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
-        let affected = conn.execute(&sql, rusqlite::params![id]).map_err(|e| RuntimeError {
-            code: "DELETE_FAILED".into(),
-            message: format!("Delete {entity}/{id} failed: {e}"),
-        })?;
+        let affected = conn
+            .execute(&sql, rusqlite::params![id])
+            .map_err(|e| RuntimeError {
+                code: "DELETE_FAILED".into(),
+                message: format!("Delete {entity}/{id} failed: {e}"),
+            })?;
         Ok(affected > 0)
     }
 
@@ -1138,9 +1134,7 @@ impl Runtime {
         let table = quote_ident(entity);
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
             Some(cursor) => (
-                format!(
-                    "SELECT * FROM {table} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2"
-                ),
+                format!("SELECT * FROM {table} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT ?2"),
                 vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
             ),
             None => (
@@ -1179,15 +1173,12 @@ impl Runtime {
             quote_ident(field)
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
-        Ok(conn
-            .prepare(&sql)
+        Ok(conn.prepare(&sql).ok().and_then(|mut stmt| {
+            stmt.query_row(rusqlite::params![value], |row| {
+                Ok(row_to_json(row, &columns))
+            })
             .ok()
-            .and_then(|mut stmt| {
-                stmt.query_row(rusqlite::params![value], |row| {
-                    Ok(row_to_json(row, &columns))
-                })
-                .ok()
-            }))
+        }))
     }
 
     /// Link relation using a pre-held connection (for transactions).
@@ -1334,10 +1325,8 @@ impl Runtime {
                                             })
                                             .collect();
                                         if !ph.is_empty() {
-                                            where_clauses.push(format!(
-                                                "{qk} IN ({})",
-                                                ph.join(", ")
-                                            ));
+                                            where_clauses
+                                                .push(format!("{qk} IN ({})", ph.join(", ")));
                                         }
                                     }
                                 }
@@ -1397,7 +1386,10 @@ impl Runtime {
         let mut results = serde_json::Map::new();
         for (entity_name, query_opts) in obj {
             let _ent = self.require_entity(entity_name)?;
-            let filter = query_opts.get("where").cloned().unwrap_or(serde_json::json!({}));
+            let filter = query_opts
+                .get("where")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             let rows = self.query_filtered_with_conn(conn, entity_name, &filter)?;
             results.insert(entity_name.clone(), serde_json::json!(rows));
         }
@@ -1446,9 +1438,12 @@ impl Runtime {
             }
         }
 
-        for (fn_name, alias_prefix) in
-            [("sum", "sum_"), ("avg", "avg_"), ("min", "min_"), ("max", "max_")]
-        {
+        for (fn_name, alias_prefix) in [
+            ("sum", "sum_"),
+            ("avg", "avg_"),
+            ("min", "min_"),
+            ("max", "max_"),
+        ] {
             if let Some(fields) = obj.get(fn_name).and_then(|v| v.as_array()) {
                 for field in fields {
                     if let Some(f) = field.as_str() {
@@ -1503,18 +1498,15 @@ impl Runtime {
                     group_select.push(quoted);
                     group_field_names.push(f.to_string());
                 } else if let Some(spec) = g.as_object() {
-                    let field = spec
-                        .get("field")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| RuntimeError {
-                            code: "INVALID_QUERY".into(),
-                            message: "groupBy object spec requires `field`".into(),
-                        })?;
+                    let field =
+                        spec.get("field")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| RuntimeError {
+                                code: "INVALID_QUERY".into(),
+                                message: "groupBy object spec requires `field`".into(),
+                            })?;
                     validate_column_name(field, ent)?;
-                    let bucket = spec
-                        .get("bucket")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("day");
+                    let bucket = spec.get("bucket").and_then(|v| v.as_str()).unwrap_or("day");
                     let fmt = match bucket {
                         "hour" => "%Y-%m-%d %H:00:00",
                         "day" => "%Y-%m-%d",
@@ -1531,8 +1523,7 @@ impl Runtime {
                         }
                     };
                     let alias = format!("{field}_{bucket}");
-                    let expr =
-                        format!("strftime('{}', {})", fmt, quote_ident(field));
+                    let expr = format!("strftime('{}', {})", fmt, quote_ident(field));
                     group_by.push(expr.clone());
                     group_select.push(format!("{} AS {}", expr, quote_ident(&alias)));
                     group_field_names.push(alias);
@@ -1722,7 +1713,7 @@ fn row_to_json(row: &rusqlite::Row<'_>, field_names: &[String]) -> serde_json::V
 
     for (i, name) in field_names.iter().enumerate() {
         let col_idx = i + 1; // +1 because id is at index 0
-        // Try string first, then integer, then float, then null.
+                             // Try string first, then integer, then float, then null.
         if let Ok(s) = row.get::<_, String>(col_idx) {
             obj.insert(name.clone(), serde_json::Value::String(s));
         } else if let Ok(n) = row.get::<_, i64>(col_idx) {
@@ -1743,7 +1734,6 @@ fn row_to_json(row: &rusqlite::Row<'_>, field_names: &[String]) -> serde_json::V
 
     serde_json::Value::Object(obj)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1788,7 +1778,11 @@ mod tests {
     #[test]
     fn reset_for_tests_wipes_in_memory() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
         assert_eq!(rt.list("User").unwrap().len(), 1);
         rt.reset_for_tests().unwrap();
         assert_eq!(rt.list("User").unwrap().len(), 0);
@@ -1810,7 +1804,10 @@ mod tests {
     fn insert_and_get() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let id = rt
-            .insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+            )
             .unwrap();
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["email"], "a@b.com");
@@ -1819,8 +1816,16 @@ mod tests {
     #[test]
     fn list_entities() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "b@c.com", "displayName": "B"})).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "b@c.com", "displayName": "B"}),
+        )
+        .unwrap();
         let rows = rt.list("User").unwrap();
         assert_eq!(rows.len(), 2);
     }
@@ -1829,9 +1834,14 @@ mod tests {
     fn update_entity() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let id = rt
-            .insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+            )
             .unwrap();
-        let updated = rt.update("User", &id, &serde_json::json!({"displayName": "Updated"})).unwrap();
+        let updated = rt
+            .update("User", &id, &serde_json::json!({"displayName": "Updated"}))
+            .unwrap();
         assert!(updated);
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["displayName"], "Updated");
@@ -1841,7 +1851,10 @@ mod tests {
     fn delete_entity() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let id = rt
-            .insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+            )
             .unwrap();
         let deleted = rt.delete("User", &id).unwrap();
         assert!(deleted);
@@ -1851,7 +1864,11 @@ mod tests {
     #[test]
     fn lookup_by_field() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
         let row = rt.lookup("User", "email", "a@b.com").unwrap().unwrap();
         assert_eq!(row["displayName"], "A");
     }
@@ -1867,7 +1884,10 @@ mod tests {
     fn insert_rejects_unknown_column() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let err = rt
-            .insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A", "evil_col": "x"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "a@b.com", "displayName": "A", "evil_col": "x"}),
+            )
             .unwrap_err();
         assert_eq!(err.code, "INVALID_COLUMN");
     }
@@ -1876,9 +1896,14 @@ mod tests {
     fn update_rejects_unknown_column() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let id = rt
-            .insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+            )
             .unwrap();
-        let err = rt.update("User", &id, &serde_json::json!({"bad_field": "x"})).unwrap_err();
+        let err = rt
+            .update("User", &id, &serde_json::json!({"bad_field": "x"}))
+            .unwrap_err();
         assert_eq!(err.code, "INVALID_COLUMN");
     }
 
@@ -1910,10 +1935,17 @@ mod tests {
     #[test]
     fn query_filtered_sanitizes_order_direction() {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
         // Even a malicious direction value should be normalized to ASC.
         let rows = rt
-            .query_filtered("User", &serde_json::json!({"$order": {"email": "DROP TABLE User"}}))
+            .query_filtered(
+                "User",
+                &serde_json::json!({"$order": {"email": "DROP TABLE User"}}),
+            )
             .unwrap();
         assert_eq!(rows.len(), 1);
     }
@@ -1935,7 +1967,10 @@ mod tests {
 
         // Write then read through the pool.
         let id = rt
-            .insert("User", &serde_json::json!({"email": "pool@test.com", "displayName": "Pool"}))
+            .insert(
+                "User",
+                &serde_json::json!({"email": "pool@test.com", "displayName": "Pool"}),
+            )
             .unwrap();
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["email"], "pool@test.com");
@@ -1955,8 +1990,16 @@ mod tests {
         let rt = Arc::new(Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap());
 
         // Seed some data so reads have something to return.
-        rt.insert("User", &serde_json::json!({"email": "a@b.com", "displayName": "A"})).unwrap();
-        rt.insert("User", &serde_json::json!({"email": "b@c.com", "displayName": "B"})).unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "displayName": "A"}),
+        )
+        .unwrap();
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "b@c.com", "displayName": "B"}),
+        )
+        .unwrap();
 
         // Hold the write lock to simulate a long write.
         let write_guard = rt.lock_write_conn().unwrap();

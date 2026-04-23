@@ -56,7 +56,10 @@ pub fn write_pages(pages: &[StaticPage], out_dir: &Path) -> Result<usize, String
         .map_err(|e| format!("Failed to create output directory: {e}"))?;
 
     let out_canonical = std::fs::canonicalize(out_dir).map_err(|e| {
-        format!("Failed to canonicalize output directory {}: {e}", out_dir.display())
+        format!(
+            "Failed to canonicalize output directory {}: {e}",
+            out_dir.display()
+        )
     })?;
 
     for page in pages {
@@ -69,7 +72,10 @@ pub fn write_pages(pages: &[StaticPage], out_dir: &Path) -> Result<usize, String
                 page.path
             ));
         }
-        if pp.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if pp
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(format!(
                 "refusing page path with `..` component: {:?}",
                 page.path
@@ -81,9 +87,8 @@ pub fn write_pages(pages: &[StaticPage], out_dir: &Path) -> Result<usize, String
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
             // Canonicalize the parent (it exists now) and check containment.
-            let parent_canonical = std::fs::canonicalize(parent).map_err(|e| {
-                format!("Failed to canonicalize {}: {e}", parent.display())
-            })?;
+            let parent_canonical = std::fs::canonicalize(parent)
+                .map_err(|e| format!("Failed to canonicalize {}: {e}", parent.display()))?;
             if !parent_canonical.starts_with(&out_canonical) {
                 return Err(format!(
                     "page path {:?} would write outside the output directory",
@@ -149,8 +154,10 @@ mod tests {
     use pylon_kernel::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -268,7 +275,10 @@ mod tests {
             html: "<h1>x</h1>".into(),
         }];
         let err = write_pages(&pages, &dir).unwrap_err();
-        assert!(err.contains("..") || err.contains("outside"), "unexpected: {err}");
+        assert!(
+            err.contains("..") || err.contains("outside"),
+            "unexpected: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

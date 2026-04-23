@@ -18,8 +18,7 @@ pub struct JobStore {
 impl JobStore {
     /// Open or create the job store database at `path`.
     pub fn open(path: &str) -> Result<Self, String> {
-        let conn =
-            Connection::open(path).map_err(|e| format!("Failed to open job store: {e}"))?;
+        let conn = Connection::open(path).map_err(|e| format!("Failed to open job store: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -206,10 +205,8 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Job {
     Job {
         id: row.get(0).unwrap_or_default(),
         name: row.get(1).unwrap_or_default(),
-        payload: serde_json::from_str(
-            &row.get::<_, String>(2).unwrap_or_default(),
-        )
-        .unwrap_or(serde_json::json!({})),
+        payload: serde_json::from_str(&row.get::<_, String>(2).unwrap_or_default())
+            .unwrap_or(serde_json::json!({})),
         priority: int_to_priority(row.get(3).unwrap_or(1)),
         status: str_to_status(&row.get::<_, String>(4).unwrap_or_default()),
         max_retries: row.get(5).unwrap_or(3),
@@ -440,7 +437,9 @@ mod tests {
         store.save(&recent).unwrap();
 
         // A pending job (should never be cleaned regardless of age).
-        store.save(&make_job("j_pending", JobStatus::Pending)).unwrap();
+        store
+            .save(&make_job("j_pending", JobStatus::Pending))
+            .unwrap();
 
         // Cleanup anything completed more than 1 hour ago.
         let deleted = store.cleanup_completed(3600);
@@ -455,9 +454,14 @@ mod tests {
     #[test]
     fn all_priorities_roundtrip() {
         let store = JobStore::in_memory().unwrap();
-        for (i, prio) in [Priority::Low, Priority::Normal, Priority::High, Priority::Critical]
-            .iter()
-            .enumerate()
+        for (i, prio) in [
+            Priority::Low,
+            Priority::Normal,
+            Priority::High,
+            Priority::Critical,
+        ]
+        .iter()
+        .enumerate()
         {
             let mut job = make_job(&format!("j_{i}"), JobStatus::Pending);
             job.priority = *prio;

@@ -187,8 +187,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         message: format!("Files created but could not write manifest: {e}"),
                         span: None,
                         hint: Some(
-                            "Run 'pylon codegen app.ts --out pylon.manifest.json' manually"
-                                .into(),
+                            "Run 'pylon codegen app.ts --out pylon.manifest.json' manually".into(),
                         ),
                     }],
                     json_mode,

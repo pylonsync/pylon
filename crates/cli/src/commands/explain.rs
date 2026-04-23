@@ -23,7 +23,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     if json_mode {
         print_json(&manifest);
     } else {
-        println!("App: {} v{} (manifest v{})", manifest.name, manifest.version, manifest.manifest_version);
+        println!(
+            "App: {} v{} (manifest v{})",
+            manifest.name, manifest.version, manifest.manifest_version
+        );
         println!();
         println!("Entities:");
         for entity in &manifest.entities {

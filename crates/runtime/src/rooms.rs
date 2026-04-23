@@ -19,10 +19,7 @@ pub enum RoomEvent {
         data: Option<serde_json::Value>,
     },
     /// Someone left the room.
-    Leave {
-        room: String,
-        user_id: String,
-    },
+    Leave { room: String, user_id: String },
     /// Presence update (cursor position, typing indicator, custom data).
     Presence {
         room: String,
@@ -38,10 +35,7 @@ pub enum RoomEvent {
         data: serde_json::Value,
     },
     /// Room state snapshot (sent on join).
-    Snapshot {
-        room: String,
-        peers: Vec<PeerInfo>,
-    },
+    Snapshot { room: String, peers: Vec<PeerInfo> },
 }
 
 /// Info about a peer in a room.
@@ -167,7 +161,9 @@ impl RoomManager {
             });
         }
 
-        let room_state = rooms.entry(room.to_string()).or_insert_with(|| Room::new(room));
+        let room_state = rooms
+            .entry(room.to_string())
+            .or_insert_with(|| Room::new(room));
 
         let member = RoomMember {
             user_id: user_id.to_string(),
@@ -270,10 +266,7 @@ impl RoomManager {
     /// List all members currently in a room.
     pub fn members(&self, room: &str) -> Vec<PeerInfo> {
         let rooms = self.rooms.lock().unwrap();
-        rooms
-            .get(room)
-            .map(|r| r.peer_infos())
-            .unwrap_or_default()
+        rooms.get(room).map(|r| r.peer_infos()).unwrap_or_default()
     }
 
     /// List all active room names.
@@ -403,7 +396,8 @@ mod tests {
     #[test]
     fn join_returns_existing_peers_in_snapshot() {
         let mgr = RoomManager::new(60);
-        mgr.join("lobby", "alice", Some(serde_json::json!({"color": "red"}))).unwrap();
+        mgr.join("lobby", "alice", Some(serde_json::json!({"color": "red"})))
+            .unwrap();
 
         let (snapshot, _) = mgr.join("lobby", "bob", None).unwrap();
         if let RoomEvent::Snapshot { peers, .. } = snapshot {
@@ -449,7 +443,11 @@ mod tests {
         let mgr = RoomManager::new(60);
         mgr.join("doc:123", "alice", None).unwrap();
 
-        let event = mgr.set_presence("doc:123", "alice", serde_json::json!({"cursor": {"x": 10, "y": 20}}));
+        let event = mgr.set_presence(
+            "doc:123",
+            "alice",
+            serde_json::json!({"cursor": {"x": 10, "y": 20}}),
+        );
         assert!(event.is_some());
 
         let data = mgr.get_presence("doc:123", "alice").unwrap();
@@ -459,7 +457,9 @@ mod tests {
     #[test]
     fn presence_not_in_room_returns_none() {
         let mgr = RoomManager::new(60);
-        assert!(mgr.set_presence("lobby", "alice", serde_json::json!({})).is_none());
+        assert!(mgr
+            .set_presence("lobby", "alice", serde_json::json!({}))
+            .is_none());
         assert!(mgr.get_presence("lobby", "alice").is_none());
     }
 
@@ -468,10 +468,21 @@ mod tests {
         let mgr = RoomManager::new(60);
         mgr.join("lobby", "alice", None).unwrap();
 
-        let event = mgr.broadcast("lobby", Some("alice"), "typing", serde_json::json!({"active": true}));
+        let event = mgr.broadcast(
+            "lobby",
+            Some("alice"),
+            "typing",
+            serde_json::json!({"active": true}),
+        );
         assert!(event.is_some());
 
-        if let Some(RoomEvent::Broadcast { topic, sender, data, .. }) = event {
+        if let Some(RoomEvent::Broadcast {
+            topic,
+            sender,
+            data,
+            ..
+        }) = event
+        {
             assert_eq!(topic, "typing");
             assert_eq!(sender, Some("alice".to_string()));
             assert_eq!(data, serde_json::json!({"active": true}));
@@ -483,13 +494,16 @@ mod tests {
     #[test]
     fn broadcast_to_nonexistent_room() {
         let mgr = RoomManager::new(60);
-        assert!(mgr.broadcast("ghost", None, "ping", serde_json::json!({})).is_none());
+        assert!(mgr
+            .broadcast("ghost", None, "ping", serde_json::json!({}))
+            .is_none());
     }
 
     #[test]
     fn members_list() {
         let mgr = RoomManager::new(60);
-        mgr.join("lobby", "alice", Some(serde_json::json!({"role": "admin"}))).unwrap();
+        mgr.join("lobby", "alice", Some(serde_json::json!({"role": "admin"})))
+            .unwrap();
         mgr.join("lobby", "bob", None).unwrap();
 
         let members = mgr.members("lobby");
@@ -544,8 +558,14 @@ mod tests {
     #[test]
     fn entity_scoped_room() {
         let mgr = RoomManager::new(60);
-        mgr.join("Todo:t1", "alice", Some(serde_json::json!({"editing": true}))).unwrap();
-        mgr.join("Todo:t1", "bob", Some(serde_json::json!({"viewing": true}))).unwrap();
+        mgr.join(
+            "Todo:t1",
+            "alice",
+            Some(serde_json::json!({"editing": true})),
+        )
+        .unwrap();
+        mgr.join("Todo:t1", "bob", Some(serde_json::json!({"viewing": true})))
+            .unwrap();
 
         assert_eq!(mgr.room_size("Todo:t1"), 2);
 
@@ -557,8 +577,10 @@ mod tests {
     #[test]
     fn rejoin_updates_data() {
         let mgr = RoomManager::new(60);
-        mgr.join("lobby", "alice", Some(serde_json::json!({"v": 1}))).unwrap();
-        mgr.join("lobby", "alice", Some(serde_json::json!({"v": 2}))).unwrap();
+        mgr.join("lobby", "alice", Some(serde_json::json!({"v": 1})))
+            .unwrap();
+        mgr.join("lobby", "alice", Some(serde_json::json!({"v": 2})))
+            .unwrap();
 
         // Should still be 1 member, not 2.
         assert_eq!(mgr.room_size("lobby"), 1);

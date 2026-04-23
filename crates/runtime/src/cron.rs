@@ -63,9 +63,7 @@ fn parse_field(field: &str, min: u8, max: u8) -> Result<Vec<u8>, String> {
 
     // */N -- step over full range
     if let Some(step) = field.strip_prefix("*/") {
-        let step: u8 = step
-            .parse()
-            .map_err(|_| format!("Invalid step: {step}"))?;
+        let step: u8 = step.parse().map_err(|_| format!("Invalid step: {step}"))?;
         if step == 0 {
             return Err("Step cannot be 0".into());
         }
@@ -84,16 +82,12 @@ fn parse_field(field: &str, min: u8, max: u8) -> Result<Vec<u8>, String> {
                 .parse()
                 .map_err(|_| format!("Invalid range end: {}", range[1]))?;
             if start > end || start < min || end > max {
-                return Err(format!(
-                    "Range {start}-{end} out of bounds ({min}-{max})"
-                ));
+                return Err(format!("Range {start}-{end} out of bounds ({min}-{max})"));
             }
             values.extend(start..=end);
         } else {
             // Single value
-            let val: u8 = part
-                .parse()
-                .map_err(|_| format!("Invalid value: {part}"))?;
+            let val: u8 = part.parse().map_err(|_| format!("Invalid value: {part}"))?;
             if val < min || val > max {
                 return Err(format!("Value {val} out of bounds ({min}-{max})"));
             }
@@ -152,7 +146,10 @@ mod tests {
     #[test]
     fn parse_every_5_minutes() {
         let cron = CronExpr::parse("*/5 * * * *").unwrap();
-        assert_eq!(cron.minutes, vec![0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]);
+        assert_eq!(
+            cron.minutes,
+            vec![0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        );
     }
 
     #[test]

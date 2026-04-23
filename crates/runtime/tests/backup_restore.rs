@@ -78,12 +78,21 @@ fn backup_and_restore_preserves_rows() {
     // Seed.
     {
         let rt = Runtime::open(src_db.to_str().unwrap(), test_manifest()).unwrap();
-        rt.insert("Todo", &serde_json::json!({"title": "buy milk", "done": false}))
-            .unwrap();
-        rt.insert("Todo", &serde_json::json!({"title": "walk dog", "done": true}))
-            .unwrap();
-        rt.insert("Todo", &serde_json::json!({"title": "write test", "done": false}))
-            .unwrap();
+        rt.insert(
+            "Todo",
+            &serde_json::json!({"title": "buy milk", "done": false}),
+        )
+        .unwrap();
+        rt.insert(
+            "Todo",
+            &serde_json::json!({"title": "walk dog", "done": true}),
+        )
+        .unwrap();
+        rt.insert(
+            "Todo",
+            &serde_json::json!({"title": "write test", "done": false}),
+        )
+        .unwrap();
         // Runtime goes out of scope here; WAL should flush on drop.
     }
 

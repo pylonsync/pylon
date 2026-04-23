@@ -4,8 +4,8 @@
 //! They are used by both the main server (`/api/cache`, `/api/pubsub/*`) and
 //! the standalone cache server (`/cache`, `/pubsub/*`).
 
-use pylon_plugin::builtin::cache::CachePlugin;
 use crate::pubsub::PubSubBroker;
+use pylon_plugin::builtin::cache::CachePlugin;
 
 // ---------------------------------------------------------------------------
 // Cache command dispatch
@@ -364,10 +364,7 @@ pub fn handle_cache_command(cache: &CachePlugin, body: &str) -> (u16, String) {
             )
         }
         "KEYS" => {
-            let pattern = data
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
+            let pattern = data.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
             let keys = cache.keys(pattern);
             (
                 200,
@@ -524,11 +521,7 @@ pub fn handle_pubsub_channels(pubsub: &PubSubBroker) -> (u16, String) {
 /// Handle a `GET /pubsub/history/:channel` request.
 ///
 /// The `url` parameter is the full URL path (used to parse `?limit=N`).
-pub fn handle_pubsub_history(
-    pubsub: &PubSubBroker,
-    channel: &str,
-    url: &str,
-) -> (u16, String) {
+pub fn handle_pubsub_history(pubsub: &PubSubBroker, channel: &str, url: &str) -> (u16, String) {
     let limit: usize = url
         .split("limit=")
         .nth(1)
@@ -568,8 +561,7 @@ mod tests {
         );
         assert_eq!(status, 200);
 
-        let (status, body) =
-            handle_cache_command(&cache, r#"{"cmd": "GET", "key": "hello"}"#);
+        let (status, body) = handle_cache_command(&cache, r#"{"cmd": "GET", "key": "hello"}"#);
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["result"], "world");
@@ -613,8 +605,7 @@ mod tests {
     #[test]
     fn cache_unknown_command() {
         let cache = make_cache();
-        let (status, body) =
-            handle_cache_command(&cache, r#"{"cmd": "NOTACMD", "key": "k"}"#);
+        let (status, body) = handle_cache_command(&cache, r#"{"cmd": "NOTACMD", "key": "k"}"#);
         assert_eq!(status, 400);
         assert!(body.contains("Unknown cache command"));
     }
@@ -622,10 +613,8 @@ mod tests {
     #[test]
     fn pubsub_publish_and_channels() {
         let pubsub = make_pubsub();
-        let (status, body) = handle_pubsub_publish(
-            &pubsub,
-            r#"{"channel": "chat", "message": "hello"}"#,
-        );
+        let (status, body) =
+            handle_pubsub_publish(&pubsub, r#"{"channel": "chat", "message": "hello"}"#);
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["ok"], true);
@@ -669,14 +658,12 @@ mod tests {
     #[test]
     fn cache_incr_decr() {
         let cache = make_cache();
-        let (status, body) =
-            handle_cache_command(&cache, r#"{"cmd": "INCR", "key": "counter"}"#);
+        let (status, body) = handle_cache_command(&cache, r#"{"cmd": "INCR", "key": "counter"}"#);
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["result"], 1);
 
-        let (_, body) =
-            handle_cache_command(&cache, r#"{"cmd": "DECR", "key": "counter"}"#);
+        let (_, body) = handle_cache_command(&cache, r#"{"cmd": "DECR", "key": "counter"}"#);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["result"], 0);
     }

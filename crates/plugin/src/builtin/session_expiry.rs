@@ -28,8 +28,8 @@ impl SessionExpiryPlugin {
     /// Create with default settings: 24h max lifetime, 2h idle timeout.
     pub fn new() -> Self {
         Self {
-            max_lifetime: 86400,  // 24 hours
-            idle_timeout: 7200,   // 2 hours
+            max_lifetime: 86400, // 24 hours
+            idle_timeout: 7200,  // 2 hours
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -92,9 +92,7 @@ impl SessionExpiryPlugin {
         let now = now_secs();
         let mut sessions = self.sessions.lock().unwrap();
         let before = sessions.len();
-        sessions.retain(|_, s| {
-            s.expires_at > now && (now - s.last_active) <= self.idle_timeout
-        });
+        sessions.retain(|_, s| s.expires_at > now && (now - s.last_active) <= self.idle_timeout);
         before - sessions.len()
     }
 
@@ -210,10 +208,8 @@ mod tests {
 
     #[test]
     fn custom_timeouts() {
-        let plugin = SessionExpiryPlugin::with_timeouts(
-            Duration::from_secs(3600),
-            Duration::from_secs(600),
-        );
+        let plugin =
+            SessionExpiryPlugin::with_timeouts(Duration::from_secs(3600), Duration::from_secs(600));
         plugin.track("t1", "u1");
         assert!(plugin.check("t1").is_ok());
     }

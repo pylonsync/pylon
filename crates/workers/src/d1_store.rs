@@ -6,8 +6,8 @@
 //! The Workers fetch handler provides a concrete `D1Executor` that delegates
 //! to the real D1 bindings.
 
-use pylon_kernel::{AppManifest, ManifestEntity};
 use pylon_http::{DataError, DataStore};
+use pylon_kernel::{AppManifest, ManifestEntity};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -120,10 +120,12 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
             placeholders.join(", ")
         );
 
-        self.executor.execute(&sql, &params).map_err(|e| DataError {
-            code: "INSERT_FAILED".into(),
-            message: e,
-        })?;
+        self.executor
+            .execute(&sql, &params)
+            .map_err(|e| DataError {
+                code: "INSERT_FAILED".into(),
+                message: e,
+            })?;
 
         Ok(id)
     }
@@ -212,19 +214,19 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
             quote_ident(entity),
             sets.join(", ")
         );
-        let affected = self.executor.execute(&sql, &params).map_err(|e| DataError {
-            code: "UPDATE_FAILED".into(),
-            message: e,
-        })?;
+        let affected = self
+            .executor
+            .execute(&sql, &params)
+            .map_err(|e| DataError {
+                code: "UPDATE_FAILED".into(),
+                message: e,
+            })?;
         Ok(affected > 0)
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
         let _ = self.entity(entity)?;
-        let sql = format!(
-            "DELETE FROM {} WHERE \"id\" = ?1",
-            quote_ident(entity)
-        );
+        let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
         let affected = self
             .executor
             .execute(&sql, &[Value::String(id.to_string())])
@@ -235,12 +237,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
         Ok(affected > 0)
     }
 
-    fn lookup(
-        &self,
-        entity: &str,
-        field: &str,
-        value: &str,
-    ) -> Result<Option<Value>, DataError> {
+    fn lookup(&self, entity: &str, field: &str, value: &str) -> Result<Option<Value>, DataError> {
         let ent = self.entity(entity)?;
         self.validate_column(ent, field)?;
         let sql = format!(
@@ -290,11 +287,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
         self.update(entity, id, &data)
     }
 
-    fn query_filtered(
-        &self,
-        entity: &str,
-        filter: &Value,
-    ) -> Result<Vec<Value>, DataError> {
+    fn query_filtered(&self, entity: &str, filter: &Value) -> Result<Vec<Value>, DataError> {
         let ent = self.entity(entity)?;
         let empty = serde_json::Map::new();
         let obj = filter.as_object().unwrap_or(&empty);
@@ -361,8 +354,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                                 }
                                 "$like" => {
                                     where_clauses.push(format!("{qk} LIKE ?{idx}"));
-                                    let pattern =
-                                        format!("%{}%", op_val.as_str().unwrap_or(""));
+                                    let pattern = format!("%{}%", op_val.as_str().unwrap_or(""));
                                     params.push(Value::String(pattern));
                                     idx += 1;
                                 }
@@ -378,10 +370,8 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                                             })
                                             .collect();
                                         if !ph.is_empty() {
-                                            where_clauses.push(format!(
-                                                "{qk} IN ({})",
-                                                ph.join(", ")
-                                            ));
+                                            where_clauses
+                                                .push(format!("{qk} IN ({})", ph.join(", ")));
                                         }
                                     }
                                 }
@@ -427,20 +417,14 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
         })?;
         let mut results = serde_json::Map::new();
         for (entity_name, opts) in obj {
-            let filter = opts
-                .get("where")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+            let filter = opts.get("where").cloned().unwrap_or(serde_json::json!({}));
             let rows = self.query_filtered(entity_name, &filter)?;
             results.insert(entity_name.clone(), Value::Array(rows));
         }
         Ok(Value::Object(results))
     }
 
-    fn transact(
-        &self,
-        ops: &[Value],
-    ) -> Result<(bool, Vec<Value>), DataError> {
+    fn transact(&self, ops: &[Value]) -> Result<(bool, Vec<Value>), DataError> {
         // D1 doesn't have real transactions from the Worker API — it has
         // a batch API that runs in a single trip. For now, execute ops
         // sequentially and short-circuit on error (no real rollback).
@@ -453,9 +437,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                 "insert" => {
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
                     match self.insert(entity, &data) {
-                        Ok(id) => {
-                            results.push(serde_json::json!({"op":"insert","id":id}))
-                        }
+                        Ok(id) => results.push(serde_json::json!({"op":"insert","id":id})),
                         Err(e) => {
                             rollback = true;
                             results.push(serde_json::json!({"op":"insert","error":e.message}));
@@ -467,9 +449,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
                     match self.update(entity, id, &data) {
-                        Ok(_) => {
-                            results.push(serde_json::json!({"op":"update","id":id}))
-                        }
+                        Ok(_) => results.push(serde_json::json!({"op":"update","id":id})),
                         Err(e) => {
                             rollback = true;
                             results.push(serde_json::json!({"op":"update","error":e.message}));
@@ -480,9 +460,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                 "delete" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     match self.delete(entity, id) {
-                        Ok(_) => {
-                            results.push(serde_json::json!({"op":"delete","id":id}))
-                        }
+                        Ok(_) => results.push(serde_json::json!({"op":"delete","id":id})),
                         Err(e) => {
                             rollback = true;
                             results.push(serde_json::json!({"op":"delete","error":e.message}));
@@ -491,9 +469,7 @@ impl<E: D1Executor> DataStore for D1DataStore<E> {
                     }
                 }
                 _ => {
-                    results.push(
-                        serde_json::json!({"op":op_type,"error":"unknown operation"}),
-                    );
+                    results.push(serde_json::json!({"op":op_type,"error":"unknown operation"}));
                 }
             }
         }

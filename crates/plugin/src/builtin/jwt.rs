@@ -116,7 +116,10 @@ impl JwtPlugin {
         }
 
         {
-            let mut used = self.used_refresh_tokens.lock().map_err(|_| "Lock poisoned")?;
+            let mut used = self
+                .used_refresh_tokens
+                .lock()
+                .map_err(|_| "Lock poisoned")?;
             if used.contains(refresh_token) {
                 return Err("Refresh token already used".into());
             }
@@ -159,7 +162,12 @@ impl JwtPlugin {
             return Err("Token expired".into());
         }
 
-        Ok(Claims { sub, iat, exp, kind })
+        Ok(Claims {
+            sub,
+            iat,
+            exp,
+            kind,
+        })
     }
 
     /// Resolve a JWT to a user ID. Returns None if invalid.
@@ -213,9 +221,21 @@ fn base64url_decode(data: &str) -> Result<Vec<u8>, String> {
     let mut i = 0;
     while i < bytes.len() {
         let b0 = val(bytes[i])?;
-        let b1 = if i + 1 < bytes.len() { val(bytes[i + 1])? } else { 0 };
-        let b2 = if i + 2 < bytes.len() { val(bytes[i + 2])? } else { 0 };
-        let b3 = if i + 3 < bytes.len() { val(bytes[i + 3])? } else { 0 };
+        let b1 = if i + 1 < bytes.len() {
+            val(bytes[i + 1])?
+        } else {
+            0
+        };
+        let b2 = if i + 2 < bytes.len() {
+            val(bytes[i + 2])?
+        } else {
+            0
+        };
+        let b3 = if i + 3 < bytes.len() {
+            val(bytes[i + 3])?
+        } else {
+            0
+        };
 
         let n = ((b0 as u32) << 18) | ((b1 as u32) << 12) | ((b2 as u32) << 6) | (b3 as u32);
         out.push((n >> 16) as u8);
@@ -233,8 +253,8 @@ fn base64url_decode(data: &str) -> Result<Vec<u8>, String> {
 // -- HMAC-SHA256 signing --
 
 fn hmac_sha256(key: &str, data: &str) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
     mac.update(data.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }
@@ -252,7 +272,9 @@ fn extract_json_number(json: &str, key: &str) -> Option<u64> {
     let idx = json.find(&pattern)?;
     let start = idx + pattern.len();
     let rest = &json[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 

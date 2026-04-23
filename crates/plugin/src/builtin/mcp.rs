@@ -1,4 +1,3 @@
-
 use crate::Plugin;
 use serde_json::Value;
 
@@ -174,14 +173,12 @@ impl McpPlugin {
 
     /// Generate MCP resources (readable data sources).
     pub fn resources(&self) -> Vec<McpResource> {
-        let mut resources = vec![
-            McpResource {
-                uri: "pylon://schema".into(),
-                name: "App Schema".into(),
-                description: "The full app manifest/schema".into(),
-                mime_type: "application/json".into(),
-            },
-        ];
+        let mut resources = vec![McpResource {
+            uri: "pylon://schema".into(),
+            name: "App Schema".into(),
+            description: "The full app manifest/schema".into(),
+            mime_type: "application/json".into(),
+        }];
 
         for entity in &self.entities {
             resources.push(McpResource {

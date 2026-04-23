@@ -75,10 +75,7 @@ impl Shard {
     fn broadcast(&self, msg: &str) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
-            clients
-                .iter()
-                .map(|(id, h)| (*id, Arc::clone(h)))
-                .collect()
+            clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
@@ -197,9 +194,7 @@ impl WsHub {
             match tx.try_send(msg.to_string()) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        "[ws] broadcast queue full — dropping event for one shard"
-                    );
+                    tracing::warn!("[ws] broadcast queue full — dropping event for one shard");
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     // Worker exited (shutdown). Silent.
@@ -311,11 +306,7 @@ pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) 
 /// Sets a read timeout to prevent zombie threads on dead connections.
 /// Handles ping/pong for keepalive, presence/topic message relay,
 /// and clean disconnect with presence broadcast.
-fn handle_ws_connection(
-    hub: Arc<WsHub>,
-    sessions: Arc<SessionStore>,
-    stream: TcpStream,
-) {
+fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: TcpStream) {
     // Short read timeout bounds how long the PER-CLIENT mutex is held
     // while this thread is blocked in socket.read(). Each client now has
     // its own mutex (not a shard-wide one), so a quiet client only stalls
@@ -336,41 +327,44 @@ fn handle_ws_connection(
     // header callback must return synchronously with a Response.
     let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let slot_for_cb = Arc::clone(&token_slot);
-    let ws = match accept_hdr(stream, move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
-        let mut chosen_protocol: Option<String> = None;
-        let mut auth: Option<String> = None;
-        for (name, value) in req.headers() {
-            let lower = name.as_str().to_ascii_lowercase();
-            if lower == "authorization" {
-                if let Ok(v) = value.to_str() {
-                    if let Some(tok) = v.strip_prefix("Bearer ") {
-                        auth = Some(tok.to_string());
+    let ws = match accept_hdr(
+        stream,
+        move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
+            let mut chosen_protocol: Option<String> = None;
+            let mut auth: Option<String> = None;
+            for (name, value) in req.headers() {
+                let lower = name.as_str().to_ascii_lowercase();
+                if lower == "authorization" {
+                    if let Ok(v) = value.to_str() {
+                        if let Some(tok) = v.strip_prefix("Bearer ") {
+                            auth = Some(tok.to_string());
+                        }
                     }
-                }
-            } else if lower == "sec-websocket-protocol" {
-                if let Ok(v) = value.to_str() {
-                    for proto in v.split(',').map(str::trim) {
-                        if let Some(encoded) = proto.strip_prefix("bearer.") {
-                            if let Some(decoded) = percent_decode_token(encoded) {
-                                auth = auth.or(Some(decoded));
-                                chosen_protocol = Some(proto.to_string());
-                                break;
+                } else if lower == "sec-websocket-protocol" {
+                    if let Ok(v) = value.to_str() {
+                        for proto in v.split(',').map(str::trim) {
+                            if let Some(encoded) = proto.strip_prefix("bearer.") {
+                                if let Some(decoded) = percent_decode_token(encoded) {
+                                    auth = auth.or(Some(decoded));
+                                    chosen_protocol = Some(proto.to_string());
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        // RFC 6455 §11.3.4 — echo the chosen subprotocol in the response or
-        // browsers will refuse the connection.
-        if let Some(chosen) = chosen_protocol {
-            if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
-                resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
+            // RFC 6455 §11.3.4 — echo the chosen subprotocol in the response or
+            // browsers will refuse the connection.
+            if let Some(chosen) = chosen_protocol {
+                if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
+                    resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
+                }
             }
-        }
-        *slot_for_cb.lock().unwrap() = auth;
-        Ok(resp)
-    }) {
+            *slot_for_cb.lock().unwrap() = auth;
+            Ok(resp)
+        },
+    ) {
         Ok(ws) => ws,
         Err(_) => return,
     };

@@ -50,12 +50,7 @@ pub type ScheduleHook = Box<
 /// `(code, message)` pair. The runner translates the error back into the
 /// NDJSON protocol reply so the TS side sees the same shape it always did.
 pub type NestedCallHook = Box<
-    dyn Fn(
-            &str,
-            FnType,
-            serde_json::Value,
-            AuthInfo,
-        ) -> Result<serde_json::Value, (String, String)>
+    dyn Fn(&str, FnType, serde_json::Value, AuthInfo) -> Result<serde_json::Value, (String, String)>
         + Send
         + Sync,
 >;
@@ -166,9 +161,7 @@ impl FnRunner {
         std::thread::Builder::new()
             .name("pylon-fn-reader".into())
             .spawn(move || reader_loop(BufReader::new(stdout), tx))
-            .map_err(|e| {
-                kill_and_msg(&mut child, format!("Failed to spawn reader thread: {e}"))
-            })?;
+            .map_err(|e| kill_and_msg(&mut child, format!("Failed to spawn reader thread: {e}")))?;
 
         // Read Ready BEFORE publishing the new IO. If we published first, a
         // concurrent caller could send a request and `recv()` would eat the
@@ -201,8 +194,10 @@ impl FnRunner {
         *self.stdin.lock().unwrap() = Some(stdin);
         *self.inbox.lock().unwrap() = Some(rx);
         *self.process.lock().unwrap() = Some(child);
-        *self.started_with.lock().unwrap() =
-            Some((command.to_string(), args.iter().map(|s| s.to_string()).collect()));
+        *self.started_with.lock().unwrap() = Some((
+            command.to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+        ));
 
         Ok(defs)
     }
@@ -309,7 +304,6 @@ impl FnRunner {
         mut on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
-
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
 
@@ -325,13 +319,8 @@ impl FnRunner {
         // Send the call message. Attach HTTP request metadata when the
         // caller provided it — this lets TypeScript actions invoked via
         // /api/webhooks/:name see raw headers + body for signature checks.
-        let mut call_msg = CallMessage::new(
-            call_id.clone(),
-            fn_name.to_string(),
-            fn_type,
-            args,
-            auth,
-        );
+        let mut call_msg =
+            CallMessage::new(call_id.clone(), fn_name.to_string(), fn_type, args, auth);
         if let Some(r) = request {
             call_msg = call_msg.with_request(r);
         }
@@ -364,8 +353,7 @@ impl FnRunner {
             match msg {
                 TsMessage::Db(db_msg) if db_msg.call_id == call_id => {
                     let op_start = Instant::now();
-                    let (result, row_count) =
-                        execute_db_op(store, &db_msg);
+                    let (result, row_count) = execute_db_op(store, &db_msg);
                     let duration = op_start.elapsed();
                     let ok = result.is_ok();
 
@@ -384,11 +372,9 @@ impl FnRunner {
                     // as before (one in-flight at a time, serialized by
                     // pendingRpcs key collision).
                     let reply = match result {
-                        Ok(data) => DbResultMessage::ok_with_op(
-                            call_id.clone(),
-                            db_msg.op_id.clone(),
-                            data,
-                        ),
+                        Ok(data) => {
+                            DbResultMessage::ok_with_op(call_id.clone(), db_msg.op_id.clone(), data)
+                        }
                         Err(e) => DbResultMessage::err_with_op(
                             call_id.clone(),
                             db_msg.op_id.clone(),
@@ -425,11 +411,7 @@ impl FnRunner {
                             call_id.clone(),
                             serde_json::json!({"scheduled": true, "id": id}),
                         ),
-                        Err(e) => DbResultMessage::err(
-                            call_id.clone(),
-                            "SCHEDULE_FAILED",
-                            &e,
-                        ),
+                        Err(e) => DbResultMessage::err(call_id.clone(), "SCHEDULE_FAILED", &e),
                     };
                     self.send(&reply)?;
                 }
@@ -464,7 +446,12 @@ impl FnRunner {
                     let hook_result: Option<Result<serde_json::Value, (String, String)>> = {
                         let hook = self.nested_call_hook.lock().unwrap();
                         hook.as_ref().map(|cb| {
-                            cb(&run.fn_name, run.fn_type, run.args.clone(), nested_auth.clone())
+                            cb(
+                                &run.fn_name,
+                                run.fn_type,
+                                run.args.clone(),
+                                nested_auth.clone(),
+                            )
                         })
                     };
                     let reply = match hook_result {
@@ -592,8 +579,8 @@ fn reader_loop(mut stdout: BufReader<std::process::ChildStdout>, tx: Sender<TsMe
     loop {
         line.clear();
         match stdout.read_line(&mut line) {
-            Ok(0) => break,        // EOF — child exited
-            Err(_) => break,       // pipe error — child gone
+            Ok(0) => break,  // EOF — child exited
+            Err(_) => break, // pipe error — child gone
             Ok(_) => {}
         }
         match serde_json::from_str::<TsMessage>(line.trim()) {
@@ -641,7 +628,10 @@ impl TraceBuilder {
 fn execute_db_op(
     store: &dyn DataStore,
     msg: &DbOpMessage,
-) -> (Result<serde_json::Value, pylon_http::DataError>, Option<usize>) {
+) -> (
+    Result<serde_json::Value, pylon_http::DataError>,
+    Option<usize>,
+) {
     match msg.op {
         DbOp::Get => {
             let id = msg.id.as_deref().unwrap_or("");

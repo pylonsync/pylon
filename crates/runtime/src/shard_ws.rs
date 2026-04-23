@@ -90,46 +90,49 @@ fn handle_connection(
     let params_clone = Arc::clone(&params);
 
     use tungstenite::handshake::server::{ErrorResponse, Response};
-    let ws = accept_hdr(stream, |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
-        let uri = req.uri().to_string();
-        let mut p = params_clone.lock().unwrap();
-        p.uri = uri;
-        let mut selected_protocol: Option<String> = None;
-        for (name, value) in req.headers() {
-            let lower = name.as_str().to_ascii_lowercase();
-            if lower == "authorization" {
-                if let Ok(v) = value.to_str() {
-                    p.auth_header = Some(v.to_string());
-                }
-            } else if lower == "sec-websocket-protocol" {
-                // Accept a `bearer.<url-encoded-token>` subprotocol as an
-                // alternative to the Authorization header. Browsers can't
-                // set WebSocket headers directly, so this is how a web
-                // client carries a bearer token without putting it in the
-                // URL. Pick the first token that matches our prefix; echo
-                // the exact chosen subprotocol back in the handshake
-                // response, per RFC 6455 §11.3.4 (otherwise some browsers
-                // refuse the connection).
-                if let Ok(v) = value.to_str() {
-                    for proto in v.split(',').map(str::trim) {
-                        if let Some(encoded) = proto.strip_prefix("bearer.") {
-                            if let Ok(decoded) = urldecode_strict(encoded) {
-                                p.bearer_from_subprotocol = Some(decoded);
-                                selected_protocol = Some(proto.to_string());
-                                break;
+    let ws = accept_hdr(
+        stream,
+        |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
+            let uri = req.uri().to_string();
+            let mut p = params_clone.lock().unwrap();
+            p.uri = uri;
+            let mut selected_protocol: Option<String> = None;
+            for (name, value) in req.headers() {
+                let lower = name.as_str().to_ascii_lowercase();
+                if lower == "authorization" {
+                    if let Ok(v) = value.to_str() {
+                        p.auth_header = Some(v.to_string());
+                    }
+                } else if lower == "sec-websocket-protocol" {
+                    // Accept a `bearer.<url-encoded-token>` subprotocol as an
+                    // alternative to the Authorization header. Browsers can't
+                    // set WebSocket headers directly, so this is how a web
+                    // client carries a bearer token without putting it in the
+                    // URL. Pick the first token that matches our prefix; echo
+                    // the exact chosen subprotocol back in the handshake
+                    // response, per RFC 6455 §11.3.4 (otherwise some browsers
+                    // refuse the connection).
+                    if let Ok(v) = value.to_str() {
+                        for proto in v.split(',').map(str::trim) {
+                            if let Some(encoded) = proto.strip_prefix("bearer.") {
+                                if let Ok(decoded) = urldecode_strict(encoded) {
+                                    p.bearer_from_subprotocol = Some(decoded);
+                                    selected_protocol = Some(proto.to_string());
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        if let Some(chosen) = selected_protocol {
-            if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
-                resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
+            if let Some(chosen) = selected_protocol {
+                if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
+                    resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
+                }
             }
-        }
-        Ok(resp)
-    })
+            Ok(resp)
+        },
+    )
     .map_err(|e| format!("handshake: {e}"))?;
 
     let params = params.lock().unwrap().clone();
@@ -161,9 +164,9 @@ fn handle_connection(
         is_admin: auth_ctx.is_admin,
     };
 
-    let shard = registry.get(&shard_id).ok_or_else(|| {
-        format!("shard \"{shard_id}\" not found")
-    })?;
+    let shard = registry
+        .get(&shard_id)
+        .ok_or_else(|| format!("shard \"{shard_id}\" not found"))?;
 
     let ws = Arc::new(Mutex::new(ws));
     let subscriber_id = SubscriberId::new(sid.clone());
@@ -229,10 +232,7 @@ fn handle_connection(
                 process_input(&shard, &subscriber_id, &shard_auth, &text);
             }
             Message::Ping(payload) => {
-                let _ = ws
-                    .lock()
-                    .unwrap()
-                    .send(Message::Pong(payload));
+                let _ = ws.lock().unwrap().send(Message::Pong(payload));
             }
             Message::Close(_) => break Ok(()),
             _ => {}
@@ -264,15 +264,9 @@ fn process_input(
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let client_seq = envelope.get("client_seq").and_then(|v| v.as_u64());
-    let input_str =
-        serde_json::to_string(&input).unwrap_or_else(|_| "null".into());
+    let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "null".into());
 
-    let _ = shard.push_input_json(
-        subscriber_id.clone(),
-        &input_str,
-        client_seq,
-        shard_auth,
-    );
+    let _ = shard.push_input_json(subscriber_id.clone(), &input_str, client_seq, shard_auth);
 }
 
 // ---------------------------------------------------------------------------
@@ -339,10 +333,9 @@ fn url_decode(s: &str) -> String {
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
-                if let Ok(h) = u8::from_str_radix(
-                    std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                    16,
-                ) {
+                if let Ok(h) =
+                    u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+                {
                     out.push(h as char);
                     i += 3;
                 } else {

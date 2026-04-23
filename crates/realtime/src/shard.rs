@@ -310,10 +310,7 @@ impl<S: SimState> Shard<S> {
     /// If a future transport grows up that doesn't use the authorized path
     /// by accident, this becomes an auth bypass on shard state.
     #[doc(hidden)]
-    pub fn add_subscriber(
-        &self,
-        sub: Subscriber<S::Snapshot>,
-    ) -> Result<(), ShardError> {
+    pub fn add_subscriber(&self, sub: Subscriber<S::Snapshot>) -> Result<(), ShardError> {
         if !self.is_running() {
             return Err(ShardError::Stopped);
         }
@@ -466,10 +463,7 @@ impl<S: SimState> Shard<S> {
                 if let Err(e) =
                     state.apply_input(&pending.subscriber_id, pending.input, pending.received_at)
                 {
-                    tracing::warn!(
-                        "[realtime] apply_input error in shard {}: {:?}",
-                        self.id, e
-                    );
+                    tracing::warn!("[realtime] apply_input error in shard {}: {:?}", self.id, e);
                 }
             }
 
@@ -640,10 +634,7 @@ mod tests {
         let sub = Subscriber::new(
             SubscriberId::new("p1"),
             Box::new(move |tick, bytes| {
-                received_clone
-                    .lock()
-                    .unwrap()
-                    .push((tick, bytes.to_vec()));
+                received_clone.lock().unwrap().push((tick, bytes.to_vec()));
             }),
         );
         shard.add_subscriber(sub).unwrap();
@@ -664,14 +655,17 @@ mod tests {
         // subscribe to any sid, which let Alice impersonate Bob.
         let shard: Arc<Shard<Counter>> = Shard::new(
             "t",
-            Counter { value: 0, finished: false },
+            Counter {
+                value: 0,
+                finished: false,
+            },
             ShardConfig::default(),
         );
-        let sub = Subscriber::new(
-            SubscriberId::new("bob"),
-            Box::new(|_tick, _bytes| {}),
-        );
-        let alice = ShardAuth { user_id: Some("alice".into()), is_admin: false };
+        let sub = Subscriber::new(SubscriberId::new("bob"), Box::new(|_tick, _bytes| {}));
+        let alice = ShardAuth {
+            user_id: Some("alice".into()),
+            is_admin: false,
+        };
         let err = shard.add_subscriber_authorized(sub, &alice);
         assert!(matches!(err, Err(ShardError::Unauthorized(_))));
     }
@@ -680,14 +674,17 @@ mod tests {
     fn default_authorize_subscribe_allows_matching_user_id() {
         let shard: Arc<Shard<Counter>> = Shard::new(
             "t",
-            Counter { value: 0, finished: false },
+            Counter {
+                value: 0,
+                finished: false,
+            },
             ShardConfig::default(),
         );
-        let sub = Subscriber::new(
-            SubscriberId::new("alice"),
-            Box::new(|_tick, _bytes| {}),
-        );
-        let alice = ShardAuth { user_id: Some("alice".into()), is_admin: false };
+        let sub = Subscriber::new(SubscriberId::new("alice"), Box::new(|_tick, _bytes| {}));
+        let alice = ShardAuth {
+            user_id: Some("alice".into()),
+            is_admin: false,
+        };
         shard.add_subscriber_authorized(sub, &alice).unwrap();
     }
 
@@ -695,14 +692,17 @@ mod tests {
     fn default_authorize_subscribe_admin_passes() {
         let shard: Arc<Shard<Counter>> = Shard::new(
             "t",
-            Counter { value: 0, finished: false },
+            Counter {
+                value: 0,
+                finished: false,
+            },
             ShardConfig::default(),
         );
-        let sub = Subscriber::new(
-            SubscriberId::new("whoever"),
-            Box::new(|_tick, _bytes| {}),
-        );
-        let admin = ShardAuth { user_id: None, is_admin: true };
+        let sub = Subscriber::new(SubscriberId::new("whoever"), Box::new(|_tick, _bytes| {}));
+        let admin = ShardAuth {
+            user_id: None,
+            is_admin: true,
+        };
         shard.add_subscriber_authorized(sub, &admin).unwrap();
     }
 

@@ -220,7 +220,10 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         let data_dir = watch_dir.join(".pylon");
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             if !json_mode {
-                eprintln!("[dev] Failed to create data dir {}: {e}", data_dir.display());
+                eprintln!(
+                    "[dev] Failed to create data dir {}: {e}",
+                    data_dir.display()
+                );
             }
             return ExitCode::Error;
         }
@@ -379,7 +382,11 @@ fn run_rebuild_and_get_manifest(
         );
     }
 
-    if has_errors { None } else { Some(manifest) }
+    if has_errors {
+        None
+    } else {
+        Some(manifest)
+    }
 }
 
 fn run_rebuild(entry_file: &str, json_mode: bool, count: &mut u32) {

@@ -21,7 +21,10 @@ pub enum FieldRule {
     /// Must not be empty string.
     NotEmpty,
     /// Custom validation function.
-    Custom(String, Box<dyn Fn(&Value) -> Result<(), String> + Send + Sync>),
+    Custom(
+        String,
+        Box<dyn Fn(&Value) -> Result<(), String> + Send + Sync>,
+    ),
 }
 
 /// Validation rule for an entity.field.
@@ -183,7 +186,9 @@ mod tests {
         assert!(result.unwrap_err().message.contains("at least 3"));
 
         let mut data = serde_json::json!({"displayName": "Alice"});
-        assert!(plugin.before_insert("User", &mut data, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("User", &mut data, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
@@ -192,7 +197,9 @@ mod tests {
         plugin.add_rule("User", "email", FieldRule::MaxLength(50));
 
         let mut data = serde_json::json!({"email": "a".repeat(51)});
-        assert!(plugin.before_insert("User", &mut data, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("User", &mut data, &AuthContext::anonymous())
+            .is_err());
     }
 
     #[test]
@@ -201,10 +208,14 @@ mod tests {
         plugin.add_rule("User", "email", FieldRule::Email);
 
         let mut bad = serde_json::json!({"email": "notanemail"});
-        assert!(plugin.before_insert("User", &mut bad, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("User", &mut bad, &AuthContext::anonymous())
+            .is_err());
 
         let mut good = serde_json::json!({"email": "alice@example.com"});
-        assert!(plugin.before_insert("User", &mut good, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("User", &mut good, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
@@ -213,10 +224,14 @@ mod tests {
         plugin.add_rule("Todo", "title", FieldRule::NotEmpty);
 
         let mut empty = serde_json::json!({"title": "  "});
-        assert!(plugin.before_insert("Todo", &mut empty, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("Todo", &mut empty, &AuthContext::anonymous())
+            .is_err());
 
         let mut valid = serde_json::json!({"title": "Buy milk"});
-        assert!(plugin.before_insert("Todo", &mut valid, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("Todo", &mut valid, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
@@ -226,13 +241,19 @@ mod tests {
         plugin.add_rule("Product", "price", FieldRule::Max(10000.0));
 
         let mut negative = serde_json::json!({"price": -5});
-        assert!(plugin.before_insert("Product", &mut negative, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("Product", &mut negative, &AuthContext::anonymous())
+            .is_err());
 
         let mut too_high = serde_json::json!({"price": 99999});
-        assert!(plugin.before_insert("Product", &mut too_high, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("Product", &mut too_high, &AuthContext::anonymous())
+            .is_err());
 
         let mut valid = serde_json::json!({"price": 29.99});
-        assert!(plugin.before_insert("Product", &mut valid, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("Product", &mut valid, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
@@ -241,17 +262,23 @@ mod tests {
         plugin.add_rule("User", "website", FieldRule::Pattern("https://".into()));
 
         let mut bad = serde_json::json!({"website": "http://example.com"});
-        assert!(plugin.before_insert("User", &mut bad, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("User", &mut bad, &AuthContext::anonymous())
+            .is_err());
 
         let mut good = serde_json::json!({"website": "https://example.com"});
-        assert!(plugin.before_insert("User", &mut good, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("User", &mut good, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
     fn no_rules_for_entity_passes() {
         let plugin = ValidationPlugin::new();
         let mut data = serde_json::json!({"anything": "goes"});
-        assert!(plugin.before_insert("Unknown", &mut data, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("Unknown", &mut data, &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]
@@ -260,7 +287,9 @@ mod tests {
         plugin.add_rule("Todo", "title", FieldRule::NotEmpty);
 
         let mut data = serde_json::json!({"title": ""});
-        assert!(plugin.before_update("Todo", "t1", &mut data, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_update("Todo", "t1", &mut data, &AuthContext::anonymous())
+            .is_err());
     }
 
     #[test]
@@ -271,12 +300,18 @@ mod tests {
         plugin.add_rule("User", "displayName", FieldRule::MaxLength(50));
 
         let mut empty = serde_json::json!({"displayName": ""});
-        assert!(plugin.before_insert("User", &mut empty, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("User", &mut empty, &AuthContext::anonymous())
+            .is_err());
 
         let mut short = serde_json::json!({"displayName": "A"});
-        assert!(plugin.before_insert("User", &mut short, &AuthContext::anonymous()).is_err());
+        assert!(plugin
+            .before_insert("User", &mut short, &AuthContext::anonymous())
+            .is_err());
 
         let mut valid = serde_json::json!({"displayName": "Alice"});
-        assert!(plugin.before_insert("User", &mut valid, &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_insert("User", &mut valid, &AuthContext::anonymous())
+            .is_ok());
     }
 }

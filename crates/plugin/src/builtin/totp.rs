@@ -152,7 +152,9 @@ fn generate_secret() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    (0..16).map(|_| chars[rng.gen_range(0..32)] as char).collect()
+    (0..16)
+        .map(|_| chars[rng.gen_range(0..32)] as char)
+        .collect()
 }
 
 /// Generate a 6-digit TOTP code per RFC 6238.
@@ -171,8 +173,8 @@ fn generate_totp_at(secret: &str, unix_secs: u64) -> String {
     let counter = unix_secs / 30;
     let counter_bytes = counter.to_be_bytes();
 
-    let mut mac = HmacSha1::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(&counter_bytes);
     let result = mac.finalize().into_bytes();
     let hash = result.as_slice();
@@ -220,7 +222,10 @@ mod tests {
         let plugin = TotpPlugin::new();
         plugin.enroll("user-1");
         let code = plugin.current_code("user-1").unwrap();
-        assert!(plugin.verify("user-1", &code), "first verify should succeed");
+        assert!(
+            plugin.verify("user-1", &code),
+            "first verify should succeed"
+        );
         assert!(
             !plugin.verify("user-1", &code),
             "replay within the same window must be rejected"
@@ -298,6 +303,8 @@ mod tests {
     fn generate_secret_is_16_chars_base32() {
         let s = generate_secret();
         assert_eq!(s.len(), 16);
-        assert!(s.chars().all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)));
+        assert!(s
+            .chars()
+            .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)));
     }
 }

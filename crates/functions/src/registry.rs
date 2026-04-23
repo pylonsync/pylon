@@ -134,10 +134,26 @@ mod tests {
     fn list_by_type() {
         let reg = FnRegistry::new();
         reg.register_all(vec![
-            FnDef { name: "a".into(), fn_type: FnType::Mutation, args_schema: None },
-            FnDef { name: "b".into(), fn_type: FnType::Query, args_schema: None },
-            FnDef { name: "c".into(), fn_type: FnType::Mutation, args_schema: None },
-            FnDef { name: "d".into(), fn_type: FnType::Action, args_schema: None },
+            FnDef {
+                name: "a".into(),
+                fn_type: FnType::Mutation,
+                args_schema: None,
+            },
+            FnDef {
+                name: "b".into(),
+                fn_type: FnType::Query,
+                args_schema: None,
+            },
+            FnDef {
+                name: "c".into(),
+                fn_type: FnType::Mutation,
+                args_schema: None,
+            },
+            FnDef {
+                name: "d".into(),
+                fn_type: FnType::Action,
+                args_schema: None,
+            },
         ]);
 
         assert_eq!(reg.list_by_type(FnType::Mutation).len(), 2);
