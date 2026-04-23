@@ -37,11 +37,12 @@
   --text-3: #7a7a82;
   --text-4: #4a4a52;
 
-  /* Single accent: amber. Reads as "power line" / "pylon." */
-  --accent: #f5a524;
-  --accent-hover: #ffb940;
-  --accent-soft: rgba(245, 165, 36, 0.12);
-  --accent-ink: #140a00;
+  /* Single accent: electric violet. Refractive "crystal" energy that
+     matches the pylon mark, differentiates us from Temporal's orange. */
+  --accent: #8b5cf6;
+  --accent-hover: #a78bfa;
+  --accent-soft: rgba(139, 92, 246, 0.14);
+  --accent-ink: #ffffff;
 
   /* Supporting (data-viz only, never chrome). */
   --ok: #4ade80;
