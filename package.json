@@ -15,5 +15,13 @@
   "scripts": {
     "build": "bun run --filter '*' --if-present build",
     "check": "bun run --filter '*' --if-present check"
+  },
+  "overrides": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  },
+  "resolutions": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
   }
 }
