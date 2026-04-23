@@ -98,10 +98,7 @@ impl<T: Serialize> Subscriber<T> {
         let encoded = match encode_snapshot(snapshot, format) {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!(
-                    "[realtime] snapshot encode failed for {}: {}",
-                    self.id, e
-                );
+                eprintln!("[realtime] snapshot encode failed for {}: {}", self.id, e);
                 return;
             }
         };
@@ -121,7 +118,10 @@ impl<T: Serialize> Subscriber<T> {
             Some(prev) => {
                 // Emit a small JSON envelope: {"delta": {...changed fields...}}
                 // Falls back to full snapshot if either side isn't JSON-parsable.
-                match (serde_json::from_slice(prev), serde_json::from_slice(&encoded)) {
+                match (
+                    serde_json::from_slice(prev),
+                    serde_json::from_slice(&encoded),
+                ) {
                     (Ok(a), Ok(b)) => {
                         let patch = json_diff(&a, &b);
                         if patch.as_object().map(|o| o.is_empty()).unwrap_or(false) {
@@ -129,8 +129,7 @@ impl<T: Serialize> Subscriber<T> {
                             *last = Some(encoded);
                             return;
                         }
-                        let wrapped =
-                            serde_json::json!({ "delta": patch, "tick": tick });
+                        let wrapped = serde_json::json!({ "delta": patch, "tick": tick });
                         serde_json::to_vec(&wrapped).unwrap_or_else(|_| encoded.clone())
                     }
                     _ => encoded.clone(),

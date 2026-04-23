@@ -56,10 +56,20 @@ pub fn create_table_sql(entity_name: &str, fields: &[FieldSpec]) -> String {
         let col_type = sqlite_column_type(&field.field_type);
         let not_null = if field.optional { "" } else { " NOT NULL" };
         let unique = if field.unique { " UNIQUE" } else { "" };
-        columns.push(format!("{} {}{}{}", quote_ident(&field.name), col_type, not_null, unique));
+        columns.push(format!(
+            "{} {}{}{}",
+            quote_ident(&field.name),
+            col_type,
+            not_null,
+            unique
+        ));
     }
 
-    format!("CREATE TABLE IF NOT EXISTS {} ({})", quote_ident(entity_name), columns.join(", "))
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        quote_ident(entity_name),
+        columns.join(", ")
+    )
 }
 
 /// Generate an ALTER TABLE ADD COLUMN statement.
@@ -79,7 +89,12 @@ pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
 }
 
 /// Generate a CREATE INDEX statement.
-pub fn create_index_sql(entity_name: &str, index_name: &str, fields: &[String], unique: bool) -> String {
+pub fn create_index_sql(
+    entity_name: &str,
+    index_name: &str,
+    fields: &[String],
+    unique: bool,
+) -> String {
     let unique_str = if unique { "UNIQUE " } else { "" };
     let full_index_name = format!("{}_{}", entity_name, index_name);
     let quoted_fields: Vec<String> = fields.iter().map(|f| quote_ident(f)).collect();
@@ -638,8 +653,18 @@ mod tests {
     #[test]
     fn create_table_sql_basic() {
         let fields = vec![
-            FieldSpec { name: "email".into(), field_type: "string".into(), optional: false, unique: true },
-            FieldSpec { name: "age".into(), field_type: "int".into(), optional: true, unique: false },
+            FieldSpec {
+                name: "email".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: true,
+            },
+            FieldSpec {
+                name: "age".into(),
+                field_type: "int".into(),
+                optional: true,
+                unique: false,
+            },
         ];
         let sql = create_table_sql("User", &fields);
         assert_eq!(
@@ -651,13 +676,19 @@ mod tests {
     #[test]
     fn create_index_sql_basic() {
         let sql = create_index_sql("User", "by_email", &["email".into()], true);
-        assert_eq!(sql, "CREATE UNIQUE INDEX IF NOT EXISTS \"User_by_email\" ON \"User\" (\"email\")");
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"User_by_email\" ON \"User\" (\"email\")"
+        );
     }
 
     #[test]
     fn create_index_sql_non_unique() {
         let sql = create_index_sql("Todo", "by_author", &["authorId".into()], false);
-        assert_eq!(sql, "CREATE INDEX IF NOT EXISTS \"Todo_by_author\" ON \"Todo\" (\"authorId\")");
+        assert_eq!(
+            sql,
+            "CREATE INDEX IF NOT EXISTS \"Todo_by_author\" ON \"Todo\" (\"authorId\")"
+        );
     }
 
     #[test]
@@ -676,7 +707,10 @@ mod tests {
     fn quote_ident_escapes_double_quotes() {
         assert_eq!(quote_ident("normal"), "\"normal\"");
         assert_eq!(quote_ident("has\"quote"), "\"has\"\"quote\"");
-        assert_eq!(quote_ident("Robert'); DROP TABLE Students;--"), "\"Robert'); DROP TABLE Students;--\"");
+        assert_eq!(
+            quote_ident("Robert'); DROP TABLE Students;--"),
+            "\"Robert'); DROP TABLE Students;--\""
+        );
     }
 
     #[test]
@@ -851,7 +885,7 @@ mod tests {
                         unique: false,
                     }],
                     indexes: vec![],
-                relations: vec![],
+                    relations: vec![],
                 },
                 ManifestEntity {
                     name: "User".into(),
@@ -862,7 +896,7 @@ mod tests {
                         unique: true,
                     }],
                     indexes: vec![],
-                relations: vec![],
+                    relations: vec![],
                 },
             ],
             routes: vec![],
@@ -1003,10 +1037,10 @@ mod tests {
             op,
             SchemaOperation::AddIndex { entity, name, .. } if entity == "User" && name == "by_email"
         )));
-        assert!(!plan.operations.iter().any(|op| matches!(
-            op,
-            SchemaOperation::CreateEntity { .. }
-        )));
+        assert!(!plan
+            .operations
+            .iter()
+            .any(|op| matches!(op, SchemaOperation::CreateEntity { .. })));
     }
 
     // -- Migration history tests --
@@ -1035,7 +1069,9 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
         let manifest = test_manifest();
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let table_exists: i64 = adapter
             .conn
@@ -1053,7 +1089,9 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
         let manifest = test_manifest();
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         assert_eq!(history_count(&adapter), 1);
 
@@ -1082,12 +1120,16 @@ mod tests {
 
         // First push creates tables.
         let plan1 = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan1, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan1, &push_meta("live_sqlite"))
+            .unwrap();
 
         // Second push is noop.
         let plan2 = adapter.plan_from_live(&manifest).unwrap();
         assert!(plan2.is_empty());
-        adapter.apply_with_history(&plan2, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan2, &push_meta("live_sqlite"))
+            .unwrap();
 
         // Both pushes recorded.
         assert_eq!(history_count(&adapter), 2);
@@ -1112,12 +1154,17 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
         let manifest = test_manifest();
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let plan_json: String = adapter
             .conn
             .query_row(
-                &format!("SELECT plan_json FROM {} LIMIT 1", quote_ident(HISTORY_TABLE)),
+                &format!(
+                    "SELECT plan_json FROM {} LIMIT 1",
+                    quote_ident(HISTORY_TABLE)
+                ),
                 [],
                 |row| row.get(0),
             )
@@ -1133,7 +1180,9 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
         let manifest = test_manifest();
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let snapshot = adapter.read_schema().unwrap();
         assert!(!snapshot.tables.iter().any(|t| t.name.starts_with("_pylon")));
@@ -1153,7 +1202,9 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
         let manifest = test_manifest();
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let entries = adapter.read_history(None).unwrap();
         assert_eq!(entries.len(), 1);
@@ -1169,10 +1220,14 @@ mod tests {
         let manifest = test_manifest();
 
         let plan1 = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan1, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan1, &push_meta("live_sqlite"))
+            .unwrap();
 
         let plan2 = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan2, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan2, &push_meta("live_sqlite"))
+            .unwrap();
 
         let entries = adapter.read_history(None).unwrap();
         assert_eq!(entries.len(), 2);
@@ -1188,21 +1243,27 @@ mod tests {
 
         let plan = adapter.plan_from_live(&manifest).unwrap();
         adapter
-            .apply_with_history(&plan, &PushMetadata {
-                manifest_version: 1,
-                app_version: "0.1.0",
-                baseline: "first",
-            })
+            .apply_with_history(
+                &plan,
+                &PushMetadata {
+                    manifest_version: 1,
+                    app_version: "0.1.0",
+                    baseline: "first",
+                },
+            )
             .unwrap();
 
         // Small delay not needed — timestamps have nanosecond precision.
         let plan2 = adapter.plan_from_live(&manifest).unwrap();
         adapter
-            .apply_with_history(&plan2, &PushMetadata {
-                manifest_version: 1,
-                app_version: "0.2.0",
-                baseline: "second",
-            })
+            .apply_with_history(
+                &plan2,
+                &PushMetadata {
+                    manifest_version: 1,
+                    app_version: "0.2.0",
+                    baseline: "second",
+                },
+            )
             .unwrap();
 
         let entries = adapter.read_history(None).unwrap();
@@ -1218,9 +1279,13 @@ mod tests {
 
         // Push twice.
         let plan1 = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan1, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan1, &push_meta("live_sqlite"))
+            .unwrap();
         let plan2 = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan2, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan2, &push_meta("live_sqlite"))
+            .unwrap();
 
         let all = adapter.read_history(None).unwrap();
         assert_eq!(all.len(), 2);
@@ -1235,7 +1300,9 @@ mod tests {
         let manifest = test_manifest();
 
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let entries = adapter.read_history(None).unwrap();
         let id = &entries[0].id;
@@ -1258,7 +1325,9 @@ mod tests {
         let manifest = test_manifest();
 
         let plan = adapter.plan_from_live(&manifest).unwrap();
-        adapter.apply_with_history(&plan, &push_meta("live_sqlite")).unwrap();
+        adapter
+            .apply_with_history(&plan, &push_meta("live_sqlite"))
+            .unwrap();
 
         let entries = adapter.read_history(None).unwrap();
         let entry = &entries[0];

@@ -18,10 +18,7 @@ const RESET: &str = "\x1b[0m";
 /// Respects the `NO_COLOR` standard (<https://no-color.org/>) and treats
 /// `TERM=dumb` as a plain terminal.
 fn use_color() -> bool {
-    std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM")
-            .map(|t| t != "dumb")
-            .unwrap_or(true)
+    std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
 }
 
 /// Format a single diagnostic with ANSI colors for human-readable output.
@@ -42,15 +39,10 @@ fn format_diagnostic(d: &Diagnostic, color: bool) -> String {
         ));
 
         if let Some(hint) = &d.hint {
-            out.push_str(&format!(
-                "    {DIM}{ITALIC}hint: {hint}{RESET}\n",
-            ));
+            out.push_str(&format!("    {DIM}{ITALIC}hint: {hint}{RESET}\n",));
         }
     } else {
-        out.push_str(&format!(
-            "  {}[{}] {}\n",
-            d.severity, d.code, d.message,
-        ));
+        out.push_str(&format!("  {}[{}] {}\n", d.severity, d.code, d.message,));
 
         if let Some(hint) = &d.hint {
             out.push_str(&format!("    hint: {hint}\n"));
@@ -123,10 +115,7 @@ mod tests {
             hint: Some("remove it".into()),
         };
         let out = format_diagnostic(&d, false);
-        assert_eq!(
-            out,
-            "  warning[UNUSED] field unused\n    hint: remove it\n"
-        );
+        assert_eq!(out, "  warning[UNUSED] field unused\n    hint: remove it\n");
     }
 
     #[test]

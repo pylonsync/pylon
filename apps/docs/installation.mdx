@@ -6,26 +6,20 @@ description: "Install the Pylon CLI and runtime."
 ## Requirements
 
 - **Bun** ≥ 1.0 (runs TypeScript functions + codegen)
+- **Rust** ≥ 1.85 (required to build the CLI from source — edition 2024)
 - **Node.js** ≥ 18 (optional, for client tooling)
-- **Rust** ≥ 1.82 (only if building from source)
 
 ## Install the CLI
 
-<CodeGroup>
-```bash Install script
-curl -fsSL https://pylon.dev/install.sh | bash
-```
+Pylon is currently installed from source. A one-line install script and Homebrew tap are on the roadmap but not yet shipped.
 
-```bash From source
+```bash
 git clone https://github.com/pylonsync/pylon
 cd pylon
 cargo install --path crates/cli --locked
 ```
 
-```bash Homebrew (coming soon)
-brew install pylonsync/tap/pylon
-```
-</CodeGroup>
+This compiles and places a `pylon` binary in `~/.cargo/bin/`.
 
 Verify:
 

@@ -22,7 +22,10 @@ pub fn is_private_ip(host: &str) -> bool {
     // Extract the host portion, handling IPv6 brackets and port suffixes.
     let clean_host = if host.starts_with('[') {
         // Bracketed IPv6: [::1]:port or [::1]
-        host.trim_start_matches('[').split(']').next().unwrap_or(host)
+        host.trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or(host)
     } else if host.contains("::") || host.matches(':').count() > 1 {
         // Bare IPv6 without brackets (multiple colons means IPv6, not host:port)
         host
@@ -67,10 +70,10 @@ fn is_private_ipv4(host: &str) -> bool {
         match (octets[0], octets[1]) {
             (127, _) => true,       // 127.0.0.0/8 loopback
             (10, _) => true,        // 10.0.0.0/8
-            (172, 16..=31) => true,  // 172.16.0.0/12
-            (192, 168) => true,      // 192.168.0.0/16
-            (169, 254) => true,      // 169.254.0.0/16 (link-local + AWS metadata)
-            (0, _) => true,          // 0.0.0.0/8
+            (172, 16..=31) => true, // 172.16.0.0/12
+            (192, 168) => true,     // 192.168.0.0/16
+            (169, 254) => true,     // 169.254.0.0/16 (link-local + AWS metadata)
+            (0, _) => true,         // 0.0.0.0/8
             _ => false,
         }
     } else {

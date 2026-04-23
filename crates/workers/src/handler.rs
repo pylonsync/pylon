@@ -40,17 +40,28 @@ impl D1Executor for WorkerD1Executor {
             .map_err(|e| e.to_string())?;
 
         let result = futures::executor::block_on(bound.run()).map_err(|e| e.to_string())?;
-        Ok(result.meta().ok().flatten().and_then(|m| m.changes).unwrap_or(0) as u64)
+        Ok(result
+            .meta()
+            .ok()
+            .flatten()
+            .and_then(|m| m.changes)
+            .unwrap_or(0) as u64)
     }
 
-    fn query(&self, sql: &str, params: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, String> {
+    fn query(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<Vec<serde_json::Value>, String> {
         let stmt = self.db.prepare(sql);
         let bound = stmt
             .bind_refs(&params_to_js(params))
             .map_err(|e| e.to_string())?;
 
         let result = futures::executor::block_on(bound.all()).map_err(|e| e.to_string())?;
-        let rows = result.results::<serde_json::Value>().map_err(|e| e.to_string())?;
+        let rows = result
+            .results::<serde_json::Value>()
+            .map_err(|e| e.to_string())?;
         Ok(rows)
     }
 }
@@ -126,8 +137,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         request_headers: &[],
     };
 
-    let (status, response_body, _ct) =
-        route(&ctx, method, &url, &body, auth_token.as_deref());
+    let (status, response_body, _ct) = route(&ctx, method, &url, &body, auth_token.as_deref());
 
     let mut headers = Headers::new();
     headers.set("Content-Type", "application/json")?;
@@ -136,7 +146,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         "Access-Control-Allow-Methods",
         "GET, POST, PATCH, DELETE, OPTIONS",
     )?;
-    headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization")?;
+    headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization",
+    )?;
 
     Ok(Response::ok(response_body)?
         .with_status(status)

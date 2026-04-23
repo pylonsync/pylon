@@ -6,8 +6,7 @@
 
 use pylon_http::DataError;
 use pylon_router::{
-    CacheOps, FileOps, JobOps, OpenApiGenerator, PubSubOps, RoomOps, SchedulerOps,
-    WorkflowOps,
+    CacheOps, FileOps, JobOps, OpenApiGenerator, PubSubOps, RoomOps, SchedulerOps, WorkflowOps,
 };
 
 /// Implements all router service traits with no-op stubs.
@@ -74,21 +73,33 @@ impl RoomOps for NoopAll {
 
 impl CacheOps for NoopAll {
     fn handle_command(&self, _body: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (
+            503,
+            pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"),
+        )
     }
 
     fn handle_get(&self, _key: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (
+            503,
+            pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"),
+        )
     }
 
     fn handle_delete(&self, _key: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"))
+        (
+            503,
+            pylon_router::json_error("NOT_AVAILABLE", "Cache not available on this platform"),
+        )
     }
 }
 
 impl PubSubOps for NoopAll {
     fn handle_publish(&self, _body: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "PubSub not available on this platform"))
+        (
+            503,
+            pylon_router::json_error("NOT_AVAILABLE", "PubSub not available on this platform"),
+        )
     }
 
     fn handle_channels(&self) -> (u16, String) {
@@ -170,12 +181,7 @@ impl WorkflowOps for NoopAll {
         Err("Workflows not available on this platform".into())
     }
 
-    fn send_event(
-        &self,
-        _id: &str,
-        _event: &str,
-        _data: serde_json::Value,
-    ) -> Result<(), String> {
+    fn send_event(&self, _id: &str, _event: &str, _data: serde_json::Value) -> Result<(), String> {
         Err("Workflows not available on this platform".into())
     }
 
@@ -186,11 +192,23 @@ impl WorkflowOps for NoopAll {
 
 impl FileOps for NoopAll {
     fn upload(&self, _body: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "File uploads not available on this platform"))
+        (
+            503,
+            pylon_router::json_error(
+                "NOT_AVAILABLE",
+                "File uploads not available on this platform",
+            ),
+        )
     }
 
     fn get_file(&self, _id: &str) -> (u16, String) {
-        (503, pylon_router::json_error("NOT_AVAILABLE", "File storage not available on this platform"))
+        (
+            503,
+            pylon_router::json_error(
+                "NOT_AVAILABLE",
+                "File storage not available on this platform",
+            ),
+        )
     }
 }
 

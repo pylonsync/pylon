@@ -49,10 +49,11 @@ pub fn encode_snapshot<T: Serialize>(
     format: SnapshotFormat,
 ) -> Result<Vec<u8>, EncodeError> {
     match format {
-        SnapshotFormat::Json | SnapshotFormat::JsonCompact => serde_json::to_vec(snapshot)
-            .map_err(|e| EncodeError {
+        SnapshotFormat::Json | SnapshotFormat::JsonCompact => {
+            serde_json::to_vec(snapshot).map_err(|e| EncodeError {
                 message: format!("json: {e}"),
-            }),
+            })
+        }
         SnapshotFormat::MessagePack => {
             #[cfg(feature = "msgpack")]
             {
@@ -63,7 +64,9 @@ pub fn encode_snapshot<T: Serialize>(
             #[cfg(not(feature = "msgpack"))]
             {
                 Err(EncodeError {
-                    message: "MessagePack requires the `msgpack` feature to be enabled on pylon-realtime".into(),
+                    message:
+                        "MessagePack requires the `msgpack` feature to be enabled on pylon-realtime"
+                            .into(),
                 })
             }
         }
@@ -77,7 +80,9 @@ pub fn encode_snapshot<T: Serialize>(
             #[cfg(not(feature = "bincode"))]
             {
                 Err(EncodeError {
-                    message: "Bincode requires the `bincode` feature to be enabled on pylon-realtime".into(),
+                    message:
+                        "Bincode requires the `bincode` feature to be enabled on pylon-realtime"
+                            .into(),
                 })
             }
         }

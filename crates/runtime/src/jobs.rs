@@ -406,13 +406,7 @@ impl JobQueue {
 
     /// Get queue statistics.
     pub fn stats(&self) -> QueueStats {
-        let handler_names: Vec<String> = self
-            .handlers
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
+        let handler_names: Vec<String> = self.handlers.lock().unwrap().keys().cloned().collect();
         QueueStats {
             pending: self.pending.lock().unwrap().len(),
             running: self.running.lock().unwrap().len(),
@@ -435,12 +429,7 @@ impl JobQueue {
 
     /// Get dead letter queue contents.
     pub fn dead_letters(&self) -> Vec<Job> {
-        self.dead_letters
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect()
+        self.dead_letters.lock().unwrap().iter().cloned().collect()
     }
 
     /// Retry a dead letter by moving it back to pending.
@@ -478,12 +467,7 @@ impl JobQueue {
     }
 
     /// List pending jobs with optional status/queue filters.
-    pub fn list_jobs(
-        &self,
-        status: Option<&str>,
-        queue: Option<&str>,
-        limit: usize,
-    ) -> Vec<Job> {
+    pub fn list_jobs(&self, status: Option<&str>, queue: Option<&str>, limit: usize) -> Vec<Job> {
         let mut result = Vec::new();
 
         // Gather from all collections.
@@ -491,10 +475,7 @@ impl JobQueue {
         let running = self.running.lock().unwrap();
         let history = self.history.lock().unwrap();
 
-        let all_jobs = pending
-            .iter()
-            .chain(running.values())
-            .chain(history.iter());
+        let all_jobs = pending.iter().chain(running.values()).chain(history.iter());
 
         for job in all_jobs {
             if let Some(s) = status {
@@ -580,7 +561,10 @@ impl JobQueue {
         // Parse the numeric suffix from "job_N" and set next_id above the max.
         let max_id = pending
             .iter()
-            .filter_map(|j| j.id.strip_prefix("job_").and_then(|n| n.parse::<u64>().ok()))
+            .filter_map(|j| {
+                j.id.strip_prefix("job_")
+                    .and_then(|n| n.parse::<u64>().ok())
+            })
             .max()
             .unwrap_or(0);
         let current = self.next_id.load(Ordering::Relaxed);
@@ -686,9 +670,30 @@ mod tests {
     fn priority_ordering() {
         let q = JobQueue::new(100);
         q.enqueue_with_options("low", serde_json::json!({}), Priority::Low, 0, 0, "default");
-        q.enqueue_with_options("high", serde_json::json!({}), Priority::High, 0, 0, "default");
-        q.enqueue_with_options("normal", serde_json::json!({}), Priority::Normal, 0, 0, "default");
-        q.enqueue_with_options("critical", serde_json::json!({}), Priority::Critical, 0, 0, "default");
+        q.enqueue_with_options(
+            "high",
+            serde_json::json!({}),
+            Priority::High,
+            0,
+            0,
+            "default",
+        );
+        q.enqueue_with_options(
+            "normal",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            0,
+            "default",
+        );
+        q.enqueue_with_options(
+            "critical",
+            serde_json::json!({}),
+            Priority::Critical,
+            0,
+            0,
+            "default",
+        );
 
         let j1 = q.dequeue(Duration::from_millis(10)).unwrap();
         let j2 = q.dequeue(Duration::from_millis(10)).unwrap();
@@ -716,7 +721,14 @@ mod tests {
     #[test]
     fn fail_retries_when_under_max() {
         let q = JobQueue::new(100);
-        let id = q.enqueue_with_options("test", serde_json::json!({}), Priority::Normal, 0, 2, "default");
+        let id = q.enqueue_with_options(
+            "test",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            2,
+            "default",
+        );
 
         // First attempt -- fail.
         let _job = q.dequeue(Duration::from_millis(10)).unwrap();
@@ -732,7 +744,14 @@ mod tests {
     #[test]
     fn fail_moves_to_dead_after_max_retries() {
         let q = JobQueue::new(100);
-        let id = q.enqueue_with_options("test", serde_json::json!({}), Priority::Normal, 0, 1, "default");
+        let id = q.enqueue_with_options(
+            "test",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            1,
+            "default",
+        );
 
         // Attempt 1 -- fail.
         let _job = q.dequeue(Duration::from_millis(10)).unwrap();
@@ -752,7 +771,14 @@ mod tests {
     #[test]
     fn retry_dead_letter() {
         let q = JobQueue::new(100);
-        let id = q.enqueue_with_options("test", serde_json::json!({}), Priority::Normal, 0, 0, "default");
+        let id = q.enqueue_with_options(
+            "test",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            0,
+            "default",
+        );
 
         let _job = q.dequeue(Duration::from_millis(10)).unwrap();
         q.fail(&id, "dead");
@@ -803,10 +829,7 @@ mod tests {
     #[test]
     fn process_one_with_handler() {
         let q = Arc::new(JobQueue::new(100));
-        q.register(
-            "echo",
-            Arc::new(|_job| JobResult::Success),
-        );
+        q.register("echo", Arc::new(|_job| JobResult::Success));
         q.enqueue("echo", serde_json::json!({"msg": "hello"}));
         assert!(q.process_one());
 
@@ -818,7 +841,14 @@ mod tests {
     #[test]
     fn process_one_without_handler_fails() {
         let q = Arc::new(JobQueue::new(100));
-        q.enqueue_with_options("unhandled", serde_json::json!({}), Priority::Normal, 0, 0, "default");
+        q.enqueue_with_options(
+            "unhandled",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            0,
+            "default",
+        );
         q.process_one();
 
         // Should be in dead letters since max_retries=0.
@@ -852,7 +882,14 @@ mod tests {
     fn list_jobs_with_filters() {
         let q = JobQueue::new(100);
         q.enqueue_with_options("a", serde_json::json!({}), Priority::Normal, 0, 0, "emails");
-        q.enqueue_with_options("b", serde_json::json!({}), Priority::Normal, 0, 0, "default");
+        q.enqueue_with_options(
+            "b",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            0,
+            "default",
+        );
         q.enqueue_with_options("c", serde_json::json!({}), Priority::Normal, 0, 0, "emails");
 
         let email_jobs = q.list_jobs(None, Some("emails"), 50);
@@ -865,10 +902,7 @@ mod tests {
     #[test]
     fn worker_processes_jobs() {
         let q = Arc::new(JobQueue::new(100));
-        q.register(
-            "add",
-            Arc::new(|_job| JobResult::Success),
-        );
+        q.register("add", Arc::new(|_job| JobResult::Success));
         q.enqueue("add", serde_json::json!({"a": 1, "b": 2}));
 
         let worker = Worker::new(Arc::clone(&q), "test-worker");

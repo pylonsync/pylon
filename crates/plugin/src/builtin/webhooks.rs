@@ -88,12 +88,8 @@ fn deliver(url: &str, payload: &str) -> Result<u16, String> {
 
     let mut stream =
         TcpStream::connect(host_port).map_err(|e| format!("Connection failed: {e}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .ok();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
+    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
     let request = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -155,13 +151,8 @@ impl WebhooksPlugin {
 
     fn fire(&self, entity: &str, event: &str, row_id: &str, data: Option<&Value>) {
         for hook in &self.hooks {
-            let entity_match = hook
-                .entity
-                .as_deref()
-                .map(|e| e == entity)
-                .unwrap_or(true);
-            let event_match =
-                hook.events.is_empty() || hook.events.iter().any(|e| e == event);
+            let entity_match = hook.entity.as_deref().map(|e| e == entity).unwrap_or(true);
+            let event_match = hook.events.is_empty() || hook.events.iter().any(|e| e == event);
 
             if entity_match && event_match {
                 let payload = serde_json::json!({
@@ -295,10 +286,20 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("User", "u1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "User",
+            "u1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
         assert_eq!(plugin.log().len(), 0); // User doesn't match
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
         assert_eq!(plugin.log().len(), 1);
     }
 
@@ -312,7 +313,12 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
         assert_eq!(plugin.log().len(), 0); // insert doesn't match
 
         plugin.after_delete("Todo", "t1", &AuthContext::anonymous());
@@ -363,7 +369,12 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
         assert_eq!(plugin.delivery_history().len(), 0);
         assert_eq!(plugin.log().len(), 1);
     }
@@ -378,12 +389,21 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
 
         let history = plugin.delivery_history();
         assert_eq!(history.len(), 1);
         assert!(!history[0].success);
-        assert!(history[0].error.as_ref().unwrap().contains("private/reserved"));
+        assert!(history[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("private/reserved"));
     }
 
     #[test]
@@ -396,7 +416,12 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
 
         assert_eq!(plugin.delivery_history().len(), 1);
         assert_eq!(plugin.log().len(), 1);
@@ -412,7 +437,12 @@ mod tests {
             secret: None,
         });
 
-        plugin.after_insert("Todo", "t1", &serde_json::json!({}), &AuthContext::anonymous());
+        plugin.after_insert(
+            "Todo",
+            "t1",
+            &serde_json::json!({}),
+            &AuthContext::anonymous(),
+        );
 
         let history = plugin.delivery_history();
         assert_eq!(history[0].url, "http://127.0.0.1:19999/my-hook");

@@ -51,7 +51,10 @@ pub fn create_table_sql(entity_name: &str, fields: &[FieldSpec]) -> String {
         let unique = if field.unique { " UNIQUE" } else { "" };
         columns.push(format!(
             "{} {}{}{}",
-            quote_ident(&field.name), col_type, not_null, unique
+            quote_ident(&field.name),
+            col_type,
+            not_null,
+            unique
         ));
     }
 
@@ -70,7 +73,10 @@ pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     let unique = if field.unique { " UNIQUE" } else { "" };
     format!(
         "ALTER TABLE {} ADD COLUMN {} {}{}",
-        quote_ident(entity_name), quote_ident(&field.name), col_type, unique
+        quote_ident(entity_name),
+        quote_ident(&field.name),
+        col_type,
+        unique
     )
 }
 
@@ -168,9 +174,7 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
             other => {
                 return Err(StorageError {
                     code: "PG_OP_UNSUPPORTED".into(),
-                    message: format!(
-                        "Operation not supported by Postgres adapter: {other:?}"
-                    ),
+                    message: format!("Operation not supported by Postgres adapter: {other:?}"),
                 });
             }
         }
@@ -228,10 +232,7 @@ pub const INTROSPECT_INDEXES_SQL: &str = "\
 
 /// Plan from a snapshot (reuses the shared plan_from_snapshot).
 /// This allows Postgres to plan incrementally once introspection data is available.
-pub fn plan_from_snapshot(
-    snapshot: &crate::SchemaSnapshot,
-    target: &AppManifest,
-) -> SchemaPlan {
+pub fn plan_from_snapshot(snapshot: &crate::SchemaSnapshot, target: &AppManifest) -> SchemaPlan {
     crate::plan_from_snapshot(snapshot, target)
 }
 
@@ -357,12 +358,11 @@ pub mod live {
     impl LivePostgresAdapter {
         /// Connect to a Postgres database.
         pub fn connect(url: &str) -> Result<Self, StorageError> {
-            let client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| {
-                StorageError {
+            let client =
+                postgres::Client::connect(url, postgres::NoTls).map_err(|e| StorageError {
                     code: "PG_CONNECT_FAILED".into(),
                     message: format!("Failed to connect to Postgres: {e}"),
-                }
-            })?;
+                })?;
             Ok(Self { client })
         }
 
@@ -431,10 +431,7 @@ pub mod live {
         }
 
         /// Plan from live database state.
-        pub fn plan_from_live(
-            &mut self,
-            target: &AppManifest,
-        ) -> Result<SchemaPlan, StorageError> {
+        pub fn plan_from_live(&mut self, target: &AppManifest) -> Result<SchemaPlan, StorageError> {
             let snapshot = self.read_schema()?;
             Ok(crate::plan_from_snapshot(&snapshot, target))
         }
@@ -491,10 +488,7 @@ pub mod live {
             id: &str,
         ) -> Result<Option<serde_json::Value>, StorageError> {
             let sql = format!("SELECT * FROM {} WHERE id = $1", quote_ident(entity));
-            let rows = self
-                .client
-                .query(sql.as_str(), &[&id])
-                .map_err(pg_err)?;
+            let rows = self.client.query(sql.as_str(), &[&id]).map_err(pg_err)?;
 
             match rows.first() {
                 Some(row) => Ok(Some(row_to_json(row))),
@@ -503,10 +497,7 @@ pub mod live {
         }
 
         /// List all rows from an entity.
-        pub fn list(
-            &mut self,
-            entity: &str,
-        ) -> Result<Vec<serde_json::Value>, StorageError> {
+        pub fn list(&mut self, entity: &str) -> Result<Vec<serde_json::Value>, StorageError> {
             let sql = format!("SELECT * FROM {}", quote_ident(entity));
             let rows = self.client.query(sql.as_str(), &[]).map_err(pg_err)?;
 
@@ -562,24 +553,14 @@ pub mod live {
                 .map(|v| v as &(dyn postgres::types::ToSql + Sync))
                 .collect();
 
-            let rows_affected = self
-                .client
-                .execute(sql.as_str(), &params)
-                .map_err(pg_err)?;
+            let rows_affected = self.client.execute(sql.as_str(), &params).map_err(pg_err)?;
             Ok(rows_affected > 0)
         }
 
         /// Delete a row by ID. Returns true if the row was found and deleted.
-        pub fn delete(
-            &mut self,
-            entity: &str,
-            id: &str,
-        ) -> Result<bool, StorageError> {
+        pub fn delete(&mut self, entity: &str, id: &str) -> Result<bool, StorageError> {
             let sql = format!("DELETE FROM {} WHERE id = $1", quote_ident(entity));
-            let rows_affected = self
-                .client
-                .execute(sql.as_str(), &[&id])
-                .map_err(pg_err)?;
+            let rows_affected = self.client.execute(sql.as_str(), &[&id]).map_err(pg_err)?;
             Ok(rows_affected > 0)
         }
 
@@ -672,11 +653,27 @@ pub mod live {
                             serde_json::Value::Object(ops) => {
                                 for (op, v) in ops {
                                     match op.as_str() {
-                                        "$gt" => planned.push((field.into(), ">".into(), value_to_pg(v))),
-                                        "$gte" => planned.push((field.into(), ">=".into(), value_to_pg(v))),
-                                        "$lt" => planned.push((field.into(), "<".into(), value_to_pg(v))),
-                                        "$lte" => planned.push((field.into(), "<=".into(), value_to_pg(v))),
-                                        "$like" => planned.push((field.into(), "LIKE".into(), value_to_pg(v))),
+                                        "$gt" => {
+                                            planned.push((field.into(), ">".into(), value_to_pg(v)))
+                                        }
+                                        "$gte" => planned.push((
+                                            field.into(),
+                                            ">=".into(),
+                                            value_to_pg(v),
+                                        )),
+                                        "$lt" => {
+                                            planned.push((field.into(), "<".into(), value_to_pg(v)))
+                                        }
+                                        "$lte" => planned.push((
+                                            field.into(),
+                                            "<=".into(),
+                                            value_to_pg(v),
+                                        )),
+                                        "$like" => planned.push((
+                                            field.into(),
+                                            "LIKE".into(),
+                                            value_to_pg(v),
+                                        )),
                                         "$in" => {
                                             if let Some(arr) = v.as_array() {
                                                 let placeholders: Vec<String> = (0..arr.len())
@@ -738,7 +735,10 @@ pub mod live {
                 .map(|s| s as &(dyn postgres::types::ToSql + Sync))
                 .collect();
 
-            let rows = self.client.query(sql.as_str(), &pg_params).map_err(pg_err)?;
+            let rows = self
+                .client
+                .query(sql.as_str(), &pg_params)
+                .map_err(pg_err)?;
             Ok(rows.iter().map(row_to_json).collect())
         }
     }
@@ -799,11 +799,8 @@ pub mod live {
                         results.push(TxResult::Updated(n > 0));
                     }
                     TxOp::Delete { entity, id } => {
-                        let sql =
-                            format!("DELETE FROM {} WHERE id = $1", quote_ident(entity));
-                        let n = tx
-                            .execute(sql.as_str(), &[id])
-                            .map_err(pg_err)?;
+                        let sql = format!("DELETE FROM {} WHERE id = $1", quote_ident(entity));
+                        let n = tx.execute(sql.as_str(), &[id]).map_err(pg_err)?;
                         results.push(TxResult::Deleted(n > 0));
                     }
                 }
@@ -867,11 +864,9 @@ pub mod live {
                     .and_then(serde_json::Number::from_f64)
                     .map(serde_json::Value::Number)
                     .unwrap_or(serde_json::Value::Null),
-                Type::JSON | Type::JSONB => {
-                    try_get_or_null::<Option<serde_json::Value>>(row, i)
-                        .flatten()
-                        .unwrap_or(serde_json::Value::Null)
-                }
+                Type::JSON | Type::JSONB => try_get_or_null::<Option<serde_json::Value>>(row, i)
+                    .flatten()
+                    .unwrap_or(serde_json::Value::Null),
                 Type::BYTEA => try_get_or_null::<Option<Vec<u8>>>(row, i)
                     .flatten()
                     .map(|b| serde_json::Value::String(b64(&b)))
@@ -967,8 +962,10 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -1057,10 +1054,7 @@ mod tests {
             unique: false,
         };
         let sql = add_column_sql("User", &field);
-        assert_eq!(
-            sql,
-            "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT"
-        );
+        assert_eq!(sql, "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT");
     }
 
     #[test]
@@ -1175,25 +1169,72 @@ mod tests {
                 crate::TableSnapshot {
                     name: "User".into(),
                     columns: vec![
-                        crate::ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                        crate::ColumnSnapshot { name: "email".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "displayName".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "createdAt".into(), column_type: "TIMESTAMPTZ".into(), notnull: true, primary_key: false },
+                        crate::ColumnSnapshot {
+                            name: "id".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: true,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "email".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "displayName".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "createdAt".into(),
+                            column_type: "TIMESTAMPTZ".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
                     ],
                     indexes: vec![],
                 },
                 crate::TableSnapshot {
                     name: "Todo".into(),
                     columns: vec![
-                        crate::ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                        crate::ColumnSnapshot { name: "title".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "done".into(), column_type: "BOOLEAN".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "authorId".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "createdAt".into(), column_type: "TIMESTAMPTZ".into(), notnull: true, primary_key: false },
+                        crate::ColumnSnapshot {
+                            name: "id".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: true,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "title".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "done".into(),
+                            column_type: "BOOLEAN".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "authorId".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "createdAt".into(),
+                            column_type: "TIMESTAMPTZ".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
                     ],
-                    indexes: vec![
-                        crate::IndexSnapshot { name: "Todo_by_author".into(), columns: vec!["authorId".into()], unique: false },
-                    ],
+                    indexes: vec![crate::IndexSnapshot {
+                        name: "Todo_by_author".into(),
+                        columns: vec!["authorId".into()],
+                        unique: false,
+                    }],
                 },
             ],
         };
@@ -1209,8 +1250,18 @@ mod tests {
                 crate::TableSnapshot {
                     name: "User".into(),
                     columns: vec![
-                        crate::ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                        crate::ColumnSnapshot { name: "email".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
+                        crate::ColumnSnapshot {
+                            name: "id".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: true,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "email".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
                         // missing displayName and createdAt
                     ],
                     indexes: vec![],
@@ -1218,22 +1269,53 @@ mod tests {
                 crate::TableSnapshot {
                     name: "Todo".into(),
                     columns: vec![
-                        crate::ColumnSnapshot { name: "id".into(), column_type: "TEXT".into(), notnull: true, primary_key: true },
-                        crate::ColumnSnapshot { name: "title".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "done".into(), column_type: "BOOLEAN".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "authorId".into(), column_type: "TEXT".into(), notnull: true, primary_key: false },
-                        crate::ColumnSnapshot { name: "createdAt".into(), column_type: "TIMESTAMPTZ".into(), notnull: true, primary_key: false },
+                        crate::ColumnSnapshot {
+                            name: "id".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: true,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "title".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "done".into(),
+                            column_type: "BOOLEAN".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "authorId".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                        crate::ColumnSnapshot {
+                            name: "createdAt".into(),
+                            column_type: "TIMESTAMPTZ".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
                     ],
-                    indexes: vec![
-                        crate::IndexSnapshot { name: "Todo_by_author".into(), columns: vec!["authorId".into()], unique: false },
-                    ],
+                    indexes: vec![crate::IndexSnapshot {
+                        name: "Todo_by_author".into(),
+                        columns: vec!["authorId".into()],
+                        unique: false,
+                    }],
                 },
             ],
         };
         let manifest = test_manifest();
         let plan = plan_from_snapshot(&snapshot, &manifest);
 
-        let add_fields: Vec<_> = plan.operations.iter().filter(|op| matches!(op, SchemaOperation::AddField { .. })).collect();
+        let add_fields: Vec<_> = plan
+            .operations
+            .iter()
+            .filter(|op| matches!(op, SchemaOperation::AddField { .. }))
+            .collect();
         assert_eq!(add_fields.len(), 2); // displayName + createdAt
     }
 
@@ -1245,26 +1327,14 @@ mod tests {
             json_value_to_string(&serde_json::Value::String("hello".into())),
             "hello"
         );
-        assert_eq!(
-            json_value_to_string(&serde_json::json!(42)),
-            "42"
-        );
-        assert_eq!(
-            json_value_to_string(&serde_json::json!(3.14)),
-            "3.14"
-        );
-        assert_eq!(
-            json_value_to_string(&serde_json::Value::Bool(true)),
-            "true"
-        );
+        assert_eq!(json_value_to_string(&serde_json::json!(42)), "42");
+        assert_eq!(json_value_to_string(&serde_json::json!(3.14)), "3.14");
+        assert_eq!(json_value_to_string(&serde_json::Value::Bool(true)), "true");
         assert_eq!(
             json_value_to_string(&serde_json::Value::Bool(false)),
             "false"
         );
-        assert_eq!(
-            json_value_to_string(&serde_json::Value::Null),
-            ""
-        );
+        assert_eq!(json_value_to_string(&serde_json::Value::Null), "");
         // Arrays and objects get their JSON representation.
         assert_eq!(
             json_value_to_string(&serde_json::json!([1, 2, 3])),

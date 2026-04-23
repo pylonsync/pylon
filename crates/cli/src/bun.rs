@@ -39,7 +39,11 @@ pub fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
                 output.status.code().unwrap_or(-1)
             ),
             span: None,
-            hint: if detail.is_empty() { None } else { Some(detail) },
+            hint: if detail.is_empty() {
+                None
+            } else {
+                Some(detail)
+            },
         });
     }
 

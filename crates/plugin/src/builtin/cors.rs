@@ -95,10 +95,7 @@ mod tests {
             cors.allow_origin_header(Some("https://myapp.com")),
             "https://myapp.com"
         );
-        assert_eq!(
-            cors.allow_origin_header(Some("https://evil.com")),
-            ""
-        );
+        assert_eq!(cors.allow_origin_header(Some("https://evil.com")), "");
         assert_eq!(cors.allow_origin_header(None), "");
     }
 }

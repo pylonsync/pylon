@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use pylon_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
-use pylon_runtime::ws::WsHub;
 use pylon_runtime::sse::SseHub;
+use pylon_runtime::ws::WsHub;
+use pylon_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
     let start = Instant::now();
@@ -29,13 +29,23 @@ fn main() {
     // -- ChangeLog throughput --
     let log = ChangeLog::new();
     bench("changelog append", 100_000, || {
-        log.append("User", "u1", ChangeKind::Insert, Some(serde_json::json!({"name":"Alice"})));
+        log.append(
+            "User",
+            "u1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"name":"Alice"})),
+        );
     });
 
     // -- Pull performance with large log --
     let log = ChangeLog::new();
     for i in 0..10_000 {
-        log.append("User", &format!("u{i}"), ChangeKind::Insert, Some(serde_json::json!({"name":"User"})));
+        log.append(
+            "User",
+            &format!("u{i}"),
+            ChangeKind::Insert,
+            Some(serde_json::json!({"name":"User"})),
+        );
     }
 
     bench("pull 100 from 10k log", 10_000, || {
@@ -87,7 +97,11 @@ fn main() {
         let _json = serde_json::to_string(&event).unwrap();
     }
     let ser_time = start.elapsed();
-    println!("    Serialize 10k events: {:?} ({:.2?}/event)", ser_time, ser_time / 10_000);
+    println!(
+        "    Serialize 10k events: {:?} ({:.2?}/event)",
+        ser_time,
+        ser_time / 10_000
+    );
 
     // Measure lock contention under simulated load.
     let hub = WsHub::new();

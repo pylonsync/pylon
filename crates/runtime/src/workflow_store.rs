@@ -18,8 +18,8 @@ pub struct WorkflowStore {
 impl WorkflowStore {
     /// Open or create the workflow store database at `path`.
     pub fn open(path: &str) -> Result<Self, String> {
-        let conn = Connection::open(path)
-            .map_err(|e| format!("Failed to open workflow store: {e}"))?;
+        let conn =
+            Connection::open(path).map_err(|e| format!("Failed to open workflow store: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -434,7 +434,10 @@ mod tests {
 
         assert_eq!(loaded.steps[0].name, "create_account");
         assert_eq!(loaded.steps[0].status, StepStatus::Completed);
-        assert_eq!(loaded.steps[0].output, Some(serde_json::json!({"result": "create_account"})));
+        assert_eq!(
+            loaded.steps[0].output,
+            Some(serde_json::json!({"result": "create_account"}))
+        );
         assert_eq!(loaded.steps[0].duration_ms, Some(42));
 
         assert_eq!(loaded.steps[1].name, "send_email");
@@ -470,13 +473,30 @@ mod tests {
     fn load_active_returns_pending_running_waiting() {
         let store = WorkflowStore::in_memory().unwrap();
 
-        store.save(&make_workflow("wf_pending", WorkflowStatus::Pending)).unwrap();
-        store.save(&make_workflow("wf_running", WorkflowStatus::Running)).unwrap();
-        store.save(&make_workflow("wf_waiting", WorkflowStatus::WaitingForEvent)).unwrap();
-        store.save(&make_workflow("wf_sleeping", WorkflowStatus::Sleeping)).unwrap();
-        store.save(&make_workflow("wf_completed", WorkflowStatus::Completed)).unwrap();
-        store.save(&make_workflow("wf_failed", WorkflowStatus::Failed)).unwrap();
-        store.save(&make_workflow("wf_cancelled", WorkflowStatus::Cancelled)).unwrap();
+        store
+            .save(&make_workflow("wf_pending", WorkflowStatus::Pending))
+            .unwrap();
+        store
+            .save(&make_workflow("wf_running", WorkflowStatus::Running))
+            .unwrap();
+        store
+            .save(&make_workflow(
+                "wf_waiting",
+                WorkflowStatus::WaitingForEvent,
+            ))
+            .unwrap();
+        store
+            .save(&make_workflow("wf_sleeping", WorkflowStatus::Sleeping))
+            .unwrap();
+        store
+            .save(&make_workflow("wf_completed", WorkflowStatus::Completed))
+            .unwrap();
+        store
+            .save(&make_workflow("wf_failed", WorkflowStatus::Failed))
+            .unwrap();
+        store
+            .save(&make_workflow("wf_cancelled", WorkflowStatus::Cancelled))
+            .unwrap();
 
         let active = store.load_active().unwrap();
         assert_eq!(active.len(), 3);
@@ -494,7 +514,9 @@ mod tests {
         sleeping.wake_at = Some(99999);
         store.save(&sleeping).unwrap();
 
-        store.save(&make_workflow("wf_run", WorkflowStatus::Running)).unwrap();
+        store
+            .save(&make_workflow("wf_run", WorkflowStatus::Running))
+            .unwrap();
 
         let result = store.load_sleeping().unwrap();
         assert_eq!(result.len(), 1);
@@ -506,10 +528,18 @@ mod tests {
     fn count_by_status_counts_correctly() {
         let store = WorkflowStore::in_memory().unwrap();
 
-        store.save(&make_workflow("w1", WorkflowStatus::Pending)).unwrap();
-        store.save(&make_workflow("w2", WorkflowStatus::Pending)).unwrap();
-        store.save(&make_workflow("w3", WorkflowStatus::Running)).unwrap();
-        store.save(&make_workflow("w4", WorkflowStatus::Completed)).unwrap();
+        store
+            .save(&make_workflow("w1", WorkflowStatus::Pending))
+            .unwrap();
+        store
+            .save(&make_workflow("w2", WorkflowStatus::Pending))
+            .unwrap();
+        store
+            .save(&make_workflow("w3", WorkflowStatus::Running))
+            .unwrap();
+        store
+            .save(&make_workflow("w4", WorkflowStatus::Completed))
+            .unwrap();
 
         assert_eq!(store.count_by_status("Pending"), 2);
         assert_eq!(store.count_by_status("Running"), 1);

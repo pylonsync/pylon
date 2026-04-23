@@ -37,7 +37,14 @@ impl AuditLogPlugin {
         self.entries.lock().unwrap().len()
     }
 
-    fn record(&self, action: &str, entity: &str, row_id: &str, data: Option<&Value>, auth: &AuthContext) {
+    fn record(
+        &self,
+        action: &str,
+        entity: &str,
+        row_id: &str,
+        data: Option<&Value>,
+        auth: &AuthContext,
+    ) {
         let entry = AuditEntry {
             timestamp: now(),
             user_id: auth.user_id.clone(),

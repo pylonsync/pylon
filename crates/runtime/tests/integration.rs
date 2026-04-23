@@ -37,9 +37,7 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
     );
 
     let mut stream = TcpStream::connect(host_port).expect("Failed to connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream
         .write_all(request.as_bytes())
         .expect("Failed to write request");
@@ -56,11 +54,7 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
         .unwrap_or(0);
 
     // Body is everything after the first blank line (\r\n\r\n).
-    let body = response
-        .split("\r\n\r\n")
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
     (status, body)
 }
@@ -212,7 +206,10 @@ fn crud_lifecycle() {
     );
     assert_eq!(status, 201, "INSERT should return 201: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let id = resp["id"].as_str().expect("response must contain id").to_string();
+    let id = resp["id"]
+        .as_str()
+        .expect("response must contain id")
+        .to_string();
 
     // GET
     let (status, body) = http_request("GET", &format!("{base}/api/entities/Todo/{id}"), None);
@@ -294,13 +291,19 @@ fn auth_session_flow() {
         &format!("{base}/api/auth/session"),
         Some(r#"{"user_id": "user-1"}"#),
     );
-    assert!(status == 200 || status == 201, "session create: status={status} body={body}");
+    assert!(
+        status == 200 || status == 201,
+        "session create: status={status} body={body}"
+    );
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(resp["token"].as_str().is_some(), "token missing");
 
     // Create a guest session.
     let (status, body) = http_request("POST", &format!("{base}/api/auth/guest"), None);
-    assert!(status == 200 || status == 201, "guest session: status={status} body={body}");
+    assert!(
+        status == 200 || status == 201,
+        "guest session: status={status} body={body}"
+    );
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(resp["guest"].as_bool().unwrap());
 }
@@ -495,11 +498,7 @@ fn sync_pull() {
     );
 
     // Pull changes since sequence 0.
-    let (status, body) = http_request(
-        "GET",
-        &format!("{base}/api/sync/pull?since=0"),
-        None,
-    );
+    let (status, body) = http_request("GET", &format!("{base}/api/sync/pull?since=0"), None);
     assert_eq!(status, 200, "sync pull: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(
@@ -515,9 +514,7 @@ fn cors_headers_present() {
     // Make a raw request and inspect response headers.
     let host = base.strip_prefix("http://").unwrap();
     let mut stream = TcpStream::connect(host).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     write!(
         stream,
         "GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"

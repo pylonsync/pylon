@@ -127,12 +127,7 @@ impl DbResultMessage {
         }
     }
 
-    pub fn err_with_op(
-        call_id: String,
-        op_id: Option<String>,
-        code: &str,
-        message: &str,
-    ) -> Self {
+    pub fn err_with_op(call_id: String, op_id: Option<String>, code: &str, message: &str) -> Self {
         Self {
             msg_type: "result",
             call_id,

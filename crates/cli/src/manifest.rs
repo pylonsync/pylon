@@ -156,7 +156,8 @@ mod tests {
 
     #[test]
     fn roundtrip_manifest() {
-        let json = r#"{"manifest_version":1,"name":"app","version":"1.0.0","entities":[],"routes":[]}"#;
+        let json =
+            r#"{"manifest_version":1,"name":"app","version":"1.0.0","entities":[],"routes":[]}"#;
         let m = parse_manifest(json, "test.json").unwrap();
         assert_eq!(m.manifest_version, 1);
         assert!(m.queries.is_empty());
@@ -277,10 +278,13 @@ mod tests {
 
     #[test]
     fn unsupported_manifest_version() {
-        let json = r#"{"manifest_version":999,"name":"app","version":"1.0.0","entities":[],"routes":[]}"#;
+        let json =
+            r#"{"manifest_version":999,"name":"app","version":"1.0.0","entities":[],"routes":[]}"#;
         let m = parse_manifest(json, "test.json").unwrap();
         let diags = pylon_schema::validate_manifest_version(&m);
-        assert!(diags.iter().any(|d| d.code == "MANIFEST_VERSION_UNSUPPORTED"));
+        assert!(diags
+            .iter()
+            .any(|d| d.code == "MANIFEST_VERSION_UNSUPPORTED"));
     }
 
     #[test]

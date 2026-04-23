@@ -37,7 +37,10 @@ impl RateLimitPlugin {
         if entry.0 > self.max_requests {
             Err(PluginError {
                 code: "RATE_LIMITED".into(),
-                message: format!("Too many requests. Limit: {} per {:?}", self.max_requests, self.window),
+                message: format!(
+                    "Too many requests. Limit: {} per {:?}",
+                    self.max_requests, self.window
+                ),
                 status: 429,
             })
         } else {
@@ -54,11 +57,7 @@ impl RateLimitPlugin {
     /// Call from the HTTP layer where peer IP is available. Pass `""` for
     /// `peer_ip` if unknown — the fallback is the same shared `__anon__`
     /// bucket as before (not worse than the old behavior).
-    pub fn check_request(
-        &self,
-        user_id: Option<&str>,
-        peer_ip: &str,
-    ) -> Result<(), PluginError> {
+    pub fn check_request(&self, user_id: Option<&str>, peer_ip: &str) -> Result<(), PluginError> {
         let key = match user_id {
             Some(u) if !u.is_empty() => format!("user:{u}"),
             _ if !peer_ip.is_empty() => format!("ip:{peer_ip}"),

@@ -71,7 +71,10 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     // Query input interfaces
     for query in &manifest.queries {
         if !query.input.is_empty() {
-            out.push_str(&format!("export interface {}Input {{\n", capitalize(&query.name)));
+            out.push_str(&format!(
+                "export interface {}Input {{\n",
+                capitalize(&query.name)
+            ));
             for field in &query.input {
                 let ts = ts_type(&field.field_type);
                 let optional = if field.optional { "?" } else { "" };
@@ -102,7 +105,10 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     // Action input interfaces
     for action in &manifest.actions {
         if !action.input.is_empty() {
-            out.push_str(&format!("export interface {}Input {{\n", capitalize(&action.name)));
+            out.push_str(&format!(
+                "export interface {}Input {{\n",
+                capitalize(&action.name)
+            ));
             for field in &action.input {
                 let ts = ts_type(&field.field_type);
                 let optional = if field.optional { "?" } else { "" };
@@ -113,9 +119,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     }
 
     // Runtime client
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// Runtime client\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     out.push_str("const DEFAULT_BASE_URL = \"http://localhost:4321\";\n\n");
 
@@ -129,7 +139,9 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("    body: body ? JSON.stringify(body) : undefined,\n");
     out.push_str("  });\n");
     out.push_str("  if (!res.ok) {\n");
-    out.push_str("    const err = await res.json().catch(() => ({})) as Record<string, unknown>;\n");
+    out.push_str(
+        "    const err = await res.json().catch(() => ({})) as Record<string, unknown>;\n",
+    );
     out.push_str("    const errorObj = err?.error as Record<string, unknown> | undefined;\n");
     out.push_str("    throw new Error((errorObj?.message as string) ?? `HTTP ${res.status}`);\n");
     out.push_str("  }\n");
@@ -137,9 +149,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("}\n\n");
 
     // Room types
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// Rooms\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     out.push_str("export interface RoomPeer {\n");
     out.push_str("  user_id: string;\n");
@@ -164,11 +180,17 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     // CRUD client
     out.push_str("export interface AgentDBClient {\n");
     out.push_str("  list(entity: EntityName): Promise<Record<string, unknown>[]>;\n");
-    out.push_str("  get(entity: EntityName, id: string): Promise<Record<string, unknown> | null>;\n");
-    out.push_str("  insert(entity: EntityName, data: Record<string, unknown>): Promise<{ id: string }>;\n");
+    out.push_str(
+        "  get(entity: EntityName, id: string): Promise<Record<string, unknown> | null>;\n",
+    );
+    out.push_str(
+        "  insert(entity: EntityName, data: Record<string, unknown>): Promise<{ id: string }>;\n",
+    );
     out.push_str("  update(entity: EntityName, id: string, data: Record<string, unknown>): Promise<{ updated: boolean }>;\n");
     out.push_str("  remove(entity: EntityName, id: string): Promise<{ deleted: boolean }>;\n");
-    out.push_str("  action(name: ActionName, input: Record<string, unknown>): Promise<ActionResult>;\n");
+    out.push_str(
+        "  action(name: ActionName, input: Record<string, unknown>): Promise<ActionResult>;\n",
+    );
     out.push_str("  actions: Actions;\n");
     out.push_str("  rooms: RoomClient;\n");
     out.push_str("}\n\n");
@@ -212,7 +234,9 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("      await req(\"POST\", \"/api/rooms/broadcast\", { room, topic, data });\n");
     out.push_str("    },\n");
     out.push_str("    async getMembers(room) {\n");
-    out.push_str("      const res = await req(\"GET\", `/api/rooms/${encodeURIComponent(room)}`);\n");
+    out.push_str(
+        "      const res = await req(\"GET\", `/api/rooms/${encodeURIComponent(room)}`);\n",
+    );
     out.push_str("      return (res as any).members as RoomPeer[];\n");
     out.push_str("    },\n");
     out.push_str("    async listRooms() {\n");
@@ -248,9 +272,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("}\n\n");
 
     // Server Actions helpers (for Next.js App Router)
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// Server Actions (Next.js App Router compatible)\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     out.push_str("/** Create a server-side client for use in Next.js Server Actions / RSC. */\n");
     out.push_str("export function createServerClient(\n");
@@ -261,9 +289,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("}\n\n");
 
     // React 19 use()-compatible data fetching
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// React 19 use() compatible promises\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     out.push_str("/** Pre-fetch data as a promise for React 19 use() hook. */\n");
     out.push_str("export function prefetch(client: AgentDBClient, entity: EntityName): Promise<Record<string, unknown>[]> {\n");
@@ -278,9 +310,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     // ------------------------------------------------------------------
     // AppSchema — shape consumed by @pylon/react's createTypedDb<S>()
     // ------------------------------------------------------------------
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// AppSchema — types consumed by @pylon/react's createTypedDb<S>()\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
 
     // Entities map.
     out.push_str("export interface Entities {\n");
@@ -321,7 +357,9 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     }
     out.push_str("}\n\n");
 
-    out.push_str("/** Top-level app schema — pass to @pylon/react's createTypedDb<AppSchema>(). */\n");
+    out.push_str(
+        "/** Top-level app schema — pass to @pylon/react's createTypedDb<AppSchema>(). */\n",
+    );
     out.push_str("export interface AppSchema {\n");
     out.push_str("  entities: Entities;\n");
     out.push_str("  functions: Functions;\n");
@@ -329,9 +367,13 @@ pub fn generate_client_ts(manifest: &AppManifest) -> String {
     out.push_str("}\n\n");
 
     // Error codes — typed union so clients can exhaustively match.
-    out.push_str("// ---------------------------------------------------------------------------\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n",
+    );
     out.push_str("// Error codes\n");
-    out.push_str("// ---------------------------------------------------------------------------\n\n");
+    out.push_str(
+        "// ---------------------------------------------------------------------------\n\n",
+    );
     let codes: Vec<String> = pylon_kernel::errors::ALL_CODES
         .iter()
         .map(|c| format!("  | \"{c}\""))
@@ -361,8 +403,10 @@ fn capitalize(s: &str) -> String {
 mod tests {
     use super::*;
     fn todo_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]

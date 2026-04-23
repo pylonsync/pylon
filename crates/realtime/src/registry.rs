@@ -176,11 +176,7 @@ mod tests {
             )
         });
         let b = reg.get_or_create("match1", || {
-            Shard::new(
-                "match1",
-                Counter { value: 99 },
-                ShardConfig::default(),
-            )
+            Shard::new("match1", Counter { value: 99 }, ShardConfig::default())
         });
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(reg.len(), 1);

@@ -57,11 +57,8 @@ fn concurrent_inserts_dont_lose_data() {
             let rt = Arc::clone(&rt);
             thread::spawn(move || {
                 for j in 0..100 {
-                    rt.insert(
-                        "Counter",
-                        &serde_json::json!({"value": i * 100 + j}),
-                    )
-                    .unwrap();
+                    rt.insert("Counter", &serde_json::json!({"value": i * 100 + j}))
+                        .unwrap();
                 }
             })
         })
@@ -146,10 +143,7 @@ fn concurrent_filtered_queries_and_inserts() {
             thread::spawn(move || {
                 let mut query_count = 0u32;
                 for _ in 0..50 {
-                    let _ = rt.query_filtered(
-                        "Counter",
-                        &serde_json::json!({"value": {"$gt": 0}}),
-                    );
+                    let _ = rt.query_filtered("Counter", &serde_json::json!({"value": {"$gt": 0}}));
                     query_count += 1;
                 }
                 query_count
@@ -260,10 +254,7 @@ fn concurrent_job_enqueue_dequeue() {
             let q = Arc::clone(&queue);
             thread::spawn(move || {
                 for j in 0..100 {
-                    q.enqueue(
-                        &format!("job_{}_{}", i, j),
-                        serde_json::json!({"n": j}),
-                    );
+                    q.enqueue(&format!("job_{}_{}", i, j), serde_json::json!({"n": j}));
                 }
             })
         })
@@ -311,15 +302,13 @@ fn concurrent_workers_no_double_processing() {
         .map(|_| {
             let q = Arc::clone(&queue);
             let count = Arc::clone(&processed);
-            thread::spawn(move || {
-                loop {
-                    match q.dequeue(Duration::from_millis(10)) {
-                        Some(job) => {
-                            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            q.complete(&job.id);
-                        }
-                        None => break,
+            thread::spawn(move || loop {
+                match q.dequeue(Duration::from_millis(10)) {
+                    Some(job) => {
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        q.complete(&job.id);
                     }
+                    None => break,
                 }
             })
         })
@@ -330,7 +319,10 @@ fn concurrent_workers_no_double_processing() {
     }
 
     let total = processed.load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(total, 200, "exactly 200 jobs should be processed, got {total}");
+    assert_eq!(
+        total, 200,
+        "exactly 200 jobs should be processed, got {total}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -364,14 +356,8 @@ fn concurrent_rate_limiter() {
 
     for t in threads {
         let (allowed, denied) = t.join().unwrap();
-        assert_eq!(
-            allowed, 100,
-            "expected 100 allowed, got {allowed}"
-        );
-        assert_eq!(
-            denied, 100,
-            "expected 100 denied, got {denied}"
-        );
+        assert_eq!(allowed, 100, "expected 100 allowed, got {allowed}");
+        assert_eq!(denied, 100, "expected 100 denied, got {denied}");
     }
 }
 

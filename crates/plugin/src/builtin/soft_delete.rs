@@ -33,7 +33,10 @@ impl SoftDeletePlugin {
 #[allow(dead_code)]
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     format!("{ts}Z")
 }
 
@@ -79,8 +82,12 @@ mod tests {
     #[test]
     fn blocks_delete_for_specific_entities() {
         let plugin = SoftDeletePlugin::for_entities(vec!["Todo".into()]);
-        assert!(plugin.before_delete("Todo", "t1", &AuthContext::anonymous()).is_err());
-        assert!(plugin.before_delete("User", "u1", &AuthContext::anonymous()).is_ok());
+        assert!(plugin
+            .before_delete("Todo", "t1", &AuthContext::anonymous())
+            .is_err());
+        assert!(plugin
+            .before_delete("User", "u1", &AuthContext::anonymous())
+            .is_ok());
     }
 
     #[test]

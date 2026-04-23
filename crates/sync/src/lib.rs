@@ -70,10 +70,7 @@ pub enum PullError {
     /// The client should do a full re-sync from entity-list state rather than
     /// trusting the delta stream — events between `cursor.last_seq` and
     /// `oldest_seq` were evicted and cannot be replayed.
-    ResyncRequired {
-        oldest_seq: u64,
-        cursor: SyncCursor,
-    },
+    ResyncRequired { oldest_seq: u64, cursor: SyncCursor },
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +136,9 @@ impl ChangeLog {
     /// Create a new change log with a specific capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            events: Mutex::new(std::collections::VecDeque::with_capacity(capacity.min(1024))),
+            events: Mutex::new(std::collections::VecDeque::with_capacity(
+                capacity.min(1024),
+            )),
             seq: Mutex::new(0),
             capacity,
             seen_op_ids: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
@@ -174,7 +173,13 @@ impl ChangeLog {
     }
 
     /// Append a change event. Returns the assigned sequence number.
-    pub fn append(&self, entity: &str, row_id: &str, kind: ChangeKind, data: Option<serde_json::Value>) -> u64 {
+    pub fn append(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: ChangeKind,
+        data: Option<serde_json::Value>,
+    ) -> u64 {
         let mut seq = self.seq.lock().unwrap();
         *seq += 1;
         let event = ChangeEvent {
@@ -289,8 +294,18 @@ mod tests {
     #[test]
     fn append_and_pull() {
         let log = ChangeLog::new();
-        log.append("User", "u1", ChangeKind::Insert, Some(serde_json::json!({"name": "Alice"})));
-        log.append("User", "u2", ChangeKind::Insert, Some(serde_json::json!({"name": "Bob"})));
+        log.append(
+            "User",
+            "u1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"name": "Alice"})),
+        );
+        log.append(
+            "User",
+            "u2",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"name": "Bob"})),
+        );
 
         assert_eq!(log.len(), 2);
 
@@ -335,8 +350,18 @@ mod tests {
     #[test]
     fn change_kinds() {
         let log = ChangeLog::new();
-        log.append("Todo", "t1", ChangeKind::Insert, Some(serde_json::json!({"title": "Test"})));
-        log.append("Todo", "t1", ChangeKind::Update, Some(serde_json::json!({"title": "Updated"})));
+        log.append(
+            "Todo",
+            "t1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"title": "Test"})),
+        );
+        log.append(
+            "Todo",
+            "t1",
+            ChangeKind::Update,
+            Some(serde_json::json!({"title": "Updated"})),
+        );
         log.append("Todo", "t1", ChangeKind::Delete, None);
 
         let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
@@ -452,15 +477,13 @@ mod tests {
     #[test]
     fn push_request_serialization() {
         let req = PushRequest {
-            changes: vec![
-                ClientChange {
-                    entity: "User".into(),
-                    row_id: "u1".into(),
-                    kind: ChangeKind::Insert,
-                    data: Some(serde_json::json!({"name": "Alice"})),
-                    op_id: None,
-                },
-            ],
+            changes: vec![ClientChange {
+                entity: "User".into(),
+                row_id: "u1".into(),
+                kind: ChangeKind::Insert,
+                data: Some(serde_json::json!({"name": "Alice"})),
+                op_id: None,
+            }],
             client_id: Some("cl_123".into()),
         };
         let json = serde_json::to_string(&req).unwrap();

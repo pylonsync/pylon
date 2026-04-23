@@ -52,10 +52,7 @@ impl Check {
 // ---------------------------------------------------------------------------
 
 fn check_bun() -> Check {
-    match std::process::Command::new("bun")
-        .arg("--version")
-        .output()
-    {
+    match std::process::Command::new("bun").arg("--version").output() {
         Ok(out) if out.status.success() => {
             let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
             Check::pass(format!("Bun {version} installed"))
@@ -119,7 +116,8 @@ fn check_dev_mode_in_prod_shape() -> Check {
     // FILES_DIR. If any of those are set, PYLON_DEV_MODE=true is
     // probably a misconfig.
     let cors = std::env::var("PYLON_CORS_ORIGIN").unwrap_or_else(|_| "*".into());
-    let has_non_dev_cors = cors != "*" && !cors.contains("localhost") && !cors.contains("127.0.0.1");
+    let has_non_dev_cors =
+        cors != "*" && !cors.contains("localhost") && !cors.contains("127.0.0.1");
     if has_non_dev_cors {
         Check::warn(
             "PYLON_DEV_MODE=true but PYLON_CORS_ORIGIN looks production-shaped",
@@ -133,18 +131,18 @@ fn check_dev_mode_in_prod_shape() -> Check {
 fn check_cors_safety() -> Check {
     let dev = is_dev_mode();
     match std::env::var("PYLON_CORS_ORIGIN") {
-        Ok(v) if v == "*" && !dev => Check::error(
-            "PYLON_CORS_ORIGIN=\"*\" in production — server will refuse to start",
-        ),
+        Ok(v) if v == "*" && !dev => {
+            Check::error("PYLON_CORS_ORIGIN=\"*\" in production — server will refuse to start")
+        }
         Ok(v) if v == "*" => Check::warn(
             "PYLON_CORS_ORIGIN=\"*\"",
             "fine for dev; must be set to an explicit origin in production",
         ),
         Ok(_) => Check::pass("PYLON_CORS_ORIGIN set"),
         Err(_) if dev => Check::pass("PYLON_CORS_ORIGIN unset (dev mode → defaults to *)"),
-        Err(_) => Check::error(
-            "PYLON_CORS_ORIGIN unset in production — server will refuse to start",
-        ),
+        Err(_) => {
+            Check::error("PYLON_CORS_ORIGIN unset in production — server will refuse to start")
+        }
     }
 }
 
@@ -214,8 +212,7 @@ fn check_fn_rate_limits() -> Check {
     // Non-essential — just surface the current caps so operators can tell
     // which values apply (defaults vs overrides).
     let max = std::env::var("PYLON_FN_RATE_LIMIT_MAX").unwrap_or_else(|_| "30".into());
-    let window =
-        std::env::var("PYLON_FN_RATE_LIMIT_WINDOW").unwrap_or_else(|_| "60".into());
+    let window = std::env::var("PYLON_FN_RATE_LIMIT_WINDOW").unwrap_or_else(|_| "60".into());
     Check::pass(format!(
         "Fn rate limit: {max} calls per {window}s per (user, fn)"
     ))
@@ -237,10 +234,7 @@ fn check_port() -> Check {
 
 fn check_disk_space() -> Check {
     // Use `df` on unix-like systems to check available space.
-    match std::process::Command::new("df")
-        .args(["-k", "."])
-        .output()
-    {
+    match std::process::Command::new("df").args(["-k", "."]).output() {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             // Second line contains the stats; 4th column is available KB.
@@ -350,10 +344,7 @@ const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
 fn use_color() -> bool {
-    std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM")
-            .map(|t| t != "dumb")
-            .unwrap_or(true)
+    std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -382,9 +373,18 @@ pub fn run(_args: &[String], json_mode: bool) -> ExitCode {
         check_jobs_db(),
     ];
 
-    let passed = checks.iter().filter(|c| c.severity == Severity::Info).count();
-    let warnings = checks.iter().filter(|c| c.severity == Severity::Warning).count();
-    let errors = checks.iter().filter(|c| c.severity == Severity::Error).count();
+    let passed = checks
+        .iter()
+        .filter(|c| c.severity == Severity::Info)
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|c| c.severity == Severity::Warning)
+        .count();
+    let errors = checks
+        .iter()
+        .filter(|c| c.severity == Severity::Error)
+        .count();
 
     if json_mode {
         let report = JsonReport {

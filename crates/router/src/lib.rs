@@ -113,12 +113,7 @@ pub trait WorkflowOps: Send + Sync {
     fn list(&self, status_filter: Option<&str>) -> serde_json::Value;
     fn get(&self, id: &str) -> Option<serde_json::Value>;
     fn advance(&self, id: &str) -> Result<String, String>;
-    fn send_event(
-        &self,
-        id: &str,
-        event: &str,
-        data: serde_json::Value,
-    ) -> Result<(), String>;
+    fn send_event(&self, id: &str, event: &str, data: serde_json::Value) -> Result<(), String>;
     fn cancel(&self, id: &str) -> Result<(), String>;
 }
 
@@ -354,8 +349,7 @@ fn route_inner(
     if url == "/api/manifest" && method == HttpMethod::Get {
         return (
             200,
-            serde_json::to_string(ctx.store.manifest())
-                .unwrap_or_else(|_| "{}".into()),
+            serde_json::to_string(ctx.store.manifest()).unwrap_or_else(|_| "{}".into()),
         );
     }
 
@@ -387,7 +381,16 @@ fn route_inner(
         }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let user_id = match data.get("user_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -403,7 +406,10 @@ fn route_inner(
     // GET /api/auth/me
     if url == "/api/auth/me" && method == HttpMethod::Get {
         let resolved = ctx.session_store.resolve(auth_token);
-        return (200, serde_json::to_string(&resolved).unwrap_or_else(|_| "{}".into()));
+        return (
+            200,
+            serde_json::to_string(&resolved).unwrap_or_else(|_| "{}".into()),
+        );
     }
 
     // POST /api/auth/guest
@@ -411,7 +417,8 @@ fn route_inner(
         let session = ctx.session_store.create_guest();
         return (
             201,
-            serde_json::json!({"token": session.token, "user_id": session.user_id, "guest": true}).to_string(),
+            serde_json::json!({"token": session.token, "user_id": session.user_id, "guest": true})
+                .to_string(),
         );
     }
 
@@ -435,7 +442,16 @@ fn route_inner(
         }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let user_id = match data.get("user_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -443,10 +459,16 @@ fn route_inner(
         };
         if let Some(token) = auth_token {
             if ctx.session_store.upgrade(token, user_id.clone()) {
-                return (200, serde_json::json!({"upgraded": true, "user_id": user_id}).to_string());
+                return (
+                    200,
+                    serde_json::json!({"upgraded": true, "user_id": user_id}).to_string(),
+                );
             }
         }
-        return (400, json_error("UPGRADE_FAILED", "No valid session to upgrade"));
+        return (
+            400,
+            json_error("UPGRADE_FAILED", "No valid session to upgrade"),
+        );
     }
 
     // POST /api/auth/select-org
@@ -486,7 +508,12 @@ fn route_inner(
         });
         let target = match target {
             Some(t) => t,
-            None => return (400, json_error("MISSING_ORG_ID", "orgId is required (or null)")),
+            None => {
+                return (
+                    400,
+                    json_error("MISSING_ORG_ID", "orgId is required (or null)"),
+                )
+            }
         };
         if target.is_empty() {
             // Clear the active org — the user is dropping out of all tenants.
@@ -522,7 +549,16 @@ fn route_inner(
     if url == "/api/auth/magic/send" && method == HttpMethod::Post {
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let email = match data.get("email").and_then(|v| v.as_str()) {
             Some(e) => e.to_string(),
@@ -543,14 +579,16 @@ fn route_inner(
             Err(e) => {
                 return (
                     500,
-                    json_error("EMAIL_SEND_FAILED", &format!("Could not issue code: {:?}", e)),
+                    json_error(
+                        "EMAIL_SEND_FAILED",
+                        &format!("Could not issue code: {:?}", e),
+                    ),
                 );
             }
         };
         let subject = "Your sign-in code";
-        let body_text = format!(
-            "Your sign-in code is: {code}\n\nThis code will expire in 10 minutes."
-        );
+        let body_text =
+            format!("Your sign-in code is: {code}\n\nThis code will expire in 10 minutes.");
         if let Err(e) = ctx.email.send(&email, subject, &body_text) {
             if !ctx.is_dev {
                 tracing::warn!("[email] Failed to send magic code to {email}: {e}");
@@ -576,7 +614,16 @@ fn route_inner(
     if url == "/api/auth/magic/verify" && method == HttpMethod::Post {
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let email = match data.get("email").and_then(|v| v.as_str()) {
             Some(e) => e,
@@ -678,7 +725,16 @@ fn route_inner(
         if method == HttpMethod::Post {
             let data: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
-                Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+                Err(e) => {
+                    return (
+                        400,
+                        json_error_safe(
+                            "INVALID_JSON",
+                            "Invalid request body",
+                            &format!("Invalid JSON: {e}"),
+                        ),
+                    )
+                }
             };
 
             // Validate CSRF state.
@@ -688,7 +744,10 @@ fn route_inner(
                 _ => {
                     return (
                         403,
-                        json_error("OAUTH_INVALID_STATE", "Invalid or missing OAuth state parameter"),
+                        json_error(
+                            "OAUTH_INVALID_STATE",
+                            "Invalid or missing OAuth state parameter",
+                        ),
                     )
                 }
             }
@@ -887,8 +946,11 @@ fn route_inner(
                 // `data` still get a chance to match (deletes pass `None`).
                 resp.changes.retain(|ev| {
                     matches!(
-                        ctx.policy_engine
-                            .check_entity_read(&ev.entity, ctx.auth_ctx, ev.data.as_ref()),
+                        ctx.policy_engine.check_entity_read(
+                            &ev.entity,
+                            ctx.auth_ctx,
+                            ev.data.as_ref()
+                        ),
                         pylon_policy::PolicyResult::Allowed
                     )
                 });
@@ -935,12 +997,16 @@ fn route_inner(
             if !user_id.is_empty() {
                 // Export
                 if action == "export" && method == HttpMethod::Post {
-                    if let Some(err) = require_admin(ctx) { return err; }
+                    if let Some(err) = require_admin(ctx) {
+                        return err;
+                    }
                     return gdpr_export(ctx, user_id);
                 }
                 // Purge (hard delete + session revoke)
                 if action == "purge" && method == HttpMethod::Delete {
-                    if let Some(err) = require_admin(ctx) { return err; }
+                    if let Some(err) = require_admin(ctx) {
+                        return err;
+                    }
                     return gdpr_purge(ctx, user_id);
                 }
             }
@@ -954,7 +1020,16 @@ fn route_inner(
         }
         let push_req: pylon_sync::PushRequest = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
 
         let mut applied = 0u32;
@@ -985,7 +1060,9 @@ fn route_inner(
                                 );
                                 applied += 1;
                             }
-                            Err(e) => errors.push(format!("insert {}: {}", change.entity, e.message)),
+                            Err(e) => {
+                                errors.push(format!("insert {}: {}", change.entity, e.message))
+                            }
                         }
                     }
                 }
@@ -1008,23 +1085,21 @@ fn route_inner(
                         }
                     }
                 }
-                ChangeKind::Delete => {
-                    match ctx.store.delete(&change.entity, &change.row_id) {
-                        Ok(_) => {
-                            ctx.change_log.append(
-                                &change.entity,
-                                &change.row_id,
-                                ChangeKind::Delete,
-                                None,
-                            );
-                            applied += 1;
-                        }
-                        Err(e) => errors.push(format!(
-                            "delete {}/{}: {}",
-                            change.entity, change.row_id, e.message
-                        )),
+                ChangeKind::Delete => match ctx.store.delete(&change.entity, &change.row_id) {
+                    Ok(_) => {
+                        ctx.change_log.append(
+                            &change.entity,
+                            &change.row_id,
+                            ChangeKind::Delete,
+                            None,
+                        );
+                        applied += 1;
                     }
-                }
+                    Err(e) => errors.push(format!(
+                        "delete {}/{}: {}",
+                        change.entity, change.row_id, e.message
+                    )),
+                },
             }
         }
 
@@ -1065,10 +1140,21 @@ fn route_inner(
     // -----------------------------------------------------------------------
 
     if url == "/api/rooms/join" && method == HttpMethod::Post {
-        if let Some(err) = require_auth(ctx) { return err; }
+        if let Some(err) = require_auth(ctx) {
+            return err;
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let room = match data.get("room").and_then(|v| v.as_str()) {
             Some(r) => r,
@@ -1086,7 +1172,12 @@ fn route_inner(
         };
         let user_id = match user_id {
             Some(u) => u,
-            None => return (401, json_error("AUTH_REQUIRED", "authenticated session required")),
+            None => {
+                return (
+                    401,
+                    json_error("AUTH_REQUIRED", "authenticated session required"),
+                )
+            }
         };
         let user_data = data.get("data").cloned();
 
@@ -1110,10 +1201,21 @@ fn route_inner(
     }
 
     if url == "/api/rooms/leave" && method == HttpMethod::Post {
-        if let Some(err) = require_auth(ctx) { return err; }
+        if let Some(err) = require_auth(ctx) {
+            return err;
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let room = match data.get("room").and_then(|v| v.as_str()) {
             Some(r) => r,
@@ -1131,7 +1233,12 @@ fn route_inner(
         };
         let user_id = match user_id {
             Some(u) => u,
-            None => return (401, json_error("AUTH_REQUIRED", "authenticated session required")),
+            None => {
+                return (
+                    401,
+                    json_error("AUTH_REQUIRED", "authenticated session required"),
+                )
+            }
         };
 
         if let Some(leave_event) = ctx.rooms.leave(room, user_id) {
@@ -1144,10 +1251,21 @@ fn route_inner(
     }
 
     if url == "/api/rooms/presence" && method == HttpMethod::Post {
-        if let Some(err) = require_auth(ctx) { return err; }
+        if let Some(err) = require_auth(ctx) {
+            return err;
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let room = match data.get("room").and_then(|v| v.as_str()) {
             Some(r) => r,
@@ -1165,7 +1283,12 @@ fn route_inner(
         };
         let user_id = match user_id {
             Some(u) => u,
-            None => return (401, json_error("AUTH_REQUIRED", "authenticated session required")),
+            None => {
+                return (
+                    401,
+                    json_error("AUTH_REQUIRED", "authenticated session required"),
+                )
+            }
         };
         let presence_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
 
@@ -1179,10 +1302,21 @@ fn route_inner(
     }
 
     if url == "/api/rooms/broadcast" && method == HttpMethod::Post {
-        if let Some(err) = require_auth(ctx) { return err; }
+        if let Some(err) = require_auth(ctx) {
+            return err;
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let room = match data.get("room").and_then(|v| v.as_str()) {
             Some(r) => r,
@@ -1213,7 +1347,9 @@ fn route_inner(
 
     // GET /api/rooms
     if url == "/api/rooms" && method == HttpMethod::Get {
-        if let Some(err) = require_auth(ctx) { return err; }
+        if let Some(err) = require_auth(ctx) {
+            return err;
+        }
         let room_names = ctx.rooms.list_rooms();
         let rooms: Vec<serde_json::Value> = room_names
             .iter()
@@ -1239,7 +1375,9 @@ fn route_inner(
             && room_name != "presence"
             && room_name != "broadcast"
         {
-            if let Some(err) = require_auth(ctx) { return err; }
+            if let Some(err) = require_auth(ctx) {
+                return err;
+            }
             let members = ctx.rooms.members(room_name);
             return (
                 200,
@@ -1260,7 +1398,16 @@ fn route_inner(
     if url == "/api/link" && method == HttpMethod::Post {
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let entity = data.get("entity").and_then(|v| v.as_str()).unwrap_or("");
         let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1269,11 +1416,15 @@ fn route_inner(
 
         // A link is a mutation: it sets a foreign key on the source row.
         // Apply the same write policy as PATCH /api/entities/:name/:id.
-        let check = ctx.policy_engine.check_entity_write(entity, ctx.auth_ctx, Some(&data));
-        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
-            tracing::warn!(
-                "[policy] link on {entity} denied by \"{policy_name}\": {reason}"
-            );
+        let check = ctx
+            .policy_engine
+            .check_entity_write(entity, ctx.auth_ctx, Some(&data));
+        if let pylon_policy::PolicyResult::Denied {
+            policy_name,
+            reason,
+        } = check
+        {
+            tracing::warn!("[policy] link on {entity} denied by \"{policy_name}\": {reason}");
             return (403, json_error("POLICY_DENIED", "Access denied by policy"));
         }
 
@@ -1287,17 +1438,30 @@ fn route_inner(
     if url == "/api/unlink" && method == HttpMethod::Post {
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let entity = data.get("entity").and_then(|v| v.as_str()).unwrap_or("");
         let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let relation = data.get("relation").and_then(|v| v.as_str()).unwrap_or("");
 
-        let check = ctx.policy_engine.check_entity_write(entity, ctx.auth_ctx, Some(&data));
-        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
-            tracing::warn!(
-                "[policy] unlink on {entity} denied by \"{policy_name}\": {reason}"
-            );
+        let check = ctx
+            .policy_engine
+            .check_entity_write(entity, ctx.auth_ctx, Some(&data));
+        if let pylon_policy::PolicyResult::Denied {
+            policy_name,
+            reason,
+        } = check
+        {
+            tracing::warn!("[policy] unlink on {entity} denied by \"{policy_name}\": {reason}");
             return (403, json_error("POLICY_DENIED", "Access denied by policy"));
         }
 
@@ -1335,7 +1499,16 @@ fn route_inner(
         }
         let ops: Vec<serde_json::Value> = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
 
         return match ctx.store.transact(&ops) {
@@ -1366,7 +1539,16 @@ fn route_inner(
         if !entity.is_empty() && entity != "filtered" {
             let filter: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
-                Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+                Err(e) => {
+                    return (
+                        400,
+                        json_error_safe(
+                            "INVALID_JSON",
+                            "Invalid request body",
+                            &format!("Invalid JSON: {e}"),
+                        ),
+                    )
+                }
             };
             match ctx.store.query_filtered(entity, &filter) {
                 Ok(rows) => {
@@ -1391,7 +1573,11 @@ fn route_inner(
             let check = ctx
                 .policy_engine
                 .check_entity_read(parts[0], ctx.auth_ctx, None);
-            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
+            if let pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } = check
+            {
                 tracing::warn!(
                     "[policy] lookup on {} denied by \"{policy_name}\": {reason}",
                     parts[0]
@@ -1429,7 +1615,11 @@ fn route_inner(
             let check = ctx
                 .policy_engine
                 .check_entity_read(entity, ctx.auth_ctx, None);
-            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
+            if let pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } = check
+            {
                 tracing::warn!(
                     "[policy] aggregate on {entity} denied by \"{policy_name}\": {reason}"
                 );
@@ -1468,7 +1658,10 @@ fn route_inner(
                 }
             }
             return match ctx.store.aggregate(entity, &spec) {
-                Ok(result) => (200, serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())),
+                Ok(result) => (
+                    200,
+                    serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
+                ),
                 Err(e) => (400, json_error(&e.code, &e.message)),
             };
         }
@@ -1478,7 +1671,16 @@ fn route_inner(
     if url == "/api/query" && method == HttpMethod::Post {
         let query: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         // Gate every entity named in the graph against the read policy.
         // Without this a graph query could dump rows from entities the
@@ -1489,7 +1691,11 @@ fn route_inner(
                 let check = ctx
                     .policy_engine
                     .check_entity_read(entity_name, ctx.auth_ctx, None);
-                if let pylon_policy::PolicyResult::Denied { policy_name, reason } = check {
+                if let pylon_policy::PolicyResult::Denied {
+                    policy_name,
+                    reason,
+                } = check
+                {
                     tracing::warn!(
                         "[policy] graph query on {entity_name} denied by \"{policy_name}\": {reason}"
                     );
@@ -1515,17 +1721,35 @@ fn route_inner(
     if let Some(action_name) = url.strip_prefix("/api/actions/") {
         let action_name = action_name.split('?').next().unwrap_or(action_name);
         if method != HttpMethod::Post {
-            return (405, json_error("METHOD_NOT_ALLOWED", "Actions require POST"));
+            return (
+                405,
+                json_error("METHOD_NOT_ALLOWED", "Actions require POST"),
+            );
         }
 
         let input: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
 
-        let policy_check = ctx.policy_engine.check_action(action_name, ctx.auth_ctx, Some(&input));
+        let policy_check = ctx
+            .policy_engine
+            .check_action(action_name, ctx.auth_ctx, Some(&input));
         if !policy_check.is_allowed() {
-            if let pylon_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
+            if let pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } = policy_check
+            {
                 // Don't leak the raw allow expression to the client — it
                 // reveals role names, field names, and the shape of the
                 // access-control model. Log the full reason server-side
@@ -1533,10 +1757,7 @@ fn route_inner(
                 tracing::warn!(
                     "[policy] action \"{action_name}\" denied by \"{policy_name}\": {reason}"
                 );
-                return (
-                    403,
-                    json_error("POLICY_DENIED", "Access denied by policy"),
-                );
+                return (403, json_error("POLICY_DENIED", "Access denied by policy"));
             }
         }
 
@@ -1766,8 +1987,7 @@ fn route_inner(
                 return match ctx.store.list_after(entity_name, after, limit + 1) {
                     Ok(rows) => {
                         let has_more = rows.len() > limit;
-                        let page: Vec<serde_json::Value> =
-                            rows.into_iter().take(limit).collect();
+                        let page: Vec<serde_json::Value> = rows.into_iter().take(limit).collect();
                         let next_cursor = page
                             .last()
                             .and_then(|r| r.get("id"))
@@ -1799,7 +2019,16 @@ fn route_inner(
         }
         let batch: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let ops = match batch.get("operations").and_then(|v| v.as_array()) {
             Some(arr) => arr,
@@ -1833,7 +2062,14 @@ fn route_inner(
                                 ChangeKind::Insert,
                                 Some(data.clone()),
                             );
-                            broadcast_change(ctx.notifier, seq, entity, &id, ChangeKind::Insert, Some(&data));
+                            broadcast_change(
+                                ctx.notifier,
+                                seq,
+                                entity,
+                                &id,
+                                ChangeKind::Insert,
+                                Some(&data),
+                            );
                             results.push(serde_json::json!({"op": "insert", "id": id, "ok": true}));
                             succeeded += 1;
                         }
@@ -1878,13 +2114,16 @@ fn route_inner(
                     match ctx.store.delete(entity, id) {
                         Ok(deleted) => {
                             if deleted {
-                                let seq = ctx.change_log.append(
+                                let seq =
+                                    ctx.change_log.append(entity, id, ChangeKind::Delete, None);
+                                broadcast_change(
+                                    ctx.notifier,
+                                    seq,
                                     entity,
                                     id,
                                     ChangeKind::Delete,
                                     None,
                                 );
-                                broadcast_change(ctx.notifier, seq, entity, id, ChangeKind::Delete, None);
                             }
                             results.push(serde_json::json!({"op": "delete", "id": id, "ok": true}));
                             succeeded += 1;
@@ -1962,10 +2201,9 @@ fn route_inner(
         };
 
         let policy_check = match method {
-            HttpMethod::Get => {
-                ctx.policy_engine
-                    .check_entity_read(entity_name, ctx.auth_ctx, None)
-            }
+            HttpMethod::Get => ctx
+                .policy_engine
+                .check_entity_read(entity_name, ctx.auth_ctx, None),
             HttpMethod::Post => ctx.policy_engine.check_entity_insert(
                 entity_name,
                 ctx.auth_ctx,
@@ -1983,7 +2221,11 @@ fn route_inner(
             ),
             _ => pylon_policy::PolicyResult::Allowed,
         };
-        if let pylon_policy::PolicyResult::Denied { policy_name, reason } = policy_check {
+        if let pylon_policy::PolicyResult::Denied {
+            policy_name,
+            reason,
+        } = policy_check
+        {
             tracing::warn!(
                 "[policy] {method:?} {entity_name} denied by \"{policy_name}\": {reason}"
             );
@@ -2054,13 +2296,25 @@ fn route_inner(
         }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let name = match data.get("name").and_then(|v| v.as_str()) {
             Some(n) => n,
             None => return (400, json_error("MISSING_NAME", "name is required")),
         };
-        let payload = data.get("payload").cloned().unwrap_or(serde_json::json!({}));
+        let payload = data
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let priority = data
             .get("priority")
             .and_then(|v| v.as_str())
@@ -2075,7 +2329,9 @@ fn route_inner(
             .and_then(|v| v.as_str())
             .unwrap_or("default");
 
-        let id = ctx.jobs.enqueue(name, payload, priority, delay, max_retries, queue);
+        let id = ctx
+            .jobs
+            .enqueue(name, payload, priority, delay, max_retries, queue);
         return (
             201,
             serde_json::json!({"id": id, "status": "pending"}).to_string(),
@@ -2084,12 +2340,18 @@ fn route_inner(
 
     if url == "/api/jobs/stats" && method == HttpMethod::Get {
         let stats = ctx.jobs.stats();
-        return (200, serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into()));
+        return (
+            200,
+            serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into()),
+        );
     }
 
     if url == "/api/jobs/dead" && method == HttpMethod::Get {
         let dead = ctx.jobs.dead_letters();
-        return (200, serde_json::to_string(&dead).unwrap_or_else(|_| "[]".into()));
+        return (
+            200,
+            serde_json::to_string(&dead).unwrap_or_else(|_| "[]".into()),
+        );
     }
 
     if let Some(rest) = url.strip_prefix("/api/jobs/dead/") {
@@ -2120,10 +2382,7 @@ fn route_inner(
                 .split("status=")
                 .nth(1)
                 .and_then(|s| s.split('&').next());
-            let queue_filter = url
-                .split("queue=")
-                .nth(1)
-                .and_then(|s| s.split('&').next());
+            let queue_filter = url.split("queue=").nth(1).and_then(|s| s.split('&').next());
             let limit: usize = url
                 .split("limit=")
                 .nth(1)
@@ -2132,19 +2391,22 @@ fn route_inner(
                 .unwrap_or(50)
                 .min(200);
             let jobs = ctx.jobs.list_jobs(status_filter, queue_filter, limit);
-            return (200, serde_json::to_string(&jobs).unwrap_or_else(|_| "[]".into()));
+            return (
+                200,
+                serde_json::to_string(&jobs).unwrap_or_else(|_| "[]".into()),
+            );
         }
     }
 
     if let Some(job_id) = url.strip_prefix("/api/jobs/") {
         let job_id = job_id.split('?').next().unwrap_or(job_id);
-        if method == HttpMethod::Get
-            && !job_id.is_empty()
-            && job_id != "stats"
-            && job_id != "dead"
+        if method == HttpMethod::Get && !job_id.is_empty() && job_id != "stats" && job_id != "dead"
         {
             if let Some(job) = ctx.jobs.get_job(job_id) {
-                return (200, serde_json::to_string(&job).unwrap_or_else(|_| "{}".into()));
+                return (
+                    200,
+                    serde_json::to_string(&job).unwrap_or_else(|_| "{}".into()),
+                );
             }
             return (
                 404,
@@ -2159,7 +2421,10 @@ fn route_inner(
 
     if url == "/api/scheduler" && method == HttpMethod::Get {
         let tasks = ctx.scheduler.list_tasks();
-        return (200, serde_json::to_string(&tasks).unwrap_or_else(|_| "[]".into()));
+        return (
+            200,
+            serde_json::to_string(&tasks).unwrap_or_else(|_| "[]".into()),
+        );
     }
 
     if let Some(task_name) = url.strip_prefix("/api/scheduler/trigger/") {
@@ -2191,7 +2456,10 @@ fn route_inner(
     // GET /api/fn — list registered functions
     if url == "/api/fn" && method == HttpMethod::Get {
         return match ctx.functions {
-            Some(f) => (200, serde_json::to_string(&f.list_fns()).unwrap_or_else(|_| "[]".into())),
+            Some(f) => (
+                200,
+                serde_json::to_string(&f.list_fns()).unwrap_or_else(|_| "[]".into()),
+            ),
             None => (200, "[]".into()),
         };
     }
@@ -2205,7 +2473,10 @@ fn route_inner(
                     .unwrap_or(50)
                     .min(500);
                 let traces = f.recent_traces(limit);
-                (200, serde_json::to_string(&traces).unwrap_or_else(|_| "[]".into()))
+                (
+                    200,
+                    serde_json::to_string(&traces).unwrap_or_else(|_| "[]".into()),
+                )
             }
             None => (200, "[]".into()),
         };
@@ -2377,10 +2648,7 @@ fn route_inner(
                     200,
                     serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
                 ),
-                Err(e) => (
-                    400,
-                    json_error(&e.code, &e.message),
-                ),
+                Err(e) => (400, json_error(&e.code, &e.message)),
             };
         }
     }
@@ -2411,7 +2679,10 @@ fn route_inner(
                         info
                     })
                     .collect();
-                (200, serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
+                (
+                    200,
+                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()),
+                )
             }
             None => (200, "[]".into()),
         };
@@ -2436,7 +2707,10 @@ fn route_inner(
                     None => {
                         return (
                             404,
-                            json_error("SHARD_NOT_FOUND", &format!("Shard \"{shard_id}\" not found")),
+                            json_error(
+                                "SHARD_NOT_FOUND",
+                                &format!("Shard \"{shard_id}\" not found"),
+                            ),
                         );
                     }
                 };
@@ -2457,8 +2731,7 @@ fn route_inner(
                     .get("input")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                let input_str = serde_json::to_string(&input)
-                    .unwrap_or_else(|_| "null".into());
+                let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "null".into());
 
                 let shard_auth = pylon_realtime::ShardAuth {
                     user_id: ctx.auth_ctx.user_id.clone(),
@@ -2505,7 +2778,10 @@ fn route_inner(
                     }
                     return (
                         404,
-                        json_error("SHARD_NOT_FOUND", &format!("Shard \"{shard_id}\" not found")),
+                        json_error(
+                            "SHARD_NOT_FOUND",
+                            &format!("Shard \"{shard_id}\" not found"),
+                        ),
                     );
                 }
             }
@@ -2518,7 +2794,10 @@ fn route_inner(
 
     if url == "/api/workflows/definitions" && method == HttpMethod::Get {
         let defs = ctx.workflows.definitions();
-        return (200, serde_json::to_string(&defs).unwrap_or_else(|_| "[]".into()));
+        return (
+            200,
+            serde_json::to_string(&defs).unwrap_or_else(|_| "[]".into()),
+        );
     }
 
     if url == "/api/workflows/start" && method == HttpMethod::Post {
@@ -2527,7 +2806,16 @@ fn route_inner(
         }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
         };
         let name = match data.get("name").and_then(|v| v.as_str()) {
             Some(n) => n.to_string(),
@@ -2581,10 +2869,7 @@ fn route_inner(
                         return err;
                     }
                     return match ctx.workflows.advance(wf_id) {
-                        Ok(status) => (
-                            200,
-                            serde_json::json!({"status": status}).to_string(),
-                        ),
+                        Ok(status) => (200, serde_json::json!({"status": status}).to_string()),
                         Err(e) => (400, json_error("WORKFLOW_ADVANCE_FAILED", &e)),
                     };
                 }
@@ -2594,7 +2879,16 @@ fn route_inner(
                     }
                     let data: serde_json::Value = match serde_json::from_str(body) {
                         Ok(v) => v,
-                        Err(e) => return (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}"))),
+                        Err(e) => {
+                            return (
+                                400,
+                                json_error_safe(
+                                    "INVALID_JSON",
+                                    "Invalid request body",
+                                    &format!("Invalid JSON: {e}"),
+                                ),
+                            )
+                        }
                     };
                     let event = match data.get("event").and_then(|v| v.as_str()) {
                         Some(e) => e.to_string(),
@@ -2732,14 +3026,27 @@ fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u16, String)
     // Run plugin `before_insert` hooks. Registered plugins (validation,
     // timestamps, slugify) mutate `data` here; a rejected hook aborts
     // the write with their status + error payload.
-    if let Err((status, code, msg)) = ctx.plugin_hooks.before_insert(entity, &mut data, ctx.auth_ctx) {
+    if let Err((status, code, msg)) =
+        ctx.plugin_hooks
+            .before_insert(entity, &mut data, ctx.auth_ctx)
+    {
         return (status, json_error(&code, &msg));
     }
     match ctx.store.insert(entity, &data) {
         Ok(id) => {
-            let seq = ctx.change_log.append(entity, &id, ChangeKind::Insert, Some(data.clone()));
-            broadcast_change(ctx.notifier, seq, entity, &id, ChangeKind::Insert, Some(&data));
-            ctx.plugin_hooks.after_insert(entity, &id, &data, ctx.auth_ctx);
+            let seq = ctx
+                .change_log
+                .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
+            broadcast_change(
+                ctx.notifier,
+                seq,
+                entity,
+                &id,
+                ChangeKind::Insert,
+                Some(&data),
+            );
+            ctx.plugin_hooks
+                .after_insert(entity, &id, &data, ctx.auth_ctx);
             (201, serde_json::json!({"id": id}).to_string())
         }
         Err(e) => (400, json_error(&e.code, &e.message)),
@@ -2760,14 +3067,27 @@ fn handle_update(ctx: &RouterContext, entity: &str, id: &str, body: &str) -> (u1
             )
         }
     };
-    if let Err((status, code, msg)) = ctx.plugin_hooks.before_update(entity, id, &mut data, ctx.auth_ctx) {
+    if let Err((status, code, msg)) =
+        ctx.plugin_hooks
+            .before_update(entity, id, &mut data, ctx.auth_ctx)
+    {
         return (status, json_error(&code, &msg));
     }
     match ctx.store.update(entity, id, &data) {
         Ok(true) => {
-            let seq = ctx.change_log.append(entity, id, ChangeKind::Update, Some(data.clone()));
-            broadcast_change(ctx.notifier, seq, entity, id, ChangeKind::Update, Some(&data));
-            ctx.plugin_hooks.after_update(entity, id, &data, ctx.auth_ctx);
+            let seq = ctx
+                .change_log
+                .append(entity, id, ChangeKind::Update, Some(data.clone()));
+            broadcast_change(
+                ctx.notifier,
+                seq,
+                entity,
+                id,
+                ChangeKind::Update,
+                Some(&data),
+            );
+            ctx.plugin_hooks
+                .after_update(entity, id, &data, ctx.auth_ctx);
             (200, serde_json::json!({"updated": true}).to_string())
         }
         Ok(false) => (
@@ -2832,8 +3152,14 @@ pub fn json_error(code: &str, message: &str) -> String {
 /// sweep. We log a warning on export when entities appear to reference
 /// users through custom names not in this list.
 const USER_REF_FIELDS: &[&str] = &[
-    "userId", "user_id", "authorId", "author_id",
-    "ownerId", "owner_id", "createdBy", "created_by",
+    "userId",
+    "user_id",
+    "authorId",
+    "author_id",
+    "ownerId",
+    "owner_id",
+    "createdBy",
+    "created_by",
 ];
 
 /// Build a data-subject export for `user_id`. Returns a JSON envelope with
@@ -2866,11 +3192,7 @@ fn gdpr_export(ctx: &RouterContext, user_id: &str) -> (u16, String) {
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!(
-                    "[gdpr] export: query {} failed: {}",
-                    ent.name,
-                    e.message
-                );
+                tracing::warn!("[gdpr] export: query {} failed: {}", ent.name, e.message);
             }
         }
     }
@@ -2895,14 +3217,22 @@ fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
     if let Ok(true) = ctx.store.delete("User", user_id) {
         deleted += 1;
         // Synthetic change event so sync clients notice.
-        let seq = ctx.change_log.append("User", user_id, ChangeKind::Delete, None);
+        let seq = ctx
+            .change_log
+            .append("User", user_id, ChangeKind::Delete, None);
         broadcast_change(ctx.notifier, seq, "User", user_id, ChangeKind::Delete, None);
     }
 
     // Referencing rows.
     for ent in &manifest.entities {
-        if ent.name == "User" { continue; }
-        let Some(field) = ent.fields.iter().find(|f| USER_REF_FIELDS.contains(&f.name.as_str())) else {
+        if ent.name == "User" {
+            continue;
+        }
+        let Some(field) = ent
+            .fields
+            .iter()
+            .find(|f| USER_REF_FIELDS.contains(&f.name.as_str()))
+        else {
             continue;
         };
         let filter = serde_json::json!({ &field.name: user_id });
@@ -2914,11 +3244,15 @@ fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
             }
         };
         for row in rows {
-            let Some(id) = row.get("id").and_then(|v| v.as_str()) else { continue };
+            let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
             match ctx.store.delete(&ent.name, id) {
                 Ok(true) => {
                     deleted += 1;
-                    let seq = ctx.change_log.append(&ent.name, id, ChangeKind::Delete, None);
+                    let seq = ctx
+                        .change_log
+                        .append(&ent.name, id, ChangeKind::Delete, None);
                     broadcast_change(ctx.notifier, seq, &ent.name, id, ChangeKind::Delete, None);
                 }
                 Ok(false) => {}
@@ -2986,7 +3320,14 @@ pub fn json_error_safe(code: &str, user_message: &str, internal: &str) -> String
 /// Parse a JSON request body, returning a 400 error tuple on failure.
 fn parse_json(body: &str) -> Result<serde_json::Value, (u16, String)> {
     serde_json::from_str(body).map_err(|e| {
-        (400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("Invalid JSON: {e}")))
+        (
+            400,
+            json_error_safe(
+                "INVALID_JSON",
+                "Invalid request body",
+                &format!("Invalid JSON: {e}"),
+            ),
+        )
     })
 }
 
@@ -3012,9 +3353,7 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod auth_gate_tests {
     use super::*;
-    use pylon_auth::{
-        AuthContext, MagicCodeStore, OAuthStateStore, SessionStore,
-    };
+    use pylon_auth::{AuthContext, MagicCodeStore, OAuthStateStore, SessionStore};
     use pylon_kernel::{AppManifest, MANIFEST_VERSION};
     use pylon_policy::PolicyEngine;
     use pylon_sync::ChangeLog;
@@ -3045,10 +3384,7 @@ mod auth_gate_tests {
         ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
             Ok(None)
         }
-        fn list(
-            &self,
-            _entity: &str,
-        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+        fn list(&self, _entity: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
         }
         fn list_after(
@@ -3067,11 +3403,7 @@ mod auth_gate_tests {
         ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
-        fn delete(
-            &self,
-            _entity: &str,
-            _id: &str,
-        ) -> Result<bool, pylon_http::DataError> {
+        fn delete(&self, _entity: &str, _id: &str) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn lookup(
@@ -3306,12 +3638,8 @@ mod auth_gate_tests {
         with_ctx_hooks(is_dev, auth, &NoopPluginHooks, f);
     }
 
-    fn with_ctx_hooks<F>(
-        is_dev: bool,
-        auth: &AuthContext,
-        hooks: &dyn PluginHookOps,
-        f: F,
-    ) where
+    fn with_ctx_hooks<F>(is_dev: bool, auth: &AuthContext, hooks: &dyn PluginHookOps, f: F)
+    where
         F: FnOnce(&RouterContext),
     {
         let manifest = empty_manifest();
@@ -3578,13 +3906,8 @@ mod auth_gate_tests {
         let admin = AuthContext::admin();
         with_ctx(true, &admin, |ctx| {
             let depth = 300;
-            let body = format!(
-                "{}{}",
-                "[".repeat(depth),
-                "]".repeat(depth),
-            );
-            let (status, _body, _ct) =
-                route(ctx, HttpMethod::Post, "/api/sync/push", &body, None);
+            let body = format!("{}{}", "[".repeat(depth), "]".repeat(depth),);
+            let (status, _body, _ct) = route(ctx, HttpMethod::Post, "/api/sync/push", &body, None);
             // Serde may reject with 400, or the handler may accept and
             // treat as empty — either is fine. The key property: no panic.
             assert!(status >= 200 && status < 600);
@@ -3604,8 +3927,7 @@ mod auth_gate_tests {
                 HttpMethod::Options,
                 HttpMethod::Head,
             ] {
-                let (_status, _body, _ct) =
-                    route(ctx, method, "/api/entities/User", "{}", None);
+                let (_status, _body, _ct) = route(ctx, method, "/api/entities/User", "{}", None);
             }
         });
     }
@@ -3711,8 +4033,13 @@ mod auth_gate_tests {
         let admin = AuthContext::admin();
         let hooks = CountingHooks::new();
         with_ctx_hooks(true, &admin, &hooks, |ctx| {
-            let (status, _body, _ct) =
-                route(ctx, HttpMethod::Post, "/api/entities/User", r#"{"email":"a@b"}"#, None);
+            let (status, _body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/entities/User",
+                r#"{"email":"a@b"}"#,
+                None,
+            );
             assert_eq!(status, 201);
         });
         assert_eq!(hooks.before_insert_calls.load(Ordering::SeqCst), 1);
@@ -3799,8 +4126,13 @@ mod auth_gate_tests {
         let admin = AuthContext::admin();
         let hooks = CountingHooks::new();
         with_ctx_hooks(true, &admin, &hooks, |ctx| {
-            let (status, _body, _ct) =
-                route(ctx, HttpMethod::Delete, "/api/entities/User/stub-id", "", None);
+            let (status, _body, _ct) = route(
+                ctx,
+                HttpMethod::Delete,
+                "/api/entities/User/stub-id",
+                "",
+                None,
+            );
             assert_eq!(status, 200);
         });
         assert_eq!(hooks.before_delete_calls.load(Ordering::SeqCst), 1);
@@ -3844,8 +4176,7 @@ mod auth_gate_tests {
                 HttpMethod::Patch,
                 HttpMethod::Delete,
             ] {
-                let (status, _body, _ct) =
-                    route(ctx, method, "/api/webhooks/any_name", "", None);
+                let (status, _body, _ct) = route(ctx, method, "/api/webhooks/any_name", "", None);
                 // Without function runtime it's 503 regardless; the point
                 // is that we didn't 405 Method Not Allowed.
                 assert_ne!(status, 405);

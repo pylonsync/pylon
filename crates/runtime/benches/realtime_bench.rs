@@ -71,7 +71,12 @@ fn main() {
     let mut cursor_seq: u64 = 0;
     bench("change_log.pull(100)", 10_000, || {
         let _ = log
-            .pull(&SyncCursor { last_seq: cursor_seq }, 100)
+            .pull(
+                &SyncCursor {
+                    last_seq: cursor_seq,
+                },
+                100,
+            )
             .unwrap();
         cursor_seq = (cursor_seq + 100) % 9_900;
     });

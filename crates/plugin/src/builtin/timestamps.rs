@@ -26,7 +26,10 @@ impl TimestampsPlugin {
 
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let secs_per_day: u64 = 86400;
     let days = ts / secs_per_day;
     let rem = ts % secs_per_day;
@@ -59,7 +62,8 @@ impl Plugin for TimestampsPlugin {
     ) -> Result<(), PluginError> {
         if let Some(obj) = data.as_object_mut() {
             let now = now_iso();
-            obj.entry(&self.created_field).or_insert(Value::String(now.clone()));
+            obj.entry(&self.created_field)
+                .or_insert(Value::String(now.clone()));
             obj.entry(&self.updated_field).or_insert(Value::String(now));
         }
         Ok(())
@@ -87,7 +91,9 @@ mod tests {
     fn sets_created_at_on_insert() {
         let plugin = TimestampsPlugin::new();
         let mut data = serde_json::json!({"title": "Test"});
-        plugin.before_insert("Todo", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Todo", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert!(data.get("createdAt").is_some());
         assert!(data.get("updatedAt").is_some());
     }
@@ -96,7 +102,9 @@ mod tests {
     fn does_not_overwrite_existing_created_at() {
         let plugin = TimestampsPlugin::new();
         let mut data = serde_json::json!({"title": "Test", "createdAt": "2020-01-01"});
-        plugin.before_insert("Todo", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Todo", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert_eq!(data["createdAt"], "2020-01-01");
     }
 
@@ -104,7 +112,9 @@ mod tests {
     fn sets_updated_at_on_update() {
         let plugin = TimestampsPlugin::new();
         let mut data = serde_json::json!({"title": "Updated"});
-        plugin.before_update("Todo", "t1", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_update("Todo", "t1", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert!(data.get("updatedAt").is_some());
     }
 
@@ -112,7 +122,9 @@ mod tests {
     fn custom_field_names() {
         let plugin = TimestampsPlugin::with_fields("created", "modified");
         let mut data = serde_json::json!({"title": "Test"});
-        plugin.before_insert("Todo", &mut data, &AuthContext::anonymous()).unwrap();
+        plugin
+            .before_insert("Todo", &mut data, &AuthContext::anonymous())
+            .unwrap();
         assert!(data.get("created").is_some());
         assert!(data.get("modified").is_some());
     }

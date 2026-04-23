@@ -11,19 +11,22 @@ use pylon_policy::PolicyEngine;
 use pylon_sync::{ChangeKind, ChangeLog};
 use tiny_http::{Header, Method, Response, Server};
 
-use crate::datastore::{CacheAdapter, EmailAdapter, LocalFileOps, PluginHooksAdapter, PubSubAdapter, RuntimeOpenApiGenerator, ShardOpsAdapter, WsSseNotifier};
+use crate::datastore::{
+    CacheAdapter, EmailAdapter, LocalFileOps, PluginHooksAdapter, PubSubAdapter,
+    RuntimeOpenApiGenerator, ShardOpsAdapter, WsSseNotifier,
+};
+use crate::jobs::{JobQueue, JobResult, Worker};
+use crate::metrics::Metrics;
+use crate::pubsub::PubSubBroker;
+use crate::rate_limit::RateLimiter;
 use crate::rooms::RoomManager;
+use crate::scheduler::Scheduler;
 use crate::sse::SseHub;
+use crate::workflows::WorkflowEngine;
 use crate::ws::WsHub;
 use crate::Runtime;
-use crate::metrics::Metrics;
-use crate::rate_limit::RateLimiter;
+use pylon_plugin::builtin::ai_proxy::{AiMessage, AiProxyPlugin};
 use pylon_plugin::builtin::cache::CachePlugin;
-use pylon_plugin::builtin::ai_proxy::{AiProxyPlugin, AiMessage};
-use crate::pubsub::PubSubBroker;
-use crate::jobs::{JobQueue, JobResult, Worker};
-use crate::scheduler::Scheduler;
-use crate::workflows::WorkflowEngine;
 
 // ---------------------------------------------------------------------------
 // Streaming body — bridges mpsc::Receiver to std::io::Read for SSE responses
@@ -82,7 +85,6 @@ impl std::io::Read for StreamingBody {
         }
     }
 }
-
 
 /// Global shutdown flag. Set via `request_shutdown()` to trigger graceful exit.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -203,12 +205,7 @@ fn start_server(
             Ok(rows) => {
                 for row in rows {
                     if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
-                        change_log.append(
-                            &entity.name,
-                            id,
-                            ChangeKind::Insert,
-                            Some(row.clone()),
-                        );
+                        change_log.append(&entity.name, id, ChangeKind::Insert, Some(row.clone()));
                     }
                 }
             }
@@ -290,9 +287,7 @@ fn start_server(
                 let store = Arc::new(store);
                 let restored = job_queue.restore_from(&store);
                 if restored > 0 {
-                    tracing::info!(
-                        "[jobs] Restored {restored} pending job(s) from {jobs_db_path}"
-                    );
+                    tracing::info!("[jobs] Restored {restored} pending job(s) from {jobs_db_path}");
                 }
                 job_queue.attach_store(store);
             }
@@ -307,21 +302,35 @@ fn start_server(
     // Register built-in framework jobs.
     {
         let cache_ref = Arc::clone(&cache);
-        job_queue.register("pylon.cache.cleanup", Arc::new(move |_job| {
-            cache_ref.cleanup_expired();
-            JobResult::Success
-        }));
+        job_queue.register(
+            "pylon.cache.cleanup",
+            Arc::new(move |_job| {
+                cache_ref.cleanup_expired();
+                JobResult::Success
+            }),
+        );
         let rooms_ref = Arc::clone(&room_mgr);
-        job_queue.register("pylon.rooms.cleanup", Arc::new(move |_job| {
-            rooms_ref.cleanup_idle();
-            JobResult::Success
-        }));
+        job_queue.register(
+            "pylon.rooms.cleanup",
+            Arc::new(move |_job| {
+                rooms_ref.cleanup_idle();
+                JobResult::Success
+            }),
+        );
     }
 
     let scheduler = Arc::new(Scheduler::new(Arc::clone(&job_queue)));
     // Schedule built-in tasks.
-    let _ = scheduler.schedule("pylon.cache.cleanup", "*/10 * * * *", Arc::new(|_| JobResult::Success));
-    let _ = scheduler.schedule("pylon.rooms.cleanup", "*/5 * * * *", Arc::new(|_| JobResult::Success));
+    let _ = scheduler.schedule(
+        "pylon.cache.cleanup",
+        "*/10 * * * *",
+        Arc::new(|_| JobResult::Success),
+    );
+    let _ = scheduler.schedule(
+        "pylon.rooms.cleanup",
+        "*/5 * * * *",
+        Arc::new(|_| JobResult::Success),
+    );
 
     // Start 2 background workers.
     let _worker_handles: Vec<_> = (0..2)
@@ -351,18 +360,26 @@ fn start_server(
     // Override with PYLON_RATE_LIMIT_MAX + PYLON_RATE_LIMIT_WINDOW.
     let default_rl_max = if is_dev_early { 100_000 } else { 600 };
     let rl_max: u32 = std::env::var("PYLON_RATE_LIMIT_MAX")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(default_rl_max);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default_rl_max);
     let rl_window: u64 = std::env::var("PYLON_RATE_LIMIT_WINDOW")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
     let rate_limiter = Arc::new(RateLimiter::new(rl_max, rl_window));
 
     // Per-function rate limiter: separate bucket per (caller, function) pair.
     // Defaults to a stricter cap because functions are heavier than reads.
     // Override via PYLON_FN_RATE_LIMIT_MAX / PYLON_FN_RATE_LIMIT_WINDOW.
     let fn_rl_max: u32 = std::env::var("PYLON_FN_RATE_LIMIT_MAX")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     let fn_rl_window: u64 = std::env::var("PYLON_FN_RATE_LIMIT_WINDOW")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
     let fn_rate_limiter = Arc::new(RateLimiter::new(fn_rl_max, fn_rl_window));
 
     // TypeScript function runtime: optional Bun process that loads functions/*.ts
@@ -386,7 +403,9 @@ fn start_server(
     );
 
     // Dev mode flag: when false, sensitive data (e.g. magic codes) is omitted from responses.
-    let is_dev = std::env::var("PYLON_DEV_MODE").map(|v| v == "1" || v == "true").unwrap_or(true);
+    let is_dev = std::env::var("PYLON_DEV_MODE")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(true);
 
     // CORS origin. Defaults to `*` in dev for convenience; in prod we refuse
     // to start with a wildcard because the server sends `Access-Control-
@@ -407,17 +426,18 @@ fn start_server(
         }
     };
     if !is_dev && cors_origin == "*" {
-        return Err(
-            "PYLON_CORS_ORIGIN=\"*\" is refused in production mode. \
+        return Err("PYLON_CORS_ORIGIN=\"*\" is refused in production mode. \
             Set it to an explicit origin (https://app.example.com)."
-                .into(),
-        );
+            .into());
     }
     // Validate the origin once so per-request header construction can never
     // panic on bad bytes. Previously every `Header::from_bytes(...).unwrap()`
     // was a potential request-triggered DoS via env misconfiguration.
-    if Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
-        .is_err()
+    if Header::from_bytes(
+        "Access-Control-Allow-Origin",
+        cors_origin.as_bytes().to_vec(),
+    )
+    .is_err()
     {
         return Err(format!(
             "PYLON_CORS_ORIGIN={cors_origin:?} contains bytes that are not a valid HTTP header value"
@@ -453,9 +473,7 @@ fn start_server(
             }
         }
     };
-    let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(
-        csrf_origins,
-    ));
+    let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(csrf_origins));
 
     // Start WebSocket server on port+1.
     {
@@ -547,7 +565,13 @@ fn start_server(
                 Response::from_string(&body)
                     .with_status_code(200u16)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             continue;
@@ -567,12 +591,7 @@ fn start_server(
                             && h.value
                                 .as_str()
                                 .strip_prefix("Bearer ")
-                                .map(|t| {
-                                    pylon_auth::constant_time_eq(
-                                        t.as_bytes(),
-                                        admin_bytes,
-                                    )
-                                })
+                                .map(|t| pylon_auth::constant_time_eq(t.as_bytes(), admin_bytes))
                                 .unwrap_or(false)
                     });
                 if !auth_ok {
@@ -605,7 +624,13 @@ fn start_server(
                 Response::from_string(&body)
                     .with_status_code(200u16)
                     .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
@@ -625,24 +650,50 @@ fn start_server(
         // the user-visible symptom is "Failed to fetch" on login. Skip.
         let is_preflight = matches!(method, Method::Options);
         if !is_preflight {
-        if let Err(retry_after) = rate_limiter.check(&peer_ip) {
-            let err_body = json_error(
-                "RATE_LIMITED",
-                &format!("Too many requests. Retry after {retry_after} seconds."),
-            );
-            let response = with_security_headers(
-                Response::from_string(&err_body)
-                    .with_status_code(429u16)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Headers", "Content-Type, Authorization").unwrap())
-                    .with_header(Header::from_bytes("Retry-After", retry_after.to_string().as_bytes().to_vec()).unwrap())
-            );
-            let _ = request.respond(response);
-            mt.record_request(method.as_str(), 429);
-            continue;
-        }
+            if let Err(retry_after) = rate_limiter.check(&peer_ip) {
+                let err_body = json_error(
+                    "RATE_LIMITED",
+                    &format!("Too many requests. Retry after {retry_after} seconds."),
+                );
+                let response = with_security_headers(
+                    Response::from_string(&err_body)
+                        .with_status_code(429u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Methods",
+                                "GET, POST, PATCH, DELETE, OPTIONS",
+                            )
+                            .unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Headers",
+                                "Content-Type, Authorization",
+                            )
+                            .unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Retry-After",
+                                retry_after.to_string().as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request(method.as_str(), 429);
+                continue;
+            }
         } // end: if !is_preflight
 
         // --- CSRF check on state-changing requests ---
@@ -668,12 +719,7 @@ fn start_server(
             // classic sense — browsers don't auto-attach bearer tokens. Skip
             // the check for them so server-to-server API callers keep working
             // without needing Origin headers.
-            if !is_bearer
-                && !matches!(
-                    method,
-                    Method::Get | Method::Head | Method::Options
-                )
-            {
+            if !is_bearer && !matches!(method, Method::Get | Method::Head | Method::Options) {
                 let origin = request
                     .headers()
                     .iter()
@@ -684,17 +730,21 @@ fn start_server(
                     .iter()
                     .find(|h| h.field.as_str() == "Referer" || h.field.as_str() == "referer")
                     .map(|h| h.value.as_str().to_string());
-                if let Err(err) = csrf.check(
-                    method_str,
-                    origin.as_deref(),
-                    referer.as_deref(),
-                ) {
+                if let Err(err) = csrf.check(method_str, origin.as_deref(), referer.as_deref()) {
                     let body = json_error(&err.code, &err.message);
                     let response = with_security_headers(
                         Response::from_string(&body)
                             .with_status_code(err.status)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request(method_str, err.status);
@@ -715,7 +765,12 @@ fn start_server(
                 let val = h.value.as_str();
                 val.strip_prefix("Bearer ").map(|t| t.to_string())
             });
-        let auth_ctx = if admin_token.is_some() && auth_token.is_some() && pylon_auth::constant_time_eq(auth_token.as_deref().unwrap_or("").as_bytes(), admin_token.as_deref().unwrap_or("").as_bytes()) {
+        let auth_ctx = if admin_token.is_some()
+            && auth_token.is_some()
+            && pylon_auth::constant_time_eq(
+                auth_token.as_deref().unwrap_or("").as_bytes(),
+                admin_token.as_deref().unwrap_or("").as_bytes(),
+            ) {
             pylon_auth::AuthContext::admin()
         } else {
             ss.resolve(auth_token.as_deref())
@@ -748,8 +803,16 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string(&body)
                         .with_status_code(403u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 403);
@@ -763,7 +826,13 @@ fn start_server(
                 Response::from_string(&body)
                     .with_status_code(status)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
@@ -791,8 +860,16 @@ fn start_server(
                     let response = with_security_headers(
                         Response::from_string(&err)
                             .with_status_code(413u16)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 413);
@@ -807,8 +884,16 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(401u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
@@ -829,8 +914,16 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(413u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 413);
@@ -856,15 +949,20 @@ fn start_server(
                 match parse_multipart_first_file(&bytes, &content_type) {
                     Some(p) => p,
                     None => {
-                        let err = json_error(
-                            "INVALID_MULTIPART",
-                            "Could not parse multipart body",
-                        );
+                        let err = json_error("INVALID_MULTIPART", "Could not parse multipart body");
                         let response = with_security_headers(
                             Response::from_string(&err)
                                 .with_status_code(400u16)
-                                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                                .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 400);
@@ -880,24 +978,26 @@ fn start_server(
                 &std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into()),
             );
 
-            let (status, body) = match pylon_storage::files::FileStorage::store(
-                &storage, &name, &payload, &ct,
-            ) {
-                Ok(stored) => (
-                    201u16,
-                    serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
-                ),
-                Err(e) => (
-                    500u16,
-                    json_error(&e.code, &e.message),
-                ),
-            };
+            let (status, body) =
+                match pylon_storage::files::FileStorage::store(&storage, &name, &payload, &ct) {
+                    Ok(stored) => (
+                        201u16,
+                        serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
+                    ),
+                    Err(e) => (500u16, json_error(&e.code, &e.message)),
+                };
 
             let response = with_security_headers(
                 Response::from_string(&body)
                     .with_status_code(status)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
@@ -960,7 +1060,13 @@ fn start_server(
                 Response::from_string(&err_body)
                     .with_status_code(413u16)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             mt.record_request(method.as_str(), 413);
@@ -986,8 +1092,16 @@ fn start_server(
                         let response = with_security_headers(
                             Response::from_string(&err)
                                 .with_status_code(401u16)
-                                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                                .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
                         );
                         let _ = request.respond(response);
                         mt.record_request("GET", 401);
@@ -1003,8 +1117,17 @@ fn start_server(
                             let response = with_security_headers(
                                 Response::from_string(&err)
                                     .with_status_code(503u16)
-                                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 503);
@@ -1021,8 +1144,17 @@ fn start_server(
                             let response = with_security_headers(
                                 Response::from_string(&err)
                                     .with_status_code(404u16)
-                                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                                    .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 404);
@@ -1057,8 +1189,7 @@ fn start_server(
                         Box::new(move |tick: u64, bytes: &[u8]| {
                             // Format as SSE with an id: line carrying the tick
                             // number so clients can resume with Last-Event-ID.
-                            let mut frame =
-                                format!("id: {tick}\ndata: ").into_bytes();
+                            let mut frame = format!("id: {tick}\ndata: ").into_bytes();
                             frame.extend_from_slice(bytes);
                             frame.extend_from_slice(b"\n\n");
                             let _ = tx_clone.send(frame);
@@ -1068,9 +1199,7 @@ fn start_server(
                         user_id: auth_ctx.user_id.clone(),
                         is_admin: auth_ctx.is_admin,
                     };
-                    if let Err(e) =
-                        shard.add_subscriber(subscriber_id.clone(), sink, &shard_auth)
-                    {
+                    if let Err(e) = shard.add_subscriber(subscriber_id.clone(), sink, &shard_auth) {
                         let (status, code) = match &e {
                             pylon_realtime::ShardError::Unauthorized(_) => (403u16, "UNAUTHORIZED"),
                             _ => (429u16, "SUBSCRIBE_FAILED"),
@@ -1079,8 +1208,16 @@ fn start_server(
                         let response = with_security_headers(
                             Response::from_string(&err)
                                 .with_status_code(status)
-                                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                                .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
                         );
                         let _ = request.respond(response);
                         mt.record_request("GET", status);
@@ -1098,10 +1235,7 @@ fn start_server(
                             // channel is closed (client disconnected).
                             loop {
                                 std::thread::sleep(std::time::Duration::from_secs(30));
-                                if tx_liveness
-                                    .send(b": heartbeat\n\n".to_vec())
-                                    .is_err()
-                                {
+                                if tx_liveness.send(b": heartbeat\n\n".to_vec()).is_err() {
                                     shard_cleanup.remove_subscriber(&sub_id_cleanup);
                                     return;
                                 }
@@ -1139,13 +1273,10 @@ fn start_server(
         if method == Method::Post
             && url.starts_with("/api/fn/")
             && url != "/api/fn/traces"
-            && request
-                .headers()
-                .iter()
-                .any(|h| {
-                    (h.field.as_str() == "Accept" || h.field.as_str() == "accept")
-                        && h.value.as_str().contains("text/event-stream")
-                })
+            && request.headers().iter().any(|h| {
+                (h.field.as_str() == "Accept" || h.field.as_str() == "accept")
+                    && h.value.as_str().contains("text/event-stream")
+            })
         {
             let fn_name = url
                 .strip_prefix("/api/fn/")
@@ -1167,8 +1298,16 @@ fn start_server(
                     let response = with_security_headers(
                         Response::from_string(&err)
                             .with_status_code(404u16)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 404);
@@ -1185,8 +1324,16 @@ fn start_server(
                     let response = with_security_headers(
                         Response::from_string(&body)
                             .with_status_code(429u16)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 429);
@@ -1274,8 +1421,16 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(401u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
@@ -1287,12 +1442,23 @@ fn start_server(
             let ai_base = std::env::var("PYLON_AI_BASE_URL").unwrap_or_default();
 
             if ai_key.is_empty() && ai_provider != "custom" {
-                let err = json_error("AI_NOT_CONFIGURED", "Set PYLON_AI_PROVIDER and PYLON_AI_API_KEY");
+                let err = json_error(
+                    "AI_NOT_CONFIGURED",
+                    "Set PYLON_AI_PROVIDER and PYLON_AI_API_KEY",
+                );
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(503u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 503);
@@ -1306,8 +1472,16 @@ fn start_server(
                     let response = with_security_headers(
                         Response::from_string(&err)
                             .with_status_code(400u16)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
@@ -1316,18 +1490,29 @@ fn start_server(
             };
 
             let messages: Vec<AiMessage> = match parsed.get("messages").and_then(|m| m.as_array()) {
-                Some(arr) => arr.iter().filter_map(|m| {
-                    let role = m.get("role")?.as_str()?.to_string();
-                    let content = m.get("content")?.as_str()?.to_string();
-                    Some(AiMessage { role, content })
-                }).collect(),
+                Some(arr) => arr
+                    .iter()
+                    .filter_map(|m| {
+                        let role = m.get("role")?.as_str()?.to_string();
+                        let content = m.get("content")?.as_str()?.to_string();
+                        Some(AiMessage { role, content })
+                    })
+                    .collect(),
                 None => {
                     let err = json_error("MISSING_FIELD", "\"messages\" array is required");
                     let response = with_security_headers(
                         Response::from_string(&err)
                             .with_status_code(400u16)
-                            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
@@ -1336,7 +1521,8 @@ fn start_server(
             };
 
             // Override model from request body if provided.
-            let model = parsed.get("model")
+            let model = parsed
+                .get("model")
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or(ai_model);
@@ -1357,45 +1543,56 @@ fn start_server(
             // is formatted as an SSE event and pushed through the channel.
             std::thread::spawn(move || {
                 let result = proxy.stream_completion(&messages, &mut |chunk| {
-                    let sse = format!("data: {}
+                    let sse = format!(
+                        "data: {}
 
-", serde_json::json!({
-                        "choices": [{"index": 0, "delta": {"content": chunk}}]
-                    }));
+",
+                        serde_json::json!({
+                            "choices": [{"index": 0, "delta": {"content": chunk}}]
+                        })
+                    );
                     let _ = tx.send(sse.into_bytes());
                 });
 
                 // Send a final event indicating completion or error.
                 match result {
                     Ok(_) => {
-                        let _ = tx.send(b"data: [DONE]
+                        let _ = tx.send(
+                            b"data: [DONE]
 
-".to_vec());
+"
+                            .to_vec(),
+                        );
                     }
                     Err(e) => {
-                        let err_event = format!("data: {}
+                        let err_event = format!(
+                            "data: {}
 
-", serde_json::json!({"error": {"message": e, "type": "stream_error"}}));
+",
+                            serde_json::json!({"error": {"message": e, "type": "stream_error"}})
+                        );
                         let _ = tx.send(err_event.into_bytes());
                     }
                 }
                 // tx is dropped here, which causes StreamingBody::read to return 0 (EOF).
             });
 
-            let response = with_security_headers(
-                Response::new(
-                    tiny_http::StatusCode(200),
-                    vec![
-                        Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
-                        Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-                        Header::from_bytes("Connection", "keep-alive").unwrap(),
-                        Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap(),
-                    ],
-                    streaming_body,
-                    None, // unknown content length = chunked transfer
-                    None,
-                )
-            );
+            let response = with_security_headers(Response::new(
+                tiny_http::StatusCode(200),
+                vec![
+                    Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                    Header::from_bytes("Cache-Control", "no-cache").unwrap(),
+                    Header::from_bytes("Connection", "keep-alive").unwrap(),
+                    Header::from_bytes(
+                        "Access-Control-Allow-Origin",
+                        cors_origin.as_bytes().to_vec(),
+                    )
+                    .unwrap(),
+                ],
+                streaming_body,
+                None, // unknown content length = chunked transfer
+                None,
+            ));
             let _ = request.respond(response);
             mt.record_request("POST", 200);
             continue;
@@ -1411,7 +1608,10 @@ fn start_server(
         // Serving a WWW-Authenticate Basic realm isn't useful here because
         // admin auth is bearer-token based. Callers get a 401 and should
         // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
-        let (status, response_body, content_type, is_studio) = if (url == "/studio" || url == "/studio/") && method == Method::Get {
+        let (status, response_body, content_type, is_studio) = if (url == "/studio"
+            || url == "/studio/")
+            && method == Method::Get
+        {
             if !is_dev && !auth_ctx.is_admin {
                 let body = json_error(
                     "AUTH_REQUIRED",
@@ -1420,8 +1620,16 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string(&body)
                         .with_status_code(401u16)
-                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
-                        .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
@@ -1438,8 +1646,15 @@ fn start_server(
                 peer_ip: peer_ip.as_str(),
             };
             if let Err(e) = pr.run_on_request_with_meta(method.as_str(), &url, &auth_ctx, &meta) {
-                (e.status, json_error(&e.code, &e.message), "application/json", false)
-            } else if let Some((s, b)) = pr.try_handle_route(method.as_str(), &url, &body, &auth_ctx) {
+                (
+                    e.status,
+                    json_error(&e.code, &e.message),
+                    "application/json",
+                    false,
+                )
+            } else if let Some((s, b)) =
+                pr.try_handle_route(method.as_str(), &url, &body, &auth_ctx)
+            {
                 // Plugin handled the route.
                 (s, b, "application/json", false)
             } else {
@@ -1459,8 +1674,9 @@ fn start_server(
                 let shard_adapter = shards_ref.as_ref().map(|reg| ShardOpsAdapter {
                     registry: Arc::clone(reg),
                 });
-                let shard_ops: Option<&dyn pylon_router::ShardOps> =
-                    shard_adapter.as_ref().map(|a| a as &dyn pylon_router::ShardOps);
+                let shard_ops: Option<&dyn pylon_router::ShardOps> = shard_adapter
+                    .as_ref()
+                    .map(|a| a as &dyn pylon_router::ShardOps);
                 let plugin_hooks = PluginHooksAdapter(Arc::clone(&pr));
                 // Snapshot request headers as (name, value) pairs for the
                 // router to forward into webhook-invoked actions. Header
@@ -1496,7 +1712,13 @@ fn start_server(
                     request_headers: &request_headers,
                 };
                 let http_method = HttpMethod::from_str(method.as_str());
-                let (s, b, _ct) = pylon_router::route(&router_ctx, http_method, &url, &body, auth_token.as_deref());
+                let (s, b, _ct) = pylon_router::route(
+                    &router_ctx,
+                    http_method,
+                    &url,
+                    &body,
+                    auth_token.as_deref(),
+                );
                 (s, b, "application/json", false)
             }
         };
@@ -1504,7 +1726,13 @@ fn start_server(
         let mut response = Response::from_string(&response_body)
             .with_status_code(status)
             .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
-            .with_header(Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap())
+            .with_header(
+                Header::from_bytes(
+                    "Access-Control-Allow-Origin",
+                    cors_origin.as_bytes().to_vec(),
+                )
+                .unwrap(),
+            )
             .with_header(
                 Header::from_bytes(
                     "Access-Control-Allow-Methods",
@@ -1512,7 +1740,13 @@ fn start_server(
                 )
                 .unwrap(),
             )
-            .with_header(Header::from_bytes("Access-Control-Allow-Headers", "Content-Type, Authorization").unwrap());
+            .with_header(
+                Header::from_bytes(
+                    "Access-Control-Allow-Headers",
+                    "Content-Type, Authorization",
+                )
+                .unwrap(),
+            );
 
         // Add Content-Security-Policy for Studio HTML responses.
         //
@@ -1637,7 +1871,10 @@ fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
 /// - `Content-Disposition: form-data; name=...; filename=...`
 /// - `Content-Type: ...`
 /// - blank line, then raw bytes, then `\r\n--boundary` terminator
-fn parse_multipart_first_file(body: &[u8], content_type_header: &str) -> Option<(String, String, Vec<u8>)> {
+fn parse_multipart_first_file(
+    body: &[u8],
+    content_type_header: &str,
+) -> Option<(String, String, Vec<u8>)> {
     // Extract the boundary parameter.
     let boundary_param = content_type_header
         .split(';')

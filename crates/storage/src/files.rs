@@ -12,8 +12,12 @@ use serde::Serialize;
 /// Pluggable file storage backend.
 pub trait FileStorage: Send + Sync {
     /// Store file content, returning a file ID and public URL.
-    fn store(&self, name: &str, content: &[u8], content_type: &str)
-        -> Result<StoredFile, FileStorageError>;
+    fn store(
+        &self,
+        name: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<StoredFile, FileStorageError>;
 
     /// Retrieve file content by ID.
     fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError>;
@@ -177,7 +181,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pylon_files_{}", std::process::id()));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
-        let stored = storage.store("test.txt", b"hello world", "text/plain").unwrap();
+        let stored = storage
+            .store("test.txt", b"hello world", "text/plain")
+            .unwrap();
         assert_eq!(stored.size, 11);
         assert!(stored.url.starts_with("/api/files/"));
 

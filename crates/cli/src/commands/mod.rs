@@ -1,8 +1,9 @@
+pub mod backup;
 pub mod build;
 pub mod cache;
 pub mod codegen;
-pub mod deploy;
 pub mod codegen_client;
+pub mod deploy;
 pub mod dev;
 pub mod doctor;
 pub mod env;
@@ -11,7 +12,6 @@ pub mod init;
 pub mod migrate;
 pub mod plugins;
 pub mod schema;
-pub mod backup;
 pub mod seed;
 pub mod test;
 pub mod version;

@@ -42,10 +42,13 @@ impl SseShard {
     }
 
     fn add(&self, id: u64, stream: TcpStream, guard: Option<IpConnGuard>) {
-        self.clients
-            .lock()
-            .unwrap()
-            .insert(id, SseClient { stream, _guard: guard });
+        self.clients.lock().unwrap().insert(
+            id,
+            SseClient {
+                stream,
+                _guard: guard,
+            },
+        );
     }
 
     #[allow(dead_code)]

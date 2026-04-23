@@ -87,9 +87,8 @@ where
         client_seq: Option<u64>,
         auth: &ShardAuth,
     ) -> Result<u64, ShardError> {
-        let input: S::Input = serde_json::from_str(body).map_err(|e| {
-            ShardError::Other(format!("invalid input JSON: {e}"))
-        })?;
+        let input: S::Input = serde_json::from_str(body)
+            .map_err(|e| ShardError::Other(format!("invalid input JSON: {e}")))?;
         Shard::push_input_authorized(self, subscriber_id, input, client_seq, auth)
     }
 
@@ -174,11 +173,8 @@ mod tests {
     #[test]
     fn push_input_json_roundtrip() {
         use crate::subscriber::Subscriber;
-        let shard: Arc<Shard<Counter>> = Shard::new(
-            "t",
-            Counter { value: 0 },
-            ShardConfig::default(),
-        );
+        let shard: Arc<Shard<Counter>> =
+            Shard::new("t", Counter { value: 0 }, ShardConfig::default());
         // Attach a subscriber first — push_input_authorized verifies
         // that the sender is an active subscriber, not a forged id.
         let sub = Subscriber::new(SubscriberId::new("p1"), Box::new(|_t, _b| {}));
@@ -187,7 +183,10 @@ mod tests {
         let dyn_shard: Arc<dyn DynShard> = shard.clone();
         assert_eq!(dyn_shard.id(), "t");
 
-        let admin = ShardAuth { user_id: Some("a".into()), is_admin: true };
+        let admin = ShardAuth {
+            user_id: Some("a".into()),
+            is_admin: true,
+        };
         let seq = dyn_shard
             .push_input_json(SubscriberId::new("p1"), "5", None, &admin)
             .unwrap();
@@ -198,13 +197,13 @@ mod tests {
 
     #[test]
     fn push_input_json_rejects_garbage() {
-        let shard: Arc<Shard<Counter>> = Shard::new(
-            "t",
-            Counter { value: 0 },
-            ShardConfig::default(),
-        );
+        let shard: Arc<Shard<Counter>> =
+            Shard::new("t", Counter { value: 0 }, ShardConfig::default());
         let dyn_shard: Arc<dyn DynShard> = shard;
-        let admin = ShardAuth { user_id: Some("a".into()), is_admin: true };
+        let admin = ShardAuth {
+            user_id: Some("a".into()),
+            is_admin: true,
+        };
         let err = dyn_shard
             .push_input_json(SubscriberId::new("p1"), "not json", None, &admin)
             .unwrap_err();

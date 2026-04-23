@@ -10,8 +10,8 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
@@ -55,7 +55,8 @@ fn available_port() -> u16 {
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
         // Confirm the whole 4-port block is free (HTTP + WS + SSE + shardWS).
-        let ok = (0..4).all(|off| std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok());
+        let ok = (0..4)
+            .all(|off| std::net::TcpListener::bind(format!("127.0.0.1:{}", base + off)).is_ok());
         if ok {
             return base;
         }
@@ -142,14 +143,13 @@ fn http_insert_appears_in_sync_pull() {
     );
     assert_eq!(status, 201, "insert: {body}");
 
-    let (status, body) =
-        http_request("GET", &format!("{base}/api/sync/pull?since=0"), None);
+    let (status, body) = http_request("GET", &format!("{base}/api/sync/pull?since=0"), None);
     assert_eq!(status, 200, "sync pull: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     let changes = resp["changes"].as_array().expect("changes array");
-    let todo_insert = changes.iter().find(|c| {
-        c["entity"] == "Todo" && c["kind"] == "insert"
-    });
+    let todo_insert = changes
+        .iter()
+        .find(|c| c["entity"] == "Todo" && c["kind"] == "insert");
     assert!(
         todo_insert.is_some(),
         "sync pull must surface the Todo insert: {resp}"

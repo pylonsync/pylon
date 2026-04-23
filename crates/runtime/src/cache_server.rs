@@ -86,8 +86,7 @@ pub fn start_cache_server_with_options(
 
     // Start the HTTP server.
     let addr = format!("0.0.0.0:{port}");
-    let server =
-        Server::http(&addr).map_err(|e| format!("Failed to start cache server: {e}"))?;
+    let server = Server::http(&addr).map_err(|e| format!("Failed to start cache server: {e}"))?;
 
     tracing::warn!("pylon cache server listening on http://localhost:{port}");
     tracing::warn!("  Cache:  POST http://localhost:{port}/cache");
@@ -227,13 +226,7 @@ mod tests {
         );
         assert_eq!(status, 200);
 
-        let (status, body) = route_request(
-            &cache,
-            &pubsub,
-            &Method::Get,
-            "/cache/x",
-            "",
-        );
+        let (status, body) = route_request(&cache, &pubsub, &Method::Get, "/cache/x", "");
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["result"], "1");
@@ -243,13 +236,7 @@ mod tests {
     fn delete_via_route() {
         let (cache, pubsub) = setup();
         cache.set("del_me", "val", None);
-        let (status, _) = route_request(
-            &cache,
-            &pubsub,
-            &Method::Delete,
-            "/cache/del_me",
-            "",
-        );
+        let (status, _) = route_request(&cache, &pubsub, &Method::Delete, "/cache/del_me", "");
         assert_eq!(status, 200);
         assert!(cache.get("del_me").is_none());
     }
@@ -272,13 +259,7 @@ mod tests {
     #[test]
     fn pubsub_channels_via_route() {
         let (cache, pubsub) = setup();
-        let (status, body) = route_request(
-            &cache,
-            &pubsub,
-            &Method::Get,
-            "/pubsub/channels",
-            "",
-        );
+        let (status, body) = route_request(&cache, &pubsub, &Method::Get, "/pubsub/channels", "");
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["ok"], true);
@@ -303,26 +284,14 @@ mod tests {
     #[test]
     fn not_found() {
         let (cache, pubsub) = setup();
-        let (status, _) = route_request(
-            &cache,
-            &pubsub,
-            &Method::Get,
-            "/nonexistent",
-            "",
-        );
+        let (status, _) = route_request(&cache, &pubsub, &Method::Get, "/nonexistent", "");
         assert_eq!(status, 404);
     }
 
     #[test]
     fn cors_preflight() {
         let (cache, pubsub) = setup();
-        let (status, body) = route_request(
-            &cache,
-            &pubsub,
-            &Method::Options,
-            "/cache",
-            "",
-        );
+        let (status, body) = route_request(&cache, &pubsub, &Method::Options, "/cache", "");
         assert_eq!(status, 204);
         assert!(body.is_empty());
     }

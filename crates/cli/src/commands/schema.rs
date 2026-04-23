@@ -30,7 +30,12 @@ fn redact_dsn(dsn: &str) -> String {
         Some(i) => format!("{}:***", &userinfo[..i]),
         None => userinfo.to_string(),
     };
-    format!("{}{}{}", &dsn[..scheme_end], redacted_userinfo, host_and_rest)
+    format!(
+        "{}{}{}",
+        &dsn[..scheme_end],
+        redacted_userinfo,
+        host_and_rest
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +154,14 @@ pub fn run_diff(args: &[String], json_mode: bool) -> ExitCode {
     };
 
     let changes = compute_diff(&old_manifest, &new_manifest);
-    let added = changes.iter().filter(|c| c.kind.ends_with("_added")).count();
-    let removed = changes.iter().filter(|c| c.kind.ends_with("_removed")).count();
+    let added = changes
+        .iter()
+        .filter(|c| c.kind.ends_with("_added"))
+        .count();
+    let removed = changes
+        .iter()
+        .filter(|c| c.kind.ends_with("_removed"))
+        .count();
 
     let result = DiffResult {
         summary: DiffSummary {
@@ -272,10 +283,7 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
                 code: "PUSH_NO_TARGET".into(),
                 message: "No push target specified".into(),
                 span: None,
-                hint: Some(
-                    "Use --dry-run, --sqlite <path>, or --postgres <url>"
-                        .into(),
-                ),
+                hint: Some("Use --dry-run, --sqlite <path>, or --postgres <url>".into()),
             }],
             json_mode,
         );
@@ -325,7 +333,9 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
     };
 
     let validation_diags = validate_all(&manifest);
-    let has_errors = validation_diags.iter().any(|d| d.severity == Severity::Error);
+    let has_errors = validation_diags
+        .iter()
+        .any(|d| d.severity == Severity::Error);
 
     if has_errors {
         print_diagnostics(&validation_diags, json_mode);
@@ -340,7 +350,11 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
 
     if dry_run {
         // Dry-run: report plan, do not apply.
-        let baseline = if from_path.is_some() { "manifest" } else { "empty" };
+        let baseline = if from_path.is_some() {
+            "manifest"
+        } else {
+            "empty"
+        };
         let analysis = pylon_storage::analyze_plan(&plan);
         let result = PushResult {
             code: "PUSH_DRY_RUN",
@@ -507,7 +521,8 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
         }
     } else if let Some(pg_url) = postgres_url {
         // Postgres apply mode.
-        let mut adapter = match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
+        let mut adapter = match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url)
+        {
             Ok(a) => a,
             Err(e) => {
                 print_diagnostics(
@@ -718,7 +733,12 @@ fn format_operation(op: &pylon_storage::SchemaOperation) -> String {
         RemoveEntity { name } => {
             format!("REMOVE entity {}", name)
         }
-        AddIndex { entity, name, fields, unique } => {
+        AddIndex {
+            entity,
+            name,
+            fields,
+            unique,
+        } => {
             let u = if *unique { " UNIQUE" } else { "" };
             format!("ADD{u} index {}.{} [{}]", entity, name, fields.join(", "))
         }
@@ -959,7 +979,9 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
                 code: "INSPECT_NO_TARGET".into(),
                 message: "No database target specified".into(),
                 span: None,
-                hint: Some("Usage: pylon schema inspect --sqlite <path> or --postgres <url>".into()),
+                hint: Some(
+                    "Usage: pylon schema inspect --sqlite <path> or --postgres <url>".into(),
+                ),
             }],
             json_mode,
         );
@@ -1000,23 +1022,23 @@ pub fn run_inspect(args: &[String], json_mode: bool) -> ExitCode {
             }
         }
     } else if let Some(pg_url) = postgres_url {
-        let mut adapter =
-            match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url) {
-                Ok(a) => a,
-                Err(e) => {
-                    print_diagnostics(
-                        &[Diagnostic {
-                            severity: Severity::Error,
-                            code: "PG_CONNECT_FAILED".into(),
-                            message: format!("Failed to connect to Postgres: {e}"),
-                            span: None,
-                            hint: None,
-                        }],
-                        json_mode,
-                    );
-                    return ExitCode::Error;
-                }
-            };
+        let mut adapter = match pylon_storage::postgres::live::LivePostgresAdapter::connect(pg_url)
+        {
+            Ok(a) => a,
+            Err(e) => {
+                print_diagnostics(
+                    &[Diagnostic {
+                        severity: Severity::Error,
+                        code: "PG_CONNECT_FAILED".into(),
+                        message: format!("Failed to connect to Postgres: {e}"),
+                        span: None,
+                        hint: None,
+                    }],
+                    json_mode,
+                );
+                return ExitCode::Error;
+            }
+        };
         match adapter.read_schema() {
             Ok(s) => (s, format!("--postgres {}", redact_dsn(pg_url))),
             Err(e) => {
@@ -1090,7 +1112,10 @@ fn compute_diff(old: &AppManifest, new: &AppManifest) -> Vec<DiffChange> {
         changes.push(DiffChange {
             kind: "manifest_version_changed".into(),
             entity: None,
-            name: Some(format!("{} -> {}", old.manifest_version, new.manifest_version)),
+            name: Some(format!(
+                "{} -> {}",
+                old.manifest_version, new.manifest_version
+            )),
         });
     }
 
@@ -1121,9 +1146,15 @@ fn compute_diff(old: &AppManifest, new: &AppManifest) -> Vec<DiffChange> {
     // Fields per shared entity
     for name in old_entity_names.intersection(&new_entity_names) {
         let old_fields: BTreeSet<&str> = old_entities[name]
-            .fields.iter().map(|f| f.name.as_str()).collect();
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         let new_fields: BTreeSet<&str> = new_entities[name]
-            .fields.iter().map(|f| f.name.as_str()).collect();
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
 
         for field in new_fields.difference(&old_fields) {
             changes.push(DiffChange {
@@ -1277,10 +1308,12 @@ mod tests {
             name: "Post".into(),
             fields: vec![],
             indexes: vec![],
-                relations: vec![],
+            relations: vec![],
         });
         let changes = compute_diff(&old, &new);
-        assert!(changes.iter().any(|c| c.kind == "entity_added" && c.name.as_deref() == Some("Post")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "entity_added" && c.name.as_deref() == Some("Post")));
     }
 
     #[test]
@@ -1289,7 +1322,9 @@ mod tests {
         let mut new = minimal_manifest();
         new.entities.clear();
         let changes = compute_diff(&old, &new);
-        assert!(changes.iter().any(|c| c.kind == "entity_removed" && c.name.as_deref() == Some("User")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "entity_removed" && c.name.as_deref() == Some("User")));
     }
 
     #[test]
@@ -1330,18 +1365,30 @@ mod tests {
             auth: None,
         });
         let changes = compute_diff(&old, &new);
-        assert!(changes.iter().any(|c| c.kind == "route_added" && c.name.as_deref() == Some("/about")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "route_added" && c.name.as_deref() == Some("/about")));
     }
 
     #[test]
     fn query_and_action_changes() {
         let old = minimal_manifest();
         let mut new = minimal_manifest();
-        new.queries.push(ManifestQuery { name: "getUser".into(), input: vec![] });
-        new.actions.push(ManifestAction { name: "createUser".into(), input: vec![] });
+        new.queries.push(ManifestQuery {
+            name: "getUser".into(),
+            input: vec![],
+        });
+        new.actions.push(ManifestAction {
+            name: "createUser".into(),
+            input: vec![],
+        });
         let changes = compute_diff(&old, &new);
-        assert!(changes.iter().any(|c| c.kind == "query_added" && c.name.as_deref() == Some("getUser")));
-        assert!(changes.iter().any(|c| c.kind == "action_added" && c.name.as_deref() == Some("createUser")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "query_added" && c.name.as_deref() == Some("getUser")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "action_added" && c.name.as_deref() == Some("createUser")));
     }
 
     #[test]
@@ -1355,7 +1402,9 @@ mod tests {
         });
         let new = minimal_manifest();
         let changes = compute_diff(&old, &new);
-        assert!(changes.iter().any(|c| c.kind == "policy_removed" && c.name.as_deref() == Some("p1")));
+        assert!(changes
+            .iter()
+            .any(|c| c.kind == "policy_removed" && c.name.as_deref() == Some("p1")));
     }
 
     #[test]

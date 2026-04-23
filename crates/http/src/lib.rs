@@ -32,6 +32,7 @@ impl HttpMethod {
 
     /// Parse an HTTP method string, falling back to `Get` for unrecognized methods.
     /// Prefer `try_parse` to detect malformed inputs; this remains for compatibility.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self::try_parse(s).unwrap_or(Self::Get)
     }
@@ -92,11 +93,7 @@ pub trait DataStore: Send + Sync {
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError>;
 
-    fn get_by_id(
-        &self,
-        entity: &str,
-        id: &str,
-    ) -> Result<Option<serde_json::Value>, DataError>;
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError>;
 
     fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError>;
 
@@ -107,12 +104,7 @@ pub trait DataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError>;
 
-    fn update(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &serde_json::Value,
-    ) -> Result<bool, DataError>;
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError>;
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError>;
 
@@ -131,12 +123,7 @@ pub trait DataStore: Send + Sync {
         target_id: &str,
     ) -> Result<bool, DataError>;
 
-    fn unlink(
-        &self,
-        entity: &str,
-        id: &str,
-        relation: &str,
-    ) -> Result<bool, DataError>;
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError>;
 
     fn query_filtered(
         &self,
@@ -144,10 +131,7 @@ pub trait DataStore: Send + Sync {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DataError>;
 
-    fn query_graph(
-        &self,
-        query: &serde_json::Value,
-    ) -> Result<serde_json::Value, DataError>;
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError>;
 
     /// Run an aggregation query.
     ///

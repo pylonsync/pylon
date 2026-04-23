@@ -243,10 +243,7 @@ impl PolicyEngine {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
-                        reason: format!(
-                            "Policy \"{}\" denied: {}",
-                            policy.name, policy.allow
-                        ),
+                        reason: format!("Policy \"{}\" denied: {}", policy.name, policy.allow),
                     };
                 }
                 PolicyResult::Allowed => {}
@@ -264,6 +261,7 @@ impl PolicyEngine {
 /// separator. Used for `hasAnyRole` so role names containing commas aren't
 /// silently split. Returns an error on unterminated strings or unquoted
 /// tokens.
+#[cfg(test)]
 fn parse_quoted_string_list(s: &str) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     let bytes = s.as_bytes();
@@ -278,7 +276,10 @@ fn parse_quoted_string_list(s: &str) -> Result<Vec<String>, String> {
         }
         let quote = bytes[i];
         if quote != b'"' && quote != b'\'' {
-            return Err(format!("expected quoted string at byte {i}, got {:?}", quote as char));
+            return Err(format!(
+                "expected quoted string at byte {i}, got {:?}",
+                quote as char
+            ));
         }
         i += 1;
         let start = i;
@@ -365,11 +366,11 @@ enum Token {
     True,
     False,
     Null,
-    And,   // &&
-    Or,    // ||
-    Not,   // !
-    Eq,    // ==
-    Neq,   // !=
+    And, // &&
+    Or,  // ||
+    Not, // !
+    Eq,  // ==
+    Neq, // !=
     LParen,
     RParen,
     Comma,
@@ -465,17 +466,14 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                             't' => unescaped.push('\t'),
                             '0' => unescaped.push('\0'),
                             other => {
-                                return Err(format!(
-                                    "unknown string escape `\\{other}`"
-                                ));
+                                return Err(format!("unknown string escape `\\{other}`"));
                             }
                         }
                     } else {
                         unescaped.push(ch);
                     }
                 }
-                let close = closed_at
-                    .ok_or_else(|| "unterminated string literal".to_string())?;
+                let close = closed_at.ok_or_else(|| "unterminated string literal".to_string())?;
                 out.push(Token::Str(unescaped));
                 i = close;
             }
@@ -541,7 +539,11 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0, depth: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     fn at_end(&self) -> bool {
@@ -843,9 +845,7 @@ impl<'a> EvalEnv<'a> {
                 // Bare value as boolean expression.
                 match self.value_of(ast) {
                     Value::Bool(true) => EvalResult::True,
-                    Value::Bool(false) => {
-                        EvalResult::False("Expression evaluated to false".into())
-                    }
+                    Value::Bool(false) => EvalResult::False("Expression evaluated to false".into()),
                     Value::Null => EvalResult::False("Expression evaluated to null".into()),
                     Value::Str(s) => {
                         // Non-empty string is truthy (matches JS-ish intuition).
@@ -1038,13 +1038,7 @@ mod tests {
         let auth = AuthContext::authenticated("alice".into());
         let data = serde_json::json!({ "author": { "id": "alice" } });
         assert!(
-            evaluate_allow(
-                "auth.userId == data.author.id",
-                &auth,
-                Some(&data),
-                None
-            )
-            .is_allowed()
+            evaluate_allow("auth.userId == data.author.id", &auth, Some(&data), None).is_allowed()
         );
     }
 
@@ -1059,7 +1053,9 @@ mod tests {
     fn string_literal_equality() {
         let auth = AuthContext::authenticated("alice".into());
         let data = serde_json::json!({ "status": "published" });
-        assert!(evaluate_allow("data.status == \"published\"", &auth, Some(&data), None).is_allowed());
+        assert!(
+            evaluate_allow("data.status == \"published\"", &auth, Some(&data), None).is_allowed()
+        );
         assert!(!evaluate_allow("data.status == \"draft\"", &auth, Some(&data), None).is_allowed());
     }
 
@@ -1068,18 +1064,12 @@ mod tests {
         let auth = AuthContext::authenticated("alice".into()).with_tenant("acme".into());
         let data = serde_json::json!({ "tenantId": "acme" });
         assert!(
-            evaluate_allow("auth.tenantId == data.tenantId", &auth, Some(&data), None)
-                .is_allowed()
+            evaluate_allow("auth.tenantId == data.tenantId", &auth, Some(&data), None).is_allowed()
         );
         let data2 = serde_json::json!({ "tenantId": "other" });
         assert!(
-            !evaluate_allow(
-                "auth.tenantId == data.tenantId",
-                &auth,
-                Some(&data2),
-                None
-            )
-            .is_allowed()
+            !evaluate_allow("auth.tenantId == data.tenantId", &auth, Some(&data2), None)
+                .is_allowed()
         );
     }
 
@@ -1110,13 +1100,7 @@ mod tests {
         let auth = AuthContext::anonymous();
         let data = serde_json::json!({ "note": "line1\nline2" });
         assert!(
-            evaluate_allow(
-                "data.note == \"line1\\nline2\"",
-                &auth,
-                Some(&data),
-                None
-            )
-            .is_allowed()
+            evaluate_allow("data.note == \"line1\\nline2\"", &auth, Some(&data), None).is_allowed()
         );
     }
 
@@ -1135,10 +1119,7 @@ mod tests {
         // Prior bug: `unescaped.push(b as char)` mangled `é` into garbage.
         let auth = AuthContext::anonymous();
         let data = serde_json::json!({ "name": "café" });
-        assert!(
-            evaluate_allow("data.name == \"café\"", &auth, Some(&data), None)
-                .is_allowed()
-        );
+        assert!(evaluate_allow("data.name == \"café\"", &auth, Some(&data), None).is_allowed());
     }
 
     #[test]
@@ -1225,8 +1206,10 @@ mod tests {
     }
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]

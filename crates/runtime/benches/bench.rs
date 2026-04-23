@@ -4,7 +4,10 @@ use pylon_kernel::*;
 use pylon_runtime::Runtime;
 
 fn test_manifest() -> AppManifest {
-    serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json")).unwrap()
+    serde_json::from_str(include_str!(
+        "../../../examples/todo-app/pylon.manifest.json"
+    ))
+    .unwrap()
 }
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
@@ -124,7 +127,8 @@ fn main() {
     });
 
     bench("query_graph (User with where)", 1_000, || {
-        let _ = rt.query_graph(&serde_json::json!({"User": {"where": {"displayName": "User 500"}}}));
+        let _ =
+            rt.query_graph(&serde_json::json!({"User": {"where": {"displayName": "User 500"}}}));
     });
 
     // -- Insert Todo with all fields --

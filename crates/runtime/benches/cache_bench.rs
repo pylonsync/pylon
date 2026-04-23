@@ -69,8 +69,11 @@ fn main() {
 
     // MSET + MGET
     let pairs: Vec<(&str, &str)> = vec![
-        ("mk1", "v1"), ("mk2", "v2"), ("mk3", "v3"),
-        ("mk4", "v4"), ("mk5", "v5"),
+        ("mk1", "v1"),
+        ("mk2", "v2"),
+        ("mk3", "v3"),
+        ("mk4", "v4"),
+        ("mk5", "v5"),
     ];
     bench("MSET (5 keys)", 50_000, || {
         cache.mset(&pairs);
@@ -341,7 +344,11 @@ fn main() {
 
     bench("Leaderboard pattern (zadd+zrange)", 10_000, || {
         counter += 1;
-        mixed.zadd("leaderboard", counter as f64, &format!("player_{}", counter % 100));
+        mixed.zadd(
+            "leaderboard",
+            counter as f64,
+            &format!("player_{}", counter % 100),
+        );
         let _ = mixed.zrange("leaderboard", 0, 9);
     });
 

@@ -17,8 +17,8 @@
 
 use std::sync::Mutex;
 
-use pylon_kernel::AppManifest;
 use pylon_http::{DataError, DataStore};
+use pylon_kernel::AppManifest;
 
 use crate::postgres::live::LivePostgresAdapter;
 
@@ -62,11 +62,7 @@ impl DataStore for PostgresDataStore {
         guard.insert(entity, data).map_err(Self::map_err)
     }
 
-    fn get_by_id(
-        &self,
-        entity: &str,
-        id: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
         let mut guard = self.inner.lock().map_err(|_| DataError {
             code: "LOCK_POISONED".into(),
             message: "connection mutex poisoned".into(),
@@ -92,15 +88,12 @@ impl DataStore for PostgresDataStore {
             code: "LOCK_POISONED".into(),
             message: "connection mutex poisoned".into(),
         })?;
-        guard.list_after(entity, after, limit).map_err(Self::map_err)
+        guard
+            .list_after(entity, after, limit)
+            .map_err(Self::map_err)
     }
 
-    fn update(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &serde_json::Value,
-    ) -> Result<bool, DataError> {
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         let mut guard = self.inner.lock().map_err(|_| DataError {
             code: "LOCK_POISONED".into(),
             message: "connection mutex poisoned".into(),
@@ -145,7 +138,9 @@ impl DataStore for PostgresDataStore {
             code: "LOCK_POISONED".into(),
             message: "connection mutex poisoned".into(),
         })?;
-        guard.lookup_field(entity, field, value).map_err(Self::map_err)
+        guard
+            .lookup_field(entity, field, value)
+            .map_err(Self::map_err)
     }
 
     fn link(
@@ -164,22 +159,19 @@ impl DataStore for PostgresDataStore {
                 code: "ENTITY_NOT_FOUND".into(),
                 message: format!("Unknown entity: \"{entity}\""),
             })?;
-        let rel = ent.relations.iter().find(|r| r.name == relation).ok_or_else(|| {
-            DataError {
+        let rel = ent
+            .relations
+            .iter()
+            .find(|r| r.name == relation)
+            .ok_or_else(|| DataError {
                 code: "RELATION_NOT_FOUND".into(),
                 message: format!("Relation \"{relation}\" not found"),
-            }
-        })?;
+            })?;
         let data = serde_json::json!({ rel.field.clone(): target_id });
         self.update(entity, id, &data)
     }
 
-    fn unlink(
-        &self,
-        entity: &str,
-        id: &str,
-        relation: &str,
-    ) -> Result<bool, DataError> {
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         let ent = self
             .manifest
             .entities
@@ -189,12 +181,14 @@ impl DataStore for PostgresDataStore {
                 code: "ENTITY_NOT_FOUND".into(),
                 message: format!("Unknown entity: \"{entity}\""),
             })?;
-        let rel = ent.relations.iter().find(|r| r.name == relation).ok_or_else(|| {
-            DataError {
+        let rel = ent
+            .relations
+            .iter()
+            .find(|r| r.name == relation)
+            .ok_or_else(|| DataError {
                 code: "RELATION_NOT_FOUND".into(),
                 message: format!("Relation \"{relation}\" not found"),
-            }
-        })?;
+            })?;
         let data = serde_json::json!({ rel.field.clone(): serde_json::Value::Null });
         self.update(entity, id, &data)
     }
@@ -224,10 +218,7 @@ impl DataStore for PostgresDataStore {
             .map_err(Self::map_err)
     }
 
-    fn query_graph(
-        &self,
-        query: &serde_json::Value,
-    ) -> Result<serde_json::Value, DataError> {
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
         let obj = query.as_object().ok_or_else(|| DataError {
             code: "INVALID_QUERY".into(),
             message: "Graph query must be a JSON object".into(),
@@ -252,10 +243,13 @@ impl DataStore for PostgresDataStore {
         let mut typed: Vec<TxOp<'_>> = Vec::with_capacity(ops.len());
         for op in ops {
             let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
-            let entity = op.get("entity").and_then(|v| v.as_str()).ok_or_else(|| DataError {
-                code: "TX_INVALID_OP".into(),
-                message: "Each transact op must have an \"entity\" field".into(),
-            })?;
+            let entity = op
+                .get("entity")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DataError {
+                    code: "TX_INVALID_OP".into(),
+                    message: "Each transact op must have an \"entity\" field".into(),
+                })?;
             match op_type {
                 "insert" => {
                     let data = op.get("data").ok_or_else(|| DataError {
@@ -265,10 +259,13 @@ impl DataStore for PostgresDataStore {
                     typed.push(TxOp::Insert { entity, data });
                 }
                 "update" => {
-                    let id = op.get("id").and_then(|v| v.as_str()).ok_or_else(|| DataError {
-                        code: "TX_INVALID_OP".into(),
-                        message: "update op requires \"id\"".into(),
-                    })?;
+                    let id = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| DataError {
+                            code: "TX_INVALID_OP".into(),
+                            message: "update op requires \"id\"".into(),
+                        })?;
                     let data = op.get("data").ok_or_else(|| DataError {
                         code: "TX_INVALID_OP".into(),
                         message: "update op requires \"data\"".into(),
@@ -276,10 +273,13 @@ impl DataStore for PostgresDataStore {
                     typed.push(TxOp::Update { entity, id, data });
                 }
                 "delete" => {
-                    let id = op.get("id").and_then(|v| v.as_str()).ok_or_else(|| DataError {
-                        code: "TX_INVALID_OP".into(),
-                        message: "delete op requires \"id\"".into(),
-                    })?;
+                    let id = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| DataError {
+                            code: "TX_INVALID_OP".into(),
+                            message: "delete op requires \"id\"".into(),
+                        })?;
                     typed.push(TxOp::Delete { entity, id });
                 }
                 other => {

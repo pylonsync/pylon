@@ -13,10 +13,7 @@ const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
 
 fn use_color() -> bool {
-    std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM")
-            .map(|t| t != "dumb")
-            .unwrap_or(true)
+    std::env::var("NO_COLOR").is_err() && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +130,7 @@ fn run_search(query: &str, json_mode: bool) -> ExitCode {
     results.sort_by(|a, b| a.name.cmp(&b.name));
 
     if color {
-        println!(
-            "  {DIM}Results for \"{query}\":{RESET}"
-        );
+        println!("  {DIM}Results for \"{query}\":{RESET}");
     } else {
         println!("  Results for \"{query}\":");
     }
@@ -217,7 +212,10 @@ fn seeded_marketplace() -> PluginMarketplace {
 /// Print a single plugin row: name (left-aligned, padded) + description.
 fn print_plugin_row(p: &PluginMetadata, color: bool) {
     if color {
-        println!("    {BOLD}{:<20}{RESET} {DIM}{}{RESET}", p.name, p.description);
+        println!(
+            "    {BOLD}{:<20}{RESET} {DIM}{}{RESET}",
+            p.name, p.description
+        );
     } else {
         println!("    {:<20} {}", p.name, p.description);
     }

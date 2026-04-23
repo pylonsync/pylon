@@ -29,15 +29,15 @@ fn resp_parser_doesnt_panic_on_garbage() {
         b"*0\r\n",
         b":\r\n",
         b":abc\r\n",
-        b"+OK",           // missing \r\n
-        b"-ERR",          // missing \r\n
+        b"+OK",  // missing \r\n
+        b"-ERR", // missing \r\n
         b"$0\r\n\r\n",
         b"\x00\x01\x02\x03",
         b"+++\r\n",
         b"---\r\n",
         b"$2\r\nab\r\n",
-        b"$2\r\na",       // truncated bulk string
-        b"*2\r\n+OK\r\n", // incomplete array (only 1 of 2 elements)
+        b"$2\r\na",                     // truncated bulk string
+        b"*2\r\n+OK\r\n",               // incomplete array (only 1 of 2 elements)
         b"*1\r\n*1\r\n*1\r\n+deep\r\n", // nested arrays
     ];
 
@@ -103,9 +103,9 @@ fn cron_parser_doesnt_panic_on_garbage() {
         "99 99 99 99 99",
         "-1 * * * *",
         "a b c d e",
-        "* * * *",       // too few fields
-        "* * * * * *",   // too many fields
-        "0-60 * * * *",  // range exceeds max
+        "* * * *",      // too few fields
+        "* * * * * *",  // too many fields
+        "0-60 * * * *", // range exceeds max
         "*/abc * * * *",
         ",,,, * * * *",
         "1-2-3 * * * *",
@@ -294,9 +294,7 @@ fn workflow_state_machine_retry_exhaustion() {
         step_timeout_secs: 30,
     });
 
-    let id = engine
-        .start("retry_test", serde_json::json!({}))
-        .unwrap();
+    let id = engine.start("retry_test", serde_json::json!({})).unwrap();
 
     // First 2 failures should keep the workflow Running (retrying).
     for i in 0..2 {
@@ -349,7 +347,9 @@ fn workflow_terminal_states_are_idempotent() {
     });
 
     // Test Completed.
-    let id = engine.start("terminal_test", serde_json::json!({})).unwrap();
+    let id = engine
+        .start("terminal_test", serde_json::json!({}))
+        .unwrap();
     engine
         .advance_with_response(&id, serde_json::json!({"action": "complete", "output": 42}))
         .unwrap();
@@ -363,7 +363,9 @@ fn workflow_terminal_states_are_idempotent() {
     assert_eq!(status, WorkflowStatus::Completed);
 
     // Test Cancelled.
-    let id2 = engine.start("terminal_test", serde_json::json!({})).unwrap();
+    let id2 = engine
+        .start("terminal_test", serde_json::json!({}))
+        .unwrap();
     engine.cancel(&id2).unwrap();
 
     let status = engine
@@ -375,7 +377,9 @@ fn workflow_terminal_states_are_idempotent() {
     assert_eq!(status, WorkflowStatus::Cancelled);
 
     // Test Failed.
-    let id3 = engine.start("terminal_test", serde_json::json!({})).unwrap();
+    let id3 = engine
+        .start("terminal_test", serde_json::json!({}))
+        .unwrap();
     engine
         .advance_with_response(
             &id3,

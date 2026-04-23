@@ -105,7 +105,10 @@ impl OrganizationsPlugin {
         }
 
         let mut members = self.members.lock().unwrap();
-        if members.iter().any(|m| m.org_id == org_id && m.user_id == user_id) {
+        if members
+            .iter()
+            .any(|m| m.org_id == org_id && m.user_id == user_id)
+        {
             return Err("User is already a member".into());
         }
 
@@ -155,9 +158,7 @@ impl OrganizationsPlugin {
         members
             .iter()
             .filter(|m| m.user_id == user_id)
-            .filter_map(|m| {
-                orgs.get(&m.org_id).map(|o| (o.clone(), m.role.clone()))
-            })
+            .filter_map(|m| orgs.get(&m.org_id).map(|o| (o.clone(), m.role.clone())))
             .collect()
     }
 
@@ -217,8 +218,12 @@ mod tests {
     fn add_and_list_members() {
         let plugin = OrganizationsPlugin::new();
         let org = plugin.create_org("Team", "user-1");
-        plugin.add_member(&org.id, "user-2", OrgRole::Admin).unwrap();
-        plugin.add_member(&org.id, "user-3", OrgRole::Member).unwrap();
+        plugin
+            .add_member(&org.id, "user-2", OrgRole::Admin)
+            .unwrap();
+        plugin
+            .add_member(&org.id, "user-3", OrgRole::Member)
+            .unwrap();
 
         let members = plugin.list_members(&org.id);
         assert_eq!(members.len(), 3);
@@ -236,7 +241,9 @@ mod tests {
     fn remove_member() {
         let plugin = OrganizationsPlugin::new();
         let org = plugin.create_org("Team", "user-1");
-        plugin.add_member(&org.id, "user-2", OrgRole::Member).unwrap();
+        plugin
+            .add_member(&org.id, "user-2", OrgRole::Member)
+            .unwrap();
 
         assert!(plugin.remove_member(&org.id, "user-2"));
         assert!(!plugin.is_member(&org.id, "user-2"));
@@ -247,7 +254,9 @@ mod tests {
         let plugin = OrganizationsPlugin::new();
         let org1 = plugin.create_org("Team A", "user-1");
         let org2 = plugin.create_org("Team B", "user-2");
-        plugin.add_member(&org2.id, "user-1", OrgRole::Member).unwrap();
+        plugin
+            .add_member(&org2.id, "user-1", OrgRole::Member)
+            .unwrap();
 
         let orgs = plugin.list_user_orgs("user-1");
         assert_eq!(orgs.len(), 2);
@@ -267,7 +276,9 @@ mod tests {
     fn delete_org() {
         let plugin = OrganizationsPlugin::new();
         let org = plugin.create_org("Team", "user-1");
-        plugin.add_member(&org.id, "user-2", OrgRole::Member).unwrap();
+        plugin
+            .add_member(&org.id, "user-2", OrgRole::Member)
+            .unwrap();
 
         assert!(plugin.delete_org(&org.id));
         assert!(plugin.list_members(&org.id).is_empty());

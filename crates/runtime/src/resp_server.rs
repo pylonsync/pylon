@@ -149,7 +149,11 @@ fn execute_command(cache: &CachePlugin, args: &[String]) -> RespValue {
                         ttl = args.get(i).and_then(|v| v.parse::<u64>().ok()).map(|ms| {
                             // Convert ms to seconds, rounding up so sub-second TTLs
                             // still expire rather than becoming zero (infinite).
-                            if ms == 0 { 0 } else { (ms + 999) / 1000 }
+                            if ms == 0 {
+                                0
+                            } else {
+                                (ms + 999) / 1000
+                            }
                         });
                     }
                     "NX" => nx = true,
@@ -577,7 +581,9 @@ fn execute_command(cache: &CachePlugin, args: &[String]) -> RespValue {
             }
             let start: usize = args[2].parse().unwrap_or(0);
             let stop: usize = args[3].parse().unwrap_or(0);
-            let withscores = args[4..].iter().any(|a| a.eq_ignore_ascii_case("WITHSCORES"));
+            let withscores = args[4..]
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("WITHSCORES"));
             let items = cache.zrange(&args[1], start, stop);
             if withscores {
                 let mut result = Vec::with_capacity(items.len() * 2);
@@ -587,7 +593,12 @@ fn execute_command(cache: &CachePlugin, args: &[String]) -> RespValue {
                 }
                 RespValue::array(result)
             } else {
-                RespValue::array(items.into_iter().map(|(m, _)| RespValue::bulk(&m)).collect())
+                RespValue::array(
+                    items
+                        .into_iter()
+                        .map(|(m, _)| RespValue::bulk(&m))
+                        .collect(),
+                )
             }
         }
         "ZCARD" => {
@@ -729,7 +740,10 @@ mod tests {
     fn ping_pong() {
         let cache = CachePlugin::new(100);
         let output = run_session(&cache, &build_command(&["PING"]));
-        assert_eq!(parse_response(&output), RespValue::SimpleString("PONG".into()));
+        assert_eq!(
+            parse_response(&output),
+            RespValue::SimpleString("PONG".into())
+        );
     }
 
     #[test]
@@ -910,7 +924,7 @@ mod tests {
         let responses = parse_all_responses(&run_session(&cache, &cmds));
         assert_eq!(responses[0], RespValue::int(2)); // RPUSH
         assert_eq!(responses[1], RespValue::int(3)); // LPUSH
-        // LRANGE
+                                                     // LRANGE
         let items = match &responses[2] {
             RespValue::Array(Some(v)) => v.clone(),
             other => panic!("Expected array, got {other:?}"),

@@ -1074,8 +1074,10 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!("../../../examples/todo-app/pylon.manifest.json"))
-            .unwrap()
+        serde_json::from_str(include_str!(
+            "../../../examples/todo-app/pylon.manifest.json"
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -1208,7 +1210,9 @@ mod tests {
         //   const MANIFEST = {...};
         let start = html.find("const MANIFEST = ").expect("no MANIFEST const");
         let after = &html[start..];
-        let end = after.find(";\n").unwrap_or_else(|| after.len().min(100_000));
+        let end = after
+            .find(";\n")
+            .unwrap_or_else(|| after.len().min(100_000));
         after[..end].to_string()
     }
 

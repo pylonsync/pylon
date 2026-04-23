@@ -38,8 +38,8 @@ pub mod dyn_shard;
 pub mod matchmaker;
 pub mod persistence;
 pub mod prediction;
-pub mod replay;
 pub mod registry;
+pub mod replay;
 pub mod shard;
 pub mod snapshot;
 pub mod subscriber;
@@ -53,11 +53,11 @@ pub use matchmaker::{
     QueuedPlayer, ShardFactory,
 };
 pub use persistence::{persist_every_ticks, restore_or_init};
-pub use replay::{replay, ReplayEntry, ReplayLog};
 pub use prediction::{InputAck, Reconciliation};
 pub use registry::ShardRegistry;
+pub use replay::{replay, ReplayEntry, ReplayLog};
 pub use shard::{Shard, ShardAuth, ShardConfig, ShardError, SimState};
-pub use snapshot::{SnapshotFormat, encode_snapshot};
-pub use subscriber::{Subscriber, SubscriberId, SnapshotSink};
+pub use snapshot::{encode_snapshot, SnapshotFormat};
+pub use subscriber::{SnapshotSink, Subscriber, SubscriberId};
 pub use tick::TickLoop;
-pub use transport::{sse_info, webtransport_info, websocket_info, ShardTransport, TransportInfo};
+pub use transport::{sse_info, websocket_info, webtransport_info, ShardTransport, TransportInfo};

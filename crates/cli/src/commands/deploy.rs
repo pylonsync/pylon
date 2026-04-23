@@ -194,7 +194,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         });
 
     // Validate --target value if the flag was provided but unrecognised.
-    if let Some(raw) = args.windows(2).find(|w| w[0] == "--target").map(|w| w[1].as_str()) {
+    if let Some(raw) = args
+        .windows(2)
+        .find(|w| w[0] == "--target")
+        .map(|w| w[1].as_str())
+    {
         if DeployTarget::from_arg(raw).is_none() {
             print_diagnostics(
                 &[Diagnostic {
@@ -404,7 +408,9 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 println!("  pylon deploy --target docker     # Dockerfile");
                 println!("  pylon deploy --target fly        # Dockerfile + fly.toml");
                 println!("  pylon deploy --target compose    # docker-compose.yml + Dockerfile");
-                println!("  pylon deploy --target workers    # Cloudflare wrangler.toml (experimental)");
+                println!(
+                    "  pylon deploy --target workers    # Cloudflare wrangler.toml (experimental)"
+                );
                 println!("  pylon deploy --target systemd    # systemd unit for VPS install");
             }
         }
@@ -418,12 +424,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 /// Write a file into the output directory, printing a diagnostic on failure.
-fn write_or_fail(
-    out_path: &std::path::Path,
-    filename: &str,
-    content: &str,
-    json_mode: bool,
-) {
+fn write_or_fail(out_path: &std::path::Path, filename: &str, content: &str, json_mode: bool) {
     let path = out_path.join(filename);
     if let Err(e) = std::fs::write(&path, content) {
         print_diagnostics(
@@ -446,7 +447,13 @@ fn write_or_fail(
 fn sanitize_app_name(name: &str) -> String {
     name.to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -499,9 +506,18 @@ mod tests {
     fn deploy_target_parsing() {
         assert_eq!(DeployTarget::from_arg("docker"), Some(DeployTarget::Docker));
         assert_eq!(DeployTarget::from_arg("fly"), Some(DeployTarget::Fly));
-        assert_eq!(DeployTarget::from_arg("compose"), Some(DeployTarget::Compose));
-        assert_eq!(DeployTarget::from_arg("workers"), Some(DeployTarget::Workers));
-        assert_eq!(DeployTarget::from_arg("systemd"), Some(DeployTarget::Systemd));
+        assert_eq!(
+            DeployTarget::from_arg("compose"),
+            Some(DeployTarget::Compose)
+        );
+        assert_eq!(
+            DeployTarget::from_arg("workers"),
+            Some(DeployTarget::Workers)
+        );
+        assert_eq!(
+            DeployTarget::from_arg("systemd"),
+            Some(DeployTarget::Systemd)
+        );
         assert_eq!(DeployTarget::from_arg("unknown"), None);
     }
 

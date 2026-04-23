@@ -89,15 +89,18 @@ impl FeatureFlagsPlugin {
 
         match &flag.rule {
             FlagRule::Boolean(on) => *on,
-            FlagRule::UserList(users) => {
-                auth.user_id.as_ref().map(|id| users.contains(id)).unwrap_or(false)
-            }
+            FlagRule::UserList(users) => auth
+                .user_id
+                .as_ref()
+                .map(|id| users.contains(id))
+                .unwrap_or(false),
             FlagRule::Percentage(pct) => {
                 let hash = auth
                     .user_id
                     .as_ref()
                     .map(|id| {
-                        id.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+                        id.bytes()
+                            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
                     })
                     .unwrap_or(0);
                 (hash % 100) < (*pct as u64)
@@ -151,7 +154,11 @@ mod tests {
     #[test]
     fn user_list_flag() {
         let plugin = FeatureFlagsPlugin::new();
-        plugin.add_user_list("beta", "Beta features", vec!["user-1".into(), "user-2".into()]);
+        plugin.add_user_list(
+            "beta",
+            "Beta features",
+            vec!["user-1".into(), "user-2".into()],
+        );
 
         assert!(plugin.is_enabled("beta", &AuthContext::authenticated("user-1".into())));
         assert!(plugin.is_enabled("beta", &AuthContext::authenticated("user-2".into())));

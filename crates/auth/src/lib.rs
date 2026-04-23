@@ -333,8 +333,8 @@ impl OAuthConfig {
     /// Returns `(email, display_name)`.
     pub fn fetch_userinfo(&self, access_token: &str) -> Result<(String, Option<String>), String> {
         let out = http_get_bearer(self.userinfo_url(), access_token)?;
-        let parsed: serde_json::Value = serde_json::from_str(&out)
-            .map_err(|e| format!("userinfo not valid JSON: {e}"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).map_err(|e| format!("userinfo not valid JSON: {e}"))?;
         match self.provider.as_str() {
             "google" => {
                 let email = parsed
@@ -406,9 +406,7 @@ fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, St
         req = req.set("Accept", "application/json");
     }
     match req.send_string(body) {
-        Ok(resp) => resp
-            .into_string()
-            .map_err(|e| format!("read body: {e}")),
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             Err(format!("HTTP {code}: {body}"))
@@ -425,9 +423,7 @@ fn http_get_bearer(url: &str, token: &str) -> Result<String, String> {
         .set("Accept", "application/json")
         .call()
     {
-        Ok(resp) => resp
-            .into_string()
-            .map_err(|e| format!("read body: {e}")),
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             Err(format!("HTTP {code}: {body}"))
@@ -937,7 +933,13 @@ impl SessionStore {
         let mut sessions = self.sessions.lock().unwrap();
         let expired: Vec<String> = sessions
             .iter()
-            .filter_map(|(t, s)| if s.is_expired() { Some(t.clone()) } else { None })
+            .filter_map(|(t, s)| {
+                if s.is_expired() {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         let n = expired.len();
         for t in &expired {
@@ -1261,11 +1263,29 @@ mod tests {
 
     #[test]
     fn oauth_token_urls() {
-        let google = OAuthConfig { provider: "google".into(), client_id: "x".into(), client_secret: "x".into(), redirect_uri: "x".into() };
+        let google = OAuthConfig {
+            provider: "google".into(),
+            client_id: "x".into(),
+            client_secret: "x".into(),
+            redirect_uri: "x".into(),
+        };
         assert_eq!(google.token_url(), "https://oauth2.googleapis.com/token");
-        let github = OAuthConfig { provider: "github".into(), client_id: "x".into(), client_secret: "x".into(), redirect_uri: "x".into() };
-        assert_eq!(github.token_url(), "https://github.com/login/oauth/access_token");
-        let unknown = OAuthConfig { provider: "unknown".into(), client_id: "x".into(), client_secret: "x".into(), redirect_uri: "x".into() };
+        let github = OAuthConfig {
+            provider: "github".into(),
+            client_id: "x".into(),
+            client_secret: "x".into(),
+            redirect_uri: "x".into(),
+        };
+        assert_eq!(
+            github.token_url(),
+            "https://github.com/login/oauth/access_token"
+        );
+        let unknown = OAuthConfig {
+            provider: "unknown".into(),
+            client_id: "x".into(),
+            client_secret: "x".into(),
+            redirect_uri: "x".into(),
+        };
         assert_eq!(unknown.token_url(), "");
         assert!(unknown.auth_url().is_empty());
     }

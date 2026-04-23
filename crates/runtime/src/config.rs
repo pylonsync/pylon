@@ -86,10 +86,7 @@ impl ServerConfig {
             ai_api_key: env_str("PYLON_AI_API_KEY", ""),
             ai_model: env_str("PYLON_AI_MODEL", ""),
             ai_base_url: env_str("PYLON_AI_BASE_URL", ""),
-            workflow_runner_url: env_str(
-                "PYLON_WORKFLOW_RUNNER_URL",
-                "http://127.0.0.1:9876/run",
-            ),
+            workflow_runner_url: env_str("PYLON_WORKFLOW_RUNNER_URL", "http://127.0.0.1:9876/run"),
         }
     }
 }
@@ -99,15 +96,24 @@ fn env_str(key: &str, default: &str) -> String {
 }
 
 fn env_u16(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_bool(key: &str, default: bool) -> bool {

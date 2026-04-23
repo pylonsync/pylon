@@ -115,10 +115,7 @@ impl PluginMarketplace {
 
         let mut plugins = self.plugins.lock().unwrap();
         if plugins.contains_key(&metadata.name) {
-            return Err(format!(
-                "plugin \"{}\" is already published",
-                metadata.name
-            ));
+            return Err(format!("plugin \"{}\" is already published", metadata.name));
         }
         plugins.insert(metadata.name.clone(), metadata);
         Ok(())
@@ -341,7 +338,12 @@ impl PluginMarketplace {
                 license: "MIT".into(),
                 homepage: None,
                 repository: None,
-                tags: vec!["integration".into(), "mcp".into(), "ai".into(), "agents".into()],
+                tags: vec![
+                    "integration".into(),
+                    "mcp".into(),
+                    "ai".into(),
+                    "agents".into(),
+                ],
                 category: PluginCategory::Integration,
                 compatibility: ">=0.1.0".into(),
             },
@@ -551,7 +553,8 @@ mod tests {
     #[test]
     fn search_by_description() {
         let mp = PluginMarketplace::new();
-        mp.publish(make_plugin("foo", PluginCategory::Other)).unwrap();
+        mp.publish(make_plugin("foo", PluginCategory::Other))
+            .unwrap();
         // description is "A foo plugin"
         let results = mp.search("foo plugin");
         assert_eq!(results.len(), 1);
@@ -584,7 +587,8 @@ mod tests {
         let mp = PluginMarketplace::new();
         mp.publish(make_plugin("a", PluginCategory::Auth)).unwrap();
         mp.publish(make_plugin("b", PluginCategory::Auth)).unwrap();
-        mp.publish(make_plugin("c", PluginCategory::Storage)).unwrap();
+        mp.publish(make_plugin("c", PluginCategory::Storage))
+            .unwrap();
 
         let auth = mp.by_category(PluginCategory::Auth);
         assert_eq!(auth.len(), 2);
@@ -599,7 +603,8 @@ mod tests {
     #[test]
     fn unpublish() {
         let mp = PluginMarketplace::new();
-        mp.publish(make_plugin("rm-me", PluginCategory::Other)).unwrap();
+        mp.publish(make_plugin("rm-me", PluginCategory::Other))
+            .unwrap();
         assert_eq!(mp.count(), 1);
 
         assert!(mp.unpublish("rm-me"));
@@ -617,7 +622,8 @@ mod tests {
     fn list_all() {
         let mp = PluginMarketplace::new();
         mp.publish(make_plugin("a", PluginCategory::Auth)).unwrap();
-        mp.publish(make_plugin("b", PluginCategory::Storage)).unwrap();
+        mp.publish(make_plugin("b", PluginCategory::Storage))
+            .unwrap();
 
         let all = mp.list_all();
         assert_eq!(all.len(), 2);

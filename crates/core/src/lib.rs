@@ -182,11 +182,7 @@ pub struct ManifestPolicy {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub allow: String,
     /// Overrides `allow` for reads (pull, list, get). Optional.
-    #[serde(
-        default,
-        rename = "allowRead",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "allowRead", skip_serializing_if = "Option::is_none")]
     pub allow_read: Option<String>,
     /// Overrides `allow` for inserts. Optional; falls back to `allow_write`
     /// then `allow`.
@@ -260,7 +256,10 @@ mod tests {
             span: None,
             hint: Some("try again".into()),
         };
-        assert_eq!(format!("{d}"), "[warning] WARN: check this (hint: try again)");
+        assert_eq!(
+            format!("{d}"),
+            "[warning] WARN: check this (hint: try again)"
+        );
     }
 
     #[test]

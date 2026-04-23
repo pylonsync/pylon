@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use argon2::password_hash::{rand_core::OsRng, SaltString};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{SaltString, rand_core::OsRng};
 
 use crate::Plugin;
 
@@ -19,7 +19,6 @@ fn dummy_hash() -> &'static str {
         hash_password("dummy-password-for-timing-equalization")
     })
 }
-
 
 /// A stored password entry.
 #[derive(Debug, Clone)]
@@ -56,11 +55,14 @@ impl PasswordAuthPlugin {
 
         let hash = hash_password(password);
 
-        entries.insert(email.to_string(), PasswordEntry {
-            user_id: user_id.to_string(),
-            email: email.to_string(),
-            hash,
-        });
+        entries.insert(
+            email.to_string(),
+            PasswordEntry {
+                user_id: user_id.to_string(),
+                email: email.to_string(),
+                hash,
+            },
+        );
 
         Ok(())
     }
@@ -93,7 +95,12 @@ impl PasswordAuthPlugin {
     }
 
     /// Change a user's password.
-    pub fn change_password(&self, email: &str, old_password: &str, new_password: &str) -> Result<(), String> {
+    pub fn change_password(
+        &self,
+        email: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), String> {
         let mut entries = self.entries.lock().unwrap();
         let entry = entries.get_mut(email).ok_or("User not found")?;
 
@@ -160,7 +167,9 @@ mod tests {
     #[test]
     fn register_and_verify() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "password123", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "password123", "user-1")
+            .unwrap();
 
         let user_id = plugin.verify("alice@test.com", "password123").unwrap();
         assert_eq!(user_id, "user-1");
@@ -169,7 +178,9 @@ mod tests {
     #[test]
     fn wrong_password_rejected() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "password123", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "password123", "user-1")
+            .unwrap();
 
         assert!(plugin.verify("alice@test.com", "wrong").is_none());
     }
@@ -183,7 +194,9 @@ mod tests {
     #[test]
     fn duplicate_email_rejected() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "pass1", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "pass1", "user-1")
+            .unwrap();
         let result = plugin.register("alice@test.com", "pass2", "user-2");
         assert!(result.is_err());
     }
@@ -191,9 +204,13 @@ mod tests {
     #[test]
     fn change_password() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "old-pass", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "old-pass", "user-1")
+            .unwrap();
 
-        plugin.change_password("alice@test.com", "old-pass", "new-pass").unwrap();
+        plugin
+            .change_password("alice@test.com", "old-pass", "new-pass")
+            .unwrap();
 
         assert!(plugin.verify("alice@test.com", "old-pass").is_none());
         assert!(plugin.verify("alice@test.com", "new-pass").is_some());
@@ -202,7 +219,9 @@ mod tests {
     #[test]
     fn change_password_wrong_old() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "password", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "password", "user-1")
+            .unwrap();
 
         let result = plugin.change_password("alice@test.com", "wrong", "new");
         assert!(result.is_err());
@@ -211,9 +230,13 @@ mod tests {
     #[test]
     fn reset_password() {
         let plugin = PasswordAuthPlugin::new();
-        plugin.register("alice@test.com", "old-pass", "user-1").unwrap();
+        plugin
+            .register("alice@test.com", "old-pass", "user-1")
+            .unwrap();
 
-        plugin.reset_password("alice@test.com", "reset-pass").unwrap();
+        plugin
+            .reset_password("alice@test.com", "reset-pass")
+            .unwrap();
         assert!(plugin.verify("alice@test.com", "reset-pass").is_some());
     }
 

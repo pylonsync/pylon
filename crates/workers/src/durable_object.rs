@@ -38,9 +38,7 @@ use pylon_realtime::{DynShard, ShardAuth, SnapshotSink, SubscriberId};
 /// The caller provides the send function (which is `worker::WebSocket::send`
 /// or equivalent). This lets the shard's broadcast loop push snapshots to
 /// connected clients over the DO's own WebSocket.
-pub fn do_websocket_sink(
-    send: impl Fn(&[u8]) + Send + Sync + 'static,
-) -> SnapshotSink {
+pub fn do_websocket_sink(send: impl Fn(&[u8]) + Send + Sync + 'static) -> SnapshotSink {
     Box::new(move |tick: u64, bytes: &[u8]| {
         let mut payload = Vec::with_capacity(8 + bytes.len());
         payload.extend_from_slice(&tick.to_be_bytes());
@@ -72,10 +70,7 @@ pub fn persist_to_do_storage<T: serde::Serialize>(
 ) {
     if let Ok(bytes) = serde_json::to_vec(state) {
         storage.put_bytes(&format!("shard:{shard_id}:state"), &bytes);
-        storage.put_bytes(
-            &format!("shard:{shard_id}:tick"),
-            &tick.to_be_bytes(),
-        );
+        storage.put_bytes(&format!("shard:{shard_id}:tick"), &tick.to_be_bytes());
     }
 }
 

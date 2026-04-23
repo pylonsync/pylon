@@ -21,11 +21,7 @@ impl DataStore for Runtime {
         Runtime::insert(self, entity, data).map_err(into_data_error)
     }
 
-    fn get_by_id(
-        &self,
-        entity: &str,
-        id: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
         Runtime::get_by_id(self, entity, id).map_err(into_data_error)
     }
 
@@ -42,12 +38,7 @@ impl DataStore for Runtime {
         Runtime::list_after(self, entity, after, limit).map_err(into_data_error)
     }
 
-    fn update(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &serde_json::Value,
-    ) -> Result<bool, DataError> {
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         Runtime::update(self, entity, id, data).map_err(into_data_error)
     }
 
@@ -74,12 +65,7 @@ impl DataStore for Runtime {
         Runtime::link(self, entity, id, relation, target_id).map_err(into_data_error)
     }
 
-    fn unlink(
-        &self,
-        entity: &str,
-        id: &str,
-        relation: &str,
-    ) -> Result<bool, DataError> {
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         Runtime::unlink(self, entity, id, relation).map_err(into_data_error)
     }
 
@@ -91,10 +77,7 @@ impl DataStore for Runtime {
         Runtime::query_filtered(self, entity, filter).map_err(into_data_error)
     }
 
-    fn query_graph(
-        &self,
-        query: &serde_json::Value,
-    ) -> Result<serde_json::Value, DataError> {
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
         Runtime::query_graph(self, query).map_err(into_data_error)
     }
 
@@ -161,8 +144,7 @@ impl DataStore for Runtime {
                     }
                 }
                 _ => {
-                    results
-                        .push(serde_json::json!({"op": op_type, "error": "unknown operation"}));
+                    results.push(serde_json::json!({"op": op_type, "error": "unknown operation"}));
                 }
             }
         }
@@ -234,12 +216,7 @@ impl pylon_router::RoomOps for RoomManager {
         data: Option<serde_json::Value>,
     ) -> Result<(serde_json::Value, serde_json::Value), DataError> {
         RoomManager::join(self, room, user_id, data)
-            .map(|(snapshot, join_event)| {
-                (
-                    to_json(&snapshot),
-                    to_json(&join_event),
-                )
-            })
+            .map(|(snapshot, join_event)| (to_json(&snapshot), to_json(&join_event)))
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
@@ -247,8 +224,7 @@ impl pylon_router::RoomOps for RoomManager {
     }
 
     fn leave(&self, room: &str, user_id: &str) -> Option<serde_json::Value> {
-        RoomManager::leave(self, room, user_id)
-            .map(|event| to_json(&event))
+        RoomManager::leave(self, room, user_id).map(|event| to_json(&event))
     }
 
     fn set_presence(
@@ -257,8 +233,7 @@ impl pylon_router::RoomOps for RoomManager {
         user_id: &str,
         data: serde_json::Value,
     ) -> Option<serde_json::Value> {
-        RoomManager::set_presence(self, room, user_id, data)
-            .map(|event| to_json(&event))
+        RoomManager::set_presence(self, room, user_id, data).map(|event| to_json(&event))
     }
 
     fn broadcast(
@@ -268,8 +243,7 @@ impl pylon_router::RoomOps for RoomManager {
         topic: &str,
         data: serde_json::Value,
     ) -> Option<serde_json::Value> {
-        RoomManager::broadcast(self, room, sender, topic, data)
-            .map(|event| to_json(&event))
+        RoomManager::broadcast(self, room, sender, topic, data).map(|event| to_json(&event))
     }
 
     fn list_rooms(&self) -> Vec<String> {
@@ -440,8 +414,7 @@ impl pylon_router::JobOps for JobQueue {
     }
 
     fn get_job(&self, id: &str) -> Option<serde_json::Value> {
-        JobQueue::get_job(self, id)
-            .map(|j| to_json(j))
+        JobQueue::get_job(self, id).map(|j| to_json(j))
     }
 }
 
@@ -492,20 +465,14 @@ impl pylon_router::WorkflowOps for WorkflowEngine {
     }
 
     fn get(&self, id: &str) -> Option<serde_json::Value> {
-        WorkflowEngine::get(self, id)
-            .map(|inst| to_json(inst))
+        WorkflowEngine::get(self, id).map(|inst| to_json(inst))
     }
 
     fn advance(&self, id: &str) -> Result<String, String> {
         WorkflowEngine::advance(self, id).map(|status| format!("{:?}", status))
     }
 
-    fn send_event(
-        &self,
-        id: &str,
-        event: &str,
-        data: serde_json::Value,
-    ) -> Result<(), String> {
+    fn send_event(&self, id: &str, event: &str, data: serde_json::Value) -> Result<(), String> {
         WorkflowEngine::send_event(self, id, event, data)
     }
 
@@ -757,16 +724,14 @@ impl<'a> TxStore<'a> {
         kind: pylon_sync::ChangeKind,
         data: Option<&serde_json::Value>,
     ) {
-        self.pending
-            .borrow_mut()
-            .push(pylon_sync::ChangeEvent {
-                seq: 0, // assigned by ChangeLog::append after commit
-                entity: entity.to_string(),
-                row_id: row_id.to_string(),
-                kind,
-                data: data.cloned(),
-                timestamp: String::new(),
-            });
+        self.pending.borrow_mut().push(pylon_sync::ChangeEvent {
+            seq: 0, // assigned by ChangeLog::append after commit
+            entity: entity.to_string(),
+            row_id: row_id.to_string(),
+            kind,
+            data: data.cloned(),
+            timestamp: String::new(),
+        });
     }
 }
 
@@ -791,11 +756,7 @@ impl<'a> DataStore for TxStore<'a> {
         Ok(id)
     }
 
-    fn get_by_id(
-        &self,
-        entity: &str,
-        id: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
         self.runtime
             .get_by_id_with_conn(self.conn, entity, id)
             .map_err(into_data_error)
@@ -818,12 +779,7 @@ impl<'a> DataStore for TxStore<'a> {
             .map_err(into_data_error)
     }
 
-    fn update(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &serde_json::Value,
-    ) -> Result<bool, DataError> {
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         let updated = self
             .runtime
             .update_with_conn(self.conn, entity, id, data)
@@ -868,12 +824,7 @@ impl<'a> DataStore for TxStore<'a> {
             .map_err(into_data_error)
     }
 
-    fn unlink(
-        &self,
-        entity: &str,
-        id: &str,
-        relation: &str,
-    ) -> Result<bool, DataError> {
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         self.runtime
             .unlink_with_conn(self.conn, entity, id, relation)
             .map_err(into_data_error)
@@ -889,10 +840,7 @@ impl<'a> DataStore for TxStore<'a> {
             .map_err(into_data_error)
     }
 
-    fn query_graph(
-        &self,
-        query: &serde_json::Value,
-    ) -> Result<serde_json::Value, DataError> {
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
         self.runtime
             .query_graph_with_conn(self.conn, query)
             .map_err(into_data_error)
@@ -1262,8 +1210,10 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                 FnType::Mutation => {
                     // Wrap the nested mutation in its own write-conn + BEGIN
                     // + COMMIT, matching the top-level mutation contract.
-                    let conn_guard =
-                        ops.runtime.lock_conn_pub().map_err(|e| (e.code, e.message))?;
+                    let conn_guard = ops
+                        .runtime
+                        .lock_conn_pub()
+                        .map_err(|e| (e.code, e.message))?;
                     if let Err(e) = conn_guard.execute("BEGIN", []) {
                         return Err(("BEGIN_FAILED".into(), e.to_string()));
                     }
@@ -1272,15 +1222,9 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                     // already inside the outer call_inner which holds it.
                     // Nested calls never get HTTP request metadata — that's
                     // only meaningful for the top-level webhook invocation.
-                    let result = ops.runner.call_inner(
-                        &tx_store,
-                        fn_name,
-                        fn_type,
-                        args,
-                        auth,
-                        None,
-                        None,
-                    );
+                    let result = ops
+                        .runner
+                        .call_inner(&tx_store, fn_name, fn_type, args, auth, None, None);
                     match result {
                         Ok((value, _trace)) => {
                             if let Err(e) = conn_guard.execute("COMMIT", []) {
@@ -1300,8 +1244,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                                     ev.kind.clone(),
                                     ev.data.clone(),
                                 );
-                                let event =
-                                    pylon_sync::ChangeEvent { seq, ..ev };
+                                let event = pylon_sync::ChangeEvent { seq, ..ev };
                                 ops.notifier.notify(&event);
                             }
                             Ok(value)
@@ -1377,17 +1320,15 @@ fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
                         // how long failures have been compounding) and the
                         // component name.
                         let backoff_str = format!("{}", backoff.as_secs());
-                        pylon_observability::report_error(
-                            &pylon_observability::ErrorEvent {
-                                level: pylon_observability::ErrorLevel::Error,
-                                code: "FN_RESPAWN_FAILED",
-                                message: &e,
-                                context: &[
-                                    ("component", "bun-runtime-supervisor"),
-                                    ("backoff_secs", &backoff_str),
-                                ],
-                            },
-                        );
+                        pylon_observability::report_error(&pylon_observability::ErrorEvent {
+                            level: pylon_observability::ErrorLevel::Error,
+                            code: "FN_RESPAWN_FAILED",
+                            message: &e,
+                            context: &[
+                                ("component", "bun-runtime-supervisor"),
+                                ("backoff_secs", &backoff_str),
+                            ],
+                        });
                         backoff = (backoff * 2).min(max_backoff);
                     }
                 }

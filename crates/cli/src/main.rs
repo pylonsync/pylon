@@ -22,8 +22,7 @@ fn main() {
 /// - `json` → one JSON object per line (Datadog/Axiom/Sentry ingestible)
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let format = std::env::var("PYLON_LOG_FORMAT").unwrap_or_default();
     let builder = fmt()
         .with_env_filter(filter)
@@ -120,14 +119,11 @@ fn run() -> ExitCode {
 // ---------------------------------------------------------------------------
 
 const TOP_LEVEL_COMMANDS: [&str; 18] = [
-    "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env",
-    "explain", "init", "migrate", "plugins", "restore", "schema", "seed",
-    "test", "version", "help",
+    "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env", "explain", "init",
+    "migrate", "plugins", "restore", "schema", "seed", "test", "version", "help",
 ];
 
-const SCHEMA_SUBCOMMANDS: [&str; 5] = [
-    "check", "diff", "push", "inspect", "history",
-];
+const SCHEMA_SUBCOMMANDS: [&str; 5] = ["check", "diff", "push", "inspect", "history"];
 
 // ---------------------------------------------------------------------------
 // Usage
@@ -184,9 +180,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=b.len() {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -264,39 +258,24 @@ mod tests {
             suggest_command("schem", &TOP_LEVEL_COMMANDS),
             Some("schema"),
         );
-        assert_eq!(
-            suggest_command("biuld", &TOP_LEVEL_COMMANDS),
-            Some("build"),
-        );
-        assert_eq!(
-            suggest_command("chekc", &SCHEMA_SUBCOMMANDS),
-            Some("check"),
-        );
+        assert_eq!(suggest_command("biuld", &TOP_LEVEL_COMMANDS), Some("build"),);
+        assert_eq!(suggest_command("chekc", &SCHEMA_SUBCOMMANDS), Some("check"),);
     }
 
     #[test]
     fn suggest_nothing_when_too_far() {
-        assert_eq!(
-            suggest_command("zzzzzzz", &TOP_LEVEL_COMMANDS),
-            None,
-        );
+        assert_eq!(suggest_command("zzzzzzz", &TOP_LEVEL_COMMANDS), None,);
     }
 
     #[test]
     fn suggest_picks_closest() {
         // "de" -> "dev" is closer than "deploy"
-        assert_eq!(
-            suggest_command("de", &["dev", "deploy"]),
-            Some("dev"),
-        );
+        assert_eq!(suggest_command("de", &["dev", "deploy"]), Some("dev"),);
     }
 
     #[test]
     fn suggest_schema_subcommand() {
-        assert_eq!(
-            suggest_command("pus", &SCHEMA_SUBCOMMANDS),
-            Some("push"),
-        );
+        assert_eq!(suggest_command("pus", &SCHEMA_SUBCOMMANDS), Some("push"),);
         assert_eq!(
             suggest_command("insepct", &SCHEMA_SUBCOMMANDS),
             Some("inspect"),

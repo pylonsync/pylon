@@ -20,9 +20,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     let positional: Vec<&str> = args
         .iter()
-        .filter(|a| {
-            !a.starts_with('-') && *a != "build" && Some(a.as_str()) != Some(out_dir)
-        })
+        .filter(|a| !a.starts_with('-') && *a != "build" && Some(a.as_str()) != Some(out_dir))
         .map(|s| s.as_str())
         .collect();
 
