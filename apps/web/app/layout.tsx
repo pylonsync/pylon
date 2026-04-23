@@ -30,6 +30,12 @@ export const metadata: Metadata = {
     siteName: "Pylon",
     type: "website",
   },
+  twitter: {
+    card: "summary_large_image",
+    title: "Pylon — The realtime backend framework",
+    description:
+      "Schema, policies, functions, live queries, auth — one binary.",
+  },
 };
 
 export default function RootLayout({
