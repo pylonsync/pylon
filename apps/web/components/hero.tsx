@@ -337,12 +337,19 @@ onKeyDown("ArrowUp", () =>
 export function Hero() {
   return (
     <section className="hero">
+      <div className="hero-glow" />
       <div className="hero-grid-bg" />
       <div className="container-page hero-inner">
+        <div className="hero-eyebrow">
+          <span className="chip">NEW</span>
+          <span>Pylon Cloud — deploy anywhere, idle at $0</span>
+          <span className="arrow">→</span>
+        </div>
+
         <h1 className="hero-h1">
           The backend for
           <br />
-          real-time <em>apps</em> and <em>games</em>.
+          <em>real-time</em> apps and games.
         </h1>
 
         <p className="hero-sub">
