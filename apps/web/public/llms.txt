@@ -8,16 +8,16 @@ The system has four primitives: entities (typed tables), policies (row-level acc
 
 ## Docs
 
-- [Introduction](https://pylonsync.com/docs): What Pylon is, who it's for, how to read the docs.
-- [Quickstart](https://pylonsync.com/docs/quickstart): Ship a live-syncing app in five minutes — schema, policy, function, live query.
-- [Installation](https://pylonsync.com/docs/installation): CLI install, requirements (Bun, Rust for source builds), directory conventions, env vars.
+- [Introduction](https://docs.pylonsync.com): What Pylon is, who it's for, how to read the docs.
+- [Quickstart](https://docs.pylonsync.com/quickstart): Ship a live-syncing app in five minutes — schema, policy, function, live query.
+- [Installation](https://docs.pylonsync.com/installation): CLI install, requirements (Bun, Rust for source builds), directory conventions, env vars.
 
 ## Core concepts
 
-- [Entities](https://pylonsync.com/docs/concepts/entities): Declaring typed tables — `field.string/int/float/boolean/datetime/richtext/id()`, indexes, modifiers. Note: `field.number()` does NOT exist — use `field.float()` or `field.int()`.
-- [Policies](https://pylonsync.com/docs/concepts/policies): Row-level access rules with expressions referencing `auth.*`, `data.*`, `existing.*`. Omitted actions are denied by default. Server functions bypass policies.
-- [Functions](https://pylonsync.com/docs/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators: `v.string()`, `v.int()`, `v.float()`, `v.boolean()` (NOT `v.bool`), `v.datetime()`, `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`.
-- [Live queries](https://pylonsync.com/docs/concepts/live-queries): How `db.useQuery` subscribes and fan-outs update on writes. Subscriptions respect policies. Use indexed filter columns for fast fan-out.
+- [Entities](https://docs.pylonsync.com/concepts/entities): Declaring typed tables — `field.string/int/float/boolean/datetime/richtext/id()`, indexes, modifiers. Note: `field.number()` does NOT exist — use `field.float()` or `field.int()`.
+- [Policies](https://docs.pylonsync.com/concepts/policies): Row-level access rules with expressions referencing `auth.*`, `data.*`, `existing.*`. Omitted actions are denied by default. Server functions bypass policies.
+- [Functions](https://docs.pylonsync.com/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators: `v.string()`, `v.int()`, `v.float()`, `v.boolean()` (NOT `v.bool`), `v.datetime()`, `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`.
+- [Live queries](https://docs.pylonsync.com/concepts/live-queries): How `db.useQuery` subscribes and fan-outs update on writes. Subscriptions respect policies. Use indexed filter columns for fast fan-out.
 
 ## Packages
 

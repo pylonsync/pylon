@@ -36,6 +36,66 @@ function InstallCmd() {
   );
 }
 
+function ClaudeSkill() {
+  const [copied, setCopied] = React.useState(false);
+  const cmd =
+    "mkdir -p ~/.claude/skills/pylon && curl -fsSL https://pylonsync.com/pylon-skill.md > ~/.claude/skills/pylon/SKILL.md";
+  const onClick = () => {
+    navigator.clipboard?.writeText(cmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  };
+  return (
+    <div className="skill-pill">
+      <div className="skill-pill-label">
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M12 2l3 5 5 1-3.5 3.5L18 17l-6-3-6 3 1.5-5.5L4 8l5-1z" />
+        </svg>
+        <span>
+          Build with Claude Code.{" "}
+          <a href="/skill" className="skill-pill-link">
+            Install the skill
+          </a>
+          <span className="skill-pill-dim"> · one-liner →</span>
+        </span>
+      </div>
+      <button
+        className={`skill-pill-copy ${copied ? "copied" : ""}`}
+        onClick={onClick}
+        aria-label="Copy install command for Claude Code skill"
+      >
+        <span className="skill-pill-cmd">
+          curl …/pylon-skill.md &gt; ~/.claude/skills/pylon/SKILL.md
+        </span>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          width="13"
+          height="13"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+        <span className="skill-pill-copied">copied</span>
+      </button>
+    </div>
+  );
+}
+
 function GithubButton() {
   return (
     <a
@@ -854,6 +914,8 @@ export function Hero() {
           <InstallCmd />
           <GithubButton />
         </div>
+
+        <ClaudeSkill />
 
         <HeroDemo />
       </div>
