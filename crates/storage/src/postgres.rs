@@ -1328,7 +1328,7 @@ mod tests {
             "hello"
         );
         assert_eq!(json_value_to_string(&serde_json::json!(42)), "42");
-        assert_eq!(json_value_to_string(&serde_json::json!(3.14)), "3.14");
+        assert_eq!(json_value_to_string(&serde_json::json!(1.5)), "1.5");
         assert_eq!(json_value_to_string(&serde_json::Value::Bool(true)), "true");
         assert_eq!(
             json_value_to_string(&serde_json::Value::Bool(false)),
