@@ -402,9 +402,16 @@ function OnboardingScreen({
       {createOpen && (
         <CreateOrgModal
           onClose={() => setCreateOpen(false)}
-          onCreated={(id) => {
+          onCreated={async (id) => {
+            // Pull the replica before switching — createOrganization
+            // inserts Organization + OrgMember server-side, but our local
+            // useQuery<OrgMember> won't include the new row until sync
+            // catches up. Without this, select-org flips activeOrgId to
+            // an id that's not in myOrgs, and OrgGate falls back to the
+            // onboarding screen.
             setCreateOpen(false);
-            void onSelectOrg(id);
+            await db.sync.pull();
+            await onSelectOrg(id);
           }}
         />
       )}
