@@ -11,10 +11,10 @@ import { mutation, v } from "@pylonsync/functions";
 export default mutation({
   args: {
     roomId: v.string(),
-    cx: v.float(),
-    cz: v.float(),
-    radius: v.float(),
-    strength: v.float(),
+    cx: v.number(),
+    cz: v.number(),
+    radius: v.number(),
+    strength: v.number(),
     layer: v.int(), // 0..3
   },
   async handler(ctx, args) {
