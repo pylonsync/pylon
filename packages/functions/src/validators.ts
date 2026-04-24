@@ -32,14 +32,38 @@ export const v = {
   /** String value. */
   string: (): Validator => validator("string"),
 
-  /** Number (float64). */
+  /** Number (float64). Same as `v.float()`. */
   number: (): Validator => validator("number"),
+
+  /**
+   * 64-bit float. Alias for `v.number()` so the validator API matches the
+   * schema DSL (which uses `field.float()`). Prefer this in new code.
+   */
+  float: (): Validator => validator("number"),
 
   /** Integer. */
   int: (): Validator => validator("int"),
 
-  /** Boolean. */
+  /** Boolean. Same as `v.bool()`. */
   boolean: (): Validator => validator("boolean"),
+
+  /**
+   * Boolean. Alias for `v.boolean()` so the validator API matches the
+   * schema DSL (which uses `field.bool()`). Prefer this in new code.
+   */
+  bool: (): Validator => validator("boolean"),
+
+  /**
+   * ISO-8601 datetime string. Validates the shape of a string value; the
+   * stored column type comes from the schema (`field.datetime()`).
+   */
+  datetime: (): Validator => validator("string"),
+
+  /**
+   * Richtext string. Same runtime validation as `v.string()`; named
+   * explicitly so server functions read as the matching schema type.
+   */
+  richtext: (): Validator => validator("string"),
 
   /** ID reference to another entity. */
   id: (table: string): Validator => validator("id", { table }),

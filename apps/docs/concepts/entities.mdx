@@ -30,7 +30,7 @@ Every entity gets an auto-generated `id` (ULID string) and the column order you 
 | `field.string()` | `TEXT` | Any UTF-8 string |
 | `field.int()` | `INTEGER` | 64-bit signed |
 | `field.float()` | `REAL` | 64-bit IEEE-754 |
-| `field.boolean()` | `INTEGER` (0/1) | |
+| `field.bool()` | `INTEGER` (0/1) | Boolean (not `field.boolean`) |
 | `field.datetime()` | `TEXT` (ISO-8601) | Store with `new Date().toISOString()` |
 | `field.richtext()` | `TEXT` | For prose; the client SDK has editors ready |
 | `field.id(entity)` | `TEXT` | Foreign key to another entity's `id` |

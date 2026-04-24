@@ -19,12 +19,12 @@ import { mutation, v } from "@pylonsync/functions";
 export default mutation({
   args: {
     roomId: v.string(),
-    cx: v.float(),
-    cz: v.float(),
-    radius: v.float(),
-    strength: v.float(),
+    cx: v.number(),
+    cz: v.number(),
+    radius: v.number(),
+    strength: v.number(),
     mode: v.string(), // "raise" | "lower" | "smooth" | "flatten"
-    targetY: v.optional(v.float()),
+    targetY: v.optional(v.number()),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

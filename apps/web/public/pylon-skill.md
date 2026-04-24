@@ -17,7 +17,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 - **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — 12 full apps covering CRM, ERP, chat, 3D, dashboards, etc. Best place to copy patterns.
 - **This skill file (latest):** <https://pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
-**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The single biggest failure mode for Pylon apps is hallucinating API names (`field.number`, `v.bool`, `relation(...)`) that look plausible but don't exist and will error at load time.
+**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`, `db.useAggregate({sum: ...})`) is probably hallucinated.
 
 ## When to use this skill
 
@@ -119,7 +119,7 @@ console.log(JSON.stringify(manifest, null, 2));
 field.string()        // TEXT
 field.int()           // INTEGER 64-bit
 field.float()         // REAL 64-bit
-field.boolean()       // 0/1 stored as INTEGER
+field.bool()          // 0/1 stored as INTEGER (not field.boolean)
 field.datetime()      // ISO-8601 string
 field.richtext()      // long-form text
 field.id("OtherEntity") // FK to another entity's id column
@@ -130,8 +130,7 @@ field.id("OtherEntity") // FK to another entity's id column
 - `.unique()` — implicit unique index on one column
 
 **Common mistakes to avoid:**
-- `field.number()` **does not exist** — use `field.float()` or `field.int()`.
-- `field.bool()` **does not exist** — it's `field.boolean()`.
+- Both `field.float()` / `field.number()` work (same type). Both `field.bool()` / `field.boolean()` work. Pick whichever reads better.
 - `field.id()` without an entity argument **is invalid** — always pass the target entity name.
 
 ### Indexes
@@ -212,9 +211,10 @@ Import from `@pylonsync/functions`:
 ```ts
 v.string()
 v.int()
-v.float()
-v.boolean()          // NOT v.bool() — that does NOT exist
-v.datetime()
+v.number() / v.float()     // 64-bit float (both names work)
+v.boolean() / v.bool()     // boolean (both names work)
+v.datetime()               // ISO-8601 string
+v.richtext()               // richtext string
 v.id("Entity")
 v.optional(v.string())
 v.array(v.string())
@@ -222,7 +222,7 @@ v.literal("open")    // exact string/number/bool
 v.object({ k: v.string() })
 ```
 
-`v.number()` does exist as an alias for `v.float()`, but **prefer explicit `v.int()` or `v.float()`** in generated code.
+`v.float()` and `v.number()` are aliases for the same 64-bit float validator. Use whichever matches your `field.*` choice.
 
 ### Mutation pattern
 
@@ -419,7 +419,19 @@ For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop
 
 ## Gotchas & rules
 
-- **API drift** is the #1 bug cause. When writing schema, use `field.float()`/`field.int()`/`field.boolean()`. When writing validators, use `v.float()`/`v.int()`/`v.boolean()`. Do NOT use `field.number()`, `v.bool()`, or anything similar — they fail at load time.
+- **Type names** — schema (`field.*`) and validator (`v.*`) both accept two naming conventions so you don't have to remember which camp a given API belongs to:
+
+  | Type | Schema (`@pylonsync/sdk`) | Validator (`@pylonsync/functions`) |
+  |---|---|---|
+  | string | `field.string()` | `v.string()` |
+  | integer | `field.int()` | `v.int()` |
+  | float | `field.float()` or `field.number()` | `v.float()` or `v.number()` |
+  | boolean | `field.bool()` or `field.boolean()` | `v.bool()` or `v.boolean()` |
+  | datetime | `field.datetime()` | `v.datetime()` or `v.string()` |
+  | richtext | `field.richtext()` | `v.richtext()` or `v.string()` |
+  | FK id | `field.id("X")` | `v.id("X")` |
+
+  What still **doesn't exist**: `relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`. When in doubt, source is at <https://github.com/pylonsync/pylon/tree/main/packages>.
 - **Every function file must `export default`** the `mutation()/query()/action()` result. Named exports are ignored.
 - **`functions/*.ts` file names are the RPC names.** `functions/create-issue.ts` would be called as `create-issue` — prefer camelCase to match JS identifier conventions.
 - **Generated files** (`pylon.manifest.json`, `pylon.client.ts`) are rebuilt on every `pylon dev` invocation. Never edit by hand.

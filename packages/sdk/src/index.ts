@@ -49,11 +49,20 @@ function buildField(def: FieldDefinition): FieldBuilder {
   };
 }
 
+// Both naming conventions ("bool"/"boolean", "float"/"number") are
+// accepted here to match the validator side (`@pylonsync/functions`,
+// where `v.bool/v.boolean` and `v.float/v.number` are aliases). Keeping
+// both forms alive eliminates a real class of 'module fails to load'
+// bugs caused by guessing which camp the API falls into.
 export const field = {
   string: () => createFieldBuilder("string"),
   int: () => createFieldBuilder("int"),
   float: () => createFieldBuilder("float"),
+  /** Alias for `field.float()`. Lets either name work. */
+  number: () => createFieldBuilder("float"),
   bool: () => createFieldBuilder("bool"),
+  /** Alias for `field.bool()`. Lets either name work. */
+  boolean: () => createFieldBuilder("bool"),
   datetime: () => createFieldBuilder("datetime"),
   richtext: () => createFieldBuilder("richtext"),
   id: (target: string) => createFieldBuilder(`id(${target})`),
