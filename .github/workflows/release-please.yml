@@ -1,0 +1,34 @@
+name: release-please
+
+# Opens / updates a "chore: release X.Y.Z" PR whenever a conventional commit
+# lands on main. Merging that PR writes the version bumps, pushes a
+# `vX.Y.Z` git tag, and creates a GitHub Release — which then triggers
+# `release.yml` to publish npm + crates.io + prebuilt binaries + Docker.
+#
+# Version bump rules (bump-minor-pre-major = true):
+#   feat:  → 0.Y+1.0 (minor)
+#   fix:   → 0.Y.Z+1 (patch)
+#   BREAKING CHANGE / feat!: / fix!: → 0.Y+1.0 until we reach 1.0, then major
+
+on:
+  push:
+    branches: [main]
+  # Manually re-run if an automation hiccup leaves the release PR stale.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

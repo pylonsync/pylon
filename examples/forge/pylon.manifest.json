@@ -1,0 +1,178 @@
+{
+  "manifest_version": 1,
+  "name": "forge",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Prim",
+      "fields": [
+        {
+          "name": "roomId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "x",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "z",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sx",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sy",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sz",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdBy",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_room",
+          "fields": [
+            "roomId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Cursor",
+      "fields": [
+        {
+          "name": "roomId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "x",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "z",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_room_user",
+          "fields": [
+            "roomId",
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_room",
+          "fields": [
+            "roomId"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "prim_room",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId != null",
+      "entity": "Prim"
+    },
+    {
+      "name": "cursor_ownership",
+      "allowRead": "true",
+      "allowInsert": "auth.userId == data.userId",
+      "allowUpdate": "auth.userId == data.userId",
+      "allowDelete": "auth.userId == data.userId",
+      "entity": "Cursor"
+    }
+  ]
+}

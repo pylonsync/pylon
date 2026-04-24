@@ -1635,7 +1635,25 @@ fn start_server(
                 mt.record_request("GET", 401);
                 continue;
             }
-            let base = format!("http://localhost:{port}");
+            // Derive the public base URL from the request's Host header +
+            // X-Forwarded-Proto (Fly / any HTTPS terminator sets this).
+            // Hardcoding `http://localhost:{port}` here meant the studio
+            // HTML served from pylon-crm.fly.dev tried to fetch
+            // http://localhost:4321/api/* from the browser, which CSP
+            // rightly blocks.
+            let host = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Host"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_else(|| format!("localhost:{port}"));
+            let scheme = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-Forwarded-Proto"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_else(|| "http".to_string());
+            let base = format!("{scheme}://{host}");
             let html = pylon_studio_api::generate_studio_html(rt.manifest(), &base);
             (200u16, html, "text/html", true)
         } else {

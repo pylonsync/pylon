@@ -4,14 +4,50 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # -----------------------------------------------------------------
+  # Detect what changed. All expensive jobs gate on these outputs.
+  # Docs-only / example-only / marketing-site-only changes return
+  # rust=false + ts=false → every test job is skipped → the terminal
+  # `ci-passed` job still runs and reports green so branch protection
+  # doesn't block merges.
+  # -----------------------------------------------------------------
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      ts: ${{ steps.filter.outputs.ts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Dockerfile'
+              - 'rust-toolchain*'
+              - '.github/workflows/ci.yml'
+            ts:
+              - 'packages/**'
+              - 'package.json'
+              - 'bun.lockb'
+              - 'bun.lock'
+              - '.github/workflows/ci.yml'
+
   fmt:
     name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +58,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +71,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,6 +87,8 @@ jobs:
 
   build:
     name: build (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -65,6 +107,8 @@ jobs:
 
   typescript:
     name: typescript packages
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,9 +119,37 @@ jobs:
 
   audit:
     name: cargo audit
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install --locked cargo-audit
       - run: cargo audit
+
+  # -----------------------------------------------------------------
+  # Terminal gate. Always runs (even when every real job is skipped),
+  # fails if any of the real jobs actually failed or was cancelled.
+  # Skipped jobs are treated as green.
+  #
+  # Set this as the one required check in the branch protection rule.
+  # -----------------------------------------------------------------
+  ci-passed:
+    name: CI passed
+    needs: [changes, fmt, clippy, test, build, typescript, audit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate job results
+        shell: bash
+        run: |
+          results='${{ toJSON(needs) }}'
+          failed=$(echo "$results" | grep -c '"result": "failure"' || true)
+          cancelled=$(echo "$results" | grep -c '"result": "cancelled"' || true)
+          if [[ "$failed" -gt 0 || "$cancelled" -gt 0 ]]; then
+            echo "::error::One or more required jobs failed or were cancelled"
+            echo "$results"
+            exit 1
+          fi
+          echo "All jobs passed (or were skipped because no relevant code changed)."
