@@ -13,8 +13,19 @@ export default mutation({
     const displayName = args.displayName.trim();
     if (!displayName) throw ctx.error("INVALID_NAME", "display name required");
 
+    // Find-or-update by email. If the row exists but was seeded by
+    // /api/auth/magic/verify with displayName=email (the default when
+    // verify creates a User before we know the caller's real name),
+    // overwrite the display name on this call.
     const existing = await ctx.db.query("User", { email });
-    if (existing.length > 0) return existing[0];
+    if (existing.length > 0) {
+      const row = existing[0] as Record<string, unknown>;
+      if (displayName && row.displayName !== displayName) {
+        await ctx.db.update("User", row.id as string, { displayName });
+        return { ...row, displayName };
+      }
+      return row;
+    }
 
     const palette = [
       "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#10b981",
