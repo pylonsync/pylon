@@ -59,8 +59,12 @@ RUN groupadd --system --gid 10001 pylon \
 ENV PYLON_DB_PATH=/data/pylon.db
 ENV PYLON_FILES_DIR=/data/uploads
 ENV PYLON_SESSION_DB=/data/sessions.db
-ENV PYLON_DEV_MODE=false
 ENV PYLON_FUNCTIONS_RUNTIME=/pylon/packages/functions/src/runtime.ts
+# Default to dev mode so the container boots without forcing operators to
+# pre-configure PYLON_CORS_ORIGIN. Lock it down in production by setting
+# PYLON_DEV_MODE=false AND PYLON_CORS_ORIGIN=https://your-frontend.example.com
+# via `fly secrets set`.
+ENV PYLON_DEV_MODE=true
 
 USER pylon:pylon
 EXPOSE 4321
@@ -69,4 +73,4 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://localhost:4321/health || exit 1
 
-CMD ["pylon", "dev", "app.ts"]
+CMD ["pylon", "start", "app.ts"]

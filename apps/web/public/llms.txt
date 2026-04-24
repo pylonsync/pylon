@@ -27,7 +27,7 @@ The system has four primitives: entities (typed tables), policies (row-level acc
 
 ## Runtime
 
-- Single Rust binary `pylon`. Dev: `pylon dev app.ts` watches schema + functions, runs SQLite on `.pylon/dev.db` by default (or Postgres if `DATABASE_URL` is set), serves HTTP on `:4321`.
+- Single Rust binary `pylon`. Dev: `pylon dev app.ts` watches schema + functions, runs SQLite on `.pylon/dev.db` by default (or Postgres if `DATABASE_URL` is set), serves HTTP on `:4321`. Production: `pylon start app.ts` — same server, no file watcher, blocks on the server thread so process supervisors restart cleanly on fatal errors.
 - WebSocket for live queries; HTTP POST `/api/fn/<name>` for function RPC; `/api/entities/<Entity>` for direct CRUD (policy-checked).
 - Env vars: `PYLON_DB_PATH`, `PYLON_FILES_DIR`, `PYLON_CORS_ORIGIN`, `PYLON_PORT`, `PYLON_DEV_MODE`, `PYLON_RATE_LIMIT_MAX`, `PYLON_FN_RATE_LIMIT_MAX`.
 

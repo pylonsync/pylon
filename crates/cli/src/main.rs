@@ -87,6 +87,7 @@ fn run() -> ExitCode {
             }
         },
         Some("seed") => commands::seed::run(&args, json_mode),
+        Some("start") => commands::start::run(&args, json_mode),
         Some("test") => commands::test::run(&args, json_mode),
         Some("backup") => commands::backup::run_backup(&args, json_mode),
         Some("restore") => commands::backup::run_restore(&args, json_mode),
@@ -118,9 +119,9 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 18] = [
+const TOP_LEVEL_COMMANDS: [&str; 19] = [
     "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env", "explain", "init",
-    "migrate", "plugins", "restore", "schema", "seed", "test", "version", "help",
+    "migrate", "plugins", "restore", "schema", "seed", "start", "test", "version", "help",
 ];
 
 const SCHEMA_SUBCOMMANDS: [&str; 5] = ["check", "diff", "push", "inspect", "history"];
@@ -134,6 +135,7 @@ fn print_usage() {
     println!();
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");
+    println!("  start [app.ts]            Start production server (no watcher)");
     println!("  init                      Initialize a new project");
     println!("  build                     Build for production");
     println!("  deploy                    Deploy to production");

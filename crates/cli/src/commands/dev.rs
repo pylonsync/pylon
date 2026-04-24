@@ -282,7 +282,15 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
         let rt_clone = Arc::clone(&runtime);
         std::thread::spawn(move || {
-            let _ = pylon_runtime::server::start(rt_clone, port);
+            // Previously this dropped the error with `let _ = ...` which made
+            // misconfigurations (e.g. PYLON_CORS_ORIGIN unset in prod) look
+            // like a hang: machine boots, init logs scroll by, port 4321 never
+            // accepts, no error anywhere. Print to stderr so the operator sees
+            // the real reason in `fly logs` / container stdout.
+            if let Err(e) = pylon_runtime::server::start(rt_clone, port) {
+                eprintln!("[pylon] server failed to start: {e}");
+                std::process::exit(1);
+            }
         });
     }
 

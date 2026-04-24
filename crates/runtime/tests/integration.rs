@@ -21,6 +21,21 @@ use pylon_runtime::Runtime;
 /// Sends a single request with `Connection: close` and reads until EOF.
 /// Deliberately simple -- no redirect following, no chunked decoding.
 fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
+    http_request_with_auth(method, url, body, None)
+}
+
+/// Test admin token. `start_test_server` sets `PYLON_ADMIN_TOKEN` to this
+/// value the first time it's called, so passing `Some(TEST_ADMIN_TOKEN)` to
+/// `http_request_with_auth` unlocks admin-only endpoints like /api/batch,
+/// /api/transact, and /api/import.
+const TEST_ADMIN_TOKEN: &str = "testadmin_integration";
+
+fn http_request_with_auth(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    auth: Option<&str>,
+) -> (u16, String) {
     let host = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = match host.find('/') {
         Some(i) => (&host[..i], &host[i..]),
@@ -29,11 +44,15 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
 
     let body_str = body.unwrap_or("");
     let content_length = body_str.len();
+    let auth_header = match auth {
+        Some(token) => format!("Authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    };
     // Origin is mandatory on state-changing methods — the CSRF plugin
     // rejects POST/PATCH/DELETE without it. Dev mode's allowlist is `*`,
     // so echoing the host back always passes.
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nOrigin: http://{host_port}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body_str}"
+        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nOrigin: http://{host_port}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\n{auth_header}Connection: close\r\n\r\n{body_str}"
     );
 
     let mut stream = TcpStream::connect(host_port).expect("Failed to connect");
@@ -170,6 +189,19 @@ fn try_bind_block(base: u16) -> Option<u16> {
 ///
 /// Blocks until the server is accepting connections (up to 2.5 s).
 fn start_test_server() -> String {
+    // All tests share the same admin token so they can exercise admin-only
+    // endpoints (batch, transact, import). Setting this once is safe across
+    // threads — same value, never mutated — but we funnel through `Once` so
+    // it's clear a single test run only writes the env var once.
+    static INIT_ADMIN: std::sync::Once = std::sync::Once::new();
+    INIT_ADMIN.call_once(|| {
+        // Safety: called before any server thread is spawned. No other
+        // thread can be reading `PYLON_ADMIN_TOKEN` concurrently.
+        unsafe {
+            std::env::set_var("PYLON_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+        }
+    });
+
     let port = available_port();
     let manifest = test_manifest();
     let runtime = Arc::new(Runtime::in_memory(manifest).unwrap());
@@ -258,7 +290,10 @@ fn list_and_pagination() {
     let (status, body) = http_request("GET", &format!("{base}/api/entities/Todo"), None);
     assert_eq!(status, 200);
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(resp["total"], 5);
+    // Response shape is {data, count, offset, limit} — `count` is "rows
+    // returned" not "total in table"; cursor pagination at
+    // /api/entities/:e/cursor is the right path for total counts.
+    assert_eq!(resp["count"], 5);
 
     // Offset/limit pagination.
     let (_, body) = http_request(
@@ -376,7 +411,8 @@ fn error_handling() {
 fn batch_operations() {
     let base = start_test_server();
 
-    let (status, body) = http_request(
+    // /api/batch is admin-only — use the test admin token.
+    let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/batch"),
         Some(
@@ -387,6 +423,7 @@ fn batch_operations() {
                 ]
             }"#,
         ),
+        Some(TEST_ADMIN_TOKEN),
     );
     assert_eq!(status, 200, "batch: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -403,7 +440,8 @@ fn batch_operations() {
 fn transaction() {
     let base = start_test_server();
 
-    let (status, body) = http_request(
+    // /api/transact is admin-only — use the test admin token.
+    let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/transact"),
         Some(
@@ -412,6 +450,7 @@ fn transaction() {
                 {"op": "insert", "entity": "Todo", "data": {"title": "TX2", "done": false}}
             ]"#,
         ),
+        Some(TEST_ADMIN_TOKEN),
     );
     assert_eq!(status, 200, "transact: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -449,25 +488,33 @@ fn cache_via_http() {
 fn rooms_via_http() {
     let base = start_test_server();
 
-    // Join a room.
-    let (status, body) = http_request(
+    // Rooms are auth-gated — admin token works the same as a user session
+    // for this endpoint and avoids a separate guest-auth round-trip.
+    let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/rooms/join"),
         Some(r#"{"room": "lobby", "user_id": "alice"}"#),
+        Some(TEST_ADMIN_TOKEN),
     );
     assert_eq!(status, 200, "join: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(resp["joined"], "lobby");
 
     // List rooms.
-    let (status, body) = http_request("GET", &format!("{base}/api/rooms"), None);
+    let (status, body) = http_request_with_auth(
+        "GET",
+        &format!("{base}/api/rooms"),
+        None,
+        Some(TEST_ADMIN_TOKEN),
+    );
     assert_eq!(status, 200, "list rooms: {body}");
 
     // Leave the room.
-    let (status, body) = http_request(
+    let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/rooms/leave"),
         Some(r#"{"room": "lobby", "user_id": "alice"}"#),
+        Some(TEST_ADMIN_TOKEN),
     );
     assert_eq!(status, 200, "leave: {body}");
 }
