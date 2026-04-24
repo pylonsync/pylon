@@ -18,7 +18,10 @@ import {
   type AggregateSpec,
 } from "@pylonsync/react";
 
-const BASE_URL = "http://localhost:4321";
+// Set VITE_PYLON_URL in Vercel (e.g. https://pylon-erp.fly.dev) to point
+// the deployed frontend at the deployed backend; local dev falls back to
+// localhost:4321 if the env var isn't set.
+const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
 // Namespace so the ERP doesn't inherit auth/replica state from the chat
 // demo (or any other Pylon app) when they share a browser origin.
 init({ baseUrl: BASE_URL, appName: "erp" });

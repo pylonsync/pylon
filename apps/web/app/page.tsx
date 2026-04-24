@@ -2,6 +2,7 @@ import { Nav } from "@/components/nav";
 import { Hero } from "@/components/hero";
 import { DemoSection } from "@/components/demo";
 import { Features } from "@/components/features";
+import { Plugins } from "@/components/plugins";
 import { Scale } from "@/components/scale";
 import { Compare } from "@/components/compare";
 import { Unusual } from "@/components/unusual";
@@ -15,6 +16,7 @@ export default function Home() {
       <Hero />
       <DemoSection />
       <Features />
+      <Plugins />
       <Scale />
       <Compare />
       <Unusual />
