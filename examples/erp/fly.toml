@@ -22,6 +22,9 @@ primary_region = "iad"
   source = "pylon_data"
   destination = "/data"
 
-[env]
-  PYLON_DEV_MODE = "false"
-  # PYLON_CORS_ORIGIN is set via `fly secrets set` after you know the Vercel URL.
+# Dev-mode is intentionally on until an operator sets both:
+#   fly secrets set --app pylon-erp \
+#     PYLON_DEV_MODE=false \
+#     PYLON_CORS_ORIGIN=https://your-frontend.example.com
+# The server refuses to start in non-dev mode without a CORS origin, which
+# would otherwise manifest as a silent restart loop.
