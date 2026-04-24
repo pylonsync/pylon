@@ -13,6 +13,16 @@ primary_region = "iad"
   auto_start_machines = true
   min_machines_running = 0
 
+[[services]]
+  internal_port = 4322
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  [[services.ports]]
+    port = 4322
+    handlers = ["tls"]
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
