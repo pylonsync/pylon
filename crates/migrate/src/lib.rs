@@ -467,6 +467,7 @@ mod tests {
             fields,
             indexes,
             relations: vec![],
+            search: None,
         }
     }
 

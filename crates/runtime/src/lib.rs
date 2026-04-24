@@ -450,6 +450,22 @@ impl Runtime {
                 message: format!("Insert into {entity} failed: {e}"),
             })?;
 
+        // Search-index maintenance on the non-tx write path. Mirrors
+        // insert_with_conn — without this, /api/entities/:name POSTs
+        // and direct Runtime::insert callers would leave FTS5 + facet
+        // bitmaps empty even though the entity declares `search:`.
+        if let Some(cfg) = ent.search.as_ref() {
+            if !cfg.is_empty() {
+                pylon_storage::search_maintenance::apply_insert(
+                    &conn, entity, &id, data, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on insert {entity}: {e}"),
+                })?;
+            }
+        }
+
         Ok(id)
     }
 
@@ -590,6 +606,21 @@ impl Runtime {
             return Ok(false);
         }
 
+        // Capture pre-UPDATE row for search-maintenance diff. Matches
+        // the contract of search_maintenance::apply_update — old state
+        // must be read before the UPDATE lands or the diff will see
+        // the new value on both sides.
+        let searchable = ent
+            .search
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        let old_row = if searchable {
+            self.get_by_id_with_conn(&conn, entity, id)?
+        } else {
+            None
+        };
+
         values.push(Box::new(id.to_string()));
         let sql = format!(
             "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
@@ -605,13 +636,47 @@ impl Runtime {
                 message: format!("Update {entity}/{id} failed: {e}"),
             })?;
 
+        if affected > 0 && searchable {
+            if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
+                pylon_storage::search_maintenance::apply_update(
+                    &conn, entity, id, &old, data, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on update {entity}: {e}"),
+                })?;
+            }
+        }
+
         Ok(affected > 0)
     }
 
     /// Delete a row by ID. Returns true if a row was actually deleted.
     pub fn delete(&self, entity: &str, id: &str) -> Result<bool, RuntimeError> {
-        let _ent = self.require_entity(entity)?;
+        let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
+
+        // Apply search-maintenance BEFORE the DELETE — we still need
+        // the row's facet values to clear the bitmap bits.
+        let searchable = ent
+            .search
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if searchable {
+            if let (Some(cfg), Ok(Some(row))) = (
+                ent.search.as_ref(),
+                self.get_by_id_with_conn(&conn, entity, id),
+            ) {
+                pylon_storage::search_maintenance::apply_delete(
+                    &conn, entity, id, &row, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on delete {entity}: {e}"),
+                })?;
+            }
+        }
 
         let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
         let affected = conn
@@ -1013,6 +1078,21 @@ impl Runtime {
                 code: "INSERT_FAILED".into(),
                 message: format!("Insert into {entity} failed: {e}"),
             })?;
+
+        // Faceted-search maintenance in the same transaction. Skipped
+        // for entities that don't declare `search:` in their schema.
+        if let Some(cfg) = ent.search.as_ref() {
+            if !cfg.is_empty() {
+                pylon_storage::search_maintenance::apply_insert(
+                    conn, entity, &id, data, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on insert {entity}: {e}"),
+                })?;
+            }
+        }
+
         Ok(id)
     }
 
@@ -1046,6 +1126,21 @@ impl Runtime {
             return Ok(false);
         }
 
+        // Capture the pre-UPDATE row if we need to diff facet values.
+        // Read happens before the UPDATE so apply_update sees the OLD
+        // state of any facet field. Cheap — single-row lookup on the
+        // `id` primary-key index.
+        let searchable = ent
+            .search
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        let old_row = if searchable {
+            self.get_by_id_with_conn(conn, entity, id)?
+        } else {
+            None
+        };
+
         values.push(Box::new(id.to_string()));
         let sql = format!(
             "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
@@ -1059,6 +1154,19 @@ impl Runtime {
                 code: "UPDATE_FAILED".into(),
                 message: format!("Update {entity}/{id} failed: {e}"),
             })?;
+
+        if affected > 0 && searchable {
+            if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
+                pylon_storage::search_maintenance::apply_update(
+                    conn, entity, id, &old, data, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on update {entity}: {e}"),
+                })?;
+            }
+        }
+
         Ok(affected > 0)
     }
 
@@ -1069,7 +1177,29 @@ impl Runtime {
         entity: &str,
         id: &str,
     ) -> Result<bool, RuntimeError> {
-        let _ent = self.require_entity(entity)?;
+        let ent = self.require_entity(entity)?;
+
+        // Apply search maintenance BEFORE the DELETE so we still have
+        // the row's facet values to diff against.
+        let searchable = ent
+            .search
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if searchable {
+            if let (Some(cfg), Ok(Some(row))) =
+                (ent.search.as_ref(), self.get_by_id_with_conn(conn, entity, id))
+            {
+                pylon_storage::search_maintenance::apply_delete(
+                    conn, entity, id, &row, cfg,
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SEARCH_MAINTENANCE_FAILED".into(),
+                    message: format!("search index update on delete {entity}: {e}"),
+                })?;
+            }
+        }
+
         let sql = format!("DELETE FROM {} WHERE \"id\" = ?1", quote_ident(entity));
         let affected = conn
             .execute(&sql, rusqlite::params![id])
@@ -1767,6 +1897,7 @@ mod tests {
                     unique: true,
                 }],
                 relations: vec![],
+                search: None,
             }],
             routes: vec![],
             queries: vec![],

@@ -55,37 +55,14 @@ use serde::{Deserialize, Serialize};
 use crate::StorageError;
 
 // ---------------------------------------------------------------------------
-// Config (what apps declare in their schema)
+// Config — re-exported from pylon-kernel
 // ---------------------------------------------------------------------------
 
-/// Per-entity search configuration. A non-`None` value signals "make
-/// this entity searchable"; Pylon creates the FTS5 + facet tables on
-/// the next schema push.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchConfig {
-    /// Fields indexed for free-text matching (BM25). Order matters —
-    /// earlier fields get a small ranking bump in the default scoring.
-    #[serde(default)]
-    pub text: Vec<String>,
-
-    /// Fields whose distinct values Pylon maintains facet bitmaps for.
-    /// Only scalar fields (string / int / bool). Facets on richtext
-    /// or on high-cardinality fields (e.g. row ids) are silently
-    /// skipped with a warning.
-    #[serde(default)]
-    pub facets: Vec<String>,
-
-    /// Fields the client may pass to `sort`. Enforced so callers can't
-    /// point ORDER BY at something unindexed.
-    #[serde(default)]
-    pub sortable: Vec<String>,
-}
-
-impl SearchConfig {
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.facets.is_empty() && self.sortable.is_empty()
-    }
-}
+/// Storage-side alias for `pylon_kernel::ManifestSearchConfig`. The
+/// shape lives in the kernel because the manifest is what every layer
+/// reads (runtime, storage, router all share it). We re-export here
+/// so storage callers don't have to double-import.
+pub use pylon_kernel::ManifestSearchConfig as SearchConfig;
 
 // ---------------------------------------------------------------------------
 // Query + result shapes (what clients send / get back)

@@ -653,6 +653,7 @@ mod tests {
                         unique: true,
                     }],
                     relations: vec![],
+                    search: None,
                 },
                 ManifestEntity {
                     name: "Post".into(),
@@ -672,6 +673,7 @@ mod tests {
                     ],
                     indexes: vec![],
                     relations: vec![],
+                    search: None,
                 },
             ],
             routes: vec![],

@@ -72,6 +72,19 @@ pub enum SchemaOperation {
         entity: String,
         name: String,
     },
+    /// Materialize the FTS5 + facet-bitmap shadow tables for a
+    /// searchable entity. Emitted alongside CreateEntity when the
+    /// manifest declares a `search:` config; idempotent so repeated
+    /// pushes against a live DB are safe.
+    CreateSearchIndex {
+        entity: String,
+        config: pylon_kernel::ManifestSearchConfig,
+    },
+    /// Drop an entity's search shadow tables. Emitted when the entity
+    /// is removed from the manifest or its `search:` block is cleared.
+    RemoveSearchIndex {
+        entity: String,
+    },
     Noop,
 }
 
@@ -172,6 +185,14 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                         unique: index.unique,
                     });
                 }
+                if let Some(cfg) = &entity.search {
+                    if !cfg.is_empty() {
+                        operations.push(SchemaOperation::CreateSearchIndex {
+                            entity: entity.name.clone(),
+                            config: cfg.clone(),
+                        });
+                    }
+                }
             }
             Some(table) => {
                 let existing_cols: HashSet<&str> =
@@ -201,6 +222,28 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                             fields: index.fields.clone(),
                             unique: index.unique,
                         });
+                    }
+                }
+                // Search-index creation on an already-existing table:
+                // emit CreateSearchIndex when the manifest adds a
+                // `search:` block to an entity that was previously
+                // non-searchable. Apply is idempotent (IF NOT EXISTS
+                // on the FTS + facet tables) so repeated pushes don't
+                // fail; the one-way gap this closes is going from
+                // "no search" → "search" on a table that already has
+                // rows.
+                if let Some(cfg) = &entity.search {
+                    if !cfg.is_empty() {
+                        let fts_table = format!("_fts_{}", entity.name);
+                        let facet_table = "_facet_bitmap";
+                        let fts_exists = existing_tables.contains_key(fts_table.as_str());
+                        let facet_exists = existing_tables.contains_key(facet_table);
+                        if !fts_exists || !facet_exists {
+                            operations.push(SchemaOperation::CreateSearchIndex {
+                                entity: entity.name.clone(),
+                                config: cfg.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -499,7 +542,8 @@ mod tests {
                 }],
                 indexes: vec![],
                 relations: vec![],
-            }],
+                search: None,
+        }],
             routes: vec![],
             queries: vec![],
             actions: vec![],
@@ -583,6 +627,7 @@ mod tests {
             }],
             indexes: vec![],
             relations: vec![],
+            search: None,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -836,7 +881,8 @@ mod tests {
                 ],
                 indexes: vec![],
                 relations: vec![],
-            }],
+                search: None,
+        }],
             routes: vec![],
             queries: vec![],
             actions: vec![],
@@ -886,7 +932,8 @@ mod tests {
                     unique: true,
                 }],
                 relations: vec![],
-            }],
+                search: None,
+        }],
             routes: vec![],
             queries: vec![],
             actions: vec![],

@@ -745,6 +745,14 @@ fn format_operation(op: &pylon_storage::SchemaOperation) -> String {
         RemoveIndex { entity, name } => {
             format!("REMOVE index {}.{}", entity, name)
         }
+        CreateSearchIndex { entity, config } => format!(
+            "CREATE search index {} (text: {}, facets: {}, sortable: {})",
+            entity,
+            config.text.len(),
+            config.facets.len(),
+            config.sortable.len(),
+        ),
+        RemoveSearchIndex { entity } => format!("REMOVE search index {}", entity),
         Noop => "NOOP".into(),
     }
 }
@@ -1280,6 +1288,7 @@ mod tests {
                 }],
                 indexes: vec![],
                 relations: vec![],
+                search: None,
             }],
             routes: vec![ManifestRoute {
                 path: "/".into(),
@@ -1309,6 +1318,7 @@ mod tests {
             fields: vec![],
             indexes: vec![],
             relations: vec![],
+            search: None,
         });
         let changes = compute_diff(&old, &new);
         assert!(changes

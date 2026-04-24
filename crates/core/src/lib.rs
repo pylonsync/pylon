@@ -113,6 +113,34 @@ pub struct ManifestEntity {
     pub indexes: Vec<ManifestIndex>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relations: Vec<ManifestRelation>,
+    /// Opt-in faceted search config. `None` = entity isn't searchable;
+    /// `Some(cfg)` makes the runtime create FTS5 + facet-bitmap shadow
+    /// tables on schema push and maintain them on every write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ManifestSearchConfig>,
+}
+
+/// Per-entity search declaration. Lives on the manifest so both the
+/// storage layer (schema push) and the runtime (write-time maintenance
+/// + query endpoints) read the same shape.
+///
+/// Kept in `pylon-kernel` intentionally — other crates depend on kernel
+/// but not on each other, so this is the only place every layer can
+/// agree on the config surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestSearchConfig {
+    #[serde(default)]
+    pub text: Vec<String>,
+    #[serde(default)]
+    pub facets: Vec<String>,
+    #[serde(default)]
+    pub sortable: Vec<String>,
+}
+
+impl ManifestSearchConfig {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.facets.is_empty() && self.sortable.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

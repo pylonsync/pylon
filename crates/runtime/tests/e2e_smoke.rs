@@ -42,6 +42,7 @@ fn test_manifest() -> AppManifest {
             ],
             indexes: vec![],
             relations: vec![],
+            search: None,
         }],
         routes: vec![],
         queries: vec![],

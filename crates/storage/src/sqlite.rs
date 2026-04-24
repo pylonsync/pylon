@@ -434,6 +434,45 @@ impl SqliteAdapter {
                         message: format!("Failed to create index {entity}.{name}: {e}"),
                     })?;
                 }
+                SchemaOperation::CreateSearchIndex { entity, config } => {
+                    // Ensure the shared facet table exists. Single
+                    // `_facet_bitmap` table holds all entities' bitmaps
+                    // keyed by (entity, facet, value); idempotent.
+                    self.conn
+                        .execute(crate::search::create_facet_table_sql(), [])
+                        .map_err(|e| StorageError {
+                            code: "SQLITE_EXEC_FAILED".into(),
+                            message: format!("create _facet_bitmap failed: {e}"),
+                        })?;
+                    // Per-entity FTS5 shadow table. Skipped when the
+                    // config has no text fields (facet-only search).
+                    if let Some(sql) = crate::search::create_fts_table_sql(entity, config) {
+                        self.conn.execute(&sql, []).map_err(|e| StorageError {
+                            code: "SQLITE_EXEC_FAILED".into(),
+                            message: format!("create _fts_{entity} failed: {e}"),
+                        })?;
+                    }
+                }
+                SchemaOperation::RemoveSearchIndex { entity } => {
+                    self.conn
+                        .execute(
+                            &format!("DROP TABLE IF EXISTS \"_fts_{entity}\""),
+                            [],
+                        )
+                        .map_err(|e| StorageError {
+                            code: "SQLITE_EXEC_FAILED".into(),
+                            message: format!("drop _fts_{entity} failed: {e}"),
+                        })?;
+                    self.conn
+                        .execute(
+                            "DELETE FROM \"_facet_bitmap\" WHERE entity = ?1",
+                            [entity],
+                        )
+                        .map_err(|e| StorageError {
+                            code: "SQLITE_EXEC_FAILED".into(),
+                            message: format!("clear facet bitmaps for {entity} failed: {e}"),
+                        })?;
+                }
                 SchemaOperation::Noop => {}
                 other => {
                     return Err(StorageError {
@@ -642,6 +681,7 @@ mod tests {
                     unique: true,
                 }],
                 relations: vec![],
+                search: None,
             }],
             routes: vec![],
             queries: vec![],
@@ -886,6 +926,7 @@ mod tests {
                     }],
                     indexes: vec![],
                     relations: vec![],
+                    search: None,
                 },
                 ManifestEntity {
                     name: "User".into(),
@@ -897,6 +938,7 @@ mod tests {
                     }],
                     indexes: vec![],
                     relations: vec![],
+                    search: None,
                 },
             ],
             routes: vec![],

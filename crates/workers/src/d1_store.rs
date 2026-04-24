@@ -515,6 +515,7 @@ mod tests {
                 }],
                 indexes: vec![],
                 relations: vec![],
+                search: None,
             }],
             routes: vec![],
             queries: vec![],

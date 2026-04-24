@@ -85,19 +85,47 @@ export interface RelationDefinition {
   many?: boolean;
 }
 
+/**
+ * Per-entity search config. Presence of this object on an entity
+ * definition tells Pylon to create FTS5 + facet-bitmap shadow tables
+ * on the next schema push and maintain them on every write.
+ *
+ * - `text`     – fields that participate in free-text MATCH (BM25).
+ * - `facets`   – scalar fields (string / int / bool) that get live
+ *                per-value counts via `db.useSearch`.
+ * - `sortable` – fields the client may order results by. Any `sort`
+ *                on a field not in this list is silently ignored.
+ */
+export interface SearchConfig {
+  text?: string[];
+  facets?: string[];
+  sortable?: string[];
+}
+
 export interface EntityDefinition {
   name: string;
   fields: Record<string, FieldBuilder>;
   indexes?: IndexDefinition[];
   relations?: RelationDefinition[];
+  search?: SearchConfig;
 }
 
 export function entity(
   name: string,
   fields: Record<string, FieldBuilder>,
-  options?: { indexes?: IndexDefinition[]; relations?: RelationDefinition[] }
+  options?: {
+    indexes?: IndexDefinition[];
+    relations?: RelationDefinition[];
+    search?: SearchConfig;
+  },
 ): EntityDefinition {
-  return { name, fields, indexes: options?.indexes, relations: options?.relations };
+  return {
+    name,
+    fields,
+    indexes: options?.indexes,
+    relations: options?.relations,
+    search: options?.search,
+  };
 }
 
 export function relation(def: RelationDefinition): RelationDefinition {
@@ -239,6 +267,16 @@ export interface ManifestEntity {
   fields: ManifestField[];
   indexes: ManifestIndex[];
   relations?: ManifestRelation[];
+  /**
+   * Mirrors `pylon_kernel::ManifestSearchConfig`. When present, the
+   * runtime creates FTS5 + facet-bitmap shadow tables on schema push
+   * and maintains them on every write.
+   */
+  search?: {
+    text?: string[];
+    facets?: string[];
+    sortable?: string[];
+  };
 }
 
 export interface ManifestRoute {
@@ -315,6 +353,22 @@ export function entitiesToManifest(
         field: r.field,
         many: r.many,
       }));
+    }
+    if (e.search) {
+      const s = e.search;
+      // Only emit the block when at least one list is non-empty — keeps
+      // the manifest JSON clean for non-searchable entities.
+      const anyDeclared =
+        (s.text?.length ?? 0) > 0 ||
+        (s.facets?.length ?? 0) > 0 ||
+        (s.sortable?.length ?? 0) > 0;
+      if (anyDeclared) {
+        result.search = {
+          text: s.text ?? [],
+          facets: s.facets ?? [],
+          sortable: s.sortable ?? [],
+        };
+      }
     }
     return result;
   });
