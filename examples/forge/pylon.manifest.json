@@ -152,6 +152,50 @@
           "unique": false
         }
       ]
+    },
+    {
+      "name": "Terrain",
+      "fields": [
+        {
+          "name": "roomId",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "size",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "heights",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "layers",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_room",
+          "fields": [
+            "roomId"
+          ],
+          "unique": true
+        }
+      ]
     }
   ],
   "routes": [],
@@ -173,6 +217,14 @@
       "allowUpdate": "auth.userId == data.userId",
       "allowDelete": "auth.userId == data.userId",
       "entity": "Cursor"
+    },
+    {
+      "name": "terrain_room",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId != null",
+      "entity": "Terrain"
     }
   ]
 }

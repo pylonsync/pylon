@@ -1,7 +1,32 @@
+"use client";
+
+import * as React from "react";
 import Link from "next/link";
 import { PylonMark } from "./pylon-logo";
 
+const SECTION_LINKS = [
+  { href: "#demo", label: "Demo" },
+  { href: "#features", label: "Features" },
+  { href: "#scale", label: "Scale" },
+  { href: "#compare", label: "Compare" },
+  { href: "#quickstart", label: "Quickstart" },
+];
+
 export function Nav() {
+  const [open, setOpen] = React.useState(false);
+
+  // Collapse the menu when any link is tapped, or when the viewport
+  // grows past the mobile breakpoint (so the hamburger state doesn't
+  // linger into the desktop layout after a resize).
+  const close = React.useCallback(() => setOpen(false), []);
+  React.useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth > 640) setOpen(false);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   return (
     <nav className="nav">
       <div className="container-page nav-inner">
@@ -11,11 +36,11 @@ export function Nav() {
             <span>Pylon</span>
           </Link>
           <div className="nav-links">
-            <a href="#demo">Demo</a>
-            <a href="#features">Features</a>
-            <a href="#scale">Scale</a>
-            <a href="#compare">Compare</a>
-            <a href="#quickstart">Quickstart</a>
+            {SECTION_LINKS.map((l) => (
+              <a key={l.href} href={l.href}>
+                {l.label}
+              </a>
+            ))}
           </div>
         </div>
         <div className="nav-right">
@@ -41,7 +66,56 @@ export function Nav() {
             </svg>
             GitHub
           </a>
+          <button
+            className="nav-mobile-toggle"
+            aria-label={open ? "Close menu" : "Open menu"}
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {open ? (
+                <>
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </>
+              ) : (
+                <>
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                </>
+              )}
+            </svg>
+          </button>
         </div>
+      </div>
+      <div className={`nav-mobile-menu ${open ? "open" : ""}`}>
+        {SECTION_LINKS.map((l) => (
+          <a key={l.href} href={l.href} onClick={close}>
+            {l.label}
+          </a>
+        ))}
+        <a href="https://docs.pylonsync.com" onClick={close}>
+          Docs
+        </a>
+        <a
+          href="https://github.com/pylonsync/pylon"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={close}
+        >
+          GitHub
+        </a>
       </div>
     </nav>
   );

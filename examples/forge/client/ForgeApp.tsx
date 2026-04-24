@@ -63,6 +63,98 @@ type Cursor = {
   updatedAt: string;
 };
 
+type Terrain = {
+  id: string;
+  roomId: string;
+  size: number;
+  heights: string;  // JSON number[][]
+  layers: string;   // JSON number[][][]
+  updatedAt: string;
+};
+
+// Terrain → world-space. `TERRAIN_WORLD_SIZE` is the edge length of the
+// terrain mesh in world units; `TERRAIN_HEIGHT_SCALE` converts stored
+// height values into displayed Y offset. Cell coords map to world as:
+//   worldX = (cx / (size-1) - 0.5) * WORLD_SIZE
+const TERRAIN_WORLD_SIZE = 40;
+const TERRAIN_HEIGHT_SCALE = 1.0;
+
+// 4 layer colors — grass / dirt / rock / snow. These are baked into the
+// shader via vertex-attribute weights so the per-vertex blend is free.
+const LAYER_COLORS: [THREE.Color, THREE.Color, THREE.Color, THREE.Color] = [
+  new THREE.Color("#4a6b3f"), // grass
+  new THREE.Color("#6b4f3a"), // dirt
+  new THREE.Color("#6a6a74"), // rock
+  new THREE.Color("#e8e8f0"), // snow
+];
+const LAYER_LABELS = ["Grass", "Dirt", "Rock", "Snow"] as const;
+
+type Tool = "orbit" | "raise" | "lower" | "smooth" | "flatten" | "paint";
+
+/**
+ * Custom terrain material that blends 4 colors per-vertex using attributes
+ * shipped from rebuildTerrainGeometry(). Using onBeforeCompile to extend
+ * MeshStandardMaterial keeps all the standard lighting (hemisphere,
+ * directional, shadows) and only adds the splatmap blend into the diffuse.
+ */
+function buildTerrainMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.95,
+    metalness: 0.0,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.layerColor0 = { value: LAYER_COLORS[0] };
+    shader.uniforms.layerColor1 = { value: LAYER_COLORS[1] };
+    shader.uniforms.layerColor2 = { value: LAYER_COLORS[2] };
+    shader.uniforms.layerColor3 = { value: LAYER_COLORS[3] };
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+         attribute float layerW0;
+         attribute float layerW1;
+         attribute float layerW2;
+         attribute float layerW3;
+         varying vec4 vLayerW;`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+         vLayerW = vec4(layerW0, layerW1, layerW2, layerW3);`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+         uniform vec3 layerColor0;
+         uniform vec3 layerColor1;
+         uniform vec3 layerColor2;
+         uniform vec3 layerColor3;
+         varying vec4 vLayerW;`,
+      )
+      .replace(
+        "vec4 diffuseColor = vec4( diffuse, opacity );",
+        `vec3 blended =
+           layerColor0 * vLayerW.x +
+           layerColor1 * vLayerW.y +
+           layerColor2 * vLayerW.z +
+           layerColor3 * vLayerW.w;
+         vec4 diffuseColor = vec4( blended, opacity );`,
+      );
+  };
+  return mat;
+}
+
+// World <-> cell coord conversion for brush targeting.
+function worldToCell(wx: number, wz: number, size: number): { cx: number; cz: number } {
+  const cx = ((wx / TERRAIN_WORLD_SIZE) + 0.5) * (size - 1);
+  const cz = ((wz / TERRAIN_WORLD_SIZE) + 0.5) * (size - 1);
+  return { cx, cz };
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 8);
 }
@@ -107,19 +199,47 @@ export function ForgeApp() {
   const [selected, setSelected] = useState<string | null>(null);
   const [presenceCount, setPresenceCount] = useState(0);
 
+  // Terrain-editing tool state. Orbit = original camera behavior +
+  // prim-dragging. The sculpt modes run brush strokes against the
+  // heightmap; paint mutates the splatmap layer.
+  const [tool, setTool] = useState<Tool>("orbit");
+  const [paintLayer, setPaintLayer] = useState<0 | 1 | 2 | 3>(0);
+  const [brushRadius, setBrushRadius] = useState(3);
+  const [brushStrength, setBrushStrength] = useState(0.5);
+
   const mountRef = useRef<HTMLDivElement | null>(null);
   const primsLatest = useRef<Prim[]>([]);
   const cursorsLatest = useRef<Cursor[]>([]);
+  const terrainLatest = useRef<Terrain | null>(null);
   const selectedLatest = useRef<string | null>(null);
   const userIdLatest = useRef<string | null>(null);
+  const toolLatest = useRef<Tool>("orbit");
+  const paintLayerLatest = useRef<0 | 1 | 2 | 3>(0);
+  const brushRadiusLatest = useRef(3);
+  const brushStrengthLatest = useRef(0.5);
 
   const { data: prims } = db.useQuery<Prim>("Prim", { where: { roomId: ROOM_ID } });
   const { data: cursors } = db.useQuery<Cursor>("Cursor", { where: { roomId: ROOM_ID } });
+  const { data: terrainRows } = db.useQuery<Terrain>("Terrain", { where: { roomId: ROOM_ID } });
 
   useEffect(() => { primsLatest.current = prims ?? []; }, [prims]);
   useEffect(() => { cursorsLatest.current = cursors ?? []; }, [cursors]);
+  useEffect(() => { terrainLatest.current = (terrainRows ?? [])[0] ?? null; }, [terrainRows]);
   useEffect(() => { selectedLatest.current = selected; }, [selected]);
   useEffect(() => { userIdLatest.current = userId; }, [userId]);
+  useEffect(() => { toolLatest.current = tool; }, [tool]);
+  useEffect(() => { paintLayerLatest.current = paintLayer; }, [paintLayer]);
+  useEffect(() => { brushRadiusLatest.current = brushRadius; }, [brushRadius]);
+  useEffect(() => { brushStrengthLatest.current = brushStrength; }, [brushStrength]);
+
+  // Kick off terrain init once the user is authenticated. Idempotent —
+  // re-invocations return the existing row instead of creating a new one.
+  useEffect(() => {
+    if (!userId) return;
+    callFn("initTerrain", { roomId: ROOM_ID, size: 64 })
+      .then((r) => console.log("[forge] initTerrain:", r))
+      .catch((e) => console.error("[forge] initTerrain failed:", e));
+  }, [userId]);
 
   useEffect(() => {
     const others = (cursors ?? []).filter((c) => c.userId !== userId);
@@ -170,17 +290,103 @@ export function ForgeApp() {
     dir.shadow.camera.top = 16;  dir.shadow.camera.bottom = -16;
     scene.add(dir);
 
-    // ---- Ground + grid ----
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(40, 40),
-      new THREE.MeshStandardMaterial({ color: "#14141c", roughness: 0.9 }),
+    // ---- Terrain ----
+    // Heightmapped mesh replaces the old flat ground. Vertex positions
+    // are set from the Terrain.heights array; 4 vertex-attribute weights
+    // feed a fragment shader that blends between LAYER_COLORS.
+    //
+    // Geometry starts as a 2x2 placeholder; rebuildTerrainGeometry is
+    // called once we have a Terrain row from the live query, then on
+    // every update. We don't recreate the mesh — just swap the
+    // BufferGeometry inside it — so raycasts always have a valid target.
+    const terrainMat = buildTerrainMaterial();
+    const terrain = new THREE.Mesh(
+      new THREE.PlaneGeometry(TERRAIN_WORLD_SIZE, TERRAIN_WORLD_SIZE, 1, 1),
+      terrainMat,
     );
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    ground.name = "ground";
-    scene.add(ground);
+    terrain.rotation.x = -Math.PI / 2;
+    terrain.receiveShadow = true;
+    terrain.name = "ground";
+    scene.add(terrain);
 
-    const grid = new THREE.GridHelper(40, 40, 0x2a2a3a, 0x1a1a25);
+    // Brush cursor — a translucent disc that hovers at the mouse
+    // position on the terrain to preview where an edit would land.
+    const brushCursor = new THREE.Mesh(
+      new THREE.RingGeometry(0.85, 1.0, 32),
+      new THREE.MeshBasicMaterial({
+        color: "#a78bfa",
+        transparent: true,
+        opacity: 0.75,
+        side: THREE.DoubleSide,
+        depthTest: false,
+      }),
+    );
+    brushCursor.rotation.x = -Math.PI / 2;
+    brushCursor.visible = false;
+    brushCursor.renderOrder = 999;
+    scene.add(brushCursor);
+
+    let terrainSizeCache = 0;
+    function rebuildTerrainGeometry(t: Terrain) {
+      const size = t.size;
+      const heights = JSON.parse(t.heights) as number[][];
+      const layers = JSON.parse(t.layers) as number[][][];
+
+      // Only recreate the buffer attributes when the grid resolution
+      // changes. On every other update we just mutate the existing
+      // positions + layer weights in place.
+      if (terrainSizeCache !== size) {
+        const geom = new THREE.PlaneGeometry(
+          TERRAIN_WORLD_SIZE,
+          TERRAIN_WORLD_SIZE,
+          size - 1,
+          size - 1,
+        );
+        // 4 layer weights per vertex, interleaved.
+        const count = geom.attributes.position.count;
+        const w0 = new Float32Array(count);
+        const w1 = new Float32Array(count);
+        const w2 = new Float32Array(count);
+        const w3 = new Float32Array(count);
+        geom.setAttribute("layerW0", new THREE.BufferAttribute(w0, 1));
+        geom.setAttribute("layerW1", new THREE.BufferAttribute(w1, 1));
+        geom.setAttribute("layerW2", new THREE.BufferAttribute(w2, 1));
+        geom.setAttribute("layerW3", new THREE.BufferAttribute(w3, 1));
+        terrain.geometry.dispose();
+        terrain.geometry = geom;
+        terrainSizeCache = size;
+      }
+
+      const geom = terrain.geometry as THREE.PlaneGeometry;
+      const pos = geom.attributes.position as THREE.BufferAttribute;
+      const w0 = geom.attributes.layerW0 as THREE.BufferAttribute;
+      const w1 = geom.attributes.layerW1 as THREE.BufferAttribute;
+      const w2 = geom.attributes.layerW2 as THREE.BufferAttribute;
+      const w3 = geom.attributes.layerW3 as THREE.BufferAttribute;
+
+      // PlaneGeometry lays out vertices row-major, top-to-bottom. After
+      // rotation to XZ we iterate in the same order.
+      for (let z = 0; z < size; z++) {
+        for (let x = 0; x < size; x++) {
+          const idx = z * size + x;
+          // PlaneGeometry is built in XY; its local Z becomes world Y
+          // after the rotation we did above. So we set attribute Z.
+          pos.setZ(idx, (heights[z]?.[x] ?? 0) * TERRAIN_HEIGHT_SCALE);
+          const l = layers[z]?.[x] ?? [1, 0, 0, 0];
+          w0.setX(idx, l[0]);
+          w1.setX(idx, l[1]);
+          w2.setX(idx, l[2]);
+          w3.setX(idx, l[3]);
+        }
+      }
+      pos.needsUpdate = true;
+      w0.needsUpdate = true; w1.needsUpdate = true;
+      w2.needsUpdate = true; w3.needsUpdate = true;
+      geom.computeVertexNormals();
+    }
+
+    const grid = new THREE.GridHelper(TERRAIN_WORLD_SIZE, 40, 0x2a2a3a, 0x1a1a25);
+    grid.position.y = 0.002; // hover slightly so it's visible on flat terrain
     scene.add(grid);
 
     // Primitives — pooled by id.
@@ -335,12 +541,44 @@ export function ForgeApp() {
       return hits[0] ?? null;
     }
 
+    // Brush state — active while the user holds LMB in a sculpt/paint
+    // mode. The tick loop reads `brushStroke` and calls the appropriate
+    // mutation at ~10 Hz while the mouse moves.
+    let brushStroke: {
+      lastSend: number;
+      lastGndX: number;
+      lastGndZ: number;
+    } | null = null;
+
     const onMouseDown = (event: MouseEvent) => {
       if (event.button === 2) {
-        // Right button — orbit camera.
+        // Right button — orbit camera regardless of current tool.
         orbiting = { x: event.clientX, y: event.clientY };
         return;
       }
+
+      const currentTool = toolLatest.current;
+
+      // Sculpt + paint modes intercept left-click on terrain. Clicking
+      // on a primitive still selects it so the user can swap back to
+      // orbit to manipulate objects.
+      if (currentTool !== "orbit") {
+        const primHit = intersectPrim(event);
+        if (primHit) {
+          setSelected(primHit.object.userData.primId as string);
+          return;
+        }
+        const gnd = intersectGround(event);
+        if (gnd) {
+          brushStroke = {
+            lastSend: 0,
+            lastGndX: gnd.x,
+            lastGndZ: gnd.z,
+          };
+        }
+        return;
+      }
+
       const hit = intersectPrim(event);
       if (hit) {
         const primId = hit.object.userData.primId as string;
@@ -362,6 +600,36 @@ export function ForgeApp() {
       }
     };
 
+    // Apply one brush tick at the supplied world hit point. Called at
+    // ~10 Hz from both mousedown and the tick loop while the stroke is
+    // active.
+    function applyBrushAt(worldX: number, worldZ: number) {
+      const t = terrainLatest.current;
+      if (!t) return;
+      const { cx, cz } = worldToCell(worldX, worldZ, t.size);
+      const radius = brushRadiusLatest.current;
+      const strength = brushStrengthLatest.current;
+      const tool = toolLatest.current;
+
+      if (tool === "paint") {
+        callFn("paintTerrain", {
+          roomId: ROOM_ID,
+          cx, cz,
+          radius,
+          strength,
+          layer: paintLayerLatest.current,
+        }).catch((e) => console.error("[forge] paintTerrain failed:", e));
+      } else if (tool !== "orbit") {
+        callFn("sculptTerrain", {
+          roomId: ROOM_ID,
+          cx, cz,
+          radius,
+          strength,
+          mode: tool,
+        }).catch((e) => console.error("[forge] sculptTerrain failed:", e));
+      }
+    }
+
     const onMouseMove = (event: MouseEvent) => {
       // Presence cursor update (regardless of drag state).
       const gnd = intersectGround(event);
@@ -378,6 +646,35 @@ export function ForgeApp() {
             x: gnd.x, y: 0, z: gnd.z,
           }).catch(() => {});
         }
+
+        // Preview the brush footprint while a sculpt/paint tool is active.
+        const curTool = toolLatest.current;
+        if (curTool !== "orbit") {
+          brushCursor.visible = true;
+          brushCursor.position.set(gnd.x, gnd.y + 0.02, gnd.z);
+          const t = terrainLatest.current;
+          if (t) {
+            const worldPerCell = TERRAIN_WORLD_SIZE / (t.size - 1);
+            const r = brushRadiusLatest.current * worldPerCell;
+            brushCursor.scale.setScalar(r);
+          }
+        } else {
+          brushCursor.visible = false;
+        }
+      }
+
+      if (brushStroke) {
+        const hit = gnd;
+        if (hit) {
+          brushStroke.lastGndX = hit.x;
+          brushStroke.lastGndZ = hit.z;
+          const now = performance.now();
+          if (now - brushStroke.lastSend > 100) {
+            brushStroke.lastSend = now;
+            applyBrushAt(hit.x, hit.z);
+          }
+        }
+        return;
       }
 
       if (dragging) {
@@ -425,8 +722,14 @@ export function ForgeApp() {
           }).catch(() => {});
         }
       }
+      if (brushStroke) {
+        // Flush one last brush tick at the final position so the stroke
+        // reaches exactly where the user released.
+        applyBrushAt(brushStroke.lastGndX, brushStroke.lastGndZ);
+      }
       dragging = null;
       orbiting = null;
+      brushStroke = null;
     };
 
     const onWheel = (event: WheelEvent) => {
@@ -463,7 +766,17 @@ export function ForgeApp() {
 
     // ---- Main loop ----
     let raf = 0;
+    let lastTerrainUpdatedAt = "";
     const tick = () => {
+      // Sync terrain — rebuild geometry only when the row's updatedAt
+      // actually changed, so the ~35KB JSON parse isn't burning every
+      // frame. Live query pushes a new Terrain row on every brush stroke.
+      const t = terrainLatest.current;
+      if (t && t.updatedAt !== lastTerrainUpdatedAt) {
+        lastTerrainUpdatedAt = t.updatedAt;
+        rebuildTerrainGeometry(t);
+      }
+
       // Sync prims.
       const seen = new Set<string>();
       for (const p of primsLatest.current) {
@@ -636,11 +949,95 @@ export function ForgeApp() {
         </div>
       )}
 
+      {/* Tool palette — sculpt/paint modes + brush params. Orbit mode
+          leaves the original prim-drag / camera-orbit behavior intact. */}
+      <div className="fg-tool-palette">
+        <div className="fg-palette-title">Terrain</div>
+        <div className="fg-palette-tools">
+          {([
+            ["orbit", "Move"],
+            ["raise", "Raise"],
+            ["lower", "Lower"],
+            ["smooth", "Smooth"],
+            ["flatten", "Flatten"],
+            ["paint", "Paint"],
+          ] as const).map(([t, label]) => (
+            <button
+              key={t}
+              className={`fg-palette-btn ${tool === t ? "on" : ""}`}
+              onClick={() => setTool(t)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tool === "paint" && (
+          <div className="fg-palette-row">
+            <span className="fg-palette-label">Layer</span>
+            <div className="fg-palette-layers">
+              {LAYER_LABELS.map((l, i) => (
+                <button
+                  key={l}
+                  className={`fg-palette-layer ${paintLayer === i ? "on" : ""}`}
+                  onClick={() => setPaintLayer(i as 0 | 1 | 2 | 3)}
+                  style={{
+                    background: `#${LAYER_COLORS[i].getHexString()}`,
+                  }}
+                  title={l}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tool !== "orbit" && (
+          <>
+            <div className="fg-palette-row">
+              <span className="fg-palette-label">Radius</span>
+              <input
+                type="range"
+                min={1}
+                max={15}
+                step={0.5}
+                value={brushRadius}
+                onChange={(e) => setBrushRadius(Number(e.target.value))}
+              />
+              <span className="fg-palette-value">{brushRadius.toFixed(1)}</span>
+            </div>
+            <div className="fg-palette-row">
+              <span className="fg-palette-label">Strength</span>
+              <input
+                type="range"
+                min={0.05}
+                max={1.5}
+                step={0.05}
+                value={brushStrength}
+                onChange={(e) => setBrushStrength(Number(e.target.value))}
+              />
+              <span className="fg-palette-value">{brushStrength.toFixed(2)}</span>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Hint strip */}
       <div className="fg-hint-strip">
-        <span><b>Left-click + drag</b> a primitive to move</span>
-        <span><b>Right-click + drag</b> to orbit</span>
-        <span><b>Scroll</b> to zoom</span>
+        {tool === "orbit" ? (
+          <>
+            <span><b>Left-click + drag</b> a primitive to move</span>
+            <span><b>Right-click + drag</b> to orbit</span>
+            <span><b>Scroll</b> to zoom</span>
+          </>
+        ) : (
+          <>
+            <span><b>Left-click + drag</b> to {tool === "paint" ? "paint" : tool}</span>
+            <span><b>Right-click + drag</b> to orbit</span>
+            <span>Switch to <b>Move</b> to edit primitives</span>
+          </>
+        )}
       </div>
     </div>
   );
