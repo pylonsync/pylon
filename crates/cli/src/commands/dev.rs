@@ -294,15 +294,87 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         });
     }
 
-    // Poll loop.
+    // Poll loop. We track file mtimes under the watch dir and react
+    // depending on what changed:
+    //
+    //   - Any file in `functions/` (including new files): the functions
+    //     runtime is a bun subprocess that reads the functions dir once
+    //     at startup. To pick up new handlers or edits, we need to
+    //     restart the whole process. We exec a fresh `pylon dev` with
+    //     the same argv so the terminal session continues seamlessly.
+    //   - Other .ts files (primarily app.ts): regenerate the manifest +
+    //     typed client in place. No restart needed; the running server
+    //     still serves the old in-memory schema until the next restart,
+    //     but client bindings are up to date for codegen consumers.
     let mut last_mtimes = collect_ts_mtimes(watch_dir);
+    let functions_dir = watch_dir.join("functions");
 
     loop {
         std::thread::sleep(Duration::from_millis(500));
 
         let current_mtimes = collect_ts_mtimes(watch_dir);
         if current_mtimes != last_mtimes {
+            // Compute which files actually changed.
+            let functions_changed = current_mtimes
+                .iter()
+                .any(|(path, mtime)| {
+                    let is_in_functions = Path::new(path).starts_with(&functions_dir);
+                    if !is_in_functions {
+                        return false;
+                    }
+                    match last_mtimes.get(path) {
+                        Some(prev) => prev != mtime,
+                        None => true, // new file in functions/
+                    }
+                })
+                || last_mtimes
+                    .iter()
+                    .any(|(path, _)| {
+                        Path::new(path).starts_with(&functions_dir)
+                            && !current_mtimes.contains_key(path)
+                    }); // deletion
+
             last_mtimes = current_mtimes;
+
+            if functions_changed {
+                if !json_mode {
+                    println!();
+                    println!("  ✓ functions changed — restarting");
+                    println!();
+                }
+                // Replace the current process with a fresh `pylon dev`.
+                // The terminal stays; sessions + DB + any other on-disk
+                // state survive because they're in .pylon/. Open WS
+                // connections drop and the client reconnects in ~100ms.
+                let args: Vec<String> = std::env::args().collect();
+                let exe = match std::env::current_exe() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[dev] could not locate self for restart: {e}");
+                        continue;
+                    }
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let err = std::process::Command::new(&exe)
+                        .args(&args[1..])
+                        .exec();
+                    eprintln!("[dev] exec failed: {err}");
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows: exec isn't available. Spawn a new process
+                    // and exit, so the supervising shell sees a clean
+                    // restart (the spawned child inherits the terminal).
+                    let _ = std::process::Command::new(&exe)
+                        .args(&args[1..])
+                        .spawn();
+                    std::process::exit(0);
+                }
+            }
+
+            // Non-functions change — incremental rebuild only.
             run_rebuild(entry_file, json_mode, &mut rebuild_count);
         }
     }

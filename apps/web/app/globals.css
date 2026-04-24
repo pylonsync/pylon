@@ -2248,3 +2248,211 @@ pre,
   white-space: pre;
   color: inherit;
 }
+
+/* ==========================================================
+   Mobile pass — everything under 640px
+   The site was designed desktop-first; this block corrects the
+   highest-impact layout/typography breakages on phones.
+   ========================================================== */
+
+/* Hide mobile nav by default; nav.tsx reveals it under 640px */
+.nav-mobile-toggle,
+.nav-mobile-menu {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  /* Container padding — phones get less side gutter */
+  .container-page {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* ---- Nav: hamburger + slide-down menu ---- */
+  .nav-links {
+    display: none;
+  }
+  .nav-right {
+    gap: 8px;
+  }
+  .nav-right a[href*="github"] .text-dim {
+    display: none; /* hide "★ 2.4k" on phone */
+  }
+  .nav-right a[href*="github"] {
+    padding: 0 10px;
+  }
+  .nav-mobile-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 30px;
+    border: 1px solid var(--border-2);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .nav-mobile-toggle:hover {
+    background: var(--bg-2);
+  }
+  .nav-mobile-menu.open {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-1);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px;
+    gap: 6px;
+    z-index: 20;
+  }
+  .nav-mobile-menu a {
+    padding: 10px 4px;
+    color: var(--text-2);
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-mobile-menu a:last-child {
+    border-bottom: none;
+  }
+  .nav {
+    position: relative;
+  }
+
+  /* ---- Hero ---- */
+  .hero-eyebrow {
+    font-size: 11px;
+    padding: 5px 10px;
+  }
+  .hero-h1 {
+    font-size: clamp(38px, 11vw, 52px) !important;
+    line-height: 1.02;
+  }
+  .hero-sub {
+    font-size: 15px;
+  }
+  .cta-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .install-cmd,
+  .cta-row > a {
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* Skill pill: stack the label above the copy button */
+  .skill-pill {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .skill-pill-copy {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .skill-pill-cmd {
+    max-width: none;
+    flex: 1;
+  }
+
+  /* Hero demo tabs — scroll horizontally instead of cramming */
+  .hero-demo-tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .hero-demo-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .hero-demo-tab {
+    flex: 0 0 auto;
+    min-width: 120px;
+  }
+  .hero-demo-tab-label {
+    font-size: 13px;
+  }
+
+  /* Three-panel → stack, shrink code font, cap panel height so
+     users don't have to scroll past 3 full-screen code blocks */
+  .three-panel {
+    min-height: 0;
+  }
+  .three-panel-code,
+  .three-panel-app,
+  .three-panel-table {
+    min-height: 0;
+    max-height: 380px;
+    overflow: auto;
+  }
+  .code-stack-body,
+  .three-panel pre {
+    font-size: 10.5px !important;
+    line-height: 1.5;
+  }
+
+  /* Any code block should scroll horizontally, never blow out width */
+  pre, .code, .code-stack-body {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* ---- Section rhythm ---- */
+  .section {
+    padding-top: 64px;
+    padding-bottom: 64px;
+  }
+  .section-title {
+    font-size: clamp(28px, 7vw, 38px) !important;
+    line-height: 1.1;
+  }
+
+  /* Features / compare / scale — force single column */
+  .features-grid,
+  .compare-grid,
+  .scale-grid,
+  .scale-stepper {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+
+  /* Compare section tables — shrink cells so they don't overflow */
+  .compare-row {
+    font-size: 12.5px;
+  }
+
+  /* Quickstart cards stack fully */
+  .qs-inner,
+  .qs-steps,
+  .qs-grid {
+    grid-template-columns: 1fr !important;
+    gap: 20px !important;
+  }
+
+  /* Footer — single column on phones */
+  .footer-grid {
+    grid-template-columns: 1fr !important;
+    gap: 28px !important;
+  }
+
+  /* OG image + any fixed-aspect preview shouldn't overflow */
+  img,
+  svg {
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+@media (max-width: 400px) {
+  .hero-h1 {
+    font-size: 34px !important;
+  }
+  .hero-sub code {
+    font-size: 12px;
+    padding: 1px 4px;
+  }
+}

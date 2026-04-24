@@ -60,6 +60,32 @@ const Cursor = entity(
   },
 );
 
+// Per-room terrain. One row per room holds the full heightmap + 4-layer
+// splatmap as JSON strings. A 64x64 grid (the default) encodes to ~35 KB
+// and re-serializes on each brush stroke. Clients throttle edits to 10 Hz
+// so sync fan-out stays comfortable for a room of ~20 editors.
+//
+// Why JSON strings and not proper array fields: Pylon field types are
+// scalars; nested arrays would require a sidecar entity or chunking. JSON
+// lets us ship a working demo today; production MMO tooling would chunk
+// terrain into 8x8 tiles keyed by (roomId, tileX, tileZ) so brush edits
+// only touch the tiles they overlap.
+const Terrain = entity(
+  "Terrain",
+  {
+    roomId: field.string().unique(),
+    size: field.int(),              // grid edge length in cells
+    heights: field.string(),        // JSON number[][]
+    layers: field.string(),         // JSON number[][][] — splatmap, 4 weights per cell
+    updatedAt: field.datetime(),
+  },
+  {
+    indexes: [
+      { name: "by_room", fields: ["roomId"], unique: true },
+    ],
+  },
+);
+
 const primPolicy = policy({
   name: "prim_room",
   entity: "Prim",
@@ -78,13 +104,22 @@ const cursorPolicy = policy({
   allowDelete: "auth.userId == data.userId",
 });
 
+const terrainPolicy = policy({
+  name: "terrain_room",
+  entity: "Terrain",
+  allowRead: "true",
+  allowInsert: "auth.userId != null",
+  allowUpdate: "auth.userId != null",
+  allowDelete: "auth.userId != null",
+});
+
 const manifest = buildManifest({
   name: "forge",
   version: "0.1.0",
-  entities: [Prim, Cursor],
+  entities: [Prim, Cursor, Terrain],
   queries: [],
   actions: [],
-  policies: [primPolicy, cursorPolicy],
+  policies: [primPolicy, cursorPolicy, terrainPolicy],
   routes: [],
 });
 
