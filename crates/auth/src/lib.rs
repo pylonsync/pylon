@@ -1,4 +1,5 @@
 pub mod email;
+pub mod password;
 
 use serde::{Deserialize, Serialize};
 

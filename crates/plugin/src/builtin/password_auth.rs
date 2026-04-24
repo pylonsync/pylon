@@ -136,7 +136,7 @@ impl Plugin for PasswordAuthPlugin {
 ///
 /// Returns a PHC-format string that includes the algorithm, version,
 /// parameters, salt, and hash — everything needed for verification.
-fn hash_password(password: &str) -> String {
+pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     argon2
@@ -149,7 +149,7 @@ fn hash_password(password: &str) -> String {
 ///
 /// Argon2's verify_password performs constant-time comparison internally,
 /// so no separate constant_time_eq is needed.
-fn verify_password(password: &str, hash: &str) -> bool {
+pub fn verify_password(password: &str, hash: &str) -> bool {
     use argon2::PasswordHash;
     let parsed = match PasswordHash::new(hash) {
         Ok(h) => h,

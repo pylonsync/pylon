@@ -9,6 +9,10 @@ const User = entity("User", {
   email: field.string().unique(),
   displayName: field.string(),
   avatarColor: field.string(),
+  // Argon2id PHC-format hash, written by /api/auth/password/register and
+  // read back on /api/auth/password/login. Optional so the same entity
+  // also supports magic-link / OAuth paths that don't set a password.
+  passwordHash: field.string().optional(),
   createdAt: field.datetime(),
 });
 
@@ -175,9 +179,10 @@ const orgScoped = (name: string) =>
   });
 
 // User rows have to be readable for the UI to render display names /
-// avatar colors in member lists, @mentions, etc. Writes go exclusively
-// through upsertUser (the server function) so direct entity writes stay
-// denied by default.
+// avatar colors in member lists, @mentions, etc. Writes happen via the
+// password-auth endpoints (/api/auth/password/register updates the
+// passwordHash + displayName) — direct entity writes stay denied by
+// default.
 const userPolicy = policy({
   name: "user_read",
   entity: "User",

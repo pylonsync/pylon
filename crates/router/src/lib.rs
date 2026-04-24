@@ -673,6 +673,175 @@ fn route_inner(
         return (401, json_error("INVALID_CODE", "Invalid or expired code"));
     }
 
+    // POST /api/auth/password/register
+    //
+    // Create a new User row with an Argon2id-hashed password, then mint a
+    // session bound to its id. Convention: the app's User entity has a
+    // unique `email` column and a string `passwordHash` column (nullable
+    // on entities that also support OAuth / magic-link — the hash is only
+    // written here). Returns {token, user_id, expires_at} identical in
+    // shape to /api/auth/magic/verify so Login flows can share a handler.
+    if url == "/api/auth/password/register" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
+        };
+        let email = match data.get("email").and_then(|v| v.as_str()) {
+            Some(e) => e.trim().to_lowercase(),
+            None => return (400, json_error("MISSING_EMAIL", "email is required")),
+        };
+        if !email.contains('@') {
+            return (400, json_error("INVALID_EMAIL", "email must be well-formed"));
+        }
+        let password = match data.get("password").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return (400, json_error("MISSING_PASSWORD", "password is required")),
+        };
+        if password.len() < 8 {
+            return (
+                400,
+                json_error("WEAK_PASSWORD", "password must be at least 8 characters"),
+            );
+        }
+        let display_name = data
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(email.as_str())
+            .to_string();
+
+        // Reject duplicate registrations — the User row owns email
+        // uniqueness, but we surface a friendly error instead of leaking
+        // the SQL UNIQUE-constraint message.
+        if let Ok(Some(_)) = ctx.store.lookup("User", "email", &email) {
+            return (409, json_error("EMAIL_TAKEN", "Email already registered"));
+        }
+
+        let hash = pylon_auth::password::hash_password(password);
+        let now = format!(
+            "{}Z",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+
+        let user_id = match ctx.store.insert(
+            "User",
+            &serde_json::json!({
+                "email": email,
+                "displayName": display_name,
+                "passwordHash": hash,
+                "createdAt": now,
+            }),
+        ) {
+            Ok(id) => id,
+            Err(e) => return (400, json_error(&e.code, &e.message)),
+        };
+
+        let session = ctx.session_store.create(user_id.clone());
+        return (
+            200,
+            serde_json::json!({
+                "token": session.token,
+                "user_id": user_id,
+                "expires_at": session.expires_at,
+            })
+            .to_string(),
+        );
+    }
+
+    // POST /api/auth/password/login
+    //
+    // Look up User by email, verify the password against the stored
+    // Argon2id hash, mint a session. Timing-equalized: unknown-email
+    // requests still pay an Argon2 verify against a throwaway hash so
+    // an attacker can't enumerate registered addresses by response time.
+    if url == "/api/auth/password/login" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
+        };
+        let email = match data.get("email").and_then(|v| v.as_str()) {
+            Some(e) => e.trim().to_lowercase(),
+            None => return (400, json_error("MISSING_EMAIL", "email is required")),
+        };
+        let password = match data.get("password").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return (400, json_error("MISSING_PASSWORD", "password is required")),
+        };
+
+        let row = ctx.store.lookup("User", "email", &email).ok().flatten();
+        let (user_id, stored_hash): (Option<String>, Option<String>) = match row {
+            Some(r) => (
+                r.get("id").and_then(|v| v.as_str()).map(String::from),
+                r.get("passwordHash")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            ),
+            None => (None, None),
+        };
+
+        // Always run a verify to equalize timing. For unknown email we
+        // run against a dummy hash; the password won't match and we
+        // return the same INVALID_CREDENTIALS response.
+        let matched = match &stored_hash {
+            Some(h) if !h.is_empty() => pylon_auth::password::verify_password(password, h),
+            _ => {
+                // Throwaway hash so the timing side-channel is closed.
+                let _ = pylon_auth::password::verify_password(
+                    password,
+                    pylon_auth::password::dummy_hash(),
+                );
+                false
+            }
+        };
+
+        if !matched {
+            return (
+                401,
+                json_error("INVALID_CREDENTIALS", "Email or password is incorrect"),
+            );
+        }
+
+        let user_id = match user_id {
+            Some(id) => id,
+            None => {
+                return (
+                    500,
+                    json_error("USER_NOT_FOUND", "Authenticated but user missing"),
+                )
+            }
+        };
+        let session = ctx.session_store.create(user_id.clone());
+        return (
+            200,
+            serde_json::json!({
+                "token": session.token,
+                "user_id": user_id,
+                "expires_at": session.expires_at,
+            })
+            .to_string(),
+        );
+    }
+
     // GET /api/auth/providers
     if url == "/api/auth/providers" && method == HttpMethod::Get {
         let registry = pylon_auth::OAuthRegistry::from_env();

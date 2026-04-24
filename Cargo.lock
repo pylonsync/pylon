@@ -1012,6 +1012,7 @@ dependencies = [
 name = "pylon-auth"
 version = "0.2.2"
 dependencies = [
+ "argon2",
  "rand 0.8.5",
  "serde",
  "serde_json",
