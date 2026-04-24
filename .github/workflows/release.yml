@@ -10,6 +10,14 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Workflow-level default. Individual jobs can narrow, but starting permissive
+# here means every job gets the tokens it actually needs (contents for
+# github releases, packages for ghcr, id-token for npm provenance + OIDC).
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
 env:
   CARGO_TERM_COLOR: always
 
