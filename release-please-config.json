@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "rust",
+  "release-type": "simple",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
   "draft": false,
@@ -23,9 +23,10 @@
   ],
   "packages": {
     ".": {
-      "release-type": "rust",
+      "release-type": "simple",
       "package-name": "pylon",
       "extra-files": [
+        { "type": "generic", "path": "Cargo.toml" },
         { "type": "json", "path": "packages/sdk/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/functions/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/react/package.json", "jsonpath": "$.version" },
