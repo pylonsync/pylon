@@ -241,7 +241,7 @@ export function prefetchOne(client: AgentDBClient, entity: EntityName, id: strin
 }
 
 // ---------------------------------------------------------------------------
-// AppSchema — types consumed by @pylonsync/react's createTypedDb<S>()
+// AppSchema — types consumed by @pylon/react's createTypedDb<S>()
 // ---------------------------------------------------------------------------
 
 export interface Entities {
@@ -262,7 +262,7 @@ export interface Functions {
 export interface Queries {
 }
 
-/** Top-level app schema — pass to @pylonsync/react's createTypedDb<AppSchema>(). */
+/** Top-level app schema — pass to @pylon/react's createTypedDb<AppSchema>(). */
 export interface AppSchema {
   entities: Entities;
   functions: Functions;
