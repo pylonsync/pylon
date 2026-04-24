@@ -5,6 +5,7 @@ pub mod pool;
 pub mod postgres;
 pub mod search;
 pub mod search_maintenance;
+pub mod search_query;
 pub mod sqlite;
 
 use std::fmt;
