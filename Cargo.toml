@@ -49,6 +49,10 @@ argon2 = "0.5"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# Roaring bitmaps for faceted search — Druid, Lucene, Meilisearch all
+# rely on the same data structure. Storing per-(entity, facet, value)
+# match-sets as bitmaps makes facet counts O(popcount), not O(matches).
+roaring = "0.10"
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

@@ -3,6 +3,7 @@ pub mod files;
 pub mod pg_datastore;
 pub mod pool;
 pub mod postgres;
+pub mod search;
 pub mod sqlite;
 
 use std::fmt;
@@ -18,6 +19,15 @@ use serde::{Deserialize, Serialize};
 pub struct StorageError {
     pub code: String,
     pub message: String,
+}
+
+impl StorageError {
+    pub fn new(code: &str, message: &str) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for StorageError {
