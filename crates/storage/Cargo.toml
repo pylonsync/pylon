@@ -2,14 +2,20 @@
 name = "pylon-storage"
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core" }
-pylon-http = { path = "../http" }
+pylon-kernel = { path = "../core", version = "0.2.3" }
+pylon-http = { path = "../http", version = "0.2.3" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }

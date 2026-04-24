@@ -2,25 +2,31 @@
 name = "pylon-runtime"
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core" }
-pylon-http = { path = "../http" }
-pylon-router = { path = "../router" }
-pylon-auth = { path = "../auth" }
-pylon-policy = { path = "../policy" }
-pylon-plugin = { path = "../plugin" }
-pylon-sync = { path = "../sync" }
+pylon-kernel = { path = "../core", version = "0.2.3" }
+pylon-http = { path = "../http", version = "0.2.3" }
+pylon-router = { path = "../router", version = "0.2.3" }
+pylon-auth = { path = "../auth", version = "0.2.3" }
+pylon-policy = { path = "../policy", version = "0.2.3" }
+pylon-plugin = { path = "../plugin", version = "0.2.3" }
+pylon-sync = { path = "../sync", version = "0.2.3" }
 pylon-studio-api = { path = "../studio_api" }
-pylon-storage = { path = "../storage" }
-pylon-functions = { path = "../functions" }
-pylon-migrate = { path = "../migrate" }
-pylon-observability = { path = "../observability" }
-pylon-realtime = { path = "../realtime" }
+pylon-storage = { path = "../storage", version = "0.2.3" }
+pylon-functions = { path = "../functions", version = "0.2.3" }
+pylon-migrate = { path = "../migrate", version = "0.2.3" }
+pylon-observability = { path = "../observability", version = "0.2.3" }
+pylon-realtime = { path = "../realtime", version = "0.2.3" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

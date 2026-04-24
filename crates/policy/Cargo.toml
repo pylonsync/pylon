@@ -2,13 +2,19 @@
 name = "pylon-policy"
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core" }
-pylon-auth = { path = "../auth" }
+pylon-kernel = { path = "../core", version = "0.2.3" }
+pylon-auth = { path = "../auth", version = "0.2.3" }
 serde_json = { workspace = true }
 

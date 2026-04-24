@@ -2,6 +2,12 @@
 name = "pylon-cli"
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 
 [[bin]]
@@ -9,13 +15,13 @@ name = "pylon"
 path = "src/main.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core" }
-pylon-plugin = { path = "../plugin" }
-pylon-schema = { path = "../schema" }
-pylon-storage = { path = "../storage", features = ["postgres-live"] }
-pylon-runtime = { path = "../runtime" }
-pylon-staticgen = { path = "../staticgen" }
-pylon-migrate = { path = "../migrate" }
+pylon-kernel = { path = "../core", version = "0.2.3" }
+pylon-plugin = { path = "../plugin", version = "0.2.3" }
+pylon-schema = { path = "../schema", version = "0.2.3" }
+pylon-storage = { path = "../storage", version = "0.2.3", features = ["postgres-live"] }
+pylon-runtime = { path = "../runtime", version = "0.2.3" }
+pylon-staticgen = { path = "../staticgen", version = "0.2.3" }
+pylon-migrate = { path = "../migrate", version = "0.2.3" }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

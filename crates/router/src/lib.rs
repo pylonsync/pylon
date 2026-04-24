@@ -734,11 +734,26 @@ fn route_inner(
                 .as_secs()
         );
 
+        // Deterministic avatar color seeded from the email so the same
+        // address gets the same color across logins. Apps whose User
+        // entity doesn't have an `avatarColor` field are fine too —
+        // the storage layer ignores unknown fields on insert.
+        let palette = [
+            "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#10b981",
+            "#84cc16", "#eab308", "#f97316", "#ef4444", "#ec4899",
+        ];
+        let mut hash_val: i32 = 0;
+        for b in email.as_bytes() {
+            hash_val = hash_val.wrapping_mul(31).wrapping_add(*b as i32);
+        }
+        let avatar_color = palette[(hash_val.unsigned_abs() as usize) % palette.len()];
+
         let user_id = match ctx.store.insert(
             "User",
             &serde_json::json!({
                 "email": email,
                 "displayName": display_name,
+                "avatarColor": avatar_color,
                 "passwordHash": hash,
                 "createdAt": now,
             }),
