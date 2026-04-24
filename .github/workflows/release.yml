@@ -64,6 +64,10 @@ jobs:
     name: Publish npm packages
     needs: verify
     runs-on: ubuntu-latest
+    # NPM_TOKEN lives under the `Production` environment (not as a
+    # repository secret). Declaring the environment here is what grants
+    # this job access. Same story for publish-crates below.
+    environment: Production
     permissions:
       contents: read
       id-token: write        # required for npm provenance
@@ -103,6 +107,7 @@ jobs:
     name: Publish crates.io
     needs: verify
     runs-on: ubuntu-latest
+    environment: Production
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
