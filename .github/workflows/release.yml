@@ -95,7 +95,10 @@ jobs:
               echo "✓ $NAME@$VERSION already published — skipping"
             else
               echo "→ Publishing $NAME@$VERSION"
-              (cd "$pkg" && npm publish --access public --provenance)
+              # Provenance is off until the repo is public — npm rejects
+              # sigstore bundles that reference a private source repo.
+              # Re-add `--provenance` once pylonsync/pylon is public.
+              (cd "$pkg" && npm publish --access public)
             fi
           done
 
