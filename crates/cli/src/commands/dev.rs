@@ -315,24 +315,18 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         let current_mtimes = collect_ts_mtimes(watch_dir);
         if current_mtimes != last_mtimes {
             // Compute which files actually changed.
-            let functions_changed = current_mtimes
-                .iter()
-                .any(|(path, mtime)| {
-                    let is_in_functions = Path::new(path).starts_with(&functions_dir);
-                    if !is_in_functions {
-                        return false;
-                    }
-                    match last_mtimes.get(path) {
-                        Some(prev) => prev != mtime,
-                        None => true, // new file in functions/
-                    }
-                })
-                || last_mtimes
-                    .iter()
-                    .any(|(path, _)| {
-                        Path::new(path).starts_with(&functions_dir)
-                            && !current_mtimes.contains_key(path)
-                    }); // deletion
+            let functions_changed = current_mtimes.iter().any(|(path, mtime)| {
+                let is_in_functions = Path::new(path).starts_with(&functions_dir);
+                if !is_in_functions {
+                    return false;
+                }
+                match last_mtimes.get(path) {
+                    Some(prev) => prev != mtime,
+                    None => true, // new file in functions/
+                }
+            }) || last_mtimes.iter().any(|(path, _)| {
+                Path::new(path).starts_with(&functions_dir) && !current_mtimes.contains_key(path)
+            }); // deletion
 
             last_mtimes = current_mtimes;
 
@@ -357,9 +351,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
-                    let err = std::process::Command::new(&exe)
-                        .args(&args[1..])
-                        .exec();
+                    let err = std::process::Command::new(&exe).args(&args[1..]).exec();
                     eprintln!("[dev] exec failed: {err}");
                 }
                 #[cfg(not(unix))]
@@ -367,9 +359,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                     // Windows: exec isn't available. Spawn a new process
                     // and exit, so the supervising shell sees a clean
                     // restart (the spawned child inherits the terminal).
-                    let _ = std::process::Command::new(&exe)
-                        .args(&args[1..])
-                        .spawn();
+                    let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
                     std::process::exit(0);
                 }
             }
