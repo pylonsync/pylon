@@ -13,6 +13,21 @@ primary_region = "iad"
   auto_start_machines = true
   min_machines_running = 0
 
+# Pylon serves its WebSocket on a second TCP port (HTTP port + 1). Fly's
+# http_service above only proxies one internal port, so we add a raw TLS
+# service on 4322 → WSS on the public :4322 port. The client's sync
+# engine derives `wss://<host>:4322` from a base URL that ends at :4322
+# (see VITE_PYLON_WS_URL below) or we override explicitly in the app.
+[[services]]
+  internal_port = 4322
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  [[services.ports]]
+    port = 4322
+    handlers = ["tls"]
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1

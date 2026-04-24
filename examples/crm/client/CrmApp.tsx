@@ -13,12 +13,20 @@ import {
   storageKey,
 } from "@pylonsync/react";
 
-// Vite inlines VITE_* env vars at build time. Set VITE_PYLON_URL in
-// Vercel → Project Settings → Environment Variables (e.g.
-// https://pylon-crm.fly.dev) so the deployed frontend talks to the real
-// backend instead of localhost. Local dev falls back to localhost:4321.
+// Vite inlines VITE_* env vars at build time. Configure both for Vercel:
+//
+//   VITE_PYLON_URL    = https://pylon-crm.fly.dev       (HTTP)
+//   VITE_PYLON_WS_URL = wss://pylon-crm.fly.dev:4322    (WebSocket)
+//
+// Local dev falls back to localhost where we can use the port+1
+// convention pylon dev prints on startup.
 const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
-init({ baseUrl: BASE_URL, appName: "crm" });
+const WS_URL =
+  import.meta.env.VITE_PYLON_WS_URL ??
+  (BASE_URL.startsWith("https://")
+    ? `${BASE_URL.replace(/^https:/, "wss:").replace(/\/$/, "")}:4322`
+    : undefined);
+init({ baseUrl: BASE_URL, appName: "crm", wsUrl: WS_URL });
 configureClient({ baseUrl: BASE_URL, appName: "crm" });
 
 // ---------------------------------------------------------------------------
