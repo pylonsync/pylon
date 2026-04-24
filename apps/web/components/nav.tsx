@@ -7,6 +7,7 @@ import { PylonMark } from "./pylon-logo";
 const SECTION_LINKS = [
   { href: "#demo", label: "Demo" },
   { href: "#features", label: "Features" },
+  { href: "#plugins", label: "Plugins" },
   { href: "#scale", label: "Scale" },
   { href: "#compare", label: "Compare" },
   { href: "#quickstart", label: "Quickstart" },
