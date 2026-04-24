@@ -302,6 +302,15 @@ function OrgGate({
     where: { userId: currentUser.id },
   });
   const { data: orgs } = db.useQuery<Organization>("Organization");
+
+  // Debug: show exactly what the sync replica sees so we can tell whether
+  // this is a server-side read-policy/auth issue vs. a client-side join.
+  useEffect(() => {
+    console.log("[crm] currentUser.id =", currentUser.id);
+    console.log("[crm] memberships raw =", memberships);
+    console.log("[crm] orgs raw =", orgs);
+  }, [currentUser.id, memberships, orgs]);
+
   const myOrgs = useMemo(() => {
     const byId = new Map<string, Organization>();
     for (const o of orgs ?? []) byId.set(o.id, o);
@@ -310,6 +319,7 @@ function OrgGate({
       const org = byId.get(m.orgId);
       if (org) out.push(org);
     }
+    console.log("[crm] myOrgs joined =", out.map((o) => ({ id: o.id, name: o.name })));
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }, [memberships, orgs]);
 
