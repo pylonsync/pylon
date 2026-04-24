@@ -437,33 +437,100 @@ function OnboardingScreen({
   );
 }
 
+/**
+ * Magic-link login — the actual Pylon auth flow.
+ *
+ * 1. User enters email + display name → `POST /api/auth/magic/send`
+ *    mints a 6-digit code, emails it, and (in dev mode) echoes
+ *    `dev_code` in the response so the demo works without configuring
+ *    a real email provider.
+ * 2. User enters the code → `POST /api/auth/magic/verify` validates
+ *    the code, creates or looks up the User row by email, and returns
+ *    a session token already bound to that user id.
+ * 3. Client calls `upsertUser` to set the display name + avatar color
+ *    on first sign-in (the verify endpoint seeds displayName=email,
+ *    which we overwrite with the human-entered name).
+ *
+ * No guest session. No `/api/auth/upgrade` shortcut. Works identically
+ * with `PYLON_DEV_MODE=false` — the only difference is whether
+ * `dev_code` appears in the response.
+ */
 function Login({ onReady }: { onReady: (u: User) => void }) {
-  const [email, setEmail] = useState("sales@acme.example");
-  const [name, setName] = useState("Sales Lead");
+  type Step = "email" | "code";
+  const [step, setStep] = useState<Step>("email");
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [devCode, setDevCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function go() {
+  async function sendCode() {
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed.includes("@")) {
+      setErr("Enter a valid email address.");
+      return;
+    }
     setLoading(true);
     setErr(null);
     try {
-      const session = await fetch(`${BASE_URL}/api/auth/guest`, {
+      const res = await fetch(`${BASE_URL}/api/auth/magic/send`, {
         method: "POST",
-      }).then((r) => r.json());
-      const token: string = session.token;
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmed }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          body.error?.message ?? `Could not send code (${res.status})`,
+        );
+      }
+      // Dev mode hands us the code directly so the demo works without
+      // real email wiring. In prod this field is absent and the user
+      // checks their inbox.
+      if (typeof body.dev_code === "string") {
+        setDevCode(body.dev_code);
+        setCode(body.dev_code);
+      }
+      setStep("code");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function verifyCode() {
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedCode = code.trim();
+    if (!trimmedCode) {
+      setErr("Enter the code from your email.");
+      return;
+    }
+    setLoading(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${BASE_URL}/api/auth/magic/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmedEmail, code: trimmedCode }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          body.error?.message ?? `Invalid code (${res.status})`,
+        );
+      }
+      const token: string = body.token;
       localStorage.setItem(storageKey("token"), token);
       configureClient({ baseUrl: BASE_URL, appName: "crm" });
+
+      // Seed / update the User row with the display name the caller
+      // entered. upsertUser is idempotent: first sign-in overwrites the
+      // `email=displayName` placeholder the verify endpoint seeded.
       const user = await callFn<User>("upsertUser", {
-        email,
-        displayName: name,
-      });
-      await fetch(`${BASE_URL}/api/auth/upgrade`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ user_id: user.id }),
+        email: trimmedEmail,
+        displayName: name.trim() || trimmedEmail,
       });
       localStorage.setItem(storageKey("user"), JSON.stringify(user));
       void db.sync.pull();
@@ -482,35 +549,101 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
           <BrandMark />
           Pylon CRM
         </div>
-        <div className="auth-title">Sign in</div>
-        <div className="auth-subtitle">Track companies, people, and deals.</div>
-        <label className="field">
-          <span className="field-label">Email</span>
-          <input
-            className="input"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoFocus
-          />
-        </label>
-        <label className="field">
-          <span className="field-label">Display name</span>
-          <input
-            className="input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && go()}
-          />
-        </label>
-        {err && <div className="error-text">{err}</div>}
-        <button
-          className="btn btn-primary"
-          onClick={go}
-          disabled={loading}
-          style={{ width: "100%", marginTop: 8, padding: "8px 14px" }}
-        >
-          {loading ? "Signing in…" : "Continue"}
-        </button>
+        <div className="auth-title">
+          {step === "email" ? "Sign in" : "Check your email"}
+        </div>
+        <div className="auth-subtitle">
+          {step === "email"
+            ? "We'll email you a 6-digit code."
+            : `We sent a code to ${email}.`}
+        </div>
+
+        {step === "email" ? (
+          <>
+            <label className="field">
+              <span className="field-label">Email</span>
+              <input
+                className="input"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@company.com"
+                autoFocus
+                onKeyDown={(e) => e.key === "Enter" && sendCode()}
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Display name</span>
+              <input
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="How your teammates will see you"
+                onKeyDown={(e) => e.key === "Enter" && sendCode()}
+              />
+            </label>
+            {err && <div className="error-text">{err}</div>}
+            <button
+              className="btn btn-primary"
+              onClick={sendCode}
+              disabled={loading}
+              style={{ width: "100%", marginTop: 8, padding: "8px 14px" }}
+            >
+              {loading ? "Sending…" : "Send code"}
+            </button>
+          </>
+        ) : (
+          <>
+            <label className="field">
+              <span className="field-label">6-digit code</span>
+              <input
+                className="input"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                autoFocus
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="123456"
+                onKeyDown={(e) => e.key === "Enter" && verifyCode()}
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  letterSpacing: "0.18em",
+                  fontSize: 18,
+                }}
+              />
+            </label>
+            {devCode && (
+              <div
+                className="auth-subtitle"
+                style={{ marginTop: -6, fontSize: 12 }}
+              >
+                Demo mode: code shown above is also in the server response.
+              </div>
+            )}
+            {err && <div className="error-text">{err}</div>}
+            <button
+              className="btn btn-primary"
+              onClick={verifyCode}
+              disabled={loading}
+              style={{ width: "100%", marginTop: 8, padding: "8px 14px" }}
+            >
+              {loading ? "Verifying…" : "Sign in"}
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                setStep("email");
+                setCode("");
+                setDevCode(null);
+                setErr(null);
+              }}
+              disabled={loading}
+              style={{ width: "100%", marginTop: 8, padding: "8px 14px" }}
+            >
+              Use a different email
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

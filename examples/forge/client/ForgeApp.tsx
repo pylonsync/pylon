@@ -327,10 +327,22 @@ export function ForgeApp() {
     scene.add(brushCursor);
 
     let terrainSizeCache = 0;
+    // Locally cached, *mutable* copies of the heightmap + splatmap. The
+    // brush tools write to these synchronously so edits render at 60 fps
+    // without waiting for the server roundtrip. When the server-authored
+    // Terrain row arrives via the live query, rebuildTerrainGeometry
+    // replaces these with the authoritative state — if another editor
+    // touched the same area concurrently, their edits will briefly
+    // override ours, which is the correct MMO-world-editor behavior.
+    let localHeights: number[][] | null = null;
+    let localLayers: number[][][] | null = null;
+
     function rebuildTerrainGeometry(t: Terrain) {
       const size = t.size;
       const heights = JSON.parse(t.heights) as number[][];
       const layers = JSON.parse(t.layers) as number[][][];
+      localHeights = heights;
+      localLayers = layers;
 
       // Only recreate the buffer attributes when the grid resolution
       // changes. On every other update we just mutate the existing
@@ -383,6 +395,101 @@ export function ForgeApp() {
       w0.needsUpdate = true; w1.needsUpdate = true;
       w2.needsUpdate = true; w3.needsUpdate = true;
       geom.computeVertexNormals();
+    }
+
+    // Apply a brush stroke to the local arrays + BufferGeometry in place.
+    // Mirrors the math in functions/sculptTerrain.ts so the preview
+    // matches what the server will ultimately persist. The server still
+    // runs the same math and streams the authoritative result back via
+    // the live query; that becomes the reconciliation step.
+    function sculptLocal(
+      cx: number, cz: number, radius: number, strength: number,
+      mode: "raise" | "lower" | "smooth" | "flatten",
+      targetY: number = 0,
+    ) {
+      if (!localHeights || terrainSizeCache === 0) return;
+      const size = terrainSizeCache;
+      const r = Math.max(1, radius);
+      const xMin = Math.max(0, Math.floor(cx - r));
+      const xMax = Math.min(size - 1, Math.ceil(cx + r));
+      const zMin = Math.max(0, Math.floor(cz - r));
+      const zMax = Math.min(size - 1, Math.ceil(cz + r));
+
+      let avg = 0, count = 0;
+      if (mode === "smooth") {
+        for (let z = zMin; z <= zMax; z++) {
+          for (let x = xMin; x <= xMax; x++) {
+            if (Math.hypot(x - cx, z - cz) <= r) {
+              avg += localHeights[z][x];
+              count++;
+            }
+          }
+        }
+        if (count > 0) avg /= count;
+      }
+
+      const geom = terrain.geometry as THREE.PlaneGeometry;
+      const pos = geom.attributes.position as THREE.BufferAttribute;
+
+      for (let z = zMin; z <= zMax; z++) {
+        for (let x = xMin; x <= xMax; x++) {
+          const d = Math.hypot(x - cx, z - cz);
+          if (d > r) continue;
+          const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / r));
+          const s = strength * falloff;
+          let h = localHeights[z][x];
+          switch (mode) {
+            case "raise":   h += s; break;
+            case "lower":   h -= s; break;
+            case "smooth":  h += (avg - h) * Math.min(1, s); break;
+            case "flatten": h += (targetY - h) * Math.min(1, s); break;
+          }
+          localHeights[z][x] = h;
+          pos.setZ(z * size + x, h * TERRAIN_HEIGHT_SCALE);
+        }
+      }
+      pos.needsUpdate = true;
+      geom.computeVertexNormals();
+    }
+
+    function paintLocal(
+      cx: number, cz: number, radius: number, strength: number,
+      layer: 0 | 1 | 2 | 3,
+    ) {
+      if (!localLayers || terrainSizeCache === 0) return;
+      const size = terrainSizeCache;
+      const r = Math.max(1, radius);
+      const xMin = Math.max(0, Math.floor(cx - r));
+      const xMax = Math.min(size - 1, Math.ceil(cx + r));
+      const zMin = Math.max(0, Math.floor(cz - r));
+      const zMax = Math.min(size - 1, Math.ceil(cz + r));
+
+      const geom = terrain.geometry as THREE.PlaneGeometry;
+      const attrs = [
+        geom.attributes.layerW0 as THREE.BufferAttribute,
+        geom.attributes.layerW1 as THREE.BufferAttribute,
+        geom.attributes.layerW2 as THREE.BufferAttribute,
+        geom.attributes.layerW3 as THREE.BufferAttribute,
+      ];
+
+      for (let z = zMin; z <= zMax; z++) {
+        for (let x = xMin; x <= xMax; x++) {
+          const d = Math.hypot(x - cx, z - cz);
+          if (d > r) continue;
+          const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / r));
+          const add = strength * falloff;
+          const cell = localLayers[z][x];
+          cell[layer] = Math.min(1, cell[layer] + add);
+          const sum = cell[0] + cell[1] + cell[2] + cell[3];
+          if (sum > 0) {
+            cell[0] /= sum; cell[1] /= sum;
+            cell[2] /= sum; cell[3] /= sum;
+          }
+          const idx = z * size + x;
+          for (let k = 0; k < 4; k++) attrs[k].setX(idx, cell[k]);
+        }
+      }
+      for (const a of attrs) a.needsUpdate = true;
     }
 
     const grid = new THREE.GridHelper(TERRAIN_WORLD_SIZE, 40, 0x2a2a3a, 0x1a1a25);
@@ -600,10 +707,11 @@ export function ForgeApp() {
       }
     };
 
-    // Apply one brush tick at the supplied world hit point. Called at
-    // ~10 Hz from both mousedown and the tick loop while the stroke is
-    // active.
-    function applyBrushAt(worldX: number, worldZ: number) {
+    // Apply one brush tick at the supplied world hit point. Called
+    // on every mousemove during a drag — no throttle on the local
+    // preview so strokes feel immediate, while the server call is
+    // throttled to 10 Hz by the caller.
+    function applyBrushAt(worldX: number, worldZ: number, sendServer: boolean) {
       const t = terrainLatest.current;
       if (!t) return;
       const { cx, cz } = worldToCell(worldX, worldZ, t.size);
@@ -612,21 +720,27 @@ export function ForgeApp() {
       const tool = toolLatest.current;
 
       if (tool === "paint") {
-        callFn("paintTerrain", {
-          roomId: ROOM_ID,
-          cx, cz,
-          radius,
-          strength,
-          layer: paintLayerLatest.current,
-        }).catch((e) => console.error("[forge] paintTerrain failed:", e));
+        paintLocal(cx, cz, radius, strength, paintLayerLatest.current);
+        if (sendServer) {
+          callFn("paintTerrain", {
+            roomId: ROOM_ID,
+            cx, cz,
+            radius,
+            strength,
+            layer: paintLayerLatest.current,
+          }).catch((e) => console.error("[forge] paintTerrain failed:", e));
+        }
       } else if (tool !== "orbit") {
-        callFn("sculptTerrain", {
-          roomId: ROOM_ID,
-          cx, cz,
-          radius,
-          strength,
-          mode: tool,
-        }).catch((e) => console.error("[forge] sculptTerrain failed:", e));
+        sculptLocal(cx, cz, radius, strength, tool as "raise" | "lower" | "smooth" | "flatten");
+        if (sendServer) {
+          callFn("sculptTerrain", {
+            roomId: ROOM_ID,
+            cx, cz,
+            radius,
+            strength,
+            mode: tool,
+          }).catch((e) => console.error("[forge] sculptTerrain failed:", e));
+        }
       }
     }
 
@@ -669,10 +783,12 @@ export function ForgeApp() {
           brushStroke.lastGndX = hit.x;
           brushStroke.lastGndZ = hit.z;
           const now = performance.now();
-          if (now - brushStroke.lastSend > 100) {
-            brushStroke.lastSend = now;
-            applyBrushAt(hit.x, hit.z);
-          }
+          // Local preview every frame — the mesh deforms at 60 fps while
+          // the user drags. Server writes are throttled to 10 Hz so other
+          // clients (and persistence) pick up the stroke.
+          const sendServer = now - brushStroke.lastSend > 100;
+          if (sendServer) brushStroke.lastSend = now;
+          applyBrushAt(hit.x, hit.z, sendServer);
         }
         return;
       }
@@ -725,7 +841,7 @@ export function ForgeApp() {
       if (brushStroke) {
         // Flush one last brush tick at the final position so the stroke
         // reaches exactly where the user released.
-        applyBrushAt(brushStroke.lastGndX, brushStroke.lastGndZ);
+        applyBrushAt(brushStroke.lastGndX, brushStroke.lastGndZ, true);
       }
       dragging = null;
       orbiting = null;

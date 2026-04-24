@@ -174,6 +174,16 @@ const orgScoped = (name: string) =>
     allowDelete: "auth.tenantId == data.orgId",
   });
 
+// User rows have to be readable for the UI to render display names /
+// avatar colors in member lists, @mentions, etc. Writes go exclusively
+// through upsertUser (the server function) so direct entity writes stay
+// denied by default.
+const userPolicy = policy({
+  name: "user_read",
+  entity: "User",
+  allowRead: "auth.userId != null",
+});
+
 const organizationPolicy = policy({
   name: "organization_access",
   entity: "Organization",
@@ -199,6 +209,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [
+    userPolicy,
     organizationPolicy,
     orgMemberPolicy,
     orgScoped("Company"),
