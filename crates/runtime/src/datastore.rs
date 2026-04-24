@@ -157,6 +157,47 @@ impl DataStore for Runtime {
 
         Ok((!rollback, results))
     }
+
+    /// Bridge the typed `SearchQuery` / `SearchResult` shapes to the
+    /// trait's JSON-in / JSON-out contract. The router passes a JSON
+    /// body; we deserialize, look up the entity's `SearchConfig`, run
+    /// the planner, and re-serialize. Serialization round-tripping
+    /// lets this method live on the DataStore trait without forcing
+    /// pylon-http to depend on pylon-storage.
+    fn search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        let cfg = ent.search.as_ref().ok_or_else(|| DataError {
+            code: "SEARCH_NOT_CONFIGURED".into(),
+            message: format!("Entity {entity} has no `search:` config"),
+        })?;
+        let parsed: pylon_storage::search::SearchQuery =
+            serde_json::from_value(query.clone()).map_err(|e| DataError {
+                code: "INVALID_QUERY".into(),
+                message: format!("search query body: {e}"),
+            })?;
+        let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        let result = pylon_storage::search_query::run_search(&conn, entity, cfg, &parsed)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        serde_json::to_value(&result).map_err(|e| DataError {
+            code: "SEARCH_SERIALIZE_FAILED".into(),
+            message: e.to_string(),
+        })
+    }
 }
 
 fn into_data_error(e: crate::RuntimeError) -> DataError {

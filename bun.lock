@@ -276,6 +276,32 @@
         "vite": "^8.0.0",
       },
     },
+    "examples/store": {
+      "name": "store-example",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/functions": "workspace:*",
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
+      },
+    },
+    "examples/store/web": {
+      "name": "store-web",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sync": "workspace:*",
+        "react": "^19.2.0",
+        "react-dom": "^19.2.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.0",
+        "@types/react-dom": "^19.2.0",
+        "@vitejs/plugin-react": "^6.0.0",
+        "typescript": "^5.9.3",
+        "vite": "^8.0.0",
+      },
+    },
     "examples/todo-app": {
       "name": "@pylonsync/example-todo-app",
       "version": "0.1.0",
@@ -349,7 +375,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.1.0",
+      "version": "0.2.3",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -365,7 +391,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.1.0",
+      "version": "0.2.3",
       "dependencies": {
         "@pylonsync/sdk": "file:../sdk",
         "@pylonsync/sync": "file:../sync",
@@ -396,11 +422,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.1.0",
+      "version": "0.2.3",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.1.0",
+      "version": "0.2.3",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -1071,6 +1097,10 @@
 
     "statuses": ["statuses@1.5.0", "", {}, "sha512-OpZ3zP+jT1PI7I8nemJX4AKmAX070ZkYPVWV/AaKTJl+tXCTGyVdC1a4SL8RUQYEwk/f34ZX8UTykN68FwrqAA=="],
 
+    "store-example": ["store-example@workspace:examples/store"],
+
+    "store-web": ["store-web@workspace:examples/store/web"],
+
     "string-width": ["string-width@4.2.3", "", { "dependencies": { "emoji-regex": "^8.0.0", "is-fullwidth-code-point": "^3.0.0", "strip-ansi": "^6.0.1" } }, "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g=="],
 
     "strip-ansi": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
@@ -1198,10 +1228,6 @@
     "@pylonsync/example-stage-web/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
     "@pylonsync/example-stage-web/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
-
-    "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
-
-    "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@pylonsync/react-native/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 

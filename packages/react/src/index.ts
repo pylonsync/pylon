@@ -19,6 +19,7 @@ export {
   useDelete,
   useFn,
   useAggregate,
+  useSearch,
 } from "./hooks";
 export type {
   QueryOptions,
@@ -33,6 +34,8 @@ export type {
   UseFnReturn,
   AggregateSpec,
   UseAggregateReturn,
+  SearchSpec,
+  UseSearchReturn,
 } from "./hooks";
 
 // Room hook

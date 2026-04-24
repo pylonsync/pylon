@@ -5,6 +5,7 @@ import {
   useMutation as useMutationHook,
   useInfiniteQuery as useInfiniteQueryHook,
   useAggregate as useAggregateHook,
+  useSearch as useSearchHook,
   useEntityMutation,
   type QueryOptions,
   type UseQueryReturn,
@@ -13,6 +14,8 @@ import {
   type UseInfiniteQueryReturn,
   type AggregateSpec,
   type UseAggregateReturn,
+  type SearchSpec,
+  type UseSearchReturn,
 } from "./hooks";
 import {
   callFn,
@@ -113,6 +116,24 @@ export const db = {
     spec: AggregateSpec
   ): UseAggregateReturn<Row> {
     return useAggregateHook<Row>(getSync(), entity, spec);
+  },
+
+  /**
+   * Live faceted full-text search. Returns ranked hits + per-facet
+   * counts + total; re-runs when the entity's rows change so facet
+   * counts and result lists stay in lockstep with writes.
+   *
+   * ```tsx
+   * const { hits, facetCounts, total } = db.useSearch<Product>("Product", {
+   *   query: "red sneakers",
+   *   filters: { category: "shoes" },
+   *   facets: ["brand", "color"],
+   *   sort: ["price", "desc"],
+   * });
+   * ```
+   */
+  useSearch<T = Row>(entity: string, spec: SearchSpec): UseSearchReturn<T> {
+    return useSearchHook<T>(getSync(), entity, spec);
   },
 
   /** Entity-level optimistic CRUD (not server-side functions). */

@@ -2148,6 +2148,111 @@ fn route_inner(
     }
 
     // -----------------------------------------------------------------------
+    // Faceted search
+    // -----------------------------------------------------------------------
+    //
+    // POST /api/search/:entity
+    //
+    // Body shape mirrors `pylon_storage::search::SearchQuery`:
+    //
+    //   {
+    //     "query":     "red sneakers",
+    //     "filters":   { "brand": "Nike", "category": "shoes" },
+    //     "facets":    ["brand", "category"],
+    //     "sort":      ["price", "desc"],
+    //     "page":      0,
+    //     "page_size": 20
+    //   }
+    //
+    // Returns `SearchResult` — `{ hits, facetCounts, total, tookMs }`.
+    // Read-policy enforcement is applied per-hit before returning so
+    // facet counts always reflect the full match-set (bitmap intersect
+    // is cheap) but hits the caller can't read are filtered out.
+    if let Some(rest) = url.strip_prefix("/api/search/") {
+        let entity_name = rest.split('?').next().unwrap_or(rest).trim_end_matches('/');
+        if entity_name.is_empty() {
+            return (400, json_error("MISSING_ENTITY", "search path is /api/search/<Entity>"));
+        }
+        if method != HttpMethod::Post {
+            return (
+                405,
+                json_error(
+                    "METHOD_NOT_ALLOWED",
+                    "search requires POST with a JSON body",
+                ),
+            );
+        }
+        let query_json: serde_json::Value = match parse_json(body) {
+            Ok(v) => v,
+            Err((status, message)) => return (status, message),
+        };
+        // Refuse search on entities whose read policy depends on per-row
+        // fields (e.g. `auth.userId == data.ownerId`). Facet counts +
+        // totals are computed across the full match-set via bitmap
+        // intersection — exposing those aggregates for row-scoped data
+        // would leak "how many X does tenant Y have" even if individual
+        // hits were filtered out. Entities gated purely on `auth.*`
+        // (role, tenant, anon/auth status) give the same answer with
+        // or without a row, so a `None`-data probe tells us if the
+        // policy is safe to evaluate aggregate-only.
+        //
+        // Refusing is the conservative default. Operators who want
+        // per-user faceted search should either (a) make the entity's
+        // read policy row-independent, or (b) a future per-user bitmap
+        // indexing mode which we haven't shipped yet.
+        let aggregate_safe = matches!(
+            ctx.policy_engine
+                .check_entity_read(entity_name, ctx.auth_ctx, None),
+            pylon_policy::PolicyResult::Allowed
+        );
+        if !aggregate_safe {
+            return (
+                403,
+                json_error(
+                    "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY",
+                    &format!(
+                        "Entity {entity_name} has a read policy that depends on row data. \
+                         Faceted search computes aggregates over every match and would \
+                         leak counts for rows you can't read. Make the read policy \
+                         row-independent, or disable search: in the manifest."
+                    ),
+                ),
+            );
+        }
+        return match ctx.store.search(entity_name, &query_json) {
+            Ok(mut result) => {
+                // Belt-and-suspenders per-hit filter. With aggregate_safe
+                // above, the policy already allows "anyone who passes the
+                // auth check" — so this should be a no-op here, but it
+                // guards against future changes where we might relax the
+                // aggregate_safe gate for some new data-independent-
+                // looking policies that still reference `data`.
+                if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
+                    hits.retain(|hit| {
+                        matches!(
+                            ctx.policy_engine.check_entity_read(
+                                entity_name,
+                                ctx.auth_ctx,
+                                Some(hit)
+                            ),
+                            pylon_policy::PolicyResult::Allowed
+                        )
+                    });
+                }
+                (200, result.to_string())
+            }
+            Err(e) => {
+                let status = match e.code.as_str() {
+                    "ENTITY_NOT_FOUND" => 404,
+                    "SEARCH_NOT_CONFIGURED" | "INVALID_QUERY" => 400,
+                    _ => 500,
+                };
+                (status, json_error(&e.code, &e.message))
+            }
+        };
+    }
+
+    // -----------------------------------------------------------------------
     // Cursor pagination
     // -----------------------------------------------------------------------
 

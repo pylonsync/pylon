@@ -169,6 +169,25 @@ pub trait DataStore: Send + Sync {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError>;
+
+    /// Run a faceted full-text search against a searchable entity. `query`
+    /// is a JSON object with the keys defined by `SearchQuery` in
+    /// `pylon_storage::search`; returns a JSON object shaped like
+    /// `SearchResult` (`{ hits, facetCounts, total, tookMs }`).
+    ///
+    /// Default impl returns `NOT_SUPPORTED`; Runtime overrides it. The
+    /// value is raw JSON (not a typed struct) so backends without a
+    /// dependency on pylon-storage can still compile.
+    fn search(
+        &self,
+        _entity: &str,
+        _query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "search() is not implemented by this backend".into(),
+        })
+    }
 }
 
 #[cfg(test)]
