@@ -391,6 +391,8 @@ cd web && bun run dev
 
 The first `pylon dev` invocation creates `.pylon/dev.db` (SQLite) and runs auto-migration. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function code is identical either way.
 
+In production, use `pylon start app.ts` instead of `pylon dev`. Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
+
 ## Deployment
 
 Production env vars to set:

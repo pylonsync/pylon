@@ -13,5 +13,6 @@ pub mod migrate;
 pub mod plugins;
 pub mod schema;
 pub mod seed;
+pub mod start;
 pub mod test;
 pub mod version;
