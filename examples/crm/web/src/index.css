@@ -3,8 +3,9 @@
 @import "@pylonsync/example-ui/tokens.css";
 
 /* Scan client/ for class names — Tailwind 4 only auto-scans the CSS file's project by default. */
-@source "../../client";
-@source "../src";
+@source "../../client/**/*.{ts,tsx}";
+@source "../../../_shared/src/**/*.{ts,tsx}";
+@source "../src/**/*.{ts,tsx}";
 
 @theme {
   --font-sans: "Inter", -apple-system, system-ui, sans-serif;
