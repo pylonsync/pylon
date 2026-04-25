@@ -378,7 +378,7 @@ export function useInfiniteQuery<T = Row>(
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const cursorRef = useRef<string | null>(null);
+  const offsetRef = useRef<number>(0);
 
   // Mounted guard + in-flight ref. Two related issues:
   //   1. setState after unmount — same problem as useMutation.
@@ -402,12 +402,12 @@ export function useInfiniteQuery<T = Row>(
     if (mounted.current) setLoading(true);
     if (mounted.current) setError(null);
     sync
-      .loadPage(entity, { after: cursorRef.current, limit: pageSize })
-      .then((result: { rows: Row[]; nextCursor: string | null; hasMore: boolean }) => {
-        cursorRef.current = result.nextCursor;
+      .loadPage(entity, { offset: offsetRef.current, limit: pageSize })
+      .then((result) => {
+        offsetRef.current += result.data.length;
         if (mounted.current) {
           setHasMore(result.hasMore);
-          setData((prev) => [...prev, ...(result.rows as T[])]);
+          setData((prev) => [...prev, ...(result.data as T[])]);
         }
       })
       .catch((e: unknown) => {

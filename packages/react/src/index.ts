@@ -544,7 +544,11 @@ export async function uploadFile(
   } else if (input instanceof ArrayBuffer) {
     body = input;
   } else {
-    body = input as Uint8Array;
+    // Newer TS lib types refuse `Uint8Array<ArrayBufferLike>` as BodyInit
+    // directly even though every runtime accepts it. Hand fetch the
+    // underlying ArrayBuffer slice to sidestep the type narrowing.
+    const u8 = input as Uint8Array;
+    body = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
   }
 
   filename ??= "upload";
