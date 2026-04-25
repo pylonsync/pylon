@@ -84,6 +84,13 @@ jobs:
       - name: Publish @pylonsync/* (skip-if-exists)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # npm 9.5+ auto-enables provenance whenever id-token: write
+          # is granted on a GitHub Actions runner. The sigstore bundle
+          # would then reference this private repo, which the registry
+          # rejects with E422 ("Unsupported GitHub Actions source
+          # repository visibility: private"). Force it off explicitly
+          # until pylonsync/pylon goes public; flip back to "true" then.
+          NPM_CONFIG_PROVENANCE: "false"
         shell: bash
         run: |
           set -euo pipefail
@@ -95,10 +102,7 @@ jobs:
               echo "✓ $NAME@$VERSION already published — skipping"
             else
               echo "→ Publishing $NAME@$VERSION"
-              # Provenance is off until the repo is public — npm rejects
-              # sigstore bundles that reference a private source repo.
-              # Re-add `--provenance` once pylonsync/pylon is public.
-              (cd "$pkg" && npm publish --access public)
+              (cd "$pkg" && npm publish --access public --provenance=false)
             fi
           done
 
