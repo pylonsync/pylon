@@ -330,6 +330,16 @@ export class MutationQueue {
     this.persistence = persistence;
   }
 
+  /**
+   * Attach a persistence backend after construction. The SyncEngine
+   * uses this to swap in IndexedDB-backed persistence once the DB
+   * has opened (after the constructor runs). Public so it doesn't
+   * need a `// @ts-expect-error` to reach in from the same package.
+   */
+  attachPersistence(persistence: MutationQueuePersistence): void {
+    this.persistence = persistence;
+  }
+
   /** Load persisted queue state. Call once at startup. */
   async hydrate(): Promise<void> {
     if (!this.persistence) return;
@@ -537,6 +547,37 @@ export class SyncEngine {
    */
   private wsStableTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Registered consumers for binary WebSocket frames. SyncEngine itself
+   * doesn't decode binary — it just owns the WS connection and routes
+   * frames to whoever signed up via [`onBinaryFrame`]. The first
+   * consumer is `@pylonsync/loro` for CRDT snapshots / updates;
+   * future binary use cases (file streaming, etc.) register the same
+   * way so this layer stays use-case-agnostic.
+   *
+   * Set rather than Array so a hot-reload re-registration of the same
+   * handler doesn't double-invoke. Caller-provided handler identity
+   * is the dedup key.
+   */
+  private binaryHandlers: Set<(bytes: Uint8Array) => void> = new Set();
+
+  /**
+   * Register a binary-frame handler. Returns an unsubscribe fn that
+   * pulls the handler back out — call on hook unmount / module
+   * teardown so handlers don't leak.
+   *
+   * Multiple handlers can register concurrently; each gets called for
+   * every binary frame the WS receives. Handlers should be cheap and
+   * non-throwing — exceptions are caught and logged but the message
+   * is otherwise dropped for that handler.
+   */
+  onBinaryFrame(handler: (bytes: Uint8Array) => void): () => void {
+    this.binaryHandlers.add(handler);
+    return () => {
+      this.binaryHandlers.delete(handler);
+    };
+  }
+
   /** Read the cached resolved session. Null user = anonymous. */
   resolvedSession(): ResolvedSession {
     return this._resolvedSession;
@@ -633,9 +674,7 @@ export class SyncEngine {
         try {
           const { IndexedDBMutationPersistence } = await import("./persistence");
           const mqPersistence = new IndexedDBMutationPersistence(persistence);
-          // @ts-expect-error — reach into the private field to swap in the
-          // backend post-construction. Same package, acceptable coupling.
-          this.mutations.persistence = mqPersistence;
+          this.mutations.attachPersistence(mqPersistence);
           await this.mutations.hydrate();
         } catch {
           // Queue persistence optional — memory-only still works.
@@ -731,7 +770,32 @@ export class SyncEngine {
       }, 5_000);
     };
 
+    // Bind binaryType BEFORE installing the handler so the first
+    // server-pushed binary frame (CRDT snapshot or update) decodes
+    // correctly. Default in browsers is "blob"; we want raw bytes
+    // synchronously available so the binary-handler closure doesn't
+    // need to await a Blob.arrayBuffer() round-trip.
+    this.ws.binaryType = "arraybuffer";
+
     this.ws.onmessage = (event) => {
+      // Binary frame: route to whatever consumer registered via
+      // onBinaryFrame(). Pylon's CRDT broadcast (server-side
+      // notify_crdt) ships every CRDT-mode write as a binary
+      // [type|entity|row_id|payload] frame; @pylonsync/loro is the
+      // intended decoder. SyncEngine itself stays binary-agnostic so
+      // the next binary use case (file streaming, video chunks…)
+      // can register without churning this layer.
+      if (event.data instanceof ArrayBuffer) {
+        for (const handler of this.binaryHandlers) {
+          try {
+            handler(new Uint8Array(event.data));
+          } catch (err) {
+            console.warn("[sync] binary handler threw:", err);
+          }
+        }
+        return;
+      }
+
       try {
         const msg = JSON.parse(event.data as string);
 
