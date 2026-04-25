@@ -1433,7 +1433,11 @@
 
     "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
+    "@pylonsync/loro/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
     "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@pylonsync/react-native/@pylonsync/react": ["@pylonsync/react@file:packages/react", { "dependencies": { "@pylonsync/sdk": "file:../sdk", "@pylonsync/sync": "file:../sync" }, "devDependencies": { "@types/react": "^19.0.0" }, "peerDependencies": { "react": ">=18.0.0" } }],
 
