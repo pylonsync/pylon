@@ -948,6 +948,8 @@ export class SyncEngine {
         "GET",
         `/api/sync/pull?since=${this.cursor.last_seq}`
       );
+      // Successful response — clear the 410 circuit breaker.
+      this.consecutive_410s = 0;
       if (resp.changes.length > 0) {
         // Await disk writes before touching the cursor so a crash here can't
         // persist a cursor that's ahead of what actually landed in IndexedDB.
@@ -982,13 +984,41 @@ export class SyncEngine {
       // it fell off the retention window. Drop local state + cursor and
       // re-pull from seq=0. The server replays all current entity rows as
       // seed events on startup so the fresh pull reconstructs state.
+      //
+      // Circuit breaker: if the immediate re-pull ALSO 410s, accept it.
+      // Don't recurse — that's the infinite loop we used to ship before
+      // the cursor=0 server fix landed (or against an old server binary
+      // that hasn't been rebuilt yet). Track 410 retries against an
+      // exponential backoff so a misconfigured server can't melt our CPU.
       if (status === 410) {
-        await this.resetReplica();
-        // Re-pull immediately; the catch block will swallow nested failures.
-        await this.pull();
+        const attempt = this.consecutive_410s;
+        this.consecutive_410s += 1;
+        if (attempt === 0) {
+          await this.resetReplica();
+          await this.pull();
+        } else {
+          // Already retried once and still 410. Stop. Schedule a
+          // back-off retry tied to the WS reconnect path so we don't
+          // spam the server. Resets when any pull succeeds.
+          const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+          console.warn(
+            `[pylon] persistent 410 RESYNC_REQUIRED (attempt ${attempt + 1}); backing off ${delayMs}ms`,
+          );
+          setTimeout(() => {
+            // Trigger one more attempt; either it succeeds (which resets
+            // the counter) or it 410s again (which extends the backoff).
+            void this.pull();
+          }, delayMs);
+        }
       }
     }
   }
+
+  /** Consecutive 410 RESYNC_REQUIRED responses since the last successful
+   *  pull. Used by the circuit breaker in pull() to bound the retry
+   *  storm against a misconfigured server. Resets to 0 on any pull
+   *  that doesn't throw a 410. */
+  private consecutive_410s = 0;
 
   /**
    * Fetch `/api/auth/me` and update the cached `_resolvedSession`. Callers:
