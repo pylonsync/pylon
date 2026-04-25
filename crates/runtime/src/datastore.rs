@@ -1176,6 +1176,11 @@ pub fn try_spawn_functions(
         }
     };
 
+    // Hold a separate handle on the job queue for registering function
+    // job handlers below, since the schedule-hook closure consumes its
+    // own copy.
+    let job_queue_for_handlers = Arc::clone(&job_queue);
+
     // Wire scheduler requests from functions into the job queue. Use the
     // Result-returning variant so a persist failure surfaces as a TS-side
     // SCHEDULE_FAILED error instead of `{scheduled:true, id:""}`.
@@ -1220,8 +1225,62 @@ pub fn try_spawn_functions(
     });
 
     install_nested_call_hook(&ops);
+    register_function_job_handlers(&ops, &job_queue_for_handlers);
     spawn_runtime_supervisor(Arc::clone(&ops));
     Some(ops)
+}
+
+/// Bridge scheduled function calls (via `ctx.scheduler.runAfter` or
+/// `runAt`) to the function runner. Without this, the schedule hook
+/// enqueues a job whose `name` is the function name — but no handler
+/// is registered for it, so the worker fails with "No handler
+/// registered" and the scheduled callback never runs.
+///
+/// Registers one handler per loaded function. Each handler invokes
+/// `FnOpsImpl::call` with a system auth context (no user_id, not
+/// admin) so the called function runs with the same privileges a
+/// trusted-server-side caller would have. The args come from the
+/// job payload, which the schedule hook copies verbatim from the
+/// `runAfter(ms, fn, args)` invocation.
+fn register_function_job_handlers(
+    ops: &Arc<FnOpsImpl>,
+    job_queue: &Arc<crate::jobs::JobQueue>,
+) {
+    use pylon_router::FnOps as _;
+
+    let fn_names: Vec<String> = ops
+        .registry
+        .list()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+
+    for name in fn_names {
+        let weak = Arc::downgrade(ops);
+        let fn_name = name.clone();
+        job_queue.register(
+            &name,
+            Arc::new(move |job: &crate::jobs::Job| {
+                let ops = match weak.upgrade() {
+                    Some(o) => o,
+                    None => {
+                        return crate::jobs::JobResult::Failure(
+                            "RUNTIME_GONE: function ops dropped".into(),
+                        )
+                    }
+                };
+                let auth = FnAuth {
+                    user_id: None,
+                    is_admin: false,
+                    tenant_id: None,
+                };
+                match ops.call(&fn_name, job.payload.clone(), auth, None, None) {
+                    Ok(_) => crate::jobs::JobResult::Success,
+                    Err(e) => crate::jobs::JobResult::Retry(format!("{}: {}", e.code, e.message)),
+                }
+            }),
+        );
+    }
 }
 
 /// Route nested `RunFn` calls (action → query/mutation) through a

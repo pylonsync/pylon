@@ -6,8 +6,7 @@
  * rate. The dashboard aggregates samples into throughput + latency
  * percentiles per second and draws a live chart.
  */
-
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   init,
   configureClient,
@@ -15,6 +14,12 @@ import {
   callFn,
   db,
 } from "@pylonsync/react";
+import { Activity, Play, RefreshCw, Square } from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/card";
+import { Badge } from "@pylonsync/example-ui/badge";
+import { Separator } from "@pylonsync/example-ui/separator";
+import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "bench" });
@@ -56,33 +61,26 @@ type SecondBucket = {
 
 export function BenchApp() {
   const [token, setToken] = useState<string | null>(null);
-
-  // Config knobs.
   const [numWorkers, setNumWorkers] = useState(8);
-  const [perWorkerRate, setPerWorkerRate] = useState(40); // mutations/sec
+  const [perWorkerRate, setPerWorkerRate] = useState(40);
   const [running, setRunning] = useState(false);
-
-  // Live metrics.
   const [totalMutations, setTotalMutations] = useState(0);
   const [totalFailures, setTotalFailures] = useState(0);
   const [series, setSeries] = useState<SecondBucket[]>([]);
   const [currentSecond, setCurrentSecond] = useState<SecondBucket>({
-    sec: 0, count: 0, latencies: [],
+    sec: 0,
+    count: 0,
+    latencies: [],
   });
 
   const workersRef = useRef<Worker[]>([]);
   const runIdRef = useRef<string>("");
-  const secondStartRef = useRef<number>(0);
 
-  // Live count of Counter rows — shows the actual server-side effect.
   const { data: counters } = db.useQuery<Counter>("Counter");
 
-  // Auth on mount.
   useEffect(() => {
     ensureGuest().then(({ token }) => setToken(token));
   }, []);
-
-  // ---- Bench lifecycle ----
 
   const stop = useCallback(() => {
     for (const w of workersRef.current) {
@@ -95,9 +93,8 @@ export function BenchApp() {
 
   const start = useCallback(() => {
     if (!token) return;
-    stop(); // clear any prior run
+    stop();
     runIdRef.current = `run_${Date.now().toString(36)}`;
-    secondStartRef.current = Math.floor(performance.now() / 1000);
     setTotalMutations(0);
     setTotalFailures(0);
     setSeries([]);
@@ -108,11 +105,8 @@ export function BenchApp() {
       w.onmessage = (e) => {
         const msg = e.data;
         if (msg.kind !== "sample") return;
-        if (msg.ok) {
-          setTotalMutations((c) => c + 1);
-        } else {
-          setTotalFailures((c) => c + 1);
-        }
+        if (msg.ok) setTotalMutations((c) => c + 1);
+        else setTotalFailures((c) => c + 1);
         setCurrentSecond((s) => ({
           sec: s.sec,
           count: s.count + 1,
@@ -126,7 +120,7 @@ export function BenchApp() {
           token,
           workerId: i,
           ratePerSec: perWorkerRate,
-          label: `bench_${i % 16}`, // spread across 16 hot rows
+          label: `bench_${i % 16}`,
         },
       });
       workersRef.current.push(w);
@@ -134,15 +128,13 @@ export function BenchApp() {
     setRunning(true);
   }, [token, numWorkers, perWorkerRate, stop]);
 
-  // Flush current second into series once per second.
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => {
       setCurrentSecond((cur) => {
-        // Roll into series.
         setSeries((prev) => {
           const next = [...prev, { ...cur, sec: prev.length }];
-          return next.slice(-60); // keep last 60 seconds
+          return next.slice(-60);
         });
         return { sec: cur.sec + 1, count: 0, latencies: [] };
       });
@@ -150,7 +142,6 @@ export function BenchApp() {
     return () => clearInterval(t);
   }, [running]);
 
-  // Upload each bucket as a Sample row so runs can be compared later.
   useEffect(() => {
     if (series.length === 0) return;
     const last = series[series.length - 1];
@@ -179,10 +170,11 @@ export function BenchApp() {
 
   async function reset() {
     stop();
-    try { await callFn("resetBench", {}); } catch {}
+    try {
+      await callFn("resetBench", {});
+    } catch {}
   }
 
-  // Chart rendering.
   const chartRef = useRef<HTMLCanvasElement | null>(null);
   useEffect(() => {
     const c = chartRef.current;
@@ -194,15 +186,18 @@ export function BenchApp() {
     c.width = r.width * dpr;
     c.height = r.height * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const W = r.width, H = r.height;
+    const W = r.width;
+    const H = r.height;
     ctx.clearRect(0, 0, W, H);
 
-    // Axes.
-    ctx.strokeStyle = "#262626";
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       const y = (H / 4) * i;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
     }
 
     if (series.length < 2) return;
@@ -210,7 +205,6 @@ export function BenchApp() {
     const maxCount = Math.max(1, ...series.map((s) => s.count));
     const maxLat = Math.max(1, ...series.flatMap((s) => s.latencies), 100);
 
-    // TPS bars.
     const bw = W / 60;
     for (let i = 0; i < n; i++) {
       const b = series[i];
@@ -220,7 +214,6 @@ export function BenchApp() {
       ctx.fillRect(x, H - h, Math.max(1, bw - 1), h);
     }
 
-    // p95 line.
     ctx.strokeStyle = "#8b5cf6";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -234,7 +227,6 @@ export function BenchApp() {
     }
     ctx.stroke();
 
-    // p50 line.
     ctx.strokeStyle = "#4ade80";
     ctx.lineWidth = 1.5;
     ctx.setLineDash([3, 4]);
@@ -252,86 +244,109 @@ export function BenchApp() {
   }, [series]);
 
   return (
-    <div className="bn-app">
-      <div className="bn-topbar">
-        <div className="bn-brand">
-          <svg viewBox="0 0 48 64" width="18" height="24" fill="currentColor">
-            <path d="M24 2 L10 20 L24 32 Z" />
-            <path d="M24 2 L38 20 L24 32 Z" />
-            <path d="M24 32 L18 48 L24 62 L30 48 Z" />
-            <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
-            <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
-          </svg>
+    <div className="grid h-screen grid-rows-[56px_1fr]">
+      <header className="flex items-center gap-6 border-b bg-background px-5">
+        <div className="flex items-center gap-2.5 font-mono text-sm font-medium">
+          <BrandMark />
           <span>Pylon · Bench</span>
         </div>
-        <div className="bn-status">
-          <span className={`bn-dot ${running ? "on" : ""}`} />
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span
+            className={cn(
+              "inline-block size-2 rounded-full",
+              running ? "animate-pulse bg-emerald-400" : "bg-muted",
+            )}
+          />
           {running ? "running" : "idle"}
-          <span className="bn-sep">·</span>
-          target <b>{targetTps}</b> mut/s
+          <Separator orientation="vertical" className="h-3" />
+          <span>
+            target <strong className="font-mono text-foreground">{targetTps}</strong> mut/s
+          </span>
         </div>
-      </div>
+      </header>
 
-      <div className="bn-body">
-        <div className="bn-left">
-          <div className="bn-section">
-            <div className="bn-section-title">Config</div>
-            <Knob
-              label="Virtual clients"
-              value={numWorkers}
-              min={1}
-              max={128}
-              step={1}
-              onChange={setNumWorkers}
-              disabled={running}
-            />
-            <Knob
-              label="Per-client mut/sec"
-              value={perWorkerRate}
-              min={1}
-              max={200}
-              step={1}
-              onChange={setPerWorkerRate}
-              disabled={running}
-            />
-            <div className="bn-hint">
-              Target = <b>{numWorkers * perWorkerRate}</b> mutations/sec across all workers.
-            </div>
+      <div className="grid grid-cols-[320px_1fr] gap-6 overflow-hidden p-6">
+        <div className="flex flex-col gap-4 overflow-y-auto">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm uppercase tracking-wider text-muted-foreground">
+                Config
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Knob
+                label="Virtual clients"
+                value={numWorkers}
+                min={1}
+                max={128}
+                step={1}
+                onChange={setNumWorkers}
+                disabled={running}
+              />
+              <Knob
+                label="Per-client mut/sec"
+                value={perWorkerRate}
+                min={1}
+                max={200}
+                step={1}
+                onChange={setPerWorkerRate}
+                disabled={running}
+              />
+              <p className="text-xs text-muted-foreground">
+                Target = <strong className="font-mono text-foreground">{targetTps}</strong>{" "}
+                mutations/sec across all workers.
+              </p>
 
-            <div className="bn-btn-row">
-              {!running ? (
-                <button className="bn-btn primary" onClick={start} disabled={!token}>
-                  Start bench
-                </button>
-              ) : (
-                <button className="bn-btn danger" onClick={stop}>
-                  Stop
-                </button>
-              )}
-              <button className="bn-btn" onClick={reset} disabled={running}>
-                Reset
-              </button>
-            </div>
-          </div>
+              <div className="flex gap-2">
+                {!running ? (
+                  <Button onClick={start} disabled={!token} className="flex-1">
+                    <Play className="size-4" />
+                    Start bench
+                  </Button>
+                ) : (
+                  <Button variant="destructive" onClick={stop} className="flex-1">
+                    <Square className="size-4" />
+                    Stop
+                  </Button>
+                )}
+                <Button variant="outline" onClick={reset} disabled={running}>
+                  <RefreshCw className="size-4" />
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
 
-          <div className="bn-section">
-            <div className="bn-section-title">Hot rows</div>
-            <div className="bn-counters">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm uppercase tracking-wider text-muted-foreground">
+                Hot rows
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1.5">
               {(counters ?? []).slice(0, 16).map((c) => (
-                <div key={c.id} className="bn-counter">
-                  <span className="bn-counter-label">{c.label}</span>
-                  <span className="bn-counter-value">{c.value.toLocaleString()}</span>
+                <div
+                  key={c.id}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {c.label}
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    {c.value.toLocaleString()}
+                  </span>
                 </div>
               ))}
               {(counters ?? []).length === 0 && (
-                <div className="bn-empty">Start a bench to populate rows.</div>
+                <div className="py-4 text-center text-xs text-muted-foreground">
+                  Start a bench to populate rows.
+                </div>
               )}
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
-        <div className="bn-right">
-          <div className="bn-metrics">
+        <div className="flex flex-col gap-4 overflow-hidden">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7">
             <Metric label="TPS (live)" value={recentTps.toString()} sub="mut/s" />
             <Metric label="TPS (peak)" value={peakTps.toString()} sub="mut/s" />
             <Metric label="Total" value={totalMutations.toLocaleString()} />
@@ -341,15 +356,23 @@ export function BenchApp() {
             <Metric label="Errors" value={totalFailures.toString()} tone={totalFailures > 0 ? "warn" : "ok"} />
           </div>
 
-          <div className="bn-chart-wrap">
-            <div className="bn-chart-legend">
-              <span><i className="bn-legend-bar" /> TPS</span>
-              <span><i className="bn-legend-line line-p50" /> p50</span>
-              <span><i className="bn-legend-line line-p95" /> p95</span>
-              <span className="bn-legend-win">· last 60s</span>
-            </div>
-            <canvas ref={chartRef} className="bn-chart" />
-          </div>
+          <Card className="flex flex-1 flex-col overflow-hidden">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                <Activity className="size-4" />
+                Throughput &amp; latency
+              </CardTitle>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <Legend color="rgba(139, 92, 246, 0.5)" label="TPS" />
+                <Legend color="#4ade80" label="p50" dashed />
+                <Legend color="#8b5cf6" label="p95" />
+                <span>· last 60s</span>
+              </div>
+            </CardHeader>
+            <CardContent className="flex-1 p-0">
+              <canvas ref={chartRef} className="h-full w-full" />
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>
@@ -357,7 +380,13 @@ export function BenchApp() {
 }
 
 function Knob({
-  label, value, min, max, step, onChange, disabled,
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  disabled,
 }: {
   label: string;
   value: number;
@@ -368,27 +397,30 @@ function Knob({
   disabled?: boolean;
 }) {
   return (
-    <div className="bn-knob">
-      <div className="bn-knob-head">
-        <span className="bn-knob-label">{label}</span>
-        <span className="bn-knob-value">{value}</span>
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-mono tabular-nums">{value}</span>
       </div>
       <input
         type="range"
-        className="bn-knob-range"
         min={min}
         max={max}
         step={step}
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
+        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50"
       />
     </div>
   );
 }
 
 function Metric({
-  label, value, sub, tone,
+  label,
+  value,
+  sub,
+  tone,
 }: {
   label: string;
   value: string;
@@ -396,12 +428,45 @@ function Metric({
   tone?: "ok" | "warn";
 }) {
   return (
-    <div className={`bn-metric ${tone ?? ""}`}>
-      <div className="bn-metric-label">{label}</div>
-      <div className="bn-metric-value">
-        {value}
-        {sub && <span className="bn-metric-sub">{sub}</span>}
+    <Card className={cn("p-3", tone === "warn" && "border-destructive/40")}>
+      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
       </div>
-    </div>
+      <div className="mt-1 flex items-baseline gap-1 font-mono tabular-nums">
+        <span className="text-xl font-semibold">{value}</span>
+        {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
+      </div>
+    </Card>
+  );
+}
+
+function Legend({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      {dashed ? (
+        <span
+          className="block h-px w-3"
+          style={{ borderTop: `1.5px dashed ${color}` }}
+        />
+      ) : (
+        <span
+          className="block h-2 w-3 rounded-sm"
+          style={{ background: color }}
+        />
+      )}
+      {label}
+    </span>
+  );
+}
+
+function BrandMark() {
+  return (
+    <svg viewBox="0 0 48 64" width="16" height="22" fill="currentColor" aria-hidden className="text-primary">
+      <path d="M24 2 L10 20 L24 32 Z" />
+      <path d="M24 2 L38 20 L24 32 Z" />
+      <path d="M24 32 L18 48 L24 62 L30 48 Z" />
+      <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+      <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+    </svg>
   );
 }

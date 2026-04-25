@@ -15,7 +15,7 @@
  *     frame's sync step; meshes are pooled by prim id.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   init,
@@ -24,6 +24,21 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import {
+  Box,
+  Brush,
+  Circle,
+  Cone,
+  Move,
+  Mountain,
+  PaintBucket,
+  Sparkles,
+  Torus,
+  Trash2,
+} from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card } from "@pylonsync/example-ui/card";
+import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "forge" });
@@ -515,7 +530,11 @@ export function ForgeApp() {
     const cursorMeshes = new Map<string, CursorEntry>();
 
     const cursorLayer = document.createElement("div");
-    cursorLayer.className = "fg-cursors";
+    Object.assign(cursorLayer.style, {
+      position: "absolute",
+      inset: "0",
+      pointerEvents: "none",
+    });
     mount.appendChild(cursorLayer);
 
     function outlineFor(mesh: THREE.Mesh): THREE.Mesh {
@@ -574,9 +593,19 @@ export function ForgeApp() {
       scene.add(sphere);
 
       const label = document.createElement("div");
-      label.className = "fg-cursor-label";
+      Object.assign(label.style, {
+        position: "absolute",
+        top: "0",
+        left: "0",
+        fontSize: "11px",
+        fontFamily: "var(--font-mono, ui-monospace, monospace)",
+        fontWeight: "600",
+        textShadow: "0 1px 0 rgba(0,0,0,0.6)",
+        whiteSpace: "nowrap",
+        color: c.color,
+        transition: "opacity 120ms",
+      });
       label.textContent = c.name;
-      label.style.color = c.color;
       cursorLayer.appendChild(label);
 
       return {
@@ -1001,104 +1030,139 @@ export function ForgeApp() {
   const selectedPrim = selected ? (prims ?? []).find((p) => p.id === selected) : null;
 
   return (
-    <div className="fg">
-      <div ref={mountRef} className="fg-canvas" />
+    <div className="fixed inset-0 bg-[#0d0d12]">
+      <div ref={mountRef} className="absolute inset-0" />
 
       {/* Top toolbar: add primitives */}
-      <div className="fg-top-toolbar">
-        <div className="fg-brand">
-          <svg viewBox="0 0 48 64" width="16" height="21" fill="currentColor">
-            <path d="M24 2 L10 20 L24 32 Z" />
-            <path d="M24 2 L38 20 L24 32 Z" />
-            <path d="M24 32 L18 48 L24 62 L30 48 Z" />
-            <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
-            <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
-          </svg>
+      <Card className="absolute left-1/2 top-4 flex -translate-x-1/2 items-center gap-3 rounded-full border bg-card/85 px-3 py-1.5 backdrop-blur-sm">
+        <div className="flex items-center gap-2 px-2 text-sm font-semibold">
+          <BrandMark />
           <span>Forge</span>
         </div>
-        <div className="fg-toolgroup">
+        <div className="h-5 w-px bg-border" />
+        <div className="flex items-center gap-1">
           {KINDS.map((k) => (
-            <button key={k.id} className="fg-tool-btn" onClick={() => spawn(k.id)}>
-              + {k.label}
-            </button>
+            <Button
+              key={k.id}
+              size="xs"
+              variant="ghost"
+              onClick={() => spawn(k.id)}
+            >
+              <KindIcon kind={k.id} />
+              {k.label}
+            </Button>
           ))}
         </div>
-        <div className="fg-toolgroup fg-right">
-          <span className="fg-presence">
-            <span className="fg-presence-dot" />
-            {presenceCount + 1} online
-          </span>
-          <button className="fg-tool-btn danger" onClick={clearAll}>Clear</button>
-        </div>
-      </div>
+        <div className="h-5 w-px bg-border" />
+        <span className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
+          <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />
+          {presenceCount + 1} online
+        </span>
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={clearAll}
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 className="size-3" />
+          Clear
+        </Button>
+      </Card>
 
       {/* Selected-object inspector */}
       {selectedPrim && (
-        <div className="fg-inspector">
-          <div className="fg-insp-title">
-            <span className="fg-insp-kind">{selectedPrim.kind}</span>
-            <span className="fg-insp-id">#{selectedPrim.id.slice(0, 8)}</span>
-          </div>
-          <div className="fg-insp-row">
-            <span className="fg-insp-label">POSITION</span>
-            <span className="fg-insp-value">
-              {selectedPrim.x.toFixed(1)}, {selectedPrim.y.toFixed(1)}, {selectedPrim.z.toFixed(1)}
+        <Card className="absolute right-4 top-20 w-64 border bg-card/85 p-4 backdrop-blur-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold capitalize">
+              {selectedPrim.kind}
+            </span>
+            <span className="font-mono text-[10px] text-muted-foreground">
+              #{selectedPrim.id.slice(0, 8)}
             </span>
           </div>
-          <div className="fg-insp-row">
-            <span className="fg-insp-label">COLOR</span>
-            <div className="fg-swatches">
+          <div className="mt-3 flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">POSITION</span>
+            <span className="font-mono tabular-nums">
+              {selectedPrim.x.toFixed(1)}, {selectedPrim.y.toFixed(1)},{" "}
+              {selectedPrim.z.toFixed(1)}
+            </span>
+          </div>
+          <div className="mt-3 flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">COLOR</span>
+            <div className="flex flex-wrap gap-1">
               {PRIM_COLORS.map((c) => (
                 <button
                   key={c}
-                  className={`fg-swatch ${selectedPrim.color === c ? "on" : ""}`}
-                  style={{ background: c }}
                   onClick={() => colorSelected(c)}
                   title={c}
+                  className={cn(
+                    "size-6 rounded-full border-2 transition-all",
+                    selectedPrim.color === c
+                      ? "border-foreground scale-110"
+                      : "border-transparent hover:scale-105",
+                  )}
+                  style={{ background: c }}
                 />
               ))}
             </div>
           </div>
-          <div className="fg-insp-hint">
-            Drag to move · <b>Del</b> to remove · <b>1-6</b> to recolor
-          </div>
-        </div>
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Drag to move · <strong className="text-foreground">Del</strong> to remove ·{" "}
+            <strong className="text-foreground">1-6</strong> to recolor
+          </p>
+        </Card>
       )}
 
-      {/* Tool palette — sculpt/paint modes + brush params. Orbit mode
-          leaves the original prim-drag / camera-orbit behavior intact. */}
-      <div className="fg-tool-palette">
-        <div className="fg-palette-title">Terrain</div>
-        <div className="fg-palette-tools">
-          {([
-            ["orbit", "Move"],
-            ["raise", "Raise"],
-            ["lower", "Lower"],
-            ["smooth", "Smooth"],
-            ["flatten", "Flatten"],
-            ["paint", "Paint"],
-          ] as const).map(([t, label]) => (
+      {/* Tool palette */}
+      <Card className="absolute left-4 top-20 w-56 border bg-card/85 p-3 backdrop-blur-sm">
+        <div className="mb-2 flex items-center gap-1.5 px-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          <Mountain className="size-3" />
+          Terrain
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          {(
+            [
+              ["orbit", "Move", Move],
+              ["raise", "Raise", Brush],
+              ["lower", "Lower", Brush],
+              ["smooth", "Smooth", Sparkles],
+              ["flatten", "Flatten", Brush],
+              ["paint", "Paint", PaintBucket],
+            ] as const
+          ).map(([t, label, Icon]) => (
             <button
               key={t}
-              className={`fg-palette-btn ${tool === t ? "on" : ""}`}
               onClick={() => setTool(t)}
+              className={cn(
+                "flex flex-col items-center gap-1 rounded-md border px-2 py-2 text-[11px] transition-colors",
+                tool === t
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-transparent text-foreground/80 hover:bg-accent hover:text-accent-foreground",
+              )}
             >
+              <Icon className="size-3.5" />
               {label}
             </button>
           ))}
         </div>
 
         {tool === "paint" && (
-          <div className="fg-palette-row">
-            <span className="fg-palette-label">Layer</span>
-            <div className="fg-palette-layers">
+          <div className="mt-3">
+            <div className="mb-1.5 px-1 text-[11px] text-muted-foreground">Layer</div>
+            <div className="grid grid-cols-2 gap-1">
               {LAYER_LABELS.map((l, i) => (
                 <button
                   key={l}
-                  className={`fg-palette-layer ${paintLayer === i ? "on" : ""}`}
                   onClick={() => setPaintLayer(i as 0 | 1 | 2 | 3)}
+                  className={cn(
+                    "rounded-md border px-2 py-1.5 text-[11px] font-medium transition-all",
+                    paintLayer === i
+                      ? "border-foreground/40 ring-2 ring-foreground/20"
+                      : "border-transparent",
+                  )}
                   style={{
                     background: `#${LAYER_COLORS[i].getHexString()}`,
+                    color: i >= 2 ? "#000" : "#fff",
                   }}
                   title={l}
                 >
@@ -1110,51 +1174,123 @@ export function ForgeApp() {
         )}
 
         {tool !== "orbit" && (
-          <>
-            <div className="fg-palette-row">
-              <span className="fg-palette-label">Radius</span>
-              <input
-                type="range"
-                min={1}
-                max={15}
-                step={0.5}
-                value={brushRadius}
-                onChange={(e) => setBrushRadius(Number(e.target.value))}
-              />
-              <span className="fg-palette-value">{brushRadius.toFixed(1)}</span>
-            </div>
-            <div className="fg-palette-row">
-              <span className="fg-palette-label">Strength</span>
-              <input
-                type="range"
-                min={0.05}
-                max={1.5}
-                step={0.05}
-                value={brushStrength}
-                onChange={(e) => setBrushStrength(Number(e.target.value))}
-              />
-              <span className="fg-palette-value">{brushStrength.toFixed(2)}</span>
-            </div>
-          </>
+          <div className="mt-3 space-y-2">
+            <Slider
+              label="Radius"
+              value={brushRadius}
+              min={1}
+              max={15}
+              step={0.5}
+              format={(v) => v.toFixed(1)}
+              onChange={setBrushRadius}
+            />
+            <Slider
+              label="Strength"
+              value={brushStrength}
+              min={0.05}
+              max={1.5}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+              onChange={setBrushStrength}
+            />
+          </div>
         )}
-      </div>
+      </Card>
 
       {/* Hint strip */}
-      <div className="fg-hint-strip">
+      <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-4 rounded-full border bg-card/85 px-4 py-1.5 text-[11px] text-muted-foreground backdrop-blur-sm">
         {tool === "orbit" ? (
           <>
-            <span><b>Left-click + drag</b> a primitive to move</span>
-            <span><b>Right-click + drag</b> to orbit</span>
-            <span><b>Scroll</b> to zoom</span>
+            <span>
+              <strong className="text-foreground">Left-click + drag</strong> a
+              primitive to move
+            </span>
+            <span>
+              <strong className="text-foreground">Right-click + drag</strong> to
+              orbit
+            </span>
+            <span>
+              <strong className="text-foreground">Scroll</strong> to zoom
+            </span>
           </>
         ) : (
           <>
-            <span><b>Left-click + drag</b> to {tool === "paint" ? "paint" : tool}</span>
-            <span><b>Right-click + drag</b> to orbit</span>
-            <span>Switch to <b>Move</b> to edit primitives</span>
+            <span>
+              <strong className="text-foreground">Left-click + drag</strong> to{" "}
+              {tool === "paint" ? "paint" : tool}
+            </span>
+            <span>
+              <strong className="text-foreground">Right-click + drag</strong> to
+              orbit
+            </span>
+            <span>
+              Switch to <strong className="text-foreground">Move</strong> to edit
+              primitives
+            </span>
           </>
         )}
       </div>
     </div>
+  );
+}
+
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  format: (v: number) => string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-mono tabular-nums">{format(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+      />
+    </div>
+  );
+}
+
+function KindIcon({ kind }: { kind: string }) {
+  switch (kind) {
+    case "sphere":
+      return <Circle className="size-3.5" />;
+    case "cone":
+      return <Cone className="size-3.5" />;
+    case "torus":
+      return <Torus className="size-3.5" />;
+    default:
+      return <Box className="size-3.5" />;
+  }
+}
+
+function BrandMark() {
+  return (
+    <svg viewBox="0 0 48 64" width="14" height="18" fill="currentColor" className="text-primary">
+      <path d="M24 2 L10 20 L24 32 Z" />
+      <path d="M24 2 L38 20 L24 32 Z" />
+      <path d="M24 32 L18 48 L24 62 L30 48 Z" />
+      <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+      <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+    </svg>
   );
 }

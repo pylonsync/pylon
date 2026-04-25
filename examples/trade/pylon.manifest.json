@@ -1,0 +1,186 @@
+{
+  "manifest_version": 1,
+  "name": "trade",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Ticker",
+      "fields": [
+        {
+          "name": "symbol",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sector",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "price",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "openPrice",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "dayHigh",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "dayLow",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "volume",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_sector",
+          "fields": [
+            "sector"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Trade",
+      "fields": [
+        {
+          "name": "symbol",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "price",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "qty",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "at",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_symbol_at",
+          "fields": [
+            "symbol",
+            "at"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_at",
+          "fields": [
+            "at"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Watch",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "symbol",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "addedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user_symbol",
+          "fields": [
+            "userId",
+            "symbol"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "ticker_public",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "entity": "Ticker"
+    },
+    {
+      "name": "trade_public",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "entity": "Trade"
+    },
+    {
+      "name": "watch_ownership",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId == data.userId",
+      "allowDelete": "auth.userId == data.userId",
+      "entity": "Watch"
+    }
+  ]
+}

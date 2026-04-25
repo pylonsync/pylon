@@ -42,6 +42,11 @@ const FEATURES: { lane: Lane; title: string; desc: string }[] = [
     desc: "Presigned uploads out of the box. Files land on local disk or any S3-compatible bucket (R2, Backblaze, MinIO) via one env var.",
   },
   {
+    lane: "app",
+    title: "Faceted search",
+    desc: "Add `search:` to an entity, get BM25 + live facets + sort across millions of rows. Index lives in the same DB, maintained in the same transaction as your writes — no Meilisearch sidecar.",
+  },
+  {
     lane: "both",
     title: "Durable workflows",
     desc: "Long-running, multi-step workflows with sleep, retries, and event waits. Survive restarts — state checkpointed to storage on every step.",

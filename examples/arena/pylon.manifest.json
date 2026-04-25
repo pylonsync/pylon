@@ -1,0 +1,138 @@
+{
+  "manifest_version": 1,
+  "name": "arena",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Dot",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "x",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "y",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "tx",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "ty",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "speed",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "isBot",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lastSeenAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_bot",
+          "fields": [
+            "isBot"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "ArenaStats",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "mutations",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "broadcasts",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "dot_ownership",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.userId || data.isBot == true",
+      "allowDelete": "auth.userId == data.userId",
+      "entity": "Dot"
+    },
+    {
+      "name": "stats_public",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "entity": "ArenaStats"
+    }
+  ]
+}

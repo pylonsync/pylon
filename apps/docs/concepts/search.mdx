@@ -1,0 +1,140 @@
+---
+title: Search
+description: "Native faceted full-text search — declarative, in-process, no separate index server."
+---
+
+Pylon ships a built-in **faceted full-text search** layer. Add a `search:` block to an entity, get BM25 ranking + live facet counts + sort across millions of rows — without running Meilisearch, ElasticSearch, or any external index. The index is maintained inside the same SQLite/Postgres database, in the same transaction as your writes.
+
+## Declaring a searchable entity
+
+```ts
+import { entity, field } from "@pylonsync/sdk";
+
+const Product = entity(
+  "Product",
+  {
+    name: field.string(),
+    description: field.richtext(),
+    brand: field.string(),
+    category: field.string(),
+    color: field.string(),
+    price: field.float(),
+    rating: field.float(),
+    stock: field.int(),
+    createdAt: field.datetime(),
+  },
+  {
+    search: {
+      // BM25 match across these columns. Order is the weighting hint.
+      text: ["name", "description"],
+      // Facet counts maintained for these columns.
+      facets: ["brand", "category", "color"],
+      // Allowed sort keys. Anything outside this list is rejected.
+      sortable: ["price", "rating", "createdAt"],
+    },
+  },
+);
+```
+
+That's the whole config. On schema push Pylon creates an FTS5 shadow table and a roaring-bitmap facet index; every insert/update/delete maintains both **inside the same transaction** as the row write. There is never an indexing lag.
+
+## Searching from the client
+
+`db.useSearch` is the React hook. Returns ranked hits, per-facet counts, total, and timing.
+
+```tsx
+import { db } from "@pylonsync/react";
+
+function Catalog() {
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState<Record<string, string>>({});
+  const [page, setPage] = useState(0);
+
+  const { hits, facetCounts, total, tookMs, loading } =
+    db.useSearch<Product>("Product", {
+      query,
+      filters,
+      facets: ["brand", "category", "color"],
+      sort: ["price", "asc"],
+      page,
+      pageSize: 24,
+    });
+
+  // facetCounts is { brand: { Atlas: 1000, Orbit: 800, … }, … }
+  // Counts reflect the live result set after applying every filter
+  // *except* the one being counted — Algolia / Meilisearch semantics.
+}
+```
+
+The hook re-runs automatically when matching rows in the entity change, so facet counts and result lists stay in lockstep with writes. No invalidation, no refetch button.
+
+## Searching from a server function
+
+```ts
+import { mutation } from "@pylonsync/functions";
+
+export default mutation({
+  async handler(ctx, args) {
+    const result = await ctx.db.search("Product", {
+      query: args.q,
+      filters: { brand: "Atlas" },
+      facets: ["category", "color"],
+      page: 0,
+      pageSize: 50,
+    });
+    return result;
+  },
+});
+```
+
+The same query shape works server-side via `ctx.db.search`. Useful when you need to search inside a transaction or pre-aggregate before returning.
+
+## How it works
+
+- **Text matching**: SQLite FTS5 / Postgres `tsvector`. BM25 ranking by default, configurable per field.
+- **Facets**: roaring bitmaps stored in a `_facet_bitmap` table, one bitmap per `(entity, column, value)`. Intersection across active filters is bit-AND, which is faster than `WHERE` clauses by 10–100× at scale.
+- **Sort + paginate**: when the planner needs to sort across the entire match set, it materializes hit ids into a temp table, joins back to the row table, applies `ORDER BY` + `LIMIT`/`OFFSET`. This is the only way to paginate consistently across a sorted projection.
+- **Aggregation safety**: faceted search refuses to run on entities whose read policy depends on per-row data. Otherwise, facet counts would leak the existence of rows the caller can't read. To opt in, make your read policy row-independent (e.g. `auth.userId != null`) or scope reads with a server function.
+
+## API
+
+`POST /api/search/:entity` accepts:
+
+```json
+{
+  "query": "red sneakers",
+  "filters": { "category": "shoes", "brand": "Atlas" },
+  "facets": ["brand", "color", "size"],
+  "sort": ["price", "asc"],
+  "page": 0,
+  "pageSize": 24
+}
+```
+
+Returns:
+
+```json
+{
+  "hits": [/* matching rows, fully populated */],
+  "total": 142,
+  "facet_counts": { "brand": { "Atlas": 12, "Orbit": 8 }, "color": { "red": 142 } },
+  "took_ms": 3
+}
+```
+
+## Performance
+
+Native search trades the operational cost of a separate index server for slightly higher per-query latency on enormous datasets (>10M rows). For the ~99% of B2B SaaS workloads (10K–10M rows), it's faster end-to-end because there's no network hop, no async indexing lag, and no second system to monitor.
+
+The `examples/store` example runs a 10,000-product catalog with 3-facet search at sub-5ms p95 on a $5 VPS.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Faceted search example" icon="store" href="/examples/store">
+    Walk through the store with code highlights.
+  </Card>
+  <Card title="Live queries" icon="bolt" href="/concepts/live-queries">
+    How search results stay up to date.
+  </Card>
+</CardGroup>

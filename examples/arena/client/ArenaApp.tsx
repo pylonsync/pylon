@@ -3,16 +3,14 @@
  *
  * Layout:
  *   - Full-screen canvas rendering all Dot entities
- *   - Stats HUD (top-left): connected dots, mutations/sec, broadcast
- *     throughput, measured p50/p95 round-trip
- *   - Control bar (top-right): spawn N bots, reset, toggle AoI ring
+ *   - Stats HUD (top-left): connected dots, mutations/sec, p50/p95 RTT
+ *   - Control bar (top-right): spawn N bots, reset, toggle target ring
  *
  * The interesting bit is the latency histogram — every outgoing
  * moveDot mutation is timed from send → "we observe our row update
  * bounce back in the live query" — a true end-to-end RTT.
  */
-
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   init,
   db,
@@ -20,6 +18,11 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import { Bot, MousePointerClick, Trash2 } from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Switch } from "@pylonsync/example-ui/switch";
+import { Label } from "@pylonsync/example-ui/label";
+import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "arena" });
@@ -43,10 +46,6 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-// ---------------------------------------------------------------------------
-// Guest auth — every browser session is a new anonymous user. Keeps the
-// demo zero-friction; no email, no OTP.
-// ---------------------------------------------------------------------------
 async function ensureGuest(): Promise<string> {
   let token = localStorage.getItem(storageKey("token"));
   let userId = localStorage.getItem(storageKey("user"));
@@ -61,9 +60,6 @@ async function ensureGuest(): Promise<string> {
   return userId!;
 }
 
-// ---------------------------------------------------------------------------
-// Moving average + percentile calc for the latency HUD.
-// ---------------------------------------------------------------------------
 function pct(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -82,17 +78,15 @@ export function ArenaApp() {
     p95: 0,
   });
   const [showRing, setShowRing] = useState(true);
+  const [spawning, setSpawning] = useState(false);
 
   const { data: dots } = db.useQuery<Dot>("Dot");
 
-  // Interpolated positions per-dot — animated on the client even when
-  // the server hasn't pushed a new row.
   const localPositions = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const pendingSends = useRef<Map<string, number>>(new Map()); // mutationId → sentAt
   const latencies = useRef<number[]>([]);
-  const mutRateWindow = useRef<number[]>([]); // timestamps
+  const mutRateWindow = useRef<number[]>([]);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // One-time guest auth + spawn our dot.
   useEffect(() => {
     let cancelled = false;
     ensureGuest().then(async (id) => {
@@ -108,14 +102,14 @@ export function ArenaApp() {
         console.error("spawn failed", e);
       }
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // HUD tick — refresh stats every 500ms.
   useEffect(() => {
     const t = setInterval(() => {
       const now = Date.now();
-      // Drop mutations older than 1s to get per-second rate.
       mutRateWindow.current = mutRateWindow.current.filter((ts) => now - ts < 1000);
       const last100 = latencies.current.slice(-100);
       const all = dots ?? [];
@@ -129,11 +123,6 @@ export function ArenaApp() {
     }, 500);
     return () => clearInterval(t);
   }, [dots]);
-
-  // Canvas rendering — runs at rAF, interpolates each dot toward its
-  // server target, draws, sends moveDot mutations periodically for
-  // the local dot.
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -160,18 +149,24 @@ export function ArenaApp() {
       const dt = Math.min(0.05, (t - lastT) / 1000);
       lastT = t;
       const r = canvas.getBoundingClientRect();
-      const W = r.width, H = r.height;
+      const W = r.width;
+      const H = r.height;
       ctx.clearRect(0, 0, W, H);
 
-      // Subtle grid background.
       ctx.strokeStyle = "rgba(255,255,255,0.035)";
       ctx.lineWidth = 1;
       const grid = 48;
       for (let x = 0; x < W; x += grid) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, H);
+        ctx.stroke();
       }
       for (let y = 0; y < H; y += grid) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
       }
 
       const all = dots ?? [];
@@ -181,7 +176,6 @@ export function ArenaApp() {
           pos = { x: d.x, y: d.y };
           localPositions.current.set(d.id, pos);
         }
-        // Interpolate toward server target.
         const dx = d.tx - pos.x;
         const dy = d.ty - pos.y;
         const dist = Math.hypot(dx, dy);
@@ -191,11 +185,11 @@ export function ArenaApp() {
           pos.y += (dy / dist) * step;
         }
 
-        const px = pos.x * W, py = pos.y * H;
+        const px = pos.x * W;
+        const py = pos.y * H;
         const isMine = d.id === myDotId;
         const rad = isMine ? 8 : 5;
 
-        // Trail to target for local dot.
         if (isMine && showRing) {
           ctx.strokeStyle = "rgba(139, 92, 246, 0.28)";
           ctx.setLineDash([3, 4]);
@@ -220,8 +214,6 @@ export function ArenaApp() {
         }
       }
 
-      // Every ~150ms, send our observed position back up so other
-      // clients can correct drift. Also refreshes lastSeenAt.
       if (myDotId && t - lastLocalSend > 150) {
         const myRow = all.find((d) => d.id === myDotId);
         const pos = localPositions.current.get(myDotId);
@@ -229,8 +221,10 @@ export function ArenaApp() {
           const t0 = performance.now();
           callFn("moveDot", {
             dotId: myDotId,
-            x: pos.x, y: pos.y,
-            tx: myRow.tx, ty: myRow.ty,
+            x: pos.x,
+            y: pos.y,
+            tx: myRow.tx,
+            ty: myRow.ty,
           })
             .then(() => {
               latencies.current.push(performance.now() - t0);
@@ -246,11 +240,12 @@ export function ArenaApp() {
     };
     raf = requestAnimationFrame(tick);
 
-    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, [dots, myDotId, showRing]);
 
-  // Click to move — writes our dot's target. The render loop picks it
-  // up on the next frame.
   const onCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!myDotId) return;
@@ -259,19 +254,13 @@ export function ArenaApp() {
       const x = (e.clientX - r.left) / r.width;
       const y = (e.clientY - r.top) / r.height;
       const pos = localPositions.current.get(myDotId) ?? { x: 0.5, y: 0.5 };
-      callFn("moveDot", {
-        dotId: myDotId,
-        x: pos.x, y: pos.y,
-        tx: x, ty: y,
-      }).catch(() => {});
+      callFn("moveDot", { dotId: myDotId, x: pos.x, y: pos.y, tx: x, ty: y }).catch(
+        () => {},
+      );
     },
     [myDotId],
   );
 
-  // Bot spawner — drops N bot dots scattered across the plane. Each
-  // bot wanders autonomously via a client-side tick that picks new
-  // targets every few seconds.
-  const [spawning, setSpawning] = useState(false);
   async function spawnBots(count: number) {
     setSpawning(true);
     try {
@@ -295,9 +284,6 @@ export function ArenaApp() {
     await callFn("removeBots", {}).catch(() => {});
   }
 
-  // Bot brains — pick new random targets for bots every few seconds.
-  // Runs client-side so the "spawner" browser drives them; other
-  // browsers just observe via live query.
   useEffect(() => {
     if (!dots) return;
     const t = setInterval(() => {
@@ -305,8 +291,10 @@ export function ArenaApp() {
       for (const b of ourBots.slice(0, 10)) {
         callFn("moveDot", {
           dotId: b.id,
-          x: b.x, y: b.y,
-          tx: Math.random(), ty: Math.random(),
+          x: b.x,
+          y: b.y,
+          tx: Math.random(),
+          ty: Math.random(),
         }).catch(() => {});
       }
     }, 1200);
@@ -314,79 +302,154 @@ export function ArenaApp() {
   }, [dots]);
 
   return (
-    <div className="arena">
+    <div className="fixed inset-0 bg-[#0a0a0c]">
       <canvas
         ref={canvasRef}
-        className="arena-canvas"
+        className="block h-full w-full cursor-crosshair"
         onClick={onCanvasClick}
       />
 
-      <div className="arena-hud hud-stats">
-        <div className="hud-row">
-          <span className="hud-label">DOTS</span>
-          <span className="hud-value">{hudStats.dots.toLocaleString()}</span>
-          {hudStats.bots > 0 && (
-            <span className="hud-sub">· {hudStats.bots} bot</span>
-          )}
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">MUT/S</span>
-          <span className="hud-value">{hudStats.mutPerSec}</span>
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">P50</span>
-          <span className="hud-value">{hudStats.p50}<span className="hud-unit">ms</span></span>
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">P95</span>
-          <span className="hud-value">{hudStats.p95}<span className="hud-unit">ms</span></span>
-        </div>
-      </div>
+      <StatsHud stats={hudStats} />
+      <ControlsHud
+        spawning={spawning}
+        showRing={showRing}
+        onShowRing={setShowRing}
+        onSpawn={spawnBots}
+        onClear={clearBots}
+      />
 
-      <div className="arena-hud hud-controls">
-        <div className="hud-title">Stress test</div>
-        <div className="hud-btn-row">
-          <button
-            className="hud-btn"
-            disabled={spawning}
-            onClick={() => spawnBots(10)}
-          >+10 bots</button>
-          <button
-            className="hud-btn"
-            disabled={spawning}
-            onClick={() => spawnBots(100)}
-          >+100</button>
-          <button
-            className="hud-btn"
-            disabled={spawning}
-            onClick={() => spawnBots(500)}
-          >+500</button>
-        </div>
-        <button
-          className="hud-btn danger"
-          onClick={clearBots}
-        >Clear bots</button>
-        <label className="hud-toggle">
-          <input
-            type="checkbox"
-            checked={showRing}
-            onChange={(e) => setShowRing(e.target.checked)}
-          />
-          Show target line
-        </label>
-        <div className="hud-hint">Click anywhere to move.</div>
-      </div>
-
-      <div className="arena-brand">
-        <svg viewBox="0 0 48 64" width="16" height="21" fill="currentColor">
-          <path d="M24 2 L10 20 L24 32 Z" />
-          <path d="M24 2 L38 20 L24 32 Z" />
-          <path d="M24 32 L18 48 L24 62 L30 48 Z" />
-          <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
-          <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
-        </svg>
+      <div className="absolute bottom-4 left-4 flex items-center gap-2 font-mono text-xs text-muted-foreground">
+        <BrandMark />
         <span>Pylon · Arena</span>
       </div>
     </div>
+  );
+}
+
+function StatsHud({
+  stats,
+}: {
+  stats: { dots: number; bots: number; mutPerSec: number; p50: number; p95: number };
+}) {
+  return (
+    <div className="absolute left-4 top-4 flex flex-col gap-2 rounded-lg border bg-card/85 p-4 backdrop-blur-sm">
+      <Row label="DOTS" value={stats.dots.toLocaleString()} subtle={stats.bots > 0 ? `${stats.bots} bot` : undefined} />
+      <Row label="MUT/S" value={stats.mutPerSec.toString()} />
+      <Row label="P50" value={`${stats.p50}`} unit="ms" />
+      <Row label="P95" value={`${stats.p95}`} unit="ms" />
+    </div>
+  );
+}
+
+function Row({
+  label,
+  value,
+  subtle,
+  unit,
+}: {
+  label: string;
+  value: string;
+  subtle?: string;
+  unit?: string;
+}) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-12 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className="font-mono text-base tabular-nums">
+        {value}
+        {unit && <span className="ml-0.5 text-xs text-muted-foreground">{unit}</span>}
+      </span>
+      {subtle && <span className="text-xs text-muted-foreground">· {subtle}</span>}
+    </div>
+  );
+}
+
+function ControlsHud({
+  spawning,
+  showRing,
+  onShowRing,
+  onSpawn,
+  onClear,
+}: {
+  spawning: boolean;
+  showRing: boolean;
+  onShowRing: (b: boolean) => void;
+  onSpawn: (n: number) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="absolute right-4 top-4 flex w-56 flex-col gap-3 rounded-lg border bg-card/85 p-4 backdrop-blur-sm">
+      <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <Bot className="size-3.5" />
+        Stress test
+      </div>
+      <div className="flex gap-1.5">
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={spawning}
+          onClick={() => onSpawn(10)}
+          className="flex-1"
+        >
+          +10
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={spawning}
+          onClick={() => onSpawn(100)}
+          className="flex-1"
+        >
+          +100
+        </Button>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={spawning}
+          onClick={() => onSpawn(500)}
+          className="flex-1"
+        >
+          +500
+        </Button>
+      </div>
+      <Button
+        size="xs"
+        variant="ghost"
+        onClick={onClear}
+        className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+      >
+        <Trash2 className="size-3" />
+        Clear bots
+      </Button>
+      <div className="flex items-center justify-between text-xs">
+        <Label htmlFor="ring" className="cursor-pointer text-muted-foreground">
+          Show target line
+        </Label>
+        <Switch id="ring" checked={showRing} onCheckedChange={onShowRing} />
+      </div>
+      <div
+        className={cn(
+          "flex items-center gap-1.5 text-xs",
+          "text-muted-foreground",
+        )}
+      >
+        <MousePointerClick className="size-3" />
+        Click anywhere to move.
+      </div>
+    </div>
+  );
+}
+
+function BrandMark() {
+  return (
+    <svg viewBox="0 0 48 64" width="14" height="18" fill="currentColor" aria-hidden>
+      <path d="M24 2 L10 20 L24 32 Z" />
+      <path d="M24 2 L38 20 L24 32 Z" />
+      <path d="M24 32 L18 48 L24 62 L30 48 Z" />
+      <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+      <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+    </svg>
   );
 }

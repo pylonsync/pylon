@@ -10,7 +10,7 @@
           "name": "email",
           "type": "string",
           "optional": false,
-          "unique": true
+          "unique": false
         },
         {
           "name": "displayName",
@@ -19,33 +19,15 @@
           "unique": false
         },
         {
-          "name": "createdAt",
-          "type": "datetime",
-          "optional": false,
-          "unique": false
-        }
-      ],
-      "indexes": []
-    },
-    {
-      "name": "Todo",
-      "fields": [
-        {
-          "name": "title",
+          "name": "avatarColor",
           "type": "string",
-          "optional": false,
+          "optional": true,
           "unique": false
         },
         {
-          "name": "done",
-          "type": "bool",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "authorId",
-          "type": "id(User)",
-          "optional": false,
+          "name": "passwordHash",
+          "type": "string",
+          "optional": true,
           "unique": false
         },
         {
@@ -57,74 +39,23 @@
       ],
       "indexes": [
         {
-          "name": "by_author",
+          "name": "by_email",
           "fields": [
-            "authorId"
+            "email"
           ],
-          "unique": false
+          "unique": true
         }
       ]
-    }
-  ],
-  "routes": [
-    {
-      "path": "/",
-      "mode": "server",
-      "query": "allTodos",
-      "auth": "public"
     },
     {
-      "path": "/todos",
-      "mode": "live",
-      "query": "todosByAuthor",
-      "auth": "user"
-    },
-    {
-      "path": "/todos/:todoId",
-      "mode": "server",
-      "query": "todoById",
-      "auth": "user"
-    }
-  ],
-  "queries": [
-    {
-      "name": "todosByAuthor",
-      "input": [
+      "name": "Todo",
+      "fields": [
         {
-          "name": "authorId",
-          "type": "id(User)",
+          "name": "userId",
+          "type": "string",
           "optional": false,
           "unique": false
-        }
-      ]
-    },
-    {
-      "name": "allTodos",
-      "input": [
-        {
-          "name": "done",
-          "type": "bool",
-          "optional": true,
-          "unique": false
-        }
-      ]
-    },
-    {
-      "name": "todoById",
-      "input": [
-        {
-          "name": "todoId",
-          "type": "id(Todo)",
-          "optional": false,
-          "unique": false
-        }
-      ]
-    }
-  ],
-  "actions": [
-    {
-      "name": "createTodo",
-      "input": [
+        },
         {
           "name": "title",
           "type": "string",
@@ -132,39 +63,79 @@
           "unique": false
         },
         {
-          "name": "authorId",
-          "type": "id(User)",
+          "name": "notes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "done",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "priority",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "dueAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "completedAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
           "optional": false,
           "unique": false
         }
-      ]
-    },
-    {
-      "name": "toggleTodo",
-      "input": [
+      ],
+      "indexes": [
         {
-          "name": "todoId",
-          "type": "id(Todo)",
-          "optional": false,
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_user_done",
+          "fields": [
+            "userId",
+            "done"
+          ],
           "unique": false
         }
       ]
     }
   ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
   "policies": [
     {
-      "name": "authenticatedCreate",
-      "allow": "auth.userId != null",
-      "action": "createTodo"
+      "name": "user_self",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "User"
     },
     {
-      "name": "ownerToggle",
-      "allow": "auth.userId == input.authorId",
-      "action": "toggleTodo"
-    },
-    {
-      "name": "ownerReadTodos",
-      "allow": "auth.userId == data.authorId",
+      "name": "todo_owner",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId == data.userId",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId != null",
       "entity": "Todo"
     }
   ]

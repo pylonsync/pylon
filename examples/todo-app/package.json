@@ -1,13 +1,14 @@
 {
-  "name": "@pylonsync/example-todo-app",
+  "name": "todo-app-example",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "dependencies": {
-    "@pylonsync/sdk": "workspace:*"
-  },
   "scripts": {
-    "generate-manifest": "bun run app.ts",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "dev": "pylon dev"
+  },
+  "dependencies": {
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sdk": "workspace:*"
   }
 }

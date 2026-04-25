@@ -8,44 +8,21 @@ export interface User {
   id: string;
   email: string;
   displayName: string;
+  avatarColor?: string;
+  passwordHash?: string;
   createdAt: string;
 }
 
 export interface Todo {
   id: string;
+  userId: string;
   title: string;
+  notes?: string;
   done: boolean;
-  authorId: string;
+  priority: string;
+  dueAt?: string;
+  completedAt?: string;
   createdAt: string;
-}
-
-export type QueryName = "todosByAuthor" | "allTodos" | "todoById";
-
-export const QUERIES: QueryName[] = ["todosByAuthor", "allTodos", "todoById"];
-
-export interface TodosByAuthorInput {
-  authorId: string;
-}
-
-export interface AllTodosInput {
-  done?: boolean;
-}
-
-export interface TodoByIdInput {
-  todoId: string;
-}
-
-export type ActionName = "createTodo" | "toggleTodo";
-
-export const ACTIONS: ActionName[] = ["createTodo", "toggleTodo"];
-
-export interface CreateTodoInput {
-  title: string;
-  authorId: string;
-}
-
-export interface ToggleTodoInput {
-  todoId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +48,30 @@ async function _request(baseUrl: string, method: string, path: string, body?: un
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Rooms
+// ---------------------------------------------------------------------------
+
+export interface RoomPeer {
+  user_id: string;
+  data: any;
+  joined_at: string;
+}
+
+export interface RoomSnapshot {
+  room: string;
+  peers: RoomPeer[];
+}
+
+export interface RoomClient {
+  join(room: string, data?: Record<string, any>): Promise<RoomSnapshot>;
+  leave(room: string): Promise<void>;
+  setPresence(room: string, data: Record<string, any>): Promise<void>;
+  broadcast(room: string, topic: string, data: any): Promise<void>;
+  getMembers(room: string): Promise<RoomPeer[]>;
+  listRooms(): Promise<Array<{ name: string; members: number }>>;
+}
+
 export interface AgentDBClient {
   list(entity: EntityName): Promise<Record<string, unknown>[]>;
   get(entity: EntityName, id: string): Promise<Record<string, unknown> | null>;
@@ -79,6 +80,7 @@ export interface AgentDBClient {
   remove(entity: EntityName, id: string): Promise<{ deleted: boolean }>;
   action(name: ActionName, input: Record<string, unknown>): Promise<ActionResult>;
   actions: Actions;
+  rooms: RoomClient;
 }
 
 export interface ActionResult {
@@ -88,16 +90,39 @@ export interface ActionResult {
 }
 
 export interface Actions {
-  createTodo(input: CreateTodoInput): Promise<ActionResult>;
-  toggleTodo(input: ToggleTodoInput): Promise<ActionResult>;
+}
+
+function _createRoomClient(baseUrl: string, token?: string): RoomClient {
+  const req = (method: string, path: string, body?: unknown) => _request(baseUrl, method, path, body, token);
+  return {
+    async join(room, data = {}) {
+      const res = await req("POST", "/api/rooms/join", { room, data });
+      return (res as any).snapshot as RoomSnapshot;
+    },
+    async leave(room) {
+      await req("POST", "/api/rooms/leave", { room });
+    },
+    async setPresence(room, data) {
+      await req("POST", "/api/rooms/presence", { room, data });
+    },
+    async broadcast(room, topic, data) {
+      await req("POST", "/api/rooms/broadcast", { room, topic, data });
+    },
+    async getMembers(room) {
+      const res = await req("GET", `/api/rooms/${encodeURIComponent(room)}`);
+      return (res as any).members as RoomPeer[];
+    },
+    async listRooms() {
+      const res = await req("GET", "/api/rooms");
+      return res as Array<{ name: string; members: number }>;
+    },
+  };
 }
 
 export function createClient(baseUrl: string = DEFAULT_BASE_URL, token?: string): AgentDBClient {
   const req = (method: string, path: string, body?: unknown) => _request(baseUrl, method, path, body, token);
 
   const actions: Actions = {
-    createTodo: (input) => req("POST", "/api/actions/createTodo", input) as Promise<ActionResult>,
-    toggleTodo: (input) => req("POST", "/api/actions/toggleTodo", input) as Promise<ActionResult>,
   };
 
   return {
@@ -108,6 +133,7 @@ export function createClient(baseUrl: string = DEFAULT_BASE_URL, token?: string)
     remove: (entity, id) => req("DELETE", `/api/entities/${entity}/${id}`) as Promise<{ deleted: boolean }>,
     action: (name, input) => req("POST", `/api/actions/${name}`, input) as Promise<ActionResult>,
     actions,
+    rooms: _createRoomClient(baseUrl, token),
   };
 }
 
@@ -135,4 +161,98 @@ export function prefetch(client: AgentDBClient, entity: EntityName): Promise<Rec
 /** Pre-fetch a single row for React 19 use() hook. */
 export function prefetchOne(client: AgentDBClient, entity: EntityName, id: string): Promise<Record<string, unknown> | null> {
   return client.get(entity, id);
+}
+
+// ---------------------------------------------------------------------------
+// AppSchema — types consumed by @pylon/react's createTypedDb<S>()
+// ---------------------------------------------------------------------------
+
+export interface Entities {
+  User: User;
+  Todo: Todo;
+}
+
+export interface Functions {
+}
+
+export interface Queries {
+}
+
+/** Top-level app schema — pass to @pylon/react's createTypedDb<AppSchema>(). */
+export interface AppSchema {
+  entities: Entities;
+  functions: Functions;
+  queries: Queries;
+}
+
+// ---------------------------------------------------------------------------
+// Error codes
+// ---------------------------------------------------------------------------
+
+export type AgentDBErrorCode =
+  | "AUTH_REQUIRED"
+  | "UPGRADE_FAILED"
+  | "INVALID_CODE"
+  | "OAUTH_INVALID_STATE"
+  | "OAUTH_TOKEN_EXCHANGE_FAILED"
+  | "PROVIDER_NOT_FOUND"
+  | "SESSION_EXPIRED"
+  | "SESSION_NOT_FOUND"
+  | "FORBIDDEN"
+  | "POLICY_DENIED"
+  | "UNAUTHORIZED"
+  | "INVALID_JSON"
+  | "INVALID_ARGS"
+  | "INVALID_COLUMN"
+  | "INVALID_QUERY"
+  | "INVALID_DATA"
+  | "INVALID_FILE_ID"
+  | "MISSING_EMAIL"
+  | "MISSING_USER_ID"
+  | "MISSING_CODE"
+  | "MISSING_FIELD"
+  | "MISSING_ROOM"
+  | "MISSING_TOPIC"
+  | "MISSING_NAME"
+  | "MISSING_OPERATIONS"
+  | "PAYLOAD_TOO_LARGE"
+  | "NOT_FOUND"
+  | "ENTITY_NOT_FOUND"
+  | "ACTION_NOT_FOUND"
+  | "FN_NOT_FOUND"
+  | "FILE_NOT_FOUND"
+  | "SHARD_NOT_FOUND"
+  | "RELATION_NOT_FOUND"
+  | "QUERY_FAILED"
+  | "INSERT_FAILED"
+  | "UPDATE_FAILED"
+  | "DELETE_FAILED"
+  | "SCHEMA_INIT_FAILED"
+  | "LOCK_FAILED"
+  | "NESTED_TRANSACTION"
+  | "EXPORT_FAILED"
+  | "NOT_SUPPORTED"
+  | "NOT_IMPLEMENTED"
+  | "NOT_AVAILABLE"
+  | "RATE_LIMITED"
+  | "METHOD_NOT_ALLOWED"
+  | "PROTOCOL_ERROR"
+  | "RUNNER_EXITED"
+  | "RUNNER_NOT_STARTED"
+  | "IO_ERROR"
+  | "AI_NOT_CONFIGURED"
+  | "AI_REQUEST_FAILED"
+  | "EMAIL_SEND_FAILED"
+  | "WORKFLOW_START_FAILED"
+  | "WORKFLOW_ADVANCE_FAILED"
+  | "WORKFLOW_EVENT_FAILED"
+  | "WORKFLOW_CANCEL_FAILED"
+  | "INPUT_REJECTED"
+  | "SUBSCRIBE_FAILED"
+  | "SHARDS_NOT_AVAILABLE";
+
+export interface AgentDBError {
+  code: AgentDBErrorCode;
+  message: string;
+  hint?: string;
 }

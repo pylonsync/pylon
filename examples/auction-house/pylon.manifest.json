@@ -6,87 +6,414 @@
     {
       "name": "User",
       "fields": [
-        { "name": "email", "type": "string", "optional": false, "unique": true },
-        { "name": "displayName", "type": "string", "optional": false, "unique": false },
-        { "name": "balanceCents", "type": "int", "optional": false, "unique": false },
-        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
-      ],
-      "indexes": []
-    },
-    {
-      "name": "Listing",
-      "fields": [
-        { "name": "title", "type": "string", "optional": false, "unique": false },
-        { "name": "description", "type": "string", "optional": false, "unique": false },
-        { "name": "sellerId", "type": "id(User)", "optional": false, "unique": false },
-        { "name": "startingCents", "type": "int", "optional": false, "unique": false },
-        { "name": "currentCents", "type": "int", "optional": false, "unique": false },
-        { "name": "winningBidId", "type": "id(Bid)", "optional": true, "unique": false },
-        { "name": "endsAt", "type": "datetime", "optional": false, "unique": false },
-        { "name": "settledAt", "type": "datetime", "optional": true, "unique": false },
-        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "passwordHash",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "balanceCents",
+          "type": "int",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
       ],
       "indexes": [
-        { "name": "by_seller", "fields": ["sellerId"], "unique": false },
-        { "name": "by_ends_at", "fields": ["endsAt"], "unique": false }
+        {
+          "name": "by_email",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "Auction",
+      "fields": [
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "creatorId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "startsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "endsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "currentLotId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "bannerColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_status",
+          "fields": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_starts_at",
+          "fields": [
+            "startsAt"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_creator",
+          "fields": [
+            "creatorId"
+          ],
+          "unique": false
+        }
+      ],
+      "search": {
+        "text": [
+          "title",
+          "description"
+        ],
+        "facets": [
+          "status",
+          "kind"
+        ],
+        "sortable": [
+          "startsAt",
+          "endsAt",
+          "createdAt"
+        ]
+      }
+    },
+    {
+      "name": "Lot",
+      "fields": [
+        {
+          "name": "auctionId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "position",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "imageColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "startingCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "currentCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "minIncrementCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidCount",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "endsAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "winningBidId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "winnerId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "soldAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_auction",
+          "fields": [
+            "auctionId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_status",
+          "fields": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_ends_at",
+          "fields": [
+            "endsAt"
+          ],
+          "unique": false
+        }
       ]
     },
     {
       "name": "Bid",
       "fields": [
-        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false },
-        { "name": "bidderId", "type": "id(User)", "optional": false, "unique": false },
-        { "name": "amountCents", "type": "int", "optional": false, "unique": false },
-        { "name": "createdAt", "type": "datetime", "optional": false, "unique": false }
+        {
+          "name": "auctionId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lotId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidderId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidderName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "amountCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
       ],
       "indexes": [
-        { "name": "by_listing", "fields": ["listingId"], "unique": false },
-        { "name": "by_bidder", "fields": ["bidderId"], "unique": false }
+        {
+          "name": "by_lot",
+          "fields": [
+            "lotId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_bidder",
+          "fields": [
+            "bidderId"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Watch",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lotId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "addedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_lot",
+          "fields": [
+            "lotId"
+          ],
+          "unique": false
+        }
       ]
     }
   ],
-  "routes": [
-    { "path": "/", "mode": "server", "query": "activeListings", "auth": "public" },
-    { "path": "/listing/:listingId", "mode": "live", "query": "listingDetail", "auth": "public" },
-    { "path": "/me/bids", "mode": "live", "query": "myBids", "auth": "user" }
-  ],
-  "queries": [
-    { "name": "activeListings", "input": [] },
-    {
-      "name": "listingDetail",
-      "input": [
-        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false }
-      ]
-    },
-    { "name": "myBids", "input": [] }
-  ],
-  "actions": [
-    {
-      "name": "createListing",
-      "input": [
-        { "name": "title", "type": "string", "optional": false, "unique": false },
-        { "name": "description", "type": "string", "optional": false, "unique": false },
-        { "name": "startingCents", "type": "int", "optional": false, "unique": false },
-        { "name": "durationSecs", "type": "int", "optional": false, "unique": false }
-      ]
-    },
-    {
-      "name": "placeBid",
-      "input": [
-        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false },
-        { "name": "amountCents", "type": "int", "optional": false, "unique": false }
-      ]
-    },
-    {
-      "name": "settleListing",
-      "input": [
-        { "name": "listingId", "type": "id(Listing)", "optional": false, "unique": false }
-      ]
-    }
-  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
   "policies": [
-    { "name": "loggedInCreate", "allow": "auth.userId != null", "action": "createListing" },
-    { "name": "loggedInBid", "allow": "auth.userId != null", "action": "placeBid" },
-    { "name": "adminSettle", "allow": "auth.isAdmin", "action": "settleListing" }
+    {
+      "name": "user_self",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "User"
+    },
+    {
+      "name": "auction_public",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "Auction"
+    },
+    {
+      "name": "lot_public",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "Lot"
+    },
+    {
+      "name": "bid_public",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "Bid"
+    },
+    {
+      "name": "watch_owner",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId == data.userId",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId != null",
+      "entity": "Watch"
+    }
   ]
 }

@@ -3,15 +3,15 @@
  *
  * Layout:
  *   - Topbar: ticks/sec, active symbols, watchlist size, "Start ticker"
- *   - Main: top movers table (sorted by % change) + watchlist column
- *   - Right: selected symbol detail with client-computed sparkline
+ *   - Watchlist column: symbols the user is tracking
+ *   - Main: top movers table (sorted by % change)
+ *   - Detail column: selected symbol metrics + sparkline
  *
  * One tab should click "Start ticker" — it generates trades for all
  * symbols at ~100 Hz. Every other tab passively subscribes to the
  * Ticker table and sees prices update live.
  */
-
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   init,
   db,
@@ -19,6 +19,11 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import { ArrowDownRight, ArrowUpRight, Star } from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Badge } from "@pylonsync/example-ui/badge";
+import { Separator } from "@pylonsync/example-ui/separator";
+import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "trade" });
@@ -75,9 +80,11 @@ export function TradeApp() {
   const [ticksPerSec, setTicksPerSec] = useState(0);
 
   const { data: tickers } = db.useQuery<Ticker>("Ticker");
-  const { data: watches } = db.useQuery<Watch>("Watch", userId ? { where: { userId } } : undefined);
+  const { data: watches } = db.useQuery<Watch>(
+    "Watch",
+    userId ? { where: { userId } } : undefined,
+  );
 
-  // Sparkline data — recent Trade rows for the selected symbol.
   const { data: recentTrades } = db.useQuery<Trade>(
     "Trade",
     selected ? { where: { symbol: selected } } : undefined,
@@ -85,7 +92,6 @@ export function TradeApp() {
 
   const tickCount = useRef(0);
 
-  // One-time init: auth + seed the market.
   useEffect(() => {
     let cancelled = false;
     ensureGuest().then(async (id) => {
@@ -97,22 +103,21 @@ export function TradeApp() {
         console.error("seedMarket failed", e);
       }
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Ticker driver — writes trades in a tight loop while running is on.
   useEffect(() => {
     if (!running || !tickers || tickers.length === 0) return;
     let cancelled = false;
 
     const step = async () => {
       if (cancelled) return;
-      // Emit 20 trades per frame to keep a steady high rate without
-      // blocking the UI. Picks symbols with random walk price moves.
       const batch: Promise<unknown>[] = [];
       for (let i = 0; i < 20; i++) {
         const t = tickers[Math.floor(Math.random() * tickers.length)];
-        const move = (Math.random() - 0.5) * t.price * 0.002; // ±0.2%
+        const move = (Math.random() - 0.5) * t.price * 0.002;
         const price = Math.max(0.01, +(t.price + move).toFixed(2));
         const qty = Math.floor(1 + Math.random() * 40) * 100;
         batch.push(
@@ -124,10 +129,11 @@ export function TradeApp() {
       if (!cancelled) setTimeout(step, 120);
     };
     step();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [running, tickers]);
 
-  // HUD tick rate refresh.
   useEffect(() => {
     const t = setInterval(() => {
       setTicksPerSec(tickCount.current);
@@ -160,167 +166,361 @@ export function TradeApp() {
   }
 
   return (
-    <div className="tr-app">
-      <div className="tr-topbar">
-        <div className="tr-brand">
-          <svg viewBox="0 0 48 64" width="18" height="24" fill="currentColor">
-            <path d="M24 2 L10 20 L24 32 Z" />
-            <path d="M24 2 L38 20 L24 32 Z" />
-            <path d="M24 32 L18 48 L24 62 L30 48 Z" />
-            <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
-            <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
-          </svg>
-          <span>Pylon · Trade</span>
-        </div>
-        <div className="tr-stats">
-          <div className="tr-stat">
-            <span className="tr-stat-label">TICKS/S</span>
-            <span className="tr-stat-value">{ticksPerSec}</span>
-          </div>
-          <div className="tr-stat">
-            <span className="tr-stat-label">SYMBOLS</span>
-            <span className="tr-stat-value">{(tickers ?? []).length}</span>
-          </div>
-          <div className="tr-stat">
-            <span className="tr-stat-label">WATCH</span>
-            <span className="tr-stat-value">{(watches ?? []).length}</span>
-          </div>
-        </div>
-        <div className="tr-actions">
-          <button
-            className={`tr-btn ${running ? "active" : "primary"}`}
-            onClick={() => setRunning((r) => !r)}
-          >
-            {running ? "Stop ticker" : "Start ticker"}
-          </button>
-        </div>
+    <div className="grid h-screen grid-rows-[56px_1fr]">
+      <Topbar
+        ticksPerSec={ticksPerSec}
+        symbols={(tickers ?? []).length}
+        watchCount={(watches ?? []).length}
+        running={running}
+        onToggleRunning={() => setRunning((r) => !r)}
+      />
+      <div className="grid grid-cols-[260px_1fr_320px] overflow-hidden">
+        <Watchlist
+          watches={watches ?? []}
+          tickers={tickers ?? []}
+          selected={selected}
+          onSelect={setSelected}
+        />
+        <Movers
+          rows={sorted}
+          selected={selected}
+          watchSet={watchSet}
+          onSelect={setSelected}
+          onToggleWatch={toggleWatch}
+        />
+        <Detail ticker={selectedTicker} trades={recentTrades ?? []} />
       </div>
+    </div>
+  );
+}
 
-      <div className="tr-body">
-        <div className="tr-col tr-col-watch">
-          <div className="tr-col-head">Watchlist</div>
-          {(watches ?? []).length === 0 && (
-            <div className="tr-empty">Click a row → star to watch.</div>
-          )}
-          {(watches ?? []).map((w) => {
-            const t = (tickers ?? []).find((tt) => tt.symbol === w.symbol);
+// ---------------------------------------------------------------------------
+// Topbar
+// ---------------------------------------------------------------------------
+
+function Topbar({
+  ticksPerSec,
+  symbols,
+  watchCount,
+  running,
+  onToggleRunning,
+}: {
+  ticksPerSec: number;
+  symbols: number;
+  watchCount: number;
+  running: boolean;
+  onToggleRunning: () => void;
+}) {
+  return (
+    <header className="flex items-center gap-8 border-b bg-background px-5">
+      <div className="flex items-center gap-2.5 font-mono text-[13px] font-medium text-foreground">
+        <BrandMark />
+        <span>Pylon · Trade</span>
+      </div>
+      <div className="flex items-center gap-6">
+        <Stat label="TICKS/S" value={ticksPerSec} />
+        <Stat label="SYMBOLS" value={symbols} />
+        <Stat label="WATCH" value={watchCount} />
+      </div>
+      <div className="ml-auto">
+        <Button
+          variant={running ? "secondary" : "default"}
+          size="sm"
+          onClick={onToggleRunning}
+        >
+          {running ? "Stop ticker" : "Start ticker"}
+        </Button>
+      </div>
+    </header>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className="font-mono text-sm tabular-nums text-foreground">
+        {value.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+function BrandMark() {
+  return (
+    <svg
+      viewBox="0 0 48 64"
+      width="18"
+      height="24"
+      fill="currentColor"
+      aria-hidden
+      className="text-primary"
+    >
+      <path d="M24 2 L10 20 L24 32 Z" />
+      <path d="M24 2 L38 20 L24 32 Z" />
+      <path d="M24 32 L18 48 L24 62 L30 48 Z" />
+      <path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+      <path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Watchlist
+// ---------------------------------------------------------------------------
+
+function Watchlist({
+  watches,
+  tickers,
+  selected,
+  onSelect,
+}: {
+  watches: Watch[];
+  tickers: Ticker[];
+  selected: string | null;
+  onSelect: (s: string) => void;
+}) {
+  return (
+    <aside className="flex flex-col overflow-hidden border-r bg-card">
+      <ColHead>Watchlist</ColHead>
+      <div className="flex-1 overflow-y-auto">
+        {watches.length === 0 ? (
+          <Empty>Click a row → ★ to watch.</Empty>
+        ) : (
+          watches.map((w) => {
+            const t = tickers.find((tt) => tt.symbol === w.symbol);
             if (!t) return null;
-            const pct = t.openPrice > 0 ? ((t.price - t.openPrice) / t.openPrice) * 100 : 0;
+            const pct =
+              t.openPrice > 0 ? ((t.price - t.openPrice) / t.openPrice) * 100 : 0;
+            const up = pct >= 0;
             return (
-              <div
+              <button
                 key={w.id}
-                className={`tr-watch-row ${selected === t.symbol ? "active" : ""}`}
-                onClick={() => setSelected(t.symbol)}
+                onClick={() => onSelect(t.symbol)}
+                className={cn(
+                  "flex w-full items-center gap-3 border-l-2 px-4 py-2 text-left text-sm transition-colors",
+                  selected === t.symbol
+                    ? "border-primary bg-accent"
+                    : "border-transparent hover:bg-muted/40",
+                )}
               >
-                <span className="tr-watch-sym">{t.symbol}</span>
-                <span className="tr-watch-price">{t.price.toFixed(2)}</span>
-                <span className={`tr-watch-pct ${pct >= 0 ? "up" : "down"}`}>
-                  {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
+                <span className="font-mono font-medium">{t.symbol}</span>
+                <span className="ml-auto font-mono tabular-nums">
+                  {t.price.toFixed(2)}
                 </span>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="tr-col tr-col-main">
-          <div className="tr-col-head">Top movers</div>
-          <div className="tr-table">
-            <div className="tr-row tr-row-head">
-              <span>Symbol</span>
-              <span>Name</span>
-              <span>Sector</span>
-              <span className="tr-num">Price</span>
-              <span className="tr-num">Day ±</span>
-              <span className="tr-num">Volume</span>
-              <span />
-            </div>
-            {sorted.map((t) => {
-              const pct = t.pct;
-              return (
-                <div
-                  key={t.id}
-                  className={`tr-row ${selected === t.symbol ? "active" : ""}`}
-                  onClick={() => setSelected(t.symbol)}
+                <span
+                  className={cn(
+                    "font-mono text-xs tabular-nums",
+                    up ? "text-[var(--color-bull)]" : "text-[var(--color-bear)]",
+                  )}
                 >
-                  <span className="tr-sym">{t.symbol}</span>
-                  <span className="tr-name">{t.name}</span>
-                  <span className="tr-sector">{t.sector}</span>
-                  <span className="tr-num">${t.price.toFixed(2)}</span>
-                  <span className={`tr-num ${pct >= 0 ? "up" : "down"}`}>
-                    {pct >= 0 ? "+" : ""}{pct.toFixed(2)}%
-                  </span>
-                  <span className="tr-num tr-vol">{t.volume.toLocaleString()}</span>
-                  <button
-                    className={`tr-star ${watchSet.has(t.symbol) ? "on" : ""}`}
-                    onClick={(e) => { e.stopPropagation(); toggleWatch(t.symbol); }}
-                    title={watchSet.has(t.symbol) ? "Unwatch" : "Watch"}
-                  >{watchSet.has(t.symbol) ? "★" : "☆"}</button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="tr-col tr-col-detail">
-          <div className="tr-col-head">
-            {selectedTicker ? selectedTicker.symbol : "—"}
-          </div>
-          {selectedTicker ? (
-            <div className="tr-detail">
-              <div className="tr-detail-name">{selectedTicker.name}</div>
-              <div className="tr-detail-price">
-                ${selectedTicker.price.toFixed(2)}
-              </div>
-              <div className="tr-detail-row">
-                <span className="tr-stat-label">OPEN</span>
-                <span>${selectedTicker.openPrice.toFixed(2)}</span>
-              </div>
-              <div className="tr-detail-row">
-                <span className="tr-stat-label">HIGH</span>
-                <span>${selectedTicker.dayHigh.toFixed(2)}</span>
-              </div>
-              <div className="tr-detail-row">
-                <span className="tr-stat-label">LOW</span>
-                <span>${selectedTicker.dayLow.toFixed(2)}</span>
-              </div>
-              <div className="tr-detail-row">
-                <span className="tr-stat-label">VOL</span>
-                <span>{selectedTicker.volume.toLocaleString()}</span>
-              </div>
-              <Sparkline trades={recentTrades ?? []} />
-            </div>
-          ) : (
-            <div className="tr-empty">Pick a symbol.</div>
-          )}
-        </div>
+                  {up ? "+" : ""}
+                  {pct.toFixed(2)}%
+                </span>
+              </button>
+            );
+          })
+        )}
       </div>
+    </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Movers table
+// ---------------------------------------------------------------------------
+
+function Movers({
+  rows,
+  selected,
+  watchSet,
+  onSelect,
+  onToggleWatch,
+}: {
+  rows: Array<Ticker & { pct: number }>;
+  selected: string | null;
+  watchSet: Set<string>;
+  onSelect: (s: string) => void;
+  onToggleWatch: (s: string) => void;
+}) {
+  return (
+    <main className="flex flex-col overflow-hidden">
+      <ColHead>Top movers</ColHead>
+      <div className="flex-1 overflow-y-auto">
+        <div className="grid grid-cols-[80px_minmax(160px,1fr)_120px_100px_100px_120px_40px] items-center gap-2 border-b px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <span>Symbol</span>
+          <span>Name</span>
+          <span>Sector</span>
+          <span className="text-right">Price</span>
+          <span className="text-right">Day ±</span>
+          <span className="text-right">Volume</span>
+          <span />
+        </div>
+        {rows.map((t) => {
+          const up = t.pct >= 0;
+          const isSelected = selected === t.symbol;
+          return (
+            <div
+              key={t.id}
+              onClick={() => onSelect(t.symbol)}
+              className={cn(
+                "grid grid-cols-[80px_minmax(160px,1fr)_120px_100px_100px_120px_40px] cursor-pointer items-center gap-2 border-b border-border/40 px-4 py-2 text-sm transition-colors",
+                isSelected ? "bg-accent" : "hover:bg-muted/30",
+              )}
+            >
+              <span className="font-mono font-medium">{t.symbol}</span>
+              <span className="truncate text-foreground/90">{t.name}</span>
+              <span className="text-xs text-muted-foreground">{t.sector}</span>
+              <span className="text-right font-mono tabular-nums">
+                ${t.price.toFixed(2)}
+              </span>
+              <span
+                className={cn(
+                  "flex items-center justify-end gap-0.5 font-mono text-xs tabular-nums",
+                  up ? "text-[var(--color-bull)]" : "text-[var(--color-bear)]",
+                )}
+              >
+                {up ? (
+                  <ArrowUpRight className="size-3" />
+                ) : (
+                  <ArrowDownRight className="size-3" />
+                )}
+                {up ? "+" : ""}
+                {t.pct.toFixed(2)}%
+              </span>
+              <span className="text-right font-mono text-xs tabular-nums text-muted-foreground">
+                {t.volume.toLocaleString()}
+              </span>
+              <button
+                className={cn(
+                  "flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground",
+                  watchSet.has(t.symbol) && "text-amber-400",
+                )}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleWatch(t.symbol);
+                }}
+                title={watchSet.has(t.symbol) ? "Unwatch" : "Watch"}
+              >
+                <Star
+                  className={cn("size-4", watchSet.has(t.symbol) && "fill-current")}
+                />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Detail
+// ---------------------------------------------------------------------------
+
+function Detail({
+  ticker,
+  trades,
+}: {
+  ticker: Ticker | null | undefined;
+  trades: Trade[];
+}) {
+  return (
+    <aside className="flex flex-col overflow-hidden border-l bg-card">
+      <ColHead>{ticker ? ticker.symbol : "—"}</ColHead>
+      {ticker ? (
+        <div className="flex flex-col gap-4 p-5">
+          <div className="text-sm text-muted-foreground">{ticker.name}</div>
+          <div className="font-mono text-3xl font-semibold tabular-nums">
+            ${ticker.price.toFixed(2)}
+          </div>
+          <Separator />
+          <div className="flex flex-col gap-2 text-sm">
+            <Row label="OPEN" value={`$${ticker.openPrice.toFixed(2)}`} />
+            <Row label="HIGH" value={`$${ticker.dayHigh.toFixed(2)}`} />
+            <Row label="LOW" value={`$${ticker.dayLow.toFixed(2)}`} />
+            <Row label="VOL" value={ticker.volume.toLocaleString()} />
+          </div>
+          <Sparkline trades={trades} />
+          <Badge variant="outline" className="self-start font-mono text-[10px]">
+            Live
+          </Badge>
+        </div>
+      ) : (
+        <Empty>Pick a symbol.</Empty>
+      )}
+    </aside>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className="font-mono tabular-nums">{value}</span>
     </div>
   );
 }
 
 function Sparkline({ trades }: { trades: Trade[] }) {
   if (trades.length < 2) {
-    return <div className="tr-empty tr-sparkline-empty">no trades yet</div>;
+    return (
+      <div className="flex h-20 items-center justify-center rounded border border-dashed text-xs text-muted-foreground">
+        no trades yet
+      </div>
+    );
   }
-  const sorted = [...trades].sort((a, b) => +new Date(a.at) - +new Date(b.at)).slice(-60);
+  const sorted = [...trades]
+    .sort((a, b) => +new Date(a.at) - +new Date(b.at))
+    .slice(-60);
   const prices = sorted.map((t) => t.price);
   const min = Math.min(...prices);
   const max = Math.max(...prices);
   const span = Math.max(0.01, max - min);
-  const W = 240, H = 80;
-  const points = prices.map((p, i) => {
-    const x = (i / (prices.length - 1)) * W;
-    const y = H - ((p - min) / span) * H;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
+  const W = 240;
+  const H = 80;
+  const points = prices
+    .map((p, i) => {
+      const x = (i / (prices.length - 1)) * W;
+      const y = H - ((p - min) / span) * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const trending = prices[prices.length - 1] >= prices[0];
   return (
-    <svg className="tr-sparkline" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-      <polyline
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        points={points}
-      />
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      className={cn(
+        "h-20 w-full",
+        trending ? "text-[var(--color-bull)]" : "text-[var(--color-bear)]",
+      )}
+    >
+      <polyline fill="none" stroke="currentColor" strokeWidth="1.5" points={points} />
     </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function ColHead({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="border-b px-4 py-2.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+function Empty({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+      {children}
+    </div>
   );
 }

@@ -47,7 +47,7 @@ const GROUPS: PluginGroup[] = [
     blurb: "First-class files, text, and vectors.",
     plugins: [
       { name: "file_storage", desc: "Presigned uploads to local disk or any S3-compatible bucket." },
-      { name: "search", desc: "Full-text search across entity fields. No external Elasticsearch." },
+      { name: "search", desc: "BM25 full-text + faceted search with live counts. Roaring bitmap indexes maintained in the same transaction as writes — no Meilisearch sidecar, no async indexing lag." },
       { name: "vector_search", desc: "Embedding storage + cosine / dot-product nearest-neighbor queries." },
     ],
   },

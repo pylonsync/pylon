@@ -1,0 +1,31 @@
+/**
+ * Shared base layer for example apps.
+ *
+ * Examples include this with `@import "@pylonsync/example-ui/tokens.css";`
+ * AFTER `@import "tailwindcss";` and AFTER their own `@theme` block.
+ * The tokens reference semantic colors so any example's theme cascades
+ * automatically.
+ */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border);
+  }
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  button {
+    cursor: pointer;
+  }
+}

@@ -38,7 +38,8 @@
               "concepts/entities",
               "concepts/policies",
               "concepts/functions",
-              "concepts/live-queries"
+              "concepts/live-queries",
+              "concepts/search"
             ]
           }
         ]

@@ -20,6 +20,7 @@ const APP_ROWS: AppRow[] = [
   { feat: "Declarative schema", pylon: "yes", convex: "yes", supabase: "part", firebase: "part" },
   { feat: "Live queries", pylon: "yes", convex: "yes", supabase: "part", firebase: "yes" },
   { feat: "TypeScript functions", pylon: "yes", convex: "yes", supabase: "part", firebase: "part" },
+  { feat: "Native faceted search", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
   { feat: "Self-hosted, one binary", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
   { feat: "Authoritative game loop", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
   { feat: "No vendor lock-in", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },

@@ -1,118 +1,78 @@
-import { entity, field, defineRoute, query, action, policy, buildManifest } from "@pylonsync/sdk";
+/**
+ * Pylon Todo — the canonical Pylon hello-world.
+ *
+ * Smallest possible app that exercises every core primitive:
+ *   - Entity declaration with indexes
+ *   - Per-user policies (`auth.userId == data.userId`)
+ *   - Live queries via `db.useQuery`
+ *   - Optimistic mutations via `db.useEntity`
+ *   - Email/password auth out of the box
+ *
+ * No server-side functions are needed — todos are CRUD'd directly
+ * through `/api/entities/Todo`, with policies enforcing ownership.
+ */
+import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
 
-// ---------------------------------------------------------------------------
-// Schema
-// ---------------------------------------------------------------------------
+const User = entity(
+  "User",
+  {
+    email: field.string(),
+    displayName: field.string(),
+    avatarColor: field.string().optional(),
+    passwordHash: field.string().optional(),
+    createdAt: field.datetime(),
+  },
+  {
+    indexes: [{ name: "by_email", fields: ["email"], unique: true }],
+  },
+);
 
-const User = entity("User", {
-  email: field.string().unique(),
-  displayName: field.string(),
-  createdAt: field.datetime(),
+const Todo = entity(
+  "Todo",
+  {
+    userId: field.string(),
+    title: field.string(),
+    notes: field.string().optional(),
+    done: field.bool(),
+    priority: field.string(), // "low" | "med" | "high"
+    dueAt: field.datetime().optional(),
+    completedAt: field.datetime().optional(),
+    createdAt: field.datetime(),
+  },
+  {
+    indexes: [
+      { name: "by_user", fields: ["userId"], unique: false },
+      { name: "by_user_done", fields: ["userId", "done"], unique: false },
+    ],
+  },
+);
+
+const userPolicy = policy({
+  name: "user_self",
+  entity: "User",
+  allowRead: "auth.userId != null",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
 });
 
-const Todo = entity("Todo", {
-  title: field.string(),
-  done: field.bool(),
-  authorId: field.id("User"),
-  createdAt: field.datetime(),
-}, {
-  indexes: [
-    { name: "by_author", fields: ["authorId"], unique: false },
-  ],
-});
-
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
-
-const todosByAuthor = query("todosByAuthor", {
-  input: [{ name: "authorId", type: "id(User)" }],
-});
-
-const allTodos = query("allTodos", {
-  input: [{ name: "done", type: "bool", optional: true }],
-});
-
-const todoById = query("todoById", {
-  input: [{ name: "todoId", type: "id(Todo)" }],
-});
-
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
-
-const createTodo = action("createTodo", {
-  input: [
-    { name: "title", type: "string" },
-    { name: "authorId", type: "id(User)" },
-  ],
-});
-
-const toggleTodo = action("toggleTodo", {
-  input: [{ name: "todoId", type: "id(Todo)" }],
-});
-
-// ---------------------------------------------------------------------------
-// Policies
-// ---------------------------------------------------------------------------
-
-const authenticatedCreate = policy({
-  name: "authenticatedCreate",
-  action: "createTodo",
-  allow: "auth.userId != null",
-});
-
-const ownerToggle = policy({
-  name: "ownerToggle",
-  action: "toggleTodo",
-  allow: "auth.userId == input.authorId",
-});
-
-const ownerReadTodos = policy({
-  name: "ownerReadTodos",
+const todoPolicy = policy({
+  name: "todo_owner",
   entity: "Todo",
-  allow: "auth.userId == data.authorId",
+  allowRead: "auth.userId != null",
+  allowInsert: "auth.userId == data.userId",
+  allowUpdate: "auth.userId != null",
+  allowDelete: "auth.userId != null",
 });
-
-// ---------------------------------------------------------------------------
-// Routes
-// ---------------------------------------------------------------------------
-
-const home = defineRoute({
-  path: "/",
-  mode: "server",
-  query: "allTodos",
-  auth: "public",
-});
-
-const todoList = defineRoute({
-  path: "/todos",
-  mode: "live",
-  query: "todosByAuthor",
-  auth: "user",
-});
-
-const todoDetail = defineRoute({
-  path: "/todos/:todoId",
-  mode: "server",
-  query: "todoById",
-  auth: "user",
-});
-
-// ---------------------------------------------------------------------------
-// Manifest
-// ---------------------------------------------------------------------------
 
 const manifest = buildManifest({
   name: "todo-app",
   version: "0.1.0",
   entities: [User, Todo],
-  queries: [todosByAuthor, allTodos, todoById],
-  actions: [createTodo, toggleTodo],
-  policies: [authenticatedCreate, ownerToggle, ownerReadTodos],
-  routes: [home, todoList, todoDetail],
+  queries: [],
+  actions: [],
+  policies: [userPolicy, todoPolicy],
+  routes: [],
 });
 
-// Emit canonical manifest JSON to stdout.
-// Used by: pylon codegen examples/todo-app/app.ts
 console.log(JSON.stringify(manifest, null, 2));

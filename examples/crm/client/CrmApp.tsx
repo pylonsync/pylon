@@ -1,9 +1,9 @@
 /**
- * Pylon CRM demo — Attio-style: companies, people, deals, notes.
- * Org-scoped via tenant_id; reuses the session + filter patterns from the
- * ERP example. Every list is a split view (table left, detail panel right).
+ * Pylon CRM demo — companies, people, deals, notes.
+ *
+ * Org-scoped via tenant_id; each list is a split view (table left,
+ * detail panel right). Deals get a Kanban pipeline view.
  */
-
 import React, { useEffect, useMemo, useState } from "react";
 import {
   init,
@@ -12,14 +12,40 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import {
+  Building2,
+  Circle,
+  DollarSign,
+  Loader2,
+  LogOut,
+  Plus,
+  Users,
+} from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Input } from "@pylonsync/example-ui/input";
+import { Label } from "@pylonsync/example-ui/label";
+import { Textarea } from "@pylonsync/example-ui/textarea";
+import { Card, CardContent } from "@pylonsync/example-ui/card";
+import { Badge } from "@pylonsync/example-ui/badge";
+import { Avatar, AvatarFallback } from "@pylonsync/example-ui/avatar";
+import { Separator } from "@pylonsync/example-ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@pylonsync/example-ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@pylonsync/example-ui/select";
+import { cn } from "@pylonsync/example-ui/utils";
 
-// Vite inlines VITE_* env vars at build time. Configure both for Vercel:
-//
-//   VITE_PYLON_URL    = https://pylon-crm.fly.dev       (HTTP)
-//   VITE_PYLON_WS_URL = wss://pylon-crm.fly.dev:4322    (WebSocket)
-//
-// Local dev falls back to localhost where we can use the port+1
-// convention pylon dev prints on startup.
 const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
 const WS_URL =
   import.meta.env.VITE_PYLON_WS_URL ??
@@ -33,85 +59,47 @@ configureClient({ baseUrl: BASE_URL, appName: "crm" });
 // Types
 // ---------------------------------------------------------------------------
 
-type User = {
-  id: string;
-  email: string;
-  displayName: string;
-  avatarColor: string;
-};
+type User = { id: string; email: string; displayName: string; avatarColor: string };
 type Organization = {
-  id: string;
-  name: string;
-  slug: string;
-  createdBy: string;
-  createdAt: string;
+  id: string; name: string; slug: string;
+  createdBy: string; createdAt: string;
 };
 type OrgMember = {
-  id: string;
-  userId: string;
-  orgId: string;
-  role: string;
-  joinedAt: string;
+  id: string; userId: string; orgId: string;
+  role: string; joinedAt: string;
 };
 type Company = {
-  id: string;
-  orgId: string;
-  name: string;
-  domain?: string | null;
-  industry?: string | null;
-  sizeBucket?: string | null;
-  status: string;
-  description?: string | null;
-  ownerId?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  id: string; orgId: string; name: string;
+  domain?: string | null; industry?: string | null;
+  sizeBucket?: string | null; status: string;
+  description?: string | null; ownerId?: string | null;
+  createdAt: string; updatedAt: string;
 };
 type Person = {
-  id: string;
-  orgId: string;
-  firstName: string;
-  lastName?: string | null;
-  email?: string | null;
-  phone?: string | null;
-  title?: string | null;
-  companyId?: string | null;
-  ownerId?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  id: string; orgId: string; firstName: string;
+  lastName?: string | null; email?: string | null;
+  phone?: string | null; title?: string | null;
+  companyId?: string | null; ownerId?: string | null;
+  createdAt: string; updatedAt: string;
 };
 type Deal = {
-  id: string;
-  orgId: string;
-  name: string;
-  companyId?: string | null;
-  personId?: string | null;
-  stage: string;
-  amount: number;
-  probability: number;
-  closeDate?: string | null;
-  ownerId?: string | null;
+  id: string; orgId: string; name: string;
+  companyId?: string | null; personId?: string | null;
+  stage: string; amount: number; probability: number;
+  closeDate?: string | null; ownerId?: string | null;
   description?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: string; updatedAt: string;
 };
 type Note = {
-  id: string;
-  orgId: string;
-  targetType: string;
-  targetId: string;
-  body: string;
-  authorId: string;
-  createdAt: string;
+  id: string; orgId: string;
+  targetType: string; targetId: string;
+  body: string; authorId: string; createdAt: string;
 };
 type Activity = {
-  id: string;
-  orgId: string;
-  targetType: string;
-  targetId: string;
-  kind: string;
-  metaJson?: string | null;
-  actorId: string;
-  createdAt: string;
+  id: string; orgId: string;
+  targetType: string; targetId: string;
+  kind: string; metaJson?: string | null;
+  actorId: string; createdAt: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -147,7 +135,7 @@ function fullName(p: Person): string {
   return `${p.firstName}${p.lastName ? ` ${p.lastName}` : ""}`;
 }
 
-const STAGES = ["lead", "qualified", "proposal", "negotiation", "won", "lost"];
+const STAGES = ["lead", "qualified", "proposal", "negotiation", "won", "lost"] as const;
 const STAGE_LABELS: Record<string, string> = {
   lead: "Lead",
   qualified: "Qualified",
@@ -156,13 +144,13 @@ const STAGE_LABELS: Record<string, string> = {
   won: "Won",
   lost: "Lost",
 };
-const STAGE_COLORS: Record<string, string> = {
-  lead: "pill-gray",
-  qualified: "pill-accent",
-  proposal: "pill-accent",
-  negotiation: "pill-warning",
-  won: "pill-success",
-  lost: "pill-danger",
+const STAGE_VARIANT: Record<string, "default" | "secondary" | "warning" | "success" | "destructive"> = {
+  lead: "secondary",
+  qualified: "default",
+  proposal: "default",
+  negotiation: "warning",
+  won: "success",
+  lost: "destructive",
 };
 
 // ---------------------------------------------------------------------------
@@ -181,17 +169,15 @@ export function CrmApp() {
       return null;
     }
   });
-  const [activeOrgId, setActiveOrgId] = useState<string | null>(() => {
-    return localStorage.getItem(storageKey("active_org")) || null;
-  });
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(() =>
+    localStorage.getItem(storageKey("active_org")) || null,
+  );
   const [page, setPage] = useState<Page>("companies");
 
   useEffect(() => {
     if (currentUser) void db.sync.pull();
   }, [currentUser?.id]);
 
-  // Reconcile server's tenant with our local activeOrgId — same pattern
-  // as ERP so new sessions don't drift.
   useEffect(() => {
     if (!currentUser || !activeOrgId) return;
     const token = localStorage.getItem(storageKey("token"));
@@ -202,8 +188,7 @@ export function CrmApp() {
         const me = await fetch(`${BASE_URL}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         }).then((r) => r.json());
-        if (cancelled) return;
-        if (me.tenant_id === activeOrgId) return;
+        if (cancelled || me.tenant_id === activeOrgId) return;
         await fetch(`${BASE_URL}/api/auth/select-org`, {
           method: "POST",
           headers: {
@@ -269,15 +254,11 @@ export function CrmApp() {
       onSignOut={signOut}
     >
       {(org) => (
-        <div className="app">
-          <Topbar
-            currentUser={currentUser}
-            activeOrg={org}
-            onSignOut={signOut}
-          />
-          <div className="body">
+        <div className="grid h-screen grid-rows-[52px_1fr]">
+          <Topbar currentUser={currentUser} activeOrg={org} onSignOut={signOut} />
+          <div className="grid grid-cols-[200px_1fr] overflow-hidden">
             <Sidebar page={page} onNavigate={setPage} />
-            <main className="main">
+            <main className="flex overflow-hidden">
               {page === "companies" && <CompaniesPage org={org} />}
               {page === "people" && <PeoplePage org={org} />}
               {page === "deals" && <DealsPage org={org} />}
@@ -290,7 +271,7 @@ export function CrmApp() {
 }
 
 // ---------------------------------------------------------------------------
-// OrgGate + Login + Onboarding
+// Auth + Onboarding
 // ---------------------------------------------------------------------------
 
 function OrgGate({
@@ -311,14 +292,6 @@ function OrgGate({
   });
   const { data: orgs } = db.useQuery<Organization>("Organization");
 
-  // Debug: show exactly what the sync replica sees so we can tell whether
-  // this is a server-side read-policy/auth issue vs. a client-side join.
-  useEffect(() => {
-    console.log("[crm] currentUser.id =", currentUser.id);
-    console.log("[crm] memberships raw =", memberships);
-    console.log("[crm] orgs raw =", orgs);
-  }, [currentUser.id, memberships, orgs]);
-
   const myOrgs = useMemo(() => {
     const byId = new Map<string, Organization>();
     for (const o of orgs ?? []) byId.set(o.id, o);
@@ -327,7 +300,6 @@ function OrgGate({
       const org = byId.get(m.orgId);
       if (org) out.push(org);
     }
-    console.log("[crm] myOrgs joined =", out.map((o) => ({ id: o.id, name: o.name })));
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }, [memberships, orgs]);
 
@@ -363,112 +335,59 @@ function OnboardingScreen({
 }) {
   const [createOpen, setCreateOpen] = useState(myOrgs.length === 0);
   return (
-    <div className="split-screen">
-      <div className="auth-panel">
-        <div className="brand" style={{ marginBottom: 20 }}>
-          <BrandMark />
-          Pylon CRM
-        </div>
-        <div className="auth-title">Hi, {currentUser.displayName}</div>
-        <div className="auth-subtitle">
+    <div className="grid min-h-screen place-items-center p-6">
+      <Card className="w-[min(480px,92vw)] p-7">
+        <BrandRow />
+        <h2 className="mt-5 text-xl font-semibold">
+          Hi, {currentUser.displayName}
+        </h2>
+        <p className="mt-1 text-sm text-muted-foreground">
           Pick a workspace or create a new one.
-        </div>
-        {myOrgs.length > 0 && (
-          <>
-            {myOrgs.map((org) => (
-              <button
-                key={org.id}
-                onClick={() => void onSelectOrg(org.id)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  width: "100%",
-                  padding: "10px 12px",
-                  marginBottom: 6,
-                  background: "var(--surface-hover)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  textAlign: "left",
-                }}
-              >
-                <div
-                  className="avatar avatar-sm"
-                  style={{ backgroundColor: "#c7d2fe" }}
-                >
+        </p>
+        <div className="mt-4 flex flex-col gap-1.5">
+          {myOrgs.map((org) => (
+            <button
+              key={org.id}
+              onClick={() => void onSelectOrg(org.id)}
+              className="flex items-center gap-3 rounded-md border bg-secondary/40 px-3 py-2.5 text-left text-sm transition-colors hover:bg-accent"
+            >
+              <Avatar className="size-7 bg-primary/20">
+                <AvatarFallback className="bg-transparent text-xs">
                   {initials(org.name)}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500 }}>{org.name}</div>
-                  <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                    {org.slug}
-                  </div>
-                </div>
-              </button>
-            ))}
-          </>
-        )}
-        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-          <button className="btn btn-primary" onClick={() => setCreateOpen(true)}>
-            Create workspace
-          </button>
-          <button className="btn btn-ghost" onClick={onSignOut}>
-            Sign out
-          </button>
+                </AvatarFallback>
+              </Avatar>
+              <div className="flex-1">
+                <div className="font-medium">{org.name}</div>
+                <div className="text-xs text-muted-foreground">{org.slug}</div>
+              </div>
+            </button>
+          ))}
         </div>
-      </div>
-      {createOpen && (
-        <CreateOrgModal
-          onClose={() => setCreateOpen(false)}
-          onCreated={async (id) => {
-            // Pull the replica before switching — createOrganization
-            // inserts Organization + OrgMember server-side, but our local
-            // useQuery<OrgMember> won't include the new row until sync
-            // catches up. Without this, select-org flips activeOrgId to
-            // an id that's not in myOrgs, and OrgGate falls back to the
-            // onboarding screen.
-            setCreateOpen(false);
-            await db.sync.pull();
-            await onSelectOrg(id);
-          }}
-        />
-      )}
+        <div className="mt-4 flex gap-2">
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="size-4" />
+            Create workspace
+          </Button>
+          <Button variant="outline" onClick={onSignOut}>
+            Sign out
+          </Button>
+        </div>
+      </Card>
+      <CreateOrgModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={async (id) => {
+          setCreateOpen(false);
+          await db.sync.pull();
+          await onSelectOrg(id);
+        }}
+      />
     </div>
   );
 }
 
-/**
- * Magic-link login — the actual Pylon auth flow.
- *
- * 1. User enters email + display name → `POST /api/auth/magic/send`
- *    mints a 6-digit code, emails it, and (in dev mode) echoes
- *    `dev_code` in the response so the demo works without configuring
- *    a real email provider.
- * 2. User enters the code → `POST /api/auth/magic/verify` validates
- *    the code, creates or looks up the User row by email, and returns
- *    a session token already bound to that user id.
- * 3. The register endpoint seeds the User row with displayName
- *    on first sign-in (the verify endpoint seeds displayName=email,
- *    which we overwrite with the human-entered name).
- *
- * No guest session. No `/api/auth/upgrade` shortcut. Works identically
- * with `PYLON_DEV_MODE=false` — the only difference is whether
- * `dev_code` appears in the response.
- */
-/**
- * Email + password login via Pylon's /api/auth/password/{login,register}.
- *
- * Each endpoint returns {token, user_id, expires_at}. We persist the
- * token, hydrate the full User row via a lookup on email (so the UI can
- * render displayName + avatarColor), and hand control to the dashboard.
- *
- * Sign-up and sign-in share the form; the tab toggle picks which
- * endpoint to hit. Password validation happens server-side (min 8
- * chars); client-side we just surface the server's error.
- */
 function Login({ onReady }: { onReady: (u: User) => void }) {
-  type Mode = "signin" | "signup";
-  const [mode, setMode] = useState<Mode>("signin");
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -494,13 +413,8 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
     setErr(null);
     try {
       const endpoint =
-        mode === "signin"
-          ? "/api/auth/password/login"
-          : "/api/auth/password/register";
-      const payload: Record<string, string> = {
-        email: trimmedEmail,
-        password,
-      };
+        mode === "signin" ? "/api/auth/password/login" : "/api/auth/password/register";
+      const payload: Record<string, string> = { email: trimmedEmail, password };
       if (mode === "signup") payload.displayName = displayName.trim();
 
       const res = await fetch(`${BASE_URL}${endpoint}`, {
@@ -515,20 +429,13 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
             (mode === "signin" ? "Sign-in failed" : "Sign-up failed"),
         );
       }
-
       const token: string = body.token;
       const userId: string = body.user_id;
       localStorage.setItem(storageKey("token"), token);
       configureClient({ baseUrl: BASE_URL, appName: "crm" });
-
-      // Fetch the full User row — displayName + avatarColor are needed
-      // for the topbar and member lists. We do it via a direct GET now
-      // that the session is authenticated; the User row is readable by
-      // any authenticated caller per the user_read policy.
-      const userRes = await fetch(
-        `${BASE_URL}/api/entities/User/${userId}`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
+      const userRes = await fetch(`${BASE_URL}/api/entities/User/${userId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const user = (await userRes.json()) as User;
       localStorage.setItem(storageKey("user"), JSON.stringify(user));
       void db.sync.pull();
@@ -541,98 +448,98 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
   }
 
   return (
-    <div className="split-screen">
-      <div className="auth-panel">
-        <div className="brand" style={{ marginBottom: 20 }}>
-          <BrandMark />
-          Pylon CRM
+    <div className="grid min-h-screen lg:grid-cols-2">
+      <div className="flex items-center justify-center p-10">
+        <div className="w-full max-w-sm">
+          <BrandRow />
+          <h1 className="mt-6 text-2xl font-bold tracking-tight">
+            {mode === "signin" ? "Sign in" : "Create your account"}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {mode === "signin"
+              ? "Email and password for your workspace."
+              : "Set up a CRM workspace in under a minute."}
+          </p>
+          <div className="mt-5 flex flex-col gap-3">
+            <FormField label="Email">
+              <Input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@company.com"
+                autoFocus
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+              />
+            </FormField>
+            {mode === "signup" && (
+              <FormField label="Display name">
+                <Input
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="How your teammates will see you"
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                />
+              </FormField>
+            )}
+            <FormField label="Password">
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={mode === "signup" ? "At least 8 characters" : "••••••••"}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+              />
+            </FormField>
+            {err && <ErrorBlock message={err} />}
+            <Button onClick={submit} disabled={loading} className="mt-2 w-full">
+              {loading && <Loader2 className="size-4 animate-spin" />}
+              {mode === "signin"
+                ? loading
+                  ? "Signing in…"
+                  : "Sign in"
+                : loading
+                ? "Creating account…"
+                : "Create account"}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setMode(mode === "signin" ? "signup" : "signin");
+                setErr(null);
+              }}
+              disabled={loading}
+              className="w-full"
+            >
+              {mode === "signin"
+                ? "Need an account? Sign up"
+                : "Already have an account? Sign in"}
+            </Button>
+          </div>
         </div>
-        <div className="auth-title">
-          {mode === "signin" ? "Sign in" : "Create your account"}
+      </div>
+      <div className="hidden bg-gradient-to-br from-primary/30 via-primary/10 to-background lg:flex lg:items-center lg:p-12">
+        <div className="max-w-md">
+          <h2 className="text-3xl font-semibold leading-tight">
+            Customers, deals,
+            <br />
+            and the relationships between them.
+          </h2>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            Companies, people, and deals — every change syncs across teammates
+            in real time. Built on Pylon.
+          </p>
         </div>
-        <div className="auth-subtitle">
-          {mode === "signin"
-            ? "Email and password for your workspace."
-            : "Set up a CRM workspace in under a minute."}
-        </div>
-
-        <label className="field">
-          <span className="field-label">Email</span>
-          <input
-            className="input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@company.com"
-            autoFocus
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-        </label>
-
-        {mode === "signup" && (
-          <label className="field">
-            <span className="field-label">Display name</span>
-            <input
-              className="input"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="How your teammates will see you"
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-            />
-          </label>
-        )}
-
-        <label className="field">
-          <span className="field-label">Password</span>
-          <input
-            className="input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={mode === "signup" ? "At least 8 characters" : "••••••••"}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-          />
-        </label>
-
-        {err && <div className="error-text">{err}</div>}
-
-        <button
-          className="btn btn-primary"
-          onClick={submit}
-          disabled={loading}
-          style={{ width: "100%", marginTop: 8, padding: "8px 14px" }}
-        >
-          {loading
-            ? mode === "signin"
-              ? "Signing in…"
-              : "Creating account…"
-            : mode === "signin"
-              ? "Sign in"
-              : "Create account"}
-        </button>
-
-        <button
-          className="btn btn-ghost"
-          onClick={() => {
-            setMode(mode === "signin" ? "signup" : "signin");
-            setErr(null);
-          }}
-          disabled={loading}
-          style={{ width: "100%", marginTop: 10, padding: "8px 14px" }}
-        >
-          {mode === "signin"
-            ? "Need an account? Sign up"
-            : "Already have an account? Sign in"}
-        </button>
       </div>
     </div>
   );
 }
 
 function CreateOrgModal({
+  open,
   onClose,
   onCreated,
 }: {
+  open: boolean;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -640,6 +547,7 @@ function CreateOrgModal({
   const [slug, setSlug] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
   useEffect(() => {
     setSlug(
       name
@@ -650,6 +558,7 @@ function CreateOrgModal({
         .slice(0, 50),
     );
   }, [name]);
+
   async function save() {
     setBusy(true);
     setErr(null);
@@ -665,44 +574,43 @@ function CreateOrgModal({
       setBusy(false);
     }
   }
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">Create workspace</div>
-        <div className="modal-subtitle">Container for your CRM data.</div>
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Create workspace</DialogTitle>
+          <DialogDescription>Container for your CRM data.</DialogDescription>
+        </DialogHeader>
+        <FormField label="Name">
+          <Input
             autoFocus
-            className="input"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Acme Sales"
           />
-        </label>
-        <label className="field">
-          <span className="field-label">URL slug</span>
-          <input
-            className="input"
+        </FormField>
+        <FormField label="URL slug">
+          <Input
             value={slug}
             onChange={(e) => setSlug(e.target.value.toLowerCase())}
           />
-        </label>
-        {err && <div className="error-text">{err}</div>}
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>
+        </FormField>
+        {err && <ErrorBlock message={err} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={busy || !name.trim() || !slug.trim()}
+          </Button>
+          <Button
             onClick={() => void save()}
+            disabled={busy || !name.trim() || !slug.trim()}
           >
-            {busy ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -720,43 +628,29 @@ function Topbar({
   onSignOut: () => void;
 }) {
   return (
-    <header className="topbar">
-      <div className="brand">
-        <BrandMark />
-        Pylon CRM
-      </div>
-      <div
-        className="pill pill-gray"
-        style={{ padding: "3px 10px", fontSize: 12 }}
-      >
-        {activeOrg.name}
-      </div>
-      <div className="spacer" />
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "2px 10px 2px 2px",
-          background: "var(--surface-hover)",
-          border: "1px solid var(--border)",
-          borderRadius: 999,
-        }}
-      >
-        <div
-          className="avatar avatar-sm"
+    <header className="flex items-center gap-4 border-b bg-card/60 px-5">
+      <BrandRow />
+      <Badge variant="secondary">{activeOrg.name}</Badge>
+      <div className="flex-1" />
+      <div className="flex items-center gap-2 rounded-full border bg-card px-2 py-0.5">
+        <Avatar
+          className="size-6"
           style={{ backgroundColor: currentUser.avatarColor }}
         >
-          {initials(currentUser.displayName)}
-        </div>
-        <span style={{ fontSize: 12 }}>{currentUser.displayName}</span>
-        <button
+          <AvatarFallback className="bg-transparent text-[10px] text-white">
+            {initials(currentUser.displayName)}
+          </AvatarFallback>
+        </Avatar>
+        <span className="text-xs">{currentUser.displayName}</span>
+        <Button
+          variant="ghost"
+          size="xs"
           onClick={onSignOut}
-          className="btn btn-ghost"
-          style={{ padding: "2px 8px", fontSize: 11 }}
+          className="text-muted-foreground"
         >
+          <LogOut className="size-3" />
           Sign out
-        </button>
+        </Button>
       </div>
     </header>
   );
@@ -770,21 +664,26 @@ function Sidebar({
   onNavigate: (p: Page) => void;
 }) {
   const items: { id: Page; label: string; icon: React.ReactNode }[] = [
-    { id: "companies", label: "Companies", icon: <IconBuilding /> },
-    { id: "people", label: "People", icon: <IconUser /> },
-    { id: "deals", label: "Deals", icon: <IconMoney /> },
+    { id: "companies", label: "Companies", icon: <Building2 className="size-4" /> },
+    { id: "people", label: "People", icon: <Users className="size-4" /> },
+    { id: "deals", label: "Deals", icon: <DollarSign className="size-4" /> },
   ];
   return (
-    <nav className="nav">
+    <nav className="flex flex-col gap-1 border-r bg-card/40 p-2">
       {items.map((it) => (
-        <div
+        <button
           key={it.id}
-          className={"nav-item" + (page === it.id ? " active" : "")}
           onClick={() => onNavigate(it.id)}
+          className={cn(
+            "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+            page === it.id
+              ? "bg-accent text-accent-foreground"
+              : "text-foreground/80 hover:bg-accent/50",
+          )}
         >
           {it.icon}
           {it.label}
-        </div>
+        </button>
       ))}
     </nav>
   );
@@ -809,71 +708,69 @@ function CompaniesPage({ org }: { org: Organization }) {
   }, [list, selectedId]);
 
   return (
-    <>
-      <div className="list-pane">
-        <div className="list-header">
-          <div className="list-title">Companies</div>
-          <div className="list-count">{list.length}</div>
-          <div className="spacer" />
-          <button
-            className="btn btn-primary"
-            onClick={() => setAddOpen(true)}
-          >
-            <IconPlus /> Add company
-          </button>
-        </div>
+    <div className="grid w-full grid-cols-[1fr_360px] overflow-hidden">
+      <div className="flex flex-col overflow-hidden">
+        <ListHeader
+          title="Companies"
+          count={list.length}
+          actionLabel="Add company"
+          onAction={() => setAddOpen(true)}
+        />
         {list.length === 0 ? (
-          <div className="empty">
-            <div className="empty-title">No companies yet</div>
-            <div className="empty-body">
-              Add your first account to get started.
-            </div>
-            <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
-              Add company
-            </button>
-          </div>
+          <EmptyState
+            title="No companies yet"
+            sub="Add your first account to get started."
+            action={
+              <Button onClick={() => setAddOpen(true)}>
+                <Plus className="size-4" />
+                Add company
+              </Button>
+            }
+          />
         ) : (
-          <div style={{ overflowY: "auto", flex: 1 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Industry</th>
-                  <th>Size</th>
-                  <th>Status</th>
-                  <th>Added</th>
+          <div className="overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-card/95 backdrop-blur">
+                <tr className="border-b text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-2 text-left">Name</th>
+                  <th className="px-4 py-2 text-left">Industry</th>
+                  <th className="px-4 py-2 text-left">Size</th>
+                  <th className="px-4 py-2 text-left">Status</th>
+                  <th className="px-4 py-2 text-left">Added</th>
                 </tr>
               </thead>
               <tbody>
                 {list.map((c) => (
                   <tr
                     key={c.id}
-                    className={c.id === selectedId ? "selected" : ""}
                     onClick={() => setSelectedId(c.id)}
+                    className={cn(
+                      "cursor-pointer border-b border-border/40 transition-colors hover:bg-muted/30",
+                      c.id === selectedId && "bg-accent",
+                    )}
                   >
-                    <td>
-                      <div
-                        style={{ display: "flex", alignItems: "center", gap: 8 }}
-                      >
-                        <div
-                          className="avatar avatar-sm"
-                          style={{ backgroundColor: "#fde68a" }}
-                        >
-                          {initials(c.name)}
-                        </div>
-                        <span style={{ fontWeight: 500 }}>{c.name}</span>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <Avatar className="size-7 bg-amber-200">
+                          <AvatarFallback className="bg-transparent text-[10px]">
+                            {initials(c.name)}
+                          </AvatarFallback>
+                        </Avatar>
+                        <span className="font-medium">{c.name}</span>
                       </div>
                     </td>
-                    <td style={{ color: "var(--text-muted)" }}>
+                    <td className="px-4 py-2.5 text-muted-foreground">
                       {c.industry || "—"}
                     </td>
-                    <td style={{ color: "var(--text-muted)" }}>
+                    <td className="px-4 py-2.5 text-muted-foreground">
                       {c.sizeBucket || "—"}
                     </td>
-                    <td>
-                      <span className="pill pill-gray">{c.status}</span>
+                    <td className="px-4 py-2.5">
+                      <Badge variant="secondary" className="capitalize">
+                        {c.status}
+                      </Badge>
                     </td>
-                    <td style={{ color: "var(--text-muted)" }}>
+                    <td className="px-4 py-2.5 text-muted-foreground">
                       {ago(c.createdAt)}
                     </td>
                   </tr>
@@ -883,17 +780,15 @@ function CompaniesPage({ org }: { org: Organization }) {
           </div>
         )}
       </div>
-      <aside className="detail-pane">
+      <DetailPane>
         {selected ? (
           <CompanyDetail company={selected} />
         ) : (
-          <div className="empty">
-            <div className="empty-body">Pick a company to see details.</div>
-          </div>
+          <EmptyDetail>Pick a company to see details.</EmptyDetail>
         )}
-      </aside>
-      {addOpen && <AddCompanyModal onClose={() => setAddOpen(false)} />}
-    </>
+      </DetailPane>
+      <AddCompanyModal open={addOpen} onClose={() => setAddOpen(false)} />
+    </div>
   );
 }
 
@@ -903,71 +798,42 @@ function CompanyDetail({ company }: { company: Company }) {
   });
   return (
     <>
-      <div className="detail-header">
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 10,
-          }}
-        >
-          <div
-            className="avatar avatar-lg"
-            style={{ backgroundColor: "#fde68a" }}
-          >
-            {initials(company.name)}
-          </div>
-          <div>
-            <div className="detail-name">{company.name}</div>
-            <div className="detail-sub">
-              {company.domain || "—"}
-              {company.industry ? ` · ${company.industry}` : ""}
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="detail-section">
-        <div className="detail-section-title">Details</div>
-        <div className="detail-kv">
-          <div className="detail-kv-k">Status</div>
-          <div className="detail-kv-v">
-            <span className="pill pill-gray">{company.status}</span>
-          </div>
-          <div className="detail-kv-k">Size</div>
-          <div className="detail-kv-v">{company.sizeBucket || "—"}</div>
-          <div className="detail-kv-k">Domain</div>
-          <div className="detail-kv-v">{company.domain || "—"}</div>
-          <div className="detail-kv-k">Created</div>
-          <div className="detail-kv-v">{ago(company.createdAt)}</div>
-        </div>
-      </div>
-      <div className="detail-section">
-        <div className="detail-section-title">
-          People · {(people ?? []).length}
-        </div>
+      <DetailHeader
+        avatar={
+          <Avatar className="size-12 bg-amber-200">
+            <AvatarFallback className="bg-transparent">
+              {initials(company.name)}
+            </AvatarFallback>
+          </Avatar>
+        }
+        title={company.name}
+        sub={`${company.domain || "—"}${company.industry ? ` · ${company.industry}` : ""}`}
+      />
+      <DetailSection title="Details">
+        <KvList
+          items={[
+            ["Status", <Badge variant="secondary" className="capitalize">{company.status}</Badge>],
+            ["Size", company.sizeBucket || "—"],
+            ["Domain", company.domain || "—"],
+            ["Created", ago(company.createdAt)],
+          ]}
+        />
+      </DetailSection>
+      <DetailSection title={`People · ${(people ?? []).length}`}>
         {(people ?? []).length === 0 ? (
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-            No people linked yet.
-          </div>
+          <p className="text-xs text-muted-foreground">No people linked yet.</p>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div className="flex flex-col gap-1.5">
             {(people ?? []).map((p) => (
-              <div
-                key={p.id}
-                style={{ display: "flex", alignItems: "center", gap: 8 }}
-              >
-                <div
-                  className="avatar avatar-xs"
-                  style={{ backgroundColor: "#c7d2fe" }}
-                >
-                  {initials(fullName(p))}
-                </div>
-                <span style={{ fontSize: 12.5, fontWeight: 500 }}>
-                  {fullName(p)}
-                </span>
+              <div key={p.id} className="flex items-center gap-2 text-sm">
+                <Avatar className="size-5 bg-primary/20">
+                  <AvatarFallback className="bg-transparent text-[9px]">
+                    {initials(fullName(p))}
+                  </AvatarFallback>
+                </Avatar>
+                <span className="font-medium">{fullName(p)}</span>
                 {p.title && (
-                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                  <span className="text-xs text-muted-foreground">
                     {p.title}
                   </span>
                 )}
@@ -975,14 +841,20 @@ function CompanyDetail({ company }: { company: Company }) {
             ))}
           </div>
         )}
-      </div>
+      </DetailSection>
       <NotesSection targetType="Company" targetId={company.id} />
       <TimelineSection targetType="Company" targetId={company.id} />
     </>
   );
 }
 
-function AddCompanyModal({ onClose }: { onClose: () => void }) {
+function AddCompanyModal({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -992,6 +864,14 @@ function AddCompanyModal({ onClose }: { onClose: () => void }) {
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setForm({ name: "", domain: "", industry: "", sizeBucket: "", status: "lead" });
+      setErr(null);
+    }
+  }, [open]);
+
   async function save() {
     setBusy(true);
     setErr(null);
@@ -1010,86 +890,86 @@ function AddCompanyModal({ onClose }: { onClose: () => void }) {
       setBusy(false);
     }
   }
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">Add company</div>
-        <div className="modal-subtitle">Track a new account.</div>
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add company</DialogTitle>
+          <DialogDescription>Track a new account.</DialogDescription>
+        </DialogHeader>
+        <FormField label="Name">
+          <Input
             autoFocus
-            className="input"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             placeholder="Acme Corp"
           />
-        </label>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">Domain</span>
-            <input
-              className="input"
+        </FormField>
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Domain">
+            <Input
               value={form.domain}
               onChange={(e) => setForm({ ...form, domain: e.target.value })}
               placeholder="acme.com"
             />
-          </label>
-          <label className="field">
-            <span className="field-label">Industry</span>
-            <input
-              className="input"
+          </FormField>
+          <FormField label="Industry">
+            <Input
               value={form.industry}
               onChange={(e) => setForm({ ...form, industry: e.target.value })}
             />
-          </label>
+          </FormField>
         </div>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">Size</span>
-            <select
-              className="select"
-              value={form.sizeBucket}
-              onChange={(e) =>
-                setForm({ ...form, sizeBucket: e.target.value })
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Size">
+            <Select
+              value={form.sizeBucket || "__none__"}
+              onValueChange={(v) =>
+                setForm({ ...form, sizeBucket: v === "__none__" ? "" : v })
               }
             >
-              <option value="">—</option>
-              <option value="1-10">1–10</option>
-              <option value="11-50">11–50</option>
-              <option value="51-200">51–200</option>
-              <option value="201-500">201–500</option>
-              <option value="500+">500+</option>
-            </select>
-          </label>
-          <label className="field">
-            <span className="field-label">Status</span>
-            <select
-              className="select"
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">—</SelectItem>
+                <SelectItem value="1-10">1–10</SelectItem>
+                <SelectItem value="11-50">11–50</SelectItem>
+                <SelectItem value="51-200">51–200</SelectItem>
+                <SelectItem value="201-500">201–500</SelectItem>
+                <SelectItem value="500+">500+</SelectItem>
+              </SelectContent>
+            </Select>
+          </FormField>
+          <FormField label="Status">
+            <Select
               value={form.status}
-              onChange={(e) => setForm({ ...form, status: e.target.value })}
+              onValueChange={(v) => setForm({ ...form, status: v })}
             >
-              <option value="lead">Lead</option>
-              <option value="active">Active</option>
-              <option value="churned">Churned</option>
-            </select>
-          </label>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="lead">Lead</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="churned">Churned</SelectItem>
+              </SelectContent>
+            </Select>
+          </FormField>
         </div>
-        {err && <div className="error-text">{err}</div>}
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>
+        {err && <ErrorBlock message={err} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={busy || !form.name.trim()}
-            onClick={() => void save()}
-          >
-            {busy ? "Saving…" : "Add company"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button onClick={() => void save()} disabled={busy || !form.name.trim()}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Add company
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1116,38 +996,34 @@ function PeoplePage({ org }: { org: Organization }) {
   }, [list, selectedId]);
 
   return (
-    <>
-      <div className="list-pane">
-        <div className="list-header">
-          <div className="list-title">People</div>
-          <div className="list-count">{list.length}</div>
-          <div className="spacer" />
-          <button
-            className="btn btn-primary"
-            onClick={() => setAddOpen(true)}
-          >
-            <IconPlus /> Add person
-          </button>
-        </div>
+    <div className="grid w-full grid-cols-[1fr_360px] overflow-hidden">
+      <div className="flex flex-col overflow-hidden">
+        <ListHeader
+          title="People"
+          count={list.length}
+          actionLabel="Add person"
+          onAction={() => setAddOpen(true)}
+        />
         {list.length === 0 ? (
-          <div className="empty">
-            <div className="empty-title">No people yet</div>
-            <div className="empty-body">
-              Add a contact to link to a company.
-            </div>
-            <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
-              Add person
-            </button>
-          </div>
+          <EmptyState
+            title="No people yet"
+            sub="Add a contact to link to a company."
+            action={
+              <Button onClick={() => setAddOpen(true)}>
+                <Plus className="size-4" />
+                Add person
+              </Button>
+            }
+          />
         ) : (
-          <div style={{ overflowY: "auto", flex: 1 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Title</th>
-                  <th>Company</th>
-                  <th>Email</th>
+          <div className="overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-card/95 backdrop-blur">
+                <tr className="border-b text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-2 text-left">Name</th>
+                  <th className="px-4 py-2 text-left">Title</th>
+                  <th className="px-4 py-2 text-left">Company</th>
+                  <th className="px-4 py-2 text-left">Email</th>
                 </tr>
               </thead>
               <tbody>
@@ -1158,45 +1034,40 @@ function PeoplePage({ org }: { org: Organization }) {
                   return (
                     <tr
                       key={p.id}
-                      className={p.id === selectedId ? "selected" : ""}
                       onClick={() => setSelectedId(p.id)}
+                      className={cn(
+                        "cursor-pointer border-b border-border/40 transition-colors hover:bg-muted/30",
+                        p.id === selectedId && "bg-accent",
+                      )}
                     >
-                      <td>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <div
-                            className="avatar avatar-sm"
-                            style={{ backgroundColor: "#c7d2fe" }}
-                          >
-                            {initials(fullName(p))}
-                          </div>
-                          <span style={{ fontWeight: 500 }}>{fullName(p)}</span>
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <Avatar className="size-7 bg-primary/20">
+                            <AvatarFallback className="bg-transparent text-[10px]">
+                              {initials(fullName(p))}
+                            </AvatarFallback>
+                          </Avatar>
+                          <span className="font-medium">{fullName(p)}</span>
                         </div>
                       </td>
-                      <td style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-2.5 text-muted-foreground">
                         {p.title || "—"}
                       </td>
-                      <td>
+                      <td className="px-4 py-2.5">
                         {company ? (
-                          <span className="chip-company">
-                            <div
-                              className="avatar avatar-xs"
-                              style={{ backgroundColor: "#fde68a" }}
-                            >
-                              {initials(company.name)}
-                            </div>
+                          <span className="inline-flex items-center gap-1.5 rounded-md border bg-secondary/50 px-2 py-0.5 text-xs">
+                            <Avatar className="size-4 bg-amber-200">
+                              <AvatarFallback className="bg-transparent text-[8px]">
+                                {initials(company.name)}
+                              </AvatarFallback>
+                            </Avatar>
                             {company.name}
                           </span>
                         ) : (
-                          <span style={{ color: "var(--text-dim)" }}>—</span>
+                          <span className="text-muted-foreground">—</span>
                         )}
                       </td>
-                      <td style={{ color: "var(--text-muted)" }}>
+                      <td className="px-4 py-2.5 text-muted-foreground">
                         {p.email || "—"}
                       </td>
                     </tr>
@@ -1207,22 +1078,19 @@ function PeoplePage({ org }: { org: Organization }) {
           </div>
         )}
       </div>
-      <aside className="detail-pane">
+      <DetailPane>
         {selected ? (
           <PersonDetail person={selected} companyById={companyById} />
         ) : (
-          <div className="empty">
-            <div className="empty-body">Pick a person to see details.</div>
-          </div>
+          <EmptyDetail>Pick a person to see details.</EmptyDetail>
         )}
-      </aside>
-      {addOpen && (
-        <AddPersonModal
-          companies={companies ?? []}
-          onClose={() => setAddOpen(false)}
-        />
-      )}
-    </>
+      </DetailPane>
+      <AddPersonModal
+        open={addOpen}
+        companies={companies ?? []}
+        onClose={() => setAddOpen(false)}
+      />
+    </div>
   );
 }
 
@@ -1238,43 +1106,27 @@ function PersonDetail({
     : undefined;
   return (
     <>
-      <div className="detail-header">
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 10,
-          }}
-        >
-          <div
-            className="avatar avatar-lg"
-            style={{ backgroundColor: "#c7d2fe" }}
-          >
-            {initials(fullName(person))}
-          </div>
-          <div>
-            <div className="detail-name">{fullName(person)}</div>
-            <div className="detail-sub">
-              {person.title || "—"}
-              {company ? ` · ${company.name}` : ""}
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="detail-section">
-        <div className="detail-section-title">Contact</div>
-        <div className="detail-kv">
-          <div className="detail-kv-k">Email</div>
-          <div className="detail-kv-v">{person.email || "—"}</div>
-          <div className="detail-kv-k">Phone</div>
-          <div className="detail-kv-v">{person.phone || "—"}</div>
-          <div className="detail-kv-k">Company</div>
-          <div className="detail-kv-v">{company?.name || "—"}</div>
-          <div className="detail-kv-k">Created</div>
-          <div className="detail-kv-v">{ago(person.createdAt)}</div>
-        </div>
-      </div>
+      <DetailHeader
+        avatar={
+          <Avatar className="size-12 bg-primary/20">
+            <AvatarFallback className="bg-transparent">
+              {initials(fullName(person))}
+            </AvatarFallback>
+          </Avatar>
+        }
+        title={fullName(person)}
+        sub={`${person.title || "—"}${company ? ` · ${company.name}` : ""}`}
+      />
+      <DetailSection title="Contact">
+        <KvList
+          items={[
+            ["Email", person.email || "—"],
+            ["Phone", person.phone || "—"],
+            ["Company", company?.name || "—"],
+            ["Created", ago(person.createdAt)],
+          ]}
+        />
+      </DetailSection>
       <NotesSection targetType="Person" targetId={person.id} />
       <TimelineSection targetType="Person" targetId={person.id} />
     </>
@@ -1282,22 +1134,27 @@ function PersonDetail({
 }
 
 function AddPersonModal({
+  open,
   companies,
   onClose,
 }: {
+  open: boolean;
   companies: Company[];
   onClose: () => void;
 }) {
   const [form, setForm] = useState({
-    firstName: "",
-    lastName: "",
-    email: "",
-    phone: "",
-    title: "",
-    companyId: "",
+    firstName: "", lastName: "", email: "", phone: "", title: "", companyId: "",
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setForm({ firstName: "", lastName: "", email: "", phone: "", title: "", companyId: "" });
+      setErr(null);
+    }
+  }, [open]);
+
   async function save() {
     setBusy(true);
     setErr(null);
@@ -1317,99 +1174,90 @@ function AddPersonModal({
       setBusy(false);
     }
   }
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">Add person</div>
-        <div className="modal-subtitle">Contact in your network.</div>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">First name</span>
-            <input
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add person</DialogTitle>
+          <DialogDescription>Contact in your network.</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="First name">
+            <Input
               autoFocus
-              className="input"
               value={form.firstName}
-              onChange={(e) =>
-                setForm({ ...form, firstName: e.target.value })
-              }
+              onChange={(e) => setForm({ ...form, firstName: e.target.value })}
             />
-          </label>
-          <label className="field">
-            <span className="field-label">Last name</span>
-            <input
-              className="input"
+          </FormField>
+          <FormField label="Last name">
+            <Input
               value={form.lastName}
               onChange={(e) => setForm({ ...form, lastName: e.target.value })}
             />
-          </label>
+          </FormField>
         </div>
-        <label className="field">
-          <span className="field-label">Title</span>
-          <input
-            className="input"
+        <FormField label="Title">
+          <Input
             value={form.title}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
           />
-        </label>
-        <label className="field">
-          <span className="field-label">Company</span>
-          <select
-            className="select"
-            value={form.companyId}
-            onChange={(e) => setForm({ ...form, companyId: e.target.value })}
+        </FormField>
+        <FormField label="Company">
+          <Select
+            value={form.companyId || "__none__"}
+            onValueChange={(v) =>
+              setForm({ ...form, companyId: v === "__none__" ? "" : v })
+            }
           >
-            <option value="">—</option>
-            {companies.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">Email</span>
-            <input
-              className="input"
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">—</SelectItem>
+              {companies.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FormField>
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Email">
+            <Input
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
             />
-          </label>
-          <label className="field">
-            <span className="field-label">Phone</span>
-            <input
-              className="input"
+          </FormField>
+          <FormField label="Phone">
+            <Input
               value={form.phone}
               onChange={(e) => setForm({ ...form, phone: e.target.value })}
             />
-          </label>
+          </FormField>
         </div>
-        {err && <div className="error-text">{err}</div>}
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>
+        {err && <ErrorBlock message={err} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={busy || !form.firstName.trim()}
-            onClick={() => void save()}
-          >
-            {busy ? "Saving…" : "Add person"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button onClick={() => void save()} disabled={busy || !form.firstName.trim()}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Add person
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Deals page — Kanban pipeline
+// Deals page (Kanban)
 // ---------------------------------------------------------------------------
 
 function DealsPage({ org }: { org: Organization }) {
-  const { data: deals } = db.useQuery<Deal>("Deal", {
-    where: { orgId: org.id },
-  });
+  const { data: deals } = db.useQuery<Deal>("Deal", { where: { orgId: org.id } });
   const { data: companies } = db.useQuery<Company>("Company", {
     where: { orgId: org.id },
   });
@@ -1437,63 +1285,59 @@ function DealsPage({ org }: { org: Organization }) {
   const selected = (deals ?? []).find((d) => d.id === selectedId) ?? null;
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-      <div className="list-header">
-        <div className="list-title">Pipeline</div>
-        <div className="list-count">{(deals ?? []).length}</div>
-        <div className="spacer" />
-        <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
-          <IconPlus /> New deal
-        </button>
-      </div>
-      <div className="kanban">
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <ListHeader
+        title="Pipeline"
+        count={(deals ?? []).length}
+        actionLabel="New deal"
+        onAction={() => setAddOpen(true)}
+      />
+      <div className="grid flex-1 grid-cols-6 gap-3 overflow-x-auto p-4">
         {STAGES.map((stage) => {
           const items = byStage[stage] ?? [];
           const total = items.reduce((s, d) => s + d.amount, 0);
           return (
-            <div key={stage} className="kanban-col">
-              <div className="kanban-col-header">
-                <span
-                  className={"pill " + STAGE_COLORS[stage]}
-                  style={{ padding: "1px 7px" }}
+            <div key={stage} className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Badge
+                  variant={STAGE_VARIANT[stage]}
+                  className="capitalize"
                 >
-                  <span className="pill-dot" />
                   {STAGE_LABELS[stage]}
+                </Badge>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {items.length}
                 </span>
-                <span className="kanban-col-count">{items.length}</span>
-                <span className="kanban-col-total">{money(total)}</span>
+                <span className="ml-auto font-mono text-xs text-muted-foreground">
+                  {money(total)}
+                </span>
               </div>
-              {items.map((d) => (
-                <DealCard
-                  key={d.id}
-                  deal={d}
-                  company={
-                    d.companyId ? companyById.get(d.companyId) : undefined
-                  }
-                  person={d.personId ? personById.get(d.personId) : undefined}
-                  onClick={() => setSelectedId(d.id)}
-                />
-              ))}
+              <div className="flex flex-col gap-2 overflow-y-auto">
+                {items.map((d) => (
+                  <DealCard
+                    key={d.id}
+                    deal={d}
+                    company={d.companyId ? companyById.get(d.companyId) : undefined}
+                    person={d.personId ? personById.get(d.personId) : undefined}
+                    onClick={() => setSelectedId(d.id)}
+                  />
+                ))}
+              </div>
             </div>
           );
         })}
       </div>
-      {addOpen && (
-        <AddDealModal
-          companies={companies ?? []}
-          people={people ?? []}
-          onClose={() => setAddOpen(false)}
-        />
-      )}
-      {selected && (
-        <DealModal
-          deal={selected}
-          company={
-            selected.companyId ? companyById.get(selected.companyId) : undefined
-          }
-          onClose={() => setSelectedId(null)}
-        />
-      )}
+      <AddDealModal
+        open={addOpen}
+        companies={companies ?? []}
+        people={people ?? []}
+        onClose={() => setAddOpen(false)}
+      />
+      <DealModal
+        deal={selected}
+        company={selected?.companyId ? companyById.get(selected.companyId) : undefined}
+        onClose={() => setSelectedId(null)}
+      />
     </div>
   );
 }
@@ -1510,45 +1354,37 @@ function DealCard({
   onClick: () => void;
 }) {
   return (
-    <div className="kanban-card" onClick={onClick}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 8,
-        }}
-      >
-        <div className="kanban-card-name">{deal.name}</div>
-        <div className="kanban-card-amount">{money(deal.amount)}</div>
+    <Card
+      onClick={onClick}
+      className="cursor-pointer p-3 transition-colors hover:border-primary/40"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-sm font-medium leading-tight">{deal.name}</div>
+        <div className="font-mono text-sm font-semibold tabular-nums">
+          {money(deal.amount)}
+        </div>
       </div>
       {(company || person) && (
-        <div className="kanban-card-meta">
+        <div className="mt-2 flex flex-wrap items-center gap-1 text-xs">
           {company && (
-            <span className="chip-company">
-              <div
-                className="avatar avatar-xs"
-                style={{ backgroundColor: "#fde68a" }}
-              >
-                {initials(company.name)}
-              </div>
+            <span className="inline-flex items-center gap-1 rounded-md border bg-secondary/50 px-1.5 py-0.5">
+              <Avatar className="size-3.5 bg-amber-200">
+                <AvatarFallback className="bg-transparent text-[7px]">
+                  {initials(company.name)}
+                </AvatarFallback>
+              </Avatar>
               {company.name}
             </span>
           )}
           {person && (
-            <span style={{ color: "var(--text-muted)" }}>
-              · {fullName(person)}
-            </span>
+            <span className="text-muted-foreground">· {fullName(person)}</span>
           )}
         </div>
       )}
-      <div
-        className="kanban-card-meta"
-        style={{ marginTop: 4, color: "var(--text-dim)" }}
-      >
+      <div className="mt-2 text-[11px] text-muted-foreground">
         {deal.probability}% · {ago(deal.createdAt)}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -1557,11 +1393,13 @@ function DealModal({
   company,
   onClose,
 }: {
-  deal: Deal;
+  deal: Deal | null;
   company?: Company;
   onClose: () => void;
 }) {
+  if (!deal) return null;
   async function moveTo(stage: string) {
+    if (!deal) return;
     try {
       await callFn("updateDealStage", { dealId: deal.id, stage });
     } catch (e) {
@@ -1569,71 +1407,70 @@ function DealModal({
     }
   }
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 500 }}
-      >
-        <div className="modal-title">{deal.name}</div>
-        <div className="modal-subtitle">
-          {money(deal.amount)} · {company?.name || "No company"} ·{" "}
-          {deal.probability}%
+    <Dialog open={!!deal} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{deal.name}</DialogTitle>
+          <DialogDescription>
+            {money(deal.amount)} · {company?.name || "No company"} ·{" "}
+            {deal.probability}%
+          </DialogDescription>
+        </DialogHeader>
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Move to stage
         </div>
-        <div className="detail-section-title">Move to stage</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div className="flex flex-wrap gap-2">
           {STAGES.map((s) => (
             <button
               key={s}
-              onClick={() => {
-                void moveTo(s);
-              }}
-              className={"pill " + STAGE_COLORS[s]}
-              style={{
-                padding: "4px 12px",
-                border:
-                  s === deal.stage
-                    ? "2px solid var(--accent)"
-                    : "1px solid transparent",
-                fontSize: 12,
-                cursor: "pointer",
-              }}
+              onClick={() => void moveTo(s)}
+              className={cn(
+                "rounded-md border px-3 py-1 text-xs font-medium transition-colors",
+                s === deal.stage
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border hover:bg-accent",
+              )}
             >
-              <span className="pill-dot" />
               {STAGE_LABELS[s]}
             </button>
           ))}
         </div>
         <NotesSection targetType="Deal" targetId={deal.id} />
         <TimelineSection targetType="Deal" targetId={deal.id} />
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Close
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function AddDealModal({
+  open,
   companies,
   people,
   onClose,
 }: {
+  open: boolean;
   companies: Company[];
   people: Person[];
   onClose: () => void;
 }) {
   const [form, setForm] = useState({
-    name: "",
-    companyId: "",
-    personId: "",
-    stage: "lead",
-    amount: "",
+    name: "", companyId: "", personId: "", stage: "lead", amount: "",
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setForm({ name: "", companyId: "", personId: "", stage: "lead", amount: "" });
+      setErr(null);
+    }
+  }, [open]);
+
   async function save() {
     setBusy(true);
     setErr(null);
@@ -1652,95 +1489,104 @@ function AddDealModal({
       setBusy(false);
     }
   }
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">New deal</div>
-        <div className="modal-subtitle">Track an opportunity.</div>
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New deal</DialogTitle>
+          <DialogDescription>Track an opportunity.</DialogDescription>
+        </DialogHeader>
+        <FormField label="Name">
+          <Input
             autoFocus
-            className="input"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             placeholder="Acme — Q2 expansion"
           />
-        </label>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">Company</span>
-            <select
-              className="select"
-              value={form.companyId}
-              onChange={(e) => setForm({ ...form, companyId: e.target.value })}
+        </FormField>
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Company">
+            <Select
+              value={form.companyId || "__none__"}
+              onValueChange={(v) =>
+                setForm({ ...form, companyId: v === "__none__" ? "" : v })
+              }
             >
-              <option value="">—</option>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field-label">Person</span>
-            <select
-              className="select"
-              value={form.personId}
-              onChange={(e) => setForm({ ...form, personId: e.target.value })}
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">—</SelectItem>
+                {companies.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FormField>
+          <FormField label="Person">
+            <Select
+              value={form.personId || "__none__"}
+              onValueChange={(v) =>
+                setForm({ ...form, personId: v === "__none__" ? "" : v })
+              }
             >
-              <option value="">—</option>
-              {people.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {fullName(p)}
-                </option>
-              ))}
-            </select>
-          </label>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">—</SelectItem>
+                {people.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {fullName(p)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FormField>
         </div>
-        <div className="row-2">
-          <label className="field">
-            <span className="field-label">Stage</span>
-            <select
-              className="select"
+        <div className="grid grid-cols-2 gap-3">
+          <FormField label="Stage">
+            <Select
               value={form.stage}
-              onChange={(e) => setForm({ ...form, stage: e.target.value })}
+              onValueChange={(v) => setForm({ ...form, stage: v })}
             >
-              {STAGES.map((s) => (
-                <option key={s} value={s}>
-                  {STAGE_LABELS[s]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field-label">Amount (USD)</span>
-            <input
-              className="input"
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STAGES.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {STAGE_LABELS[s]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FormField>
+          <FormField label="Amount (USD)">
+            <Input
               type="number"
               min="0"
               step="100"
               value={form.amount}
               onChange={(e) => setForm({ ...form, amount: e.target.value })}
             />
-          </label>
+          </FormField>
         </div>
-        {err && <div className="error-text">{err}</div>}
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose}>
+        {err && <ErrorBlock message={err} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={busy || !form.name.trim()}
-            onClick={() => void save()}
-          >
-            {busy ? "Saving…" : "Create deal"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button onClick={() => void save()} disabled={busy || !form.name.trim()}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            Create deal
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1776,37 +1622,37 @@ function NotesSection({
   }
 
   return (
-    <div className="detail-section">
-      <div className="detail-section-title">Notes</div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        <input
-          className="input"
+    <DetailSection title="Notes">
+      <div className="mb-3 flex gap-2">
+        <Input
           value={body}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && add()}
           placeholder="Add a note…"
         />
-        <button
-          className="btn btn-primary"
+        <Button
+          size="sm"
           disabled={busy || !body.trim()}
           onClick={() => void add()}
         >
           Add
-        </button>
+        </Button>
       </div>
-      {(notes ?? []).map((n) => (
-        <NoteCard key={n.id} note={n} />
-      ))}
-    </div>
+      <div className="flex flex-col gap-2">
+        {(notes ?? []).map((n) => (
+          <NoteCard key={n.id} note={n} />
+        ))}
+      </div>
+    </DetailSection>
   );
 }
 
 function NoteCard({ note }: { note: Note }) {
   const { data: author } = db.useQueryOne<User>("User", note.authorId);
   return (
-    <div className="note-card">
-      <div className="note-body">{note.body}</div>
-      <div className="note-meta">
+    <div className="rounded-md border bg-secondary/40 p-3">
+      <p className="whitespace-pre-wrap text-sm">{note.body}</p>
+      <div className="mt-1.5 text-[11px] text-muted-foreground">
         {author?.displayName ?? "…"} · {ago(note.createdAt)}
       </div>
     </div>
@@ -1825,16 +1671,17 @@ function TimelineSection({
     orderBy: { createdAt: "desc" },
   });
   return (
-    <div className="detail-section">
-      <div className="detail-section-title">Activity</div>
+    <DetailSection title="Activity">
       {(activities ?? []).length === 0 ? (
-        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          Nothing here yet.
-        </div>
+        <p className="text-xs text-muted-foreground">Nothing here yet.</p>
       ) : (
-        (activities ?? []).map((a) => <ActivityRow key={a.id} activity={a} />)
+        <div className="flex flex-col gap-2">
+          {(activities ?? []).map((a) => (
+            <ActivityRow key={a.id} activity={a} />
+          ))}
+        </div>
       )}
-    </div>
+    </DetailSection>
   );
 }
 
@@ -1845,19 +1692,20 @@ function ActivityRow({ activity }: { activity: Activity }) {
     case "created":
       text = "created this record";
       break;
-    case "stage_changed": {
+    case "stage_changed":
       try {
         const meta = JSON.parse(activity.metaJson || "{}") as {
           from?: string;
           to?: string;
         };
-        text = `moved stage from ${STAGE_LABELS[meta.from ?? ""] || meta.from} to ${STAGE_LABELS[meta.to ?? ""] || meta.to}`;
+        text = `moved stage ${
+          STAGE_LABELS[meta.from ?? ""] || meta.from
+        } → ${STAGE_LABELS[meta.to ?? ""] || meta.to}`;
       } catch {
         text = "changed stage";
       }
       break;
-    }
-    case "note_added": {
+    case "note_added":
       try {
         const meta = JSON.parse(activity.metaJson || "{}") as {
           preview?: string;
@@ -1867,83 +1715,179 @@ function ActivityRow({ activity }: { activity: Activity }) {
         text = "added a note";
       }
       break;
-    }
     default:
       text = activity.kind;
   }
   return (
-    <div className="timeline-item">
-      <div className="timeline-icon">
-        <IconDot />
-      </div>
-      <div className="timeline-body">
-        <div className="timeline-text">
-          <strong>{actor?.displayName ?? "Someone"}</strong> {text}
+    <div className="flex gap-2 text-xs">
+      <Circle className="mt-1 size-2 shrink-0 fill-current text-muted-foreground" />
+      <div className="flex-1">
+        <div>
+          <strong className="text-foreground">
+            {actor?.displayName ?? "Someone"}
+          </strong>{" "}
+          {text}
         </div>
-        <div className="timeline-when">{ago(activity.createdAt)}</div>
+        <div className="text-[11px] text-muted-foreground">
+          {ago(activity.createdAt)}
+        </div>
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Icons
+// Layout helpers
 // ---------------------------------------------------------------------------
+
+function ListHeader({
+  title,
+  count,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  count: number;
+  actionLabel: string;
+  onAction: () => void;
+}) {
+  return (
+    <header className="flex h-12 items-center gap-3 border-b px-5">
+      <h1 className="text-sm font-semibold">{title}</h1>
+      <Badge variant="secondary" className="font-mono text-[10px]">
+        {count}
+      </Badge>
+      <div className="flex-1" />
+      <Button size="sm" onClick={onAction}>
+        <Plus className="size-4" />
+        {actionLabel}
+      </Button>
+    </header>
+  );
+}
+
+function DetailPane({ children }: { children: React.ReactNode }) {
+  return (
+    <aside className="flex flex-col overflow-y-auto border-l bg-card/40 p-5">
+      {children}
+    </aside>
+  );
+}
+
+function DetailHeader({
+  avatar,
+  title,
+  sub,
+}: {
+  avatar: React.ReactNode;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <div className="mb-4 flex items-center gap-3">
+      {avatar}
+      <div>
+        <div className="text-base font-semibold">{title}</div>
+        <div className="text-xs text-muted-foreground">{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+function DetailSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mb-5">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {title}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function KvList({ items }: { items: Array<[string, React.ReactNode]> }) {
+  return (
+    <dl className="grid grid-cols-[80px_1fr] gap-y-1.5 text-sm">
+      {items.map(([k, v]) => (
+        <React.Fragment key={k}>
+          <dt className="text-muted-foreground">{k}</dt>
+          <dd>{v}</dd>
+        </React.Fragment>
+      ))}
+    </dl>
+  );
+}
+
+function EmptyState({
+  title,
+  sub,
+  action,
+}: {
+  title: string;
+  sub: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="grid flex-1 place-items-center">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <h2 className="text-base font-semibold">{title}</h2>
+        <p className="text-sm text-muted-foreground">{sub}</p>
+        {action}
+      </div>
+    </div>
+  );
+}
+
+function EmptyDetail({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid h-full place-items-center text-sm text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+function FormField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <Label>{label}</Label>
+      {children}
+    </div>
+  );
+}
+
+function ErrorBlock({ message }: { message: string }) {
+  return (
+    <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      {message}
+    </div>
+  );
+}
+
+function BrandRow() {
+  return (
+    <div className="flex items-center gap-2">
+      <BrandMark />
+      <span className="text-base font-semibold">Pylon CRM</span>
+    </div>
+  );
+}
 
 function BrandMark() {
   return (
-    <div className="brand-mark">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-        <path
-          d="M4 7l8-4 8 4v10l-8 4-8-4V7z"
-          stroke="white"
-          strokeWidth="2"
-          strokeLinejoin="round"
-        />
-        <path
-          d="M12 11v10M4 7l8 4 8-4"
-          stroke="white"
-          strokeWidth="2"
-          strokeLinejoin="round"
-        />
-      </svg>
+    <div className="grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
+      <DollarSign className="size-3.5" />
     </div>
-  );
-}
-function IconBuilding() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <rect x="4" y="3" width="16" height="18" rx="2" stroke="currentColor" strokeWidth="2" />
-      <path d="M9 7h2M9 11h2M9 15h2M13 7h2M13 11h2M13 15h2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-function IconUser() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <circle cx="12" cy="8" r="3.5" stroke="currentColor" strokeWidth="2" />
-      <path d="M4 20c0-4 3.5-6 8-6s8 2 8 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-function IconMoney() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-      <path d="M12 3v18M16 6h-6a3 3 0 0 0 0 6h4a3 3 0 0 1 0 6H8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-function IconPlus() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-    </svg>
-  );
-}
-function IconDot() {
-  return (
-    <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor">
-      <circle cx="5" cy="5" r="3" />
-    </svg>
   );
 }

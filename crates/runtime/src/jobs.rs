@@ -255,15 +255,20 @@ impl JobQueue {
         Ok(id)
     }
 
-    /// Dequeue the highest-priority pending job. Blocks up to `timeout`.
+    /// Dequeue the highest-priority pending job whose `delay_secs` has
+    /// elapsed. Blocks up to `timeout` if nothing is ready.
     pub fn dequeue(&self, timeout: Duration) -> Option<Job> {
         let mut pending = self.pending.lock().unwrap();
-        if pending.is_empty() {
+        let now = now_secs();
+        if !pending.iter().any(|j| is_ready(j, now)) {
             let (guard, _) = self.notify.wait_timeout(pending, timeout).unwrap();
             pending = guard;
         }
 
-        if let Some(mut job) = pending.pop_front() {
+        let now = now_secs();
+        let pos = pending.iter().position(|j| is_ready(j, now));
+        if let Some(idx) = pos {
+            let mut job = pending.remove(idx).unwrap();
             job.status = JobStatus::Running;
             job.started_at = Some(now_iso());
             self.running
@@ -277,15 +282,20 @@ impl JobQueue {
         }
     }
 
-    /// Dequeue from a specific queue. Blocks up to `timeout`.
+    /// Dequeue from a specific queue. Blocks up to `timeout` if nothing
+    /// in the queue is ready (delay-respecting).
     pub fn dequeue_from(&self, queue: &str, timeout: Duration) -> Option<Job> {
         let mut pending = self.pending.lock().unwrap();
-        if !pending.iter().any(|j| j.queue == queue) {
+        let now = now_secs();
+        if !pending.iter().any(|j| j.queue == queue && is_ready(j, now)) {
             let (guard, _) = self.notify.wait_timeout(pending, timeout).unwrap();
             pending = guard;
         }
 
-        let pos = pending.iter().position(|j| j.queue == queue);
+        let now = now_secs();
+        let pos = pending
+            .iter()
+            .position(|j| j.queue == queue && is_ready(j, now));
         if let Some(idx) = pos {
             let mut job = pending.remove(idx).unwrap();
             job.status = JobStatus::Running;
@@ -631,11 +641,28 @@ impl WorkerHandle {
 // ---------------------------------------------------------------------------
 
 fn now_iso() -> String {
-    let secs = SystemTime::now()
+    format!("{}Z", now_secs())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    format!("{}Z", secs)
+        .as_secs()
+}
+
+/// True if a job's `delay_secs` has elapsed since `created_at`. Jobs
+/// without a delay (`delay_secs == 0`) are always ready.
+fn is_ready(job: &Job, now: u64) -> bool {
+    if job.delay_secs == 0 {
+        return true;
+    }
+    let created = job
+        .created_at
+        .trim_end_matches('Z')
+        .parse::<u64>()
+        .unwrap_or(0);
+    now >= created.saturating_add(job.delay_secs)
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@
  *   - Bot driver moves bots to random targets every few seconds
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   init,
@@ -23,6 +23,7 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import { Button } from "@pylonsync/example-ui/button";
 
 const BASE_URL = "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "world3d" });
@@ -467,49 +468,38 @@ export function WorldApp() {
   }, [avatars]);
 
   return (
-    <div className="w3d">
-      <div ref={mountRef} className="w3d-canvas" />
+    <div className="fixed inset-0 bg-[#0a0a0c]">
+      <div ref={mountRef} className="absolute inset-0" />
 
-      <div className="w3d-hud hud-stats">
-        <div className="hud-row">
-          <span className="hud-label">AVATARS</span>
-          <span className="hud-value">{hud.avatars.toLocaleString()}</span>
-          {hud.bots > 0 && <span className="hud-sub">· {hud.bots} bot</span>}
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">MUT/S</span>
-          <span className="hud-value">{hud.mutPerSec}</span>
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">P50</span>
-          <span className="hud-value">{hud.p50}<span className="hud-unit">ms</span></span>
-        </div>
-        <div className="hud-row">
-          <span className="hud-label">P95</span>
-          <span className="hud-value">{hud.p95}<span className="hud-unit">ms</span></span>
-        </div>
+      <div className="absolute left-4 top-4 flex flex-col gap-2 rounded-lg border bg-card/85 p-4 backdrop-blur-sm">
+        <HudRow label="AVATARS" value={hud.avatars.toLocaleString()} subtle={hud.bots > 0 ? `${hud.bots} bot` : undefined} />
+        <HudRow label="MUT/S" value={hud.mutPerSec.toString()} />
+        <HudRow label="P50" value={`${hud.p50}`} unit="ms" />
+        <HudRow label="P95" value={`${hud.p95}`} unit="ms" />
       </div>
 
-      <div className="w3d-hud hud-controls">
-        <div className="hud-title">Stress test</div>
-        <div className="hud-btn-row">
-          <button className="hud-btn" disabled={spawning} onClick={() => spawnBots(10)}>+10</button>
-          <button className="hud-btn" disabled={spawning} onClick={() => spawnBots(50)}>+50</button>
-          <button className="hud-btn" disabled={spawning} onClick={() => spawnBots(200)}>+200</button>
+      <div className="absolute right-4 top-4 flex w-56 flex-col gap-3 rounded-lg border bg-card/85 p-4 backdrop-blur-sm">
+        <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Stress test
         </div>
-        <button className="hud-btn danger" onClick={clearBots}>Clear bots</button>
-        <div className="hud-hint">
-          <b>WASD</b> to move · <b>click</b> for mouse-look
+        <div className="flex gap-1.5">
+          <Button size="xs" variant="outline" disabled={spawning} onClick={() => spawnBots(10)} className="flex-1">+10</Button>
+          <Button size="xs" variant="outline" disabled={spawning} onClick={() => spawnBots(50)} className="flex-1">+50</Button>
+          <Button size="xs" variant="outline" disabled={spawning} onClick={() => spawnBots(200)} className="flex-1">+200</Button>
         </div>
+        <Button size="xs" variant="ghost" onClick={clearBots} className="text-destructive hover:bg-destructive/10 hover:text-destructive">
+          Clear bots
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          <strong className="text-foreground">WASD</strong> to move · <strong className="text-foreground">click</strong> for mouse-look
+        </p>
         {!pointerLocked && (
-          <div className="hud-hint" style={{ color: "#a78bfa" }}>
-            Click the scene to engage controls.
-          </div>
+          <p className="text-xs text-primary">Click the scene to engage controls.</p>
         )}
       </div>
 
-      <div className="w3d-brand">
-        <svg viewBox="0 0 48 64" width="16" height="21" fill="currentColor">
+      <div className="absolute bottom-4 left-4 flex items-center gap-2 font-mono text-xs text-muted-foreground">
+        <svg viewBox="0 0 48 64" width="14" height="18" fill="currentColor" aria-hidden>
           <path d="M24 2 L10 20 L24 32 Z" />
           <path d="M24 2 L38 20 L24 32 Z" />
           <path d="M24 32 L18 48 L24 62 L30 48 Z" />
@@ -518,6 +508,31 @@ export function WorldApp() {
         </svg>
         <span>Pylon · World3D</span>
       </div>
+    </div>
+  );
+}
+
+function HudRow({
+  label,
+  value,
+  subtle,
+  unit,
+}: {
+  label: string;
+  value: string;
+  subtle?: string;
+  unit?: string;
+}) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="w-14 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className="font-mono text-base tabular-nums">
+        {value}
+        {unit && <span className="ml-0.5 text-xs text-muted-foreground">{unit}</span>}
+      </span>
+      {subtle && <span className="text-xs text-muted-foreground">· {subtle}</span>}
     </div>
   );
 }
