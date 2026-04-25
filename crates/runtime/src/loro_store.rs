@@ -35,6 +35,55 @@
 //! No eviction yet. Working sets up to ~100K active rows are fine on
 //! commodity hardware (~5-50 MB). For larger working sets a follow-up
 //! adds LRU eviction with snapshot reload on next access.
+//!
+//! # Bandwidth: full snapshot per write (TODO)
+//!
+//! Every CRDT-mode write triggers a binary WS broadcast carrying the
+//! row's *full* current snapshot, not just the incremental update.
+//! Loro's compaction bounds individual snapshots, but the per-write
+//! cost still scales with total state size, not write size.
+//!
+//! Concrete numbers:
+//!
+//! | Workload                           | Snapshot/row | Per-write fanout |
+//! |------------------------------------|--------------|------------------|
+//! | Chat message                       | ~200 B       | tiny             |
+//! | Boring CRUD record                 | ~500 B       | tiny             |
+//! | Whiteboard with 1k strokes         | ~30 KB       | uncomfortable    |
+//! | Document with 50K-char body        | ~80 KB       | bad              |
+//!
+//! Multiply by `connected_clients × writes_per_second` to get total
+//! broadcast bandwidth. For chat-shaped workloads it's free. For collab
+//! whiteboards / large documents it bites once you pass ~10 connected
+//! clients on a hot row.
+//!
+//! # Switching to incremental updates
+//!
+//! Loro already supports `export(ExportMode::updates(version_vector))`
+//! returning only the ops a peer hasn't seen — the building block is
+//! there. What's missing is the per-client tracking:
+//!
+//! 1. Subscribe protocol — clients tell the server "I want updates for
+//!    rows X, Y, Z" instead of every CRDT write fanning out to every
+//!    client. Pylon's existing room layer is the natural transport
+//!    once room semantics extend to per-row subscriptions.
+//! 2. Server-side state — `(client_id, entity, row_id) → version_vector`
+//!    so the server knows what each client is missing. Bounded by the
+//!    subscribe set; LRU-evicted with the doc cache.
+//! 3. Encoder swap — `notify_crdt` calls `encode_update_since(vv)`
+//!    instead of `encode_snapshot()` and ships frame type `0x11`
+//!    (CRDT_FRAME_UPDATE) instead of `0x10` (CRDT_FRAME_SNAPSHOT).
+//!    Wire format already reserves both bytes.
+//! 4. New-subscriber bootstrap — first frame is still a snapshot
+//!    (`0x10`), subsequent frames are deltas (`0x11`).
+//!
+//! Estimated effort: ~2 days for a working slice plus a week of
+//! production hardening (correct VV tracking under reconnects,
+//! garbage-collecting subscriptions on disconnect, handling missed
+//! frames via resync request).
+//!
+//! Until then this implementation is fine for chat / boring CRUD /
+//! demo workloads. Don't run a Figma clone on it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

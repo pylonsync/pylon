@@ -64,35 +64,78 @@ pub const CRDT_FRAME_SNAPSHOT: u8 = 0x10;
 /// Frame type for an incremental CRDT update (reserved — not yet emitted).
 pub const CRDT_FRAME_UPDATE: u8 = 0x11;
 
+/// Errors from [`encode_crdt_frame`]. Surfaced loud rather than silently
+/// truncating so a pathological entity / row_id name (>64 KiB) becomes
+/// an observable failure instead of a malformed frame the client can't
+/// decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameEncodeError {
+    /// Entity name exceeds the 16-bit length header. In practice every
+    /// Pylon entity name is well under 100 bytes — hitting this means
+    /// the caller is using the encoder for something it wasn't designed
+    /// for. The bound is `u16::MAX = 65535` bytes (UTF-8 length).
+    EntityTooLong { len: usize },
+    /// Row ID exceeds the 16-bit length header. Pylon-generated IDs are
+    /// 40 hex chars; user-supplied IDs aren't validated up to this layer
+    /// but are practically bounded by URL / SQL constraints elsewhere.
+    RowIdTooLong { len: usize },
+}
+
+impl std::fmt::Display for FrameEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EntityTooLong { len } => write!(
+                f,
+                "CRDT frame: entity name {len} bytes exceeds u16 length limit ({})",
+                u16::MAX
+            ),
+            Self::RowIdTooLong { len } => write!(
+                f,
+                "CRDT frame: row_id {len} bytes exceeds u16 length limit ({})",
+                u16::MAX
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FrameEncodeError {}
+
 /// Encode a CRDT broadcast frame. Layout documented at the top of this
-/// module. Returns a single owned `Vec<u8>` ready to ship as a binary
-/// WebSocket frame; client decoders mirror this in
-/// `@pylonsync/loro/src/wire.ts`.
+/// module. Returns the encoded bytes on success; errors when entity /
+/// row_id can't fit the 16-bit length header (~65 KiB, never hit in
+/// practice).
+///
+/// Client decoders mirror this in `@pylonsync/loro/src/wire.ts`.
 pub fn encode_crdt_frame(
     frame_type: u8,
     entity: &str,
     row_id: &str,
     payload: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, FrameEncodeError> {
     let entity_bytes = entity.as_bytes();
     let row_id_bytes = row_id.as_bytes();
-    // Header is bounded so `as u16` truncation can't silently corrupt.
-    // Entity / row_id strings well under 64 KiB in practice; truncate
-    // header values explicitly here so the wire shape stays valid even
-    // for pathological inputs (server logs the cap; client just sees
-    // a frame that won't decode and ignores).
-    let entity_len = entity_bytes.len().min(u16::MAX as usize) as u16;
-    let row_id_len = row_id_bytes.len().min(u16::MAX as usize) as u16;
+    if entity_bytes.len() > u16::MAX as usize {
+        return Err(FrameEncodeError::EntityTooLong {
+            len: entity_bytes.len(),
+        });
+    }
+    if row_id_bytes.len() > u16::MAX as usize {
+        return Err(FrameEncodeError::RowIdTooLong {
+            len: row_id_bytes.len(),
+        });
+    }
+    let entity_len = entity_bytes.len() as u16;
+    let row_id_len = row_id_bytes.len() as u16;
     let mut out = Vec::with_capacity(
         1 + 2 + entity_bytes.len() + 2 + row_id_bytes.len() + payload.len(),
     );
     out.push(frame_type);
     out.extend_from_slice(&entity_len.to_be_bytes());
-    out.extend_from_slice(&entity_bytes[..entity_len as usize]);
+    out.extend_from_slice(entity_bytes);
     out.extend_from_slice(&row_id_len.to_be_bytes());
-    out.extend_from_slice(&row_id_bytes[..row_id_len as usize]);
+    out.extend_from_slice(row_id_bytes);
     out.extend_from_slice(payload);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -106,7 +149,8 @@ mod crdt_frame_tests {
             "Message",
             "msg_123",
             &[0xab, 0xcd, 0xef],
-        );
+        )
+        .unwrap();
         assert_eq!(frame[0], 0x10);
         // entity_len = 7 ("Message") in BE
         assert_eq!(&frame[1..3], &[0, 7]);
@@ -120,13 +164,29 @@ mod crdt_frame_tests {
 
     #[test]
     fn empty_payload_still_carries_headers() {
-        let frame = encode_crdt_frame(CRDT_FRAME_UPDATE, "X", "y", &[]);
+        let frame = encode_crdt_frame(CRDT_FRAME_UPDATE, "X", "y", &[]).unwrap();
         assert_eq!(frame[0], 0x11);
         assert_eq!(&frame[1..3], &[0, 1]);
         assert_eq!(&frame[3..4], b"X");
         assert_eq!(&frame[4..6], &[0, 1]);
         assert_eq!(&frame[6..7], b"y");
         assert_eq!(frame.len(), 7);
+    }
+
+    #[test]
+    fn entity_too_long_errors() {
+        let huge_entity = "x".repeat(u16::MAX as usize + 1);
+        let err = encode_crdt_frame(CRDT_FRAME_SNAPSHOT, &huge_entity, "y", &[])
+            .expect_err("entity > u16::MAX must reject");
+        assert!(matches!(err, FrameEncodeError::EntityTooLong { .. }));
+    }
+
+    #[test]
+    fn row_id_too_long_errors() {
+        let huge_row_id = "x".repeat(u16::MAX as usize + 1);
+        let err = encode_crdt_frame(CRDT_FRAME_SNAPSHOT, "X", &huge_row_id, &[])
+            .expect_err("row_id > u16::MAX must reject");
+        assert!(matches!(err, FrameEncodeError::RowIdTooLong { .. }));
     }
 }
 

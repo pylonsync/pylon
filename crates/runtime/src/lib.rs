@@ -517,7 +517,7 @@ impl Runtime {
             if f.name == "id" {
                 continue;
             }
-            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt.as_deref())
+            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt)
                 .map_err(|e| RuntimeError {
                     code: "INVALID_CRDT_FIELD".into(),
                     message: format!(
@@ -545,11 +545,12 @@ impl Runtime {
 
     /// Insert a new row. Returns the generated ID.
     ///
-    /// For entities with `crdt: true` (the default) the LoroDoc is written
-    /// first and the SQLite row is the materialized projection. For
-    /// `crdt: false` entities the SQLite write is direct (legacy LWW path).
-    /// Both produce the same on-disk row shape, so reads, indexes, FTS,
-    /// and policies don't change between modes.
+    /// For entities with `crdt: true` (the default) the LoroDoc snapshot
+    /// + the SQLite materialized row are committed together in a single
+    /// SQLite transaction so a crash between the two leaves neither.
+    /// `crdt: false` entities skip the LoroDoc and use a direct write
+    /// (legacy LWW path). Both produce the same on-disk row shape, so
+    /// reads, indexes, FTS, and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
@@ -561,76 +562,74 @@ impl Runtime {
             message: "Insert data must be a JSON object".into(),
         })?;
 
-        // CRDT path — write to the LoroDoc first so the doc + sidecar
-        // snapshot exist before the materialized SQLite row. On a crash
-        // between the two writes the doc is durable; the next read
-        // through the doc rebuilds the materialized row.
-        //
-        // We keep the SQL INSERT below regardless of mode because the
-        // materialized view is what queries / indexes / FTS hit; the
-        // doc never replaces SQLite, it sits in front of it.
-        if ent.crdt {
-            let crdt_fields = self.crdt_fields_for(ent)?;
-            // Validate columns up-front so we don't write a doc for a
-            // patch that the SQL INSERT will reject anyway.
-            for key in obj.keys() {
-                if key != "id" {
-                    validate_column_name(key, ent)?;
+        // Validate columns up-front so we don't even open a transaction
+        // for a patch that the SQL INSERT will reject.
+        for key in obj.keys() {
+            if key != "id" {
+                validate_column_name(key, ent)?;
+            }
+        }
+
+        // Atomic block — CRDT sidecar snapshot + materialized SQL row +
+        // search-index maintenance all land together or none does. SQLite's
+        // rollback journal makes this crash-safe end-to-end.
+        with_write_tx(&conn, || {
+            if ent.crdt {
+                let crdt_fields = self.crdt_fields_for(ent)?;
+                self.crdt
+                    .apply_patch(&conn, entity, &id, &crdt_fields, data)
+                    .map_err(|e| RuntimeError {
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("crdt write {entity}/{id}: {e}"),
+                    })?;
+            }
+
+            let mut col_names = vec![quote_ident("id")];
+            let mut placeholders = vec!["?1".to_string()];
+            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id.clone())];
+
+            let mut idx = 2;
+            for (key, val) in obj {
+                if key == "id" {
+                    continue;
+                }
+                col_names.push(quote_ident(key));
+                placeholders.push(format!("?{idx}"));
+                values.push(json_to_sql(val));
+                idx += 1;
+            }
+
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                quote_ident(entity),
+                col_names.join(", "),
+                placeholders.join(", ")
+            );
+
+            let params: Vec<&dyn rusqlite::types::ToSql> =
+                values.iter().map(|v| v.as_ref()).collect();
+            conn.execute(&sql, params.as_slice())
+                .map_err(|e| RuntimeError {
+                    code: "INSERT_FAILED".into(),
+                    message: format!("Insert into {entity} failed: {e}"),
+                })?;
+
+            // Search-index maintenance lives inside the same tx so a
+            // crash between the row insert and the FTS update can't leave
+            // the search index inconsistent with the row table.
+            if let Some(cfg) = ent.search.as_ref() {
+                if !cfg.is_empty() {
+                    pylon_storage::search_maintenance::apply_insert(
+                        &conn, entity, &id, data, cfg,
+                    )
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on insert {entity}: {e}"),
+                    })?;
                 }
             }
-            self.crdt
-                .apply_patch(&conn, entity, &id, &crdt_fields, data)
-                .map_err(|e| RuntimeError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("crdt write {entity}/{id}: {e}"),
-                })?;
-        }
-
-        let mut col_names = vec![quote_ident("id")];
-        let mut placeholders = vec!["?1".to_string()];
-        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id.clone())];
-
-        let mut idx = 2;
-        for (key, val) in obj {
-            if key == "id" {
-                continue;
-            }
-            validate_column_name(key, ent)?;
-            col_names.push(quote_ident(key));
-            placeholders.push(format!("?{idx}"));
-            values.push(json_to_sql(val));
-            idx += 1;
-        }
-
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            quote_ident(entity),
-            col_names.join(", "),
-            placeholders.join(", ")
-        );
-
-        let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        conn.execute(&sql, params.as_slice())
-            .map_err(|e| RuntimeError {
-                code: "INSERT_FAILED".into(),
-                message: format!("Insert into {entity} failed: {e}"),
-            })?;
-
-        // Search-index maintenance on the non-tx write path. Mirrors
-        // insert_with_conn — without this, /api/entities/:name POSTs
-        // and direct Runtime::insert callers would leave FTS5 + facet
-        // bitmaps empty even though the entity declares `search:`.
-        if let Some(cfg) = ent.search.as_ref() {
-            if !cfg.is_empty() {
-                pylon_storage::search_maintenance::apply_insert(
-                    &conn, entity, &id, data, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on insert {entity}: {e}"),
-                })?;
-            }
-        }
+            Ok(())
+        })?;
 
         Ok(id)
     }
@@ -758,85 +757,82 @@ impl Runtime {
             message: "Update data must be a JSON object".into(),
         })?;
 
-        // CRDT path — patch the doc + persist the snapshot before the
-        // SQL UPDATE. Same crash-safety story as insert: doc is durable
-        // first, materialized view rebuilds from the doc on next read.
-        if ent.crdt && !obj.is_empty() {
-            let crdt_fields = self.crdt_fields_for(ent)?;
-            // Validate columns up-front so a doomed SQL UPDATE doesn't
-            // leave the doc ahead of the materialized view.
-            for key in obj.keys() {
-                if key != "id" {
-                    validate_column_name(key, ent)?;
-                }
+        // Validate up-front and exit cheap if there's nothing to write.
+        for key in obj.keys() {
+            if key != "id" {
+                validate_column_name(key, ent)?;
             }
-            self.crdt
-                .apply_patch(&conn, entity, id, &crdt_fields, data)
-                .map_err(|e| RuntimeError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("crdt write {entity}/{id}: {e}"),
-                })?;
         }
-
-        let mut set_clauses = Vec::new();
-        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-        let mut idx = 1;
-        for (key, val) in obj {
-            if key == "id" {
-                continue;
-            }
-            validate_column_name(key, ent)?;
-            set_clauses.push(format!("{} = ?{idx}", quote_ident(key)));
-            values.push(json_to_sql(val));
-            idx += 1;
-        }
-
-        if set_clauses.is_empty() {
+        let writable_keys: Vec<&String> = obj.keys().filter(|k| *k != "id").collect();
+        if writable_keys.is_empty() {
             return Ok(false);
         }
 
-        // Capture pre-UPDATE row for search-maintenance diff. Matches
-        // the contract of search_maintenance::apply_update — old state
-        // must be read before the UPDATE lands or the diff will see
-        // the new value on both sides.
-        let searchable = ent
-            .search
-            .as_ref()
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
-        let old_row = if searchable {
-            self.get_by_id_with_conn(&conn, entity, id)?
-        } else {
-            None
-        };
-
-        values.push(Box::new(id.to_string()));
-        let sql = format!(
-            "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
-            quote_ident(entity),
-            set_clauses.join(", ")
-        );
-
-        let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        let affected = conn
-            .execute(&sql, params.as_slice())
-            .map_err(|e| RuntimeError {
-                code: "UPDATE_FAILED".into(),
-                message: format!("Update {entity}/{id} failed: {e}"),
-            })?;
-
-        if affected > 0 && searchable {
-            if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
-                pylon_storage::search_maintenance::apply_update(
-                    &conn, entity, id, &old, data, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on update {entity}: {e}"),
-                })?;
+        // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
+        // and FTS maintenance all commit together.
+        let affected = with_write_tx(&conn, || -> Result<i64, RuntimeError> {
+            if ent.crdt {
+                let crdt_fields = self.crdt_fields_for(ent)?;
+                self.crdt
+                    .apply_patch(&conn, entity, id, &crdt_fields, data)
+                    .map_err(|e| RuntimeError {
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("crdt write {entity}/{id}: {e}"),
+                    })?;
             }
-        }
+
+            let mut set_clauses = Vec::new();
+            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut idx = 1;
+            for key in &writable_keys {
+                set_clauses.push(format!("{} = ?{idx}", quote_ident(key)));
+                values.push(json_to_sql(&obj[key.as_str()]));
+                idx += 1;
+            }
+
+            // Capture pre-UPDATE row for search-maintenance diff INSIDE the
+            // tx. Matches the contract of search_maintenance::apply_update
+            // — old state must be read before the UPDATE lands.
+            let searchable = ent
+                .search
+                .as_ref()
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
+            let old_row = if searchable {
+                self.get_by_id_with_conn(&conn, entity, id)?
+            } else {
+                None
+            };
+
+            values.push(Box::new(id.to_string()));
+            let sql = format!(
+                "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
+                quote_ident(entity),
+                set_clauses.join(", ")
+            );
+
+            let params: Vec<&dyn rusqlite::types::ToSql> =
+                values.iter().map(|v| v.as_ref()).collect();
+            let affected = conn
+                .execute(&sql, params.as_slice())
+                .map_err(|e| RuntimeError {
+                    code: "UPDATE_FAILED".into(),
+                    message: format!("Update {entity}/{id} failed: {e}"),
+                })? as i64;
+
+            if affected > 0 && searchable {
+                if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
+                    pylon_storage::search_maintenance::apply_update(
+                        &conn, entity, id, &old, data, cfg,
+                    )
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on update {entity}: {e}"),
+                    })?;
+                }
+            }
+            Ok(affected)
+        })?;
 
         Ok(affected > 0)
     }
@@ -1991,6 +1987,47 @@ impl Runtime {
 /// width is what makes `WHERE id > $1 ORDER BY id` correct for cursor
 /// pagination: variable-width hex sorts incorrectly at width boundaries
 /// (e.g. `"ff"` lex-sorts after `"100"`).
+/// Run `body` inside a SQLite transaction on `conn`. Commits on `Ok`,
+/// rolls back on `Err` (or if `body` panics).
+///
+/// Used to make the multi-statement CRDT write paths (LoroDoc snapshot
+/// upsert into `_pylon_crdt_snapshots` + the materialized entity row
+/// INSERT/UPDATE + FTS / facet maintenance) atomic so a crash mid-write
+/// can never leave the materialized view stale relative to the CRDT
+/// snapshot. Uses unmanaged BEGIN/COMMIT/ROLLBACK rather than rusqlite's
+/// `Transaction` API because the existing call sites borrow `conn`
+/// through inner closures and the lifetime juggling for a `Transaction`
+/// guard would force more refactoring than the explicit BEGIN/COMMIT.
+///
+/// `BEGIN IMMEDIATE` (vs the default `BEGIN DEFERRED`) takes the SQLite
+/// reserved lock on entry instead of escalating later — matches the
+/// pattern in `datastore.rs::transact` and avoids a SQLITE_BUSY race
+/// where a concurrent reader prevents the lock upgrade mid-write.
+fn with_write_tx<T, F>(conn: &rusqlite::Connection, body: F) -> Result<T, RuntimeError>
+where
+    F: FnOnce() -> Result<T, RuntimeError>,
+{
+    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| RuntimeError {
+        code: "TX_BEGIN_FAILED".into(),
+        message: format!("BEGIN: {e}"),
+    })?;
+    match body() {
+        Ok(v) => {
+            conn.execute("COMMIT", []).map_err(|e| RuntimeError {
+                code: "TX_COMMIT_FAILED".into(),
+                message: format!("COMMIT: {e}"),
+            })?;
+            Ok(v)
+        }
+        Err(e) => {
+            // Best-effort rollback; if even ROLLBACK fails we surface
+            // the *original* error since that's the more actionable one.
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
 fn generate_id() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2331,6 +2368,59 @@ mod tests {
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["displayName"], "Eric C");
         assert_eq!(row["email"], "x@y.com");
+    }
+
+    /// Regression: when the SQL INSERT step inside Runtime::insert fails
+    /// (UNIQUE-constraint violation here), the LoroDoc snapshot must
+    /// also roll back — neither half lands. Previously the LoroStore
+    /// wrote first and committed independently, so a doomed INSERT left
+    /// a sidecar row pointing at a doc that the materialized table
+    /// never knew about.
+    #[test]
+    fn crdt_insert_rolls_back_when_sql_step_fails() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        // Seed a row.
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "x@y.com", "displayName": "First"}),
+        )
+        .unwrap();
+
+        // Snapshot the sidecar row count BEFORE the failing insert.
+        let snap_count_before: i64 = {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'User'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // Attempt a duplicate-email insert. SQL UNIQUE rejects.
+        let err = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "x@y.com", "displayName": "Second"}),
+            )
+            .expect_err("duplicate email must fail");
+        assert_eq!(err.code, "INSERT_FAILED");
+
+        // Sidecar row count unchanged — the LoroDoc snapshot the CRDT
+        // path wrote was rolled back along with the failed SQL INSERT.
+        let snap_count_after: i64 = {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'User'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            snap_count_after, snap_count_before,
+            "failed insert should not leave a sidecar snapshot behind"
+        );
     }
 
     /// Entities with `crdt: false` skip the LoroDoc entirely — no sidecar

@@ -1696,6 +1696,7 @@ name = "pylon-crdt"
 version = "0.2.3"
 dependencies = [
  "loro",
+ "pylon-kernel",
  "serde",
  "serde_json",
  "tracing",

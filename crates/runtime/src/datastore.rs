@@ -269,14 +269,25 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     /// it gets skipped — clients on the SSE transport stay on the
     /// JSON change-event path until a future SSE-friendly encoding
     /// (base64 or hex-encoded chunks) lands.
+    ///
+    /// Frame-encode failure (entity / row_id over the 16-bit length
+    /// header) gets logged and dropped — the row's regular JSON change
+    /// event already shipped via `notify`, so clients still see the
+    /// write happened, they just don't get the binary CRDT delta.
     fn notify_crdt(&self, entity: &str, row_id: &str, snapshot: &[u8]) {
-        let frame = pylon_router::encode_crdt_frame(
+        match pylon_router::encode_crdt_frame(
             pylon_router::CRDT_FRAME_SNAPSHOT,
             entity,
             row_id,
             snapshot,
-        );
-        self.ws.broadcast_binary(frame);
+        ) {
+            Ok(frame) => self.ws.broadcast_binary(frame),
+            Err(e) => {
+                tracing::warn!(
+                    "[crdt] dropping binary frame for {entity}/{row_id}: {e}"
+                );
+            }
+        }
     }
 }
 

@@ -189,15 +189,30 @@ pub trait DataStore: Send + Sync {
         })
     }
 
-    /// Return the binary CRDT snapshot for a row, if the entity is in
-    /// CRDT mode (`crdt: true` in the manifest, the default). Returns
-    /// `Ok(None)` for `crdt: false` entities so callers can branch
-    /// without a separate "is this entity CRDT" probe.
+    /// Return the binary CRDT snapshot for a row, used by the router
+    /// to ship a binary update over WebSocket after every successful
+    /// write.
     ///
-    /// Used by the router to ship a binary update over WebSocket after
-    /// every successful write. Default impl returns `None` so backends
-    /// that don't support CRDT mode (e.g. the Workers D1 store at
-    /// time of writing) compile without ceremony.
+    /// Return value semantics:
+    /// - `Ok(Some(bytes))` — entity is CRDT-mode and bytes are the
+    ///   current Loro snapshot for the row.
+    /// - `Ok(None)` — **either** the entity is `crdt: false` (LWW
+    ///   opt-out) **or** this backend doesn't support CRDT mode at
+    ///   all. Callers MUST treat both cases identically: skip the
+    ///   binary broadcast and rely on the JSON change event for
+    ///   client invalidation. The conflation is intentional — every
+    ///   caller today does the same thing in both cases, and a
+    ///   richer enum (NotCrdtMode / NotSupported) would be carried
+    ///   through every layer for no behavioral payoff.
+    /// - `Err(_)` — entity is CRDT-mode but the snapshot fetch
+    ///   itself failed (schema lookup, sidecar read, decode). Log
+    ///   and continue; the JSON change event already covers the
+    ///   correctness path.
+    ///
+    /// Default impl returns `Ok(None)` so backends that don't support
+    /// CRDT mode (e.g. the Workers D1 store at time of writing)
+    /// compile without ceremony. Per the Ok(None) semantics above,
+    /// this is correct behavior, not a stub.
     fn crdt_snapshot(
         &self,
         _entity: &str,

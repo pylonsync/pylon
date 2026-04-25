@@ -186,18 +186,68 @@ pub struct ManifestField {
     pub optional: bool,
     pub unique: bool,
     /// CRDT container override for this field. `None` = pick a sensible
-    /// default for the field type (most things are LWW; `richtext` defaults
-    /// to LoroText). Set to escape the default — `"text"` upgrades a
-    /// `string` to LoroText for collaborative editing, `"counter"` flips
-    /// a numeric field to LoroCounter so concurrent increments don't
-    /// stomp each other, `"list"` / `"movable-list"` for ordered
-    /// collections, `"tree"` for hierarchical data, `"lww"` to be
-    /// explicit (matches the default for most scalar types).
+    /// default for the field type (most things are LWW; `richtext`
+    /// defaults to LoroText). Typed enum so typos in the manifest
+    /// fail at deserialize time instead of at first write.
     ///
     /// Ignored when the entity has `crdt: false` (the LWW-only escape
     /// hatch on the entity itself).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crdt: Option<String>,
+    pub crdt: Option<CrdtAnnotation>,
+}
+
+/// Per-field CRDT container override. Wire format is the lowercase
+/// kebab-case string each variant maps to (e.g. `"text"`, `"movable-list"`),
+/// so JSON manifests look the same as before — but a typo like
+/// `crdt: "txt"` now fails at manifest deserialization with a clear
+/// "unknown variant" error instead of slipping through and erroring at
+/// first write.
+///
+/// Variants intentionally mirror the categories
+/// [`pylon_crdt::CrdtFieldKind`] knows how to instantiate. New CRDT
+/// container types added to Loro show up as new variants here, plus a
+/// match arm in `pylon_crdt::field_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CrdtAnnotation {
+    /// Explicit LWW register (matches the default for most scalar types).
+    Lww,
+    /// Upgrade `string` → `LoroText` for collaborative character-level merge.
+    Text,
+    /// Upgrade `int`/`float` → `LoroCounter` so concurrent increments add
+    /// instead of stomping. Reserved — apply_patch returns
+    /// "not yet implemented" until the projection layer learns counters.
+    Counter,
+    /// `LoroList` for ordered collections. Reserved.
+    List,
+    /// `LoroMovableList` for reorderable lists (kanban, prioritized todo).
+    /// Reserved.
+    #[serde(rename = "movable-list")]
+    MovableList,
+    /// `LoroTree` for hierarchical data (folders, threaded comments).
+    /// Reserved.
+    Tree,
+}
+
+impl CrdtAnnotation {
+    /// Wire-format string. Stable across versions; changing this breaks
+    /// every persisted manifest on disk.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lww => "lww",
+            Self::Text => "text",
+            Self::Counter => "counter",
+            Self::List => "list",
+            Self::MovableList => "movable-list",
+            Self::Tree => "tree",
+        }
+    }
+}
+
+impl std::fmt::Display for CrdtAnnotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

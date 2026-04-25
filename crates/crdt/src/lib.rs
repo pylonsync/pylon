@@ -117,13 +117,19 @@ impl CrdtFieldKind {
 
 /// Resolve a manifest field type + optional `crdt:` annotation into the
 /// CRDT shape. `field_type` is the raw type string from the manifest
-/// (`"string"`, `"int"`, `"id(User)"`, etc.); `crdt` is the annotation
-/// (`Some("text")`, `Some("counter")`, etc., or `None` for the default).
+/// (`"string"`, `"int"`, `"id(User)"`, etc.); `crdt` is the typed
+/// annotation from `ManifestField.crdt`.
 ///
 /// Returns `Err` when the annotation isn't valid for the field type
 /// (e.g. `crdt: "counter"` on a `bool`). Catches schema mistakes at load
-/// time, not at first write.
-pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind, String> {
+/// time, not at first write. Unknown annotations are now caught at
+/// manifest deserialization time (typed enum), so this function never
+/// has to handle "unknown variant" cases.
+pub fn field_kind(
+    field_type: &str,
+    crdt: Option<pylon_kernel::CrdtAnnotation>,
+) -> Result<CrdtFieldKind, String> {
+    use pylon_kernel::CrdtAnnotation;
     let base = base_type(field_type);
     let default = match base {
         "string" | "datetime" => CrdtFieldKind::LwwString,
@@ -140,7 +146,7 @@ pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind,
         return Ok(default);
     };
     let kind = match annotation {
-        "lww" => match default {
+        CrdtAnnotation::Lww => match default {
             // Already LWW — annotation is just documentation.
             k @ (CrdtFieldKind::LwwString
             | CrdtFieldKind::LwwNumber
@@ -149,7 +155,7 @@ pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind,
             CrdtFieldKind::Text => CrdtFieldKind::LwwString,
             other => other,
         },
-        "text" => {
+        CrdtAnnotation::Text => {
             if !matches!(base, "string" | "richtext") {
                 return Err(format!(
                     "crdt: \"text\" only valid on string/richtext fields, got {base}"
@@ -157,7 +163,7 @@ pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind,
             }
             CrdtFieldKind::Text
         }
-        "counter" => {
+        CrdtAnnotation::Counter => {
             if !matches!(base, "int" | "float") {
                 return Err(format!(
                     "crdt: \"counter\" only valid on int/float fields, got {base}"
@@ -165,10 +171,9 @@ pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind,
             }
             CrdtFieldKind::Counter
         }
-        "list" => CrdtFieldKind::List,
-        "movable-list" => CrdtFieldKind::MovableList,
-        "tree" => CrdtFieldKind::Tree,
-        other => return Err(format!("unknown crdt annotation: {other}")),
+        CrdtAnnotation::List => CrdtFieldKind::List,
+        CrdtAnnotation::MovableList => CrdtFieldKind::MovableList,
+        CrdtAnnotation::Tree => CrdtFieldKind::Tree,
     };
     Ok(kind)
 }
@@ -402,13 +407,12 @@ mod tests {
         ]
     }
 
+    use pylon_kernel::CrdtAnnotation;
+
     #[test]
     fn field_kind_defaults() {
         assert_eq!(field_kind("string", None).unwrap(), CrdtFieldKind::LwwString);
-        assert_eq!(
-            field_kind("richtext", None).unwrap(),
-            CrdtFieldKind::Text
-        );
+        assert_eq!(field_kind("richtext", None).unwrap(), CrdtFieldKind::Text);
         assert_eq!(field_kind("int", None).unwrap(), CrdtFieldKind::LwwNumber);
         assert_eq!(field_kind("float", None).unwrap(), CrdtFieldKind::LwwNumber);
         assert_eq!(field_kind("bool", None).unwrap(), CrdtFieldKind::LwwBool);
@@ -422,11 +426,11 @@ mod tests {
     #[test]
     fn field_kind_text_opt_in_upgrades_string() {
         assert_eq!(
-            field_kind("string", Some("text")).unwrap(),
+            field_kind("string", Some(CrdtAnnotation::Text)).unwrap(),
             CrdtFieldKind::Text
         );
         assert_eq!(
-            field_kind("richtext", Some("text")).unwrap(),
+            field_kind("richtext", Some(CrdtAnnotation::Text)).unwrap(),
             CrdtFieldKind::Text
         );
     }
@@ -434,33 +438,48 @@ mod tests {
     #[test]
     fn field_kind_lww_downgrades_richtext() {
         assert_eq!(
-            field_kind("richtext", Some("lww")).unwrap(),
+            field_kind("richtext", Some(CrdtAnnotation::Lww)).unwrap(),
             CrdtFieldKind::LwwString
         );
     }
 
     #[test]
     fn field_kind_text_rejects_non_string_types() {
-        assert!(field_kind("int", Some("text")).is_err());
-        assert!(field_kind("bool", Some("text")).is_err());
+        assert!(field_kind("int", Some(CrdtAnnotation::Text)).is_err());
+        assert!(field_kind("bool", Some(CrdtAnnotation::Text)).is_err());
     }
 
     #[test]
     fn field_kind_counter_only_on_numbers() {
         assert_eq!(
-            field_kind("int", Some("counter")).unwrap(),
+            field_kind("int", Some(CrdtAnnotation::Counter)).unwrap(),
             CrdtFieldKind::Counter
         );
         assert_eq!(
-            field_kind("float", Some("counter")).unwrap(),
+            field_kind("float", Some(CrdtAnnotation::Counter)).unwrap(),
             CrdtFieldKind::Counter
         );
-        assert!(field_kind("string", Some("counter")).is_err());
+        assert!(field_kind("string", Some(CrdtAnnotation::Counter)).is_err());
     }
 
+    /// Unknown annotations are now caught at manifest-deserialize time
+    /// (typed enum), not at field_kind. This test asserts the wire format
+    /// still rejects bad strings via serde — the surface where typos
+    /// actually originate.
     #[test]
-    fn field_kind_unknown_annotation_is_error() {
-        assert!(field_kind("string", Some("nonsense")).is_err());
+    fn unknown_annotation_rejected_at_deserialize() {
+        let json = r#"{"crdt": "nonsense"}"#;
+        let err: Result<pylon_kernel::ManifestField, _> = serde_json::from_str(
+            r#"{"name":"x","type":"string","optional":false,"unique":false,"crdt":"nonsense"}"#,
+        );
+        assert!(err.is_err(), "typo in crdt annotation must fail to deserialize");
+        // Make sure the valid form still works.
+        let ok: pylon_kernel::ManifestField = serde_json::from_str(
+            r#"{"name":"x","type":"string","optional":false,"unique":false,"crdt":"text"}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.crdt, Some(CrdtAnnotation::Text));
+        let _ = json; // keep `json` referenced so unused-binding lint is happy
     }
 
     #[test]
