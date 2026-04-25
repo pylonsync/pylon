@@ -424,8 +424,9 @@ impl Runtime {
         })
     }
 
-    /// Create the search index tables (`_facet_bitmap` and per-entity
-    /// `_fts_<Entity>`) for every searchable entity in the manifest.
+    /// Create the search index tables (`_facet_bitmap`, per-entity
+    /// `_fts_<Entity>`, and a covering index for each declared
+    /// sortable field) for every searchable entity in the manifest.
     ///
     /// Production deployments do this via the storage adapter's
     /// `apply_schema` / migration plan; that path also handles
@@ -448,6 +449,19 @@ impl Runtime {
                     conn.execute(&sql, []).map_err(|e| RuntimeError {
                         code: "FTS_TABLE_FAILED".into(),
                         message: format!("create FTS table for {}: {e}", entity.name),
+                    })?;
+                }
+                for field in &cfg.sortable {
+                    let idx_sql = format!(
+                        "CREATE INDEX IF NOT EXISTS \"{}_sort_{field}\" ON \"{}\" (\"{field}\")",
+                        entity.name, entity.name,
+                    );
+                    conn.execute(&idx_sql, []).map_err(|e| RuntimeError {
+                        code: "SORT_INDEX_FAILED".into(),
+                        message: format!(
+                            "create sort index for {}.{field}: {e}",
+                            entity.name
+                        ),
                     })?;
                 }
             }

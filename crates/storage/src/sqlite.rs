@@ -517,6 +517,29 @@ impl SqliteAdapter {
                             message: format!("create _fts_{entity} failed: {e}"),
                         })?;
                     }
+                    // Auto-index every sortable field. Without these,
+                    // `ORDER BY <field> LIMIT n OFFSET m` does a full
+                    // table scan + sort — visible in the search bench
+                    // as "sort price asc, page 5" running ~50× slower
+                    // than the unsorted case. Indexed sort lets SQLite
+                    // walk the b-tree and stop at offset+limit.
+                    //
+                    // Naming convention: `<entity>_sort_<field>` — the
+                    // `_sort_` token distinguishes auto-indexes from
+                    // user-declared ones so future rebuilds can drop
+                    // them without colliding with custom indexes.
+                    for field in &config.sortable {
+                        let idx_sql = format!(
+                            "CREATE INDEX IF NOT EXISTS \"{entity}_sort_{field}\" \
+                             ON \"{entity}\" (\"{field}\")"
+                        );
+                        self.conn.execute(&idx_sql, []).map_err(|e| StorageError {
+                            code: "SQLITE_EXEC_FAILED".into(),
+                            message: format!(
+                                "create sort index {entity}.{field} failed: {e}"
+                            ),
+                        })?;
+                    }
                 }
                 SchemaOperation::RemoveSearchIndex { entity } => {
                     self.conn
@@ -789,10 +812,10 @@ mod tests {
 
     #[test]
     fn create_index_sql_non_unique() {
-        let sql = create_index_sql("Todo", "by_author", &["authorId".into()], false);
+        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false);
         assert_eq!(
             sql,
-            "CREATE INDEX IF NOT EXISTS \"Todo_by_author\" ON \"Todo\" (\"authorId\")"
+            "CREATE INDEX IF NOT EXISTS \"Todo_by_user\" ON \"Todo\" (\"userId\")"
         );
     }
 

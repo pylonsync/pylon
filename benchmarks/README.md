@@ -76,15 +76,15 @@ upstream of these benches).
 
 ```
 === 10K rows ===
-  empty query, page 0                  363µs/op    2,754 ops/sec
-  text 'red'                           624µs/op    1,602 ops/sec
-  filter brand+category                351µs/op    2,850 ops/sec
-  sort price asc, page 5               7.57ms/op     132 ops/sec
+  empty query, page 0                  486µs/op    2,056 ops/sec
+  text 'red'                           624µs/op    1,601 ops/sec
+  filter brand+category                471µs/op    2,123 ops/sec
+  sort price asc, page 5               488µs/op    2,047 ops/sec   ← was 7.57ms (15.5× faster)
 
 === 100K rows ===
-  empty query, page 0                  2.61ms/op     383 ops/sec
-  text 'red'                           5.57ms/op     179 ops/sec
-  filter brand                         2.69ms/op     371 ops/sec
+  empty query, page 0                  2.69ms/op     371 ops/sec
+  text 'red'                           5.51ms/op     181 ops/sec
+  filter brand                         2.73ms/op     366 ops/sec
 ```
 
 Notes from the run:
@@ -93,11 +93,12 @@ Notes from the run:
   bitmap intersection touches the same number of bits.
 - Text search is dominated by FTS5 token scoring; "red" matches ~half
   the catalog so the BM25 ranking step does real work.
-- Sorted pagination hits a known bottleneck: the planner currently
-  materializes every hit into a temp table for `ORDER BY price ASC`,
-  which collapses to 132 ops/sec. There's a planned optimization to
-  push the sort down to an index when `sort` matches a sortable
-  column.
+- Sorted pagination now matches unsorted speed thanks to two changes:
+  every `sortable` field gets an automatic covering index at schema
+  time, and the planner detects the "no filter, no FTS" case and
+  pages the entity directly instead of materializing every hit into
+  a temp table. `sort price asc, page 5` collapsed from 7.57ms to
+  488µs.
 
 ### What you should expect
 

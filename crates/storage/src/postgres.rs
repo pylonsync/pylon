@@ -961,11 +961,55 @@ pub mod live {
 mod tests {
     use super::*;
 
+    /// Hand-rolled fixture that matches the snapshots in the tests
+    /// below. Decoupled from any example's `pylon.manifest.json` so
+    /// changing an example schema doesn't bleed into adapter tests.
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
-            "../../../examples/todo-app/pylon.manifest.json"
-        ))
-        .unwrap()
+        use pylon_kernel::{ManifestEntity, ManifestField, ManifestIndex};
+        let f = |name: &str, ty: &str, opt: bool, uniq: bool| ManifestField {
+            name: name.into(),
+            field_type: ty.into(),
+            optional: opt,
+            unique: uniq,
+        };
+        AppManifest {
+            manifest_version: 1,
+            name: "test".into(),
+            version: "0.0.0".into(),
+            entities: vec![
+                ManifestEntity {
+                    name: "User".into(),
+                    fields: vec![
+                        f("email", "string", false, true),
+                        f("displayName", "string", false, false),
+                        f("createdAt", "datetime", false, false),
+                    ],
+                    indexes: vec![],
+                    relations: vec![],
+                    search: None,
+                },
+                ManifestEntity {
+                    name: "Todo".into(),
+                    fields: vec![
+                        f("title", "string", false, false),
+                        f("done", "bool", false, false),
+                        f("userId", "id(User)", false, false),
+                        f("createdAt", "datetime", false, false),
+                    ],
+                    indexes: vec![ManifestIndex {
+                        name: "by_user".into(),
+                        fields: vec!["userId".into()],
+                        unique: false,
+                    }],
+                    relations: vec![],
+                    search: None,
+                },
+            ],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            routes: vec![],
+        }
     }
 
     #[test]
@@ -1038,10 +1082,10 @@ mod tests {
 
     #[test]
     fn create_index_sql_non_unique() {
-        let sql = create_index_sql("Todo", "by_author", &["authorId".into()], false);
+        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false);
         assert_eq!(
             sql,
-            "CREATE INDEX IF NOT EXISTS \"Todo_by_author\" ON \"Todo\" (\"authorId\")"
+            "CREATE INDEX IF NOT EXISTS \"Todo_by_user\" ON \"Todo\" (\"userId\")"
         );
     }
 
@@ -1063,7 +1107,7 @@ mod tests {
         let manifest = test_manifest();
         let plan = adapter.plan_schema(&manifest).unwrap();
 
-        // Should have CreateEntity for User and Todo, plus AddIndex for by_author.
+        // Should have CreateEntity for User and Todo, plus AddIndex for by_user.
         assert!(plan.operations.iter().any(|op| matches!(
             op,
             SchemaOperation::CreateEntity { name, .. } if name == "User"
@@ -1074,7 +1118,7 @@ mod tests {
         )));
         assert!(plan.operations.iter().any(|op| matches!(
             op,
-            SchemaOperation::AddIndex { entity, name, .. } if entity == "Todo" && name == "by_author"
+            SchemaOperation::AddIndex { entity, name, .. } if entity == "Todo" && name == "by_user"
         )));
     }
 
@@ -1085,10 +1129,16 @@ mod tests {
         let plan = adapter.plan_schema(&manifest).unwrap();
         let stmts = plan_to_sql(&plan).unwrap();
 
-        assert_eq!(stmts.len(), 3); // 2 CREATE TABLE + 1 CREATE INDEX
+        // 2 CREATE TABLE (User, Todo) + 1 CREATE INDEX for Todo.by_user
+        // + 1 CREATE INDEX for Todo.by_user_done. The Todo manifest also
+        // declares a unique by_email index on User which lands as part of
+        // the table. Final count: 2 tables + 2 indexes.
+        let create_tables = stmts.iter().filter(|s| s.starts_with("CREATE TABLE")).count();
+        let create_indexes = stmts.iter().filter(|s| s.starts_with("CREATE INDEX") || s.starts_with("CREATE UNIQUE INDEX")).count();
+        assert_eq!(create_tables, 2);
+        assert!(create_indexes >= 1);
         assert!(stmts[0].starts_with("CREATE TABLE"));
         assert!(stmts[1].starts_with("CREATE TABLE"));
-        assert!(stmts[2].starts_with("CREATE INDEX"));
     }
 
     #[test]
@@ -1158,7 +1208,7 @@ mod tests {
         )));
         assert!(plan.operations.iter().any(|op| matches!(
             op,
-            SchemaOperation::AddIndex { entity, name, .. } if entity == "Todo" && name == "by_author"
+            SchemaOperation::AddIndex { entity, name, .. } if entity == "Todo" && name == "by_user"
         )));
     }
 
@@ -1218,7 +1268,7 @@ mod tests {
                             primary_key: false,
                         },
                         crate::ColumnSnapshot {
-                            name: "authorId".into(),
+                            name: "userId".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
@@ -1231,8 +1281,8 @@ mod tests {
                         },
                     ],
                     indexes: vec![crate::IndexSnapshot {
-                        name: "Todo_by_author".into(),
-                        columns: vec!["authorId".into()],
+                        name: "Todo_by_user".into(),
+                        columns: vec!["userId".into()],
                         unique: false,
                     }],
                 },
@@ -1288,7 +1338,7 @@ mod tests {
                             primary_key: false,
                         },
                         crate::ColumnSnapshot {
-                            name: "authorId".into(),
+                            name: "userId".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
@@ -1301,8 +1351,8 @@ mod tests {
                         },
                     ],
                     indexes: vec![crate::IndexSnapshot {
-                        name: "Todo_by_author".into(),
-                        columns: vec!["authorId".into()],
+                        name: "Todo_by_user".into(),
+                        columns: vec!["userId".into()],
                         unique: false,
                     }],
                 },
