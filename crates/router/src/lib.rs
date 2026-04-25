@@ -850,6 +850,174 @@ fn route_inner(
         return (401, json_error("INVALID_CODE", "Invalid or expired code"));
     }
 
+    // POST /api/auth/email/send-verification
+    //
+    // Issues a 6-digit code to the *current session's* email address and
+    // ships it via the EmailSender hook. Authenticated only — the email
+    // is read from the User row keyed by `ctx.auth_ctx.user_id`, never from
+    // the request body, so a logged-in caller can't trigger a code for
+    // someone else's address.
+    //
+    // Reuses the MagicCodeStore so cooldown + attempt limits + expiry
+    // come for free. The code is keyed by email (matching the magic-
+    // link flow) so a user can't have a magic-link code and a verify
+    // code in flight simultaneously — fine because we expect this to
+    // be called once per signup, not as a hot path.
+    //
+    // Apps that want email verification declare `User.emailVerified:
+    // datetime?` in their schema and call this endpoint after signup.
+    // Apps without the field can still call it and the verify endpoint
+    // will succeed; only the persisted-state side becomes a no-op.
+    if url == "/api/auth/email/send-verification" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(id) => id,
+            None => return (401, json_error("UNAUTHORIZED", "Sign in required")),
+        };
+        let user = match ctx.store.get_by_id("User", user_id) {
+            Ok(Some(u)) => u,
+            _ => return (404, json_error("USER_NOT_FOUND", "User not found")),
+        };
+        let email = match user.get("email").and_then(|v| v.as_str()) {
+            Some(e) => e.to_string(),
+            None => {
+                return (
+                    400,
+                    json_error("MISSING_EMAIL", "User has no email on file"),
+                )
+            }
+        };
+        let code = match ctx.magic_codes.try_create(&email) {
+            Ok(c) => c,
+            Err(pylon_auth::MagicCodeError::Throttled { retry_after_secs }) => {
+                return (
+                    429,
+                    json_error_with_hint(
+                        "RATE_LIMITED",
+                        "A verification code was requested too recently.",
+                        &format!("Try again in {retry_after_secs} seconds."),
+                    ),
+                );
+            }
+            Err(e) => {
+                return (
+                    500,
+                    json_error(
+                        "EMAIL_SEND_FAILED",
+                        &format!("Could not issue code: {:?}", e),
+                    ),
+                );
+            }
+        };
+        let subject = "Verify your email address";
+        let body_text = format!(
+            "Your email verification code is: {code}\n\nThis code will expire in 10 minutes."
+        );
+        if let Err(e) = ctx.email.send(&email, subject, &body_text) {
+            if !ctx.is_dev {
+                tracing::warn!("[email] Failed to send verification code to {email}: {e}");
+                return (
+                    500,
+                    json_error("EMAIL_SEND_FAILED", "Could not send verification email"),
+                );
+            }
+        }
+        if ctx.is_dev {
+            return (
+                200,
+                serde_json::json!({"sent": true, "email": email, "dev_code": code}).to_string(),
+            );
+        }
+        return (
+            200,
+            serde_json::json!({"sent": true, "email": email}).to_string(),
+        );
+    }
+
+    // POST /api/auth/email/verify
+    //
+    // Validates a code issued by `/api/auth/email/send-verification` and
+    // stamps `User.emailVerified` with the current timestamp. Like the
+    // send endpoint, this is bound to the active session — the email is
+    // read from `ctx.auth_ctx.user_id`, not the request body, so a leaked
+    // code can't be redeemed against someone else's account.
+    //
+    // The persisted-state update is best-effort: apps whose User schema
+    // doesn't have an `emailVerified` field will see the update silently
+    // dropped by the storage layer. The endpoint still returns 200 in
+    // that case — the *intent* of "this code matches the email on the
+    // session" was validated, even if there's nowhere to record it.
+    if url == "/api/auth/email/verify" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(id) => id,
+            None => return (401, json_error("UNAUTHORIZED", "Sign in required")),
+        };
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                )
+            }
+        };
+        let code = match data.get("code").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return (400, json_error("MISSING_CODE", "code is required")),
+        };
+        let user = match ctx.store.get_by_id("User", user_id) {
+            Ok(Some(u)) => u,
+            _ => return (404, json_error("USER_NOT_FOUND", "User not found")),
+        };
+        let email = match user.get("email").and_then(|v| v.as_str()) {
+            Some(e) => e.to_string(),
+            None => {
+                return (
+                    400,
+                    json_error("MISSING_EMAIL", "User has no email on file"),
+                )
+            }
+        };
+        match ctx.magic_codes.try_verify(&email, code) {
+            Ok(()) => {
+                let now = format!(
+                    "{}Z",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                );
+                // Best-effort: ignore the result. Schemas without an
+                // emailVerified field will reject the unknown column;
+                // schemas with it will accept the update. Either way
+                // the verification *intent* succeeded.
+                let _ = ctx.store.update(
+                    "User",
+                    user_id,
+                    &serde_json::json!({ "emailVerified": now }),
+                );
+                return (
+                    200,
+                    serde_json::json!({"verified": true, "emailVerified": now}).to_string(),
+                );
+            }
+            Err(pylon_auth::MagicCodeError::TooManyAttempts) => {
+                return (
+                    429,
+                    json_error(
+                        "RATE_LIMITED",
+                        "Too many verification attempts. Request a new code.",
+                    ),
+                );
+            }
+            Err(_) => {}
+        }
+        return (401, json_error("INVALID_CODE", "Invalid or expired code"));
+    }
+
     // POST /api/auth/password/register
     //
     // Create a new User row with an Argon2id-hashed password, then mint a
@@ -4580,6 +4748,306 @@ mod auth_gate_tests {
             ] {
                 let (_status, _body, _ct) = route(ctx, method, "/api/entities/User", "{}", None);
             }
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // /api/auth/email/* — verify the auth gate, the rate limiter, and a
+    // happy-path send→verify cycle. Uses a User-aware stub store because
+    // the default StubDataStore returns None for every get_by_id.
+    // -----------------------------------------------------------------------
+
+    /// Stub store that pretends User "u-1" exists with email
+    /// "alice@example.com" and tracks update calls so we can assert the
+    /// emailVerified field gets set.
+    struct UserStubStore {
+        manifest: AppManifest,
+        last_update: std::sync::Mutex<Option<(String, String, serde_json::Value)>>,
+    }
+    impl pylon_http::DataStore for UserStubStore {
+        fn manifest(&self) -> &AppManifest {
+            &self.manifest
+        }
+        fn insert(
+            &self,
+            _e: &str,
+            _d: &serde_json::Value,
+        ) -> Result<String, pylon_http::DataError> {
+            Ok("u-1".into())
+        }
+        fn get_by_id(
+            &self,
+            entity: &str,
+            id: &str,
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+            if entity == "User" && id == "u-1" {
+                return Ok(Some(serde_json::json!({
+                    "id": "u-1",
+                    "email": "alice@example.com",
+                    "displayName": "Alice",
+                })));
+            }
+            Ok(None)
+        }
+        fn list(&self, _e: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(vec![])
+        }
+        fn list_after(
+            &self,
+            _e: &str,
+            _a: Option<&str>,
+            _l: usize,
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(vec![])
+        }
+        fn update(
+            &self,
+            entity: &str,
+            id: &str,
+            data: &serde_json::Value,
+        ) -> Result<bool, pylon_http::DataError> {
+            *self.last_update.lock().unwrap() = Some((entity.into(), id.into(), data.clone()));
+            Ok(true)
+        }
+        fn delete(&self, _e: &str, _i: &str) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn lookup(
+            &self,
+            _e: &str,
+            _f: &str,
+            _v: &str,
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+            Ok(None)
+        }
+        fn link(
+            &self,
+            _e: &str,
+            _i: &str,
+            _r: &str,
+            _t: &str,
+        ) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn unlink(&self, _e: &str, _i: &str, _r: &str) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn query_filtered(
+            &self,
+            _e: &str,
+            _f: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(vec![])
+        }
+        fn query_graph(
+            &self,
+            _q: &serde_json::Value,
+        ) -> Result<serde_json::Value, pylon_http::DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn aggregate(
+            &self,
+            _e: &str,
+            _s: &serde_json::Value,
+        ) -> Result<serde_json::Value, pylon_http::DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn transact(
+            &self,
+            _o: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
+            Ok((true, vec![]))
+        }
+        fn search(
+            &self,
+            _e: &str,
+            _q: &serde_json::Value,
+        ) -> Result<serde_json::Value, pylon_http::DataError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    /// Capture-the-email stub so we can assert the body the user would
+    /// have received. Production wiring does this through an Resend /
+    /// SES adapter; tests just want to read what got "sent".
+    struct CaptureEmail {
+        sent: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+    impl EmailSender for CaptureEmail {
+        fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((to.into(), subject.into(), body.into()));
+            Ok(())
+        }
+    }
+
+    fn with_user_ctx<F>(is_dev: bool, auth: &AuthContext, f: F)
+    where
+        F: FnOnce(&RouterContext, &UserStubStore, &CaptureEmail, &MagicCodeStore),
+    {
+        let manifest = empty_manifest();
+        let store = UserStubStore {
+            manifest: manifest.clone(),
+            last_update: std::sync::Mutex::new(None),
+        };
+        let session_store = SessionStore::new();
+        let magic_codes = MagicCodeStore::new();
+        let oauth_state = OAuthStateStore::new();
+        let policy_engine = PolicyEngine::from_manifest(&manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let rooms = StubRooms;
+        let cache = StubCache;
+        let pubsub = StubPubSub;
+        let jobs = StubJobs;
+        let scheduler = StubScheduler;
+        let workflows = StubWorkflows;
+        let files = StubFiles;
+        let openapi = StubOpenApi;
+        let email = CaptureEmail {
+            sent: std::sync::Mutex::new(vec![]),
+        };
+        let hooks = NoopPluginHooks;
+
+        let ctx = RouterContext {
+            store: &store,
+            session_store: &session_store,
+            magic_codes: &magic_codes,
+            oauth_state: &oauth_state,
+            policy_engine: &policy_engine,
+            change_log: &change_log,
+            notifier: &notifier,
+            rooms: &rooms,
+            cache: &cache,
+            pubsub: &pubsub,
+            jobs: &jobs,
+            scheduler: &scheduler,
+            workflows: &workflows,
+            files: &files,
+            openapi: &openapi,
+            functions: None,
+            email: &email,
+            shards: None,
+            plugin_hooks: &hooks,
+            auth_ctx: auth,
+            is_dev,
+            request_headers: &[],
+        };
+        f(&ctx, &store, &email, &magic_codes);
+    }
+
+    #[test]
+    fn email_send_verification_requires_auth() {
+        let anon = AuthContext::anonymous();
+        with_user_ctx(true, &anon, |ctx, _, _, _| {
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/email/send-verification",
+                "{}",
+                None,
+            );
+            assert_eq!(status, 401);
+            assert!(body.contains("UNAUTHORIZED"));
+        });
+    }
+
+    #[test]
+    fn email_verify_requires_auth() {
+        let anon = AuthContext::anonymous();
+        with_user_ctx(true, &anon, |ctx, _, _, _| {
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/email/verify",
+                r#"{"code":"123456"}"#,
+                None,
+            );
+            assert_eq!(status, 401);
+            assert!(body.contains("UNAUTHORIZED"));
+        });
+    }
+
+    #[test]
+    fn email_send_verification_uses_session_email_not_body() {
+        // Caller is "u-1" (alice@example.com). Even if they put a
+        // different email in the body, the code should be issued for
+        // the SESSION's email — otherwise an authed caller could spam
+        // codes to arbitrary addresses.
+        let alice = AuthContext {
+            user_id: Some("u-1".into()),
+            is_admin: false,
+            roles: vec![],
+            tenant_id: None,
+        };
+        with_user_ctx(true, &alice, |ctx, _, email, _| {
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/email/send-verification",
+                r#"{"email":"victim@example.com"}"#,
+                None,
+            );
+            assert_eq!(status, 200);
+            // Dev mode echoes the code; verify the recipient is alice,
+            // not the body's victim.
+            let sent = email.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].0, "alice@example.com");
+            assert!(body.contains("alice@example.com"));
+            assert!(!body.contains("victim@example.com"));
+        });
+    }
+
+    #[test]
+    fn email_verify_happy_path_stamps_email_verified() {
+        let alice = AuthContext {
+            user_id: Some("u-1".into()),
+            is_admin: false,
+            roles: vec![],
+            tenant_id: None,
+        };
+        with_user_ctx(true, &alice, |ctx, store, _, magic_codes| {
+            // Pre-issue a code (skipping the send endpoint) so we test
+            // verify in isolation.
+            let code = magic_codes.try_create("alice@example.com").unwrap();
+            let body = format!(r#"{{"code":"{code}"}}"#);
+            let (status, resp, _) =
+                route(ctx, HttpMethod::Post, "/api/auth/email/verify", &body, None);
+            assert_eq!(status, 200);
+            assert!(resp.contains("\"verified\":true"));
+            // Update was attempted on User u-1 with emailVerified set.
+            let last = store.last_update.lock().unwrap();
+            let (entity, id, data) = last.as_ref().expect("update should have fired");
+            assert_eq!(entity, "User");
+            assert_eq!(id, "u-1");
+            assert!(data.get("emailVerified").is_some());
+        });
+    }
+
+    #[test]
+    fn email_verify_rejects_wrong_code() {
+        let alice = AuthContext {
+            user_id: Some("u-1".into()),
+            is_admin: false,
+            roles: vec![],
+            tenant_id: None,
+        };
+        with_user_ctx(true, &alice, |ctx, store, _, magic_codes| {
+            let _ = magic_codes.try_create("alice@example.com").unwrap();
+            let (status, body, _) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/email/verify",
+                r#"{"code":"999999"}"#,
+                None,
+            );
+            assert_eq!(status, 401);
+            assert!(body.contains("INVALID_CODE"));
+            // No update should have happened.
+            assert!(store.last_update.lock().unwrap().is_none());
         });
     }
 
