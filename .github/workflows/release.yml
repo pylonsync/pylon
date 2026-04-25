@@ -219,4 +219,17 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          # Single-platform for now. linux/arm64 via QEMU emulation
+          # quadruples the build time (45+ min cold, painful even
+          # warm) and we have no native arm64 runners. Add it back
+          # once we either: (a) introduce a separate arm64 build job
+          # on a GitHub-hosted ARM runner, or (b) accept the wait
+          # and queue parallel jobs by platform via matrix.
+          platforms: linux/amd64
+          # GHA cache backend persists buildx layers across runs so
+          # the cargo dep tree (~80% of build time) doesn't recompile
+          # unless Cargo.lock actually changed. mode=max preserves
+          # intermediate layers, not just the final image — saves
+          # the rust-builder stage's deps cache too.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
