@@ -16,11 +16,37 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
-import { Loader2 } from "lucide-react";
+import {
+  Loader2,
+  Hash,
+  Lock,
+  Star,
+  Plus,
+  LogOut,
+  Search,
+  X,
+  Send,
+  MessageSquare,
+  ChevronDown,
+  Smile,
+} from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Label } from "@pylonsync/example-ui/label";
 import { Card, CardContent } from "@pylonsync/example-ui/card";
+import { Textarea } from "@pylonsync/example-ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@pylonsync/example-ui/dialog";
+import { Avatar, AvatarFallback } from "@pylonsync/example-ui/avatar";
+import { Checkbox } from "@pylonsync/example-ui/checkbox";
+import { Badge } from "@pylonsync/example-ui/badge";
+import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = "http://localhost:4321";
 // Give this app its own namespace so chat's auth + replica don't clobber
@@ -142,38 +168,31 @@ function escapeHtml(s: string): string {
 }
 
 function renderMarkdown(body: string): string {
-  // Code blocks first — pull them out so their content isn't touched by
-  // the inline passes.
   const blocks: string[] = [];
   let work = body.replace(/```([\s\S]*?)```/g, (_, code: string) => {
     const idx = blocks.push(code) - 1;
     return `\u0000BLOCK${idx}\u0000`;
   });
   work = escapeHtml(work);
-  // Inline code
   work = work.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
-  // Bold / italic (greedy but scoped to same line).
   work = work.replace(/\*([^*\n]+)\*/g, "<strong>$1</strong>");
   work = work.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, "$1<em>$2</em>");
-  // URLs — match http(s), skip if it's inside quoted attribute.
   work = work.replace(
     /(^|[\s(])((?:https?:\/\/)[^\s<>"']+)/g,
     (_, lead, url) =>
-      `${lead}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`,
+      `${lead}<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-primary underline underline-offset-2 hover:text-primary/80">${url}</a>`,
   );
-  // Restore code blocks (escaped).
   work = work.replace(/\u0000BLOCK(\d+)\u0000/g, (_, idx) => {
     const raw = blocks[Number(idx)];
-    return `<pre><code>${escapeHtml(raw.replace(/^\n/, ""))}</code></pre>`;
+    return `<pre class="mt-1 overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 text-xs"><code>${escapeHtml(raw.replace(/^\n/, ""))}</code></pre>`;
   });
   return work;
 }
 
-// Shared renderer used by main + thread message rows.
 function RichBody({ body }: { body: string }) {
   return (
     <div
-      className="message-body"
+      className="whitespace-pre-wrap break-words text-sm leading-6 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12.5px] [&_code]:text-foreground [&_strong]:font-semibold [&_em]:italic"
       dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
     />
   );
@@ -185,9 +204,6 @@ function dmPeerId(ch: { name: string }, me: string): string | null {
   return a === me ? b : a === undefined ? null : a;
 }
 
-// Star persistence — per-user localStorage so stars don't bleed across
-// accounts on a shared machine. Not synced across devices; move to a
-// StarredChannel entity if you need that.
 function starsKey(userId: string) {
   return storageKey(`stars:${userId}`);
 }
@@ -222,6 +238,52 @@ function useStars(userId: string): {
     });
   };
   return { stars, toggle };
+}
+
+// ---------------------------------------------------------------------------
+// ColorAvatar — reusable avatar that keeps per-user color tints.
+// ---------------------------------------------------------------------------
+
+function ColorAvatar({
+  name,
+  color,
+  size = "md",
+  onClick,
+  className,
+}: {
+  name: string | undefined;
+  color: string | undefined;
+  size?: "xs" | "sm" | "md" | "lg";
+  onClick?: () => void;
+  className?: string;
+}) {
+  const sizeCls =
+    size === "xs"
+      ? "size-5 text-[9.5px]"
+      : size === "sm"
+        ? "size-6 text-[10.5px]"
+        : size === "lg"
+          ? "size-14 text-lg"
+          : "size-8 text-xs";
+  return (
+    <Avatar
+      className={cn(
+        sizeCls,
+        "font-semibold text-white shrink-0",
+        onClick && "cursor-pointer",
+        className,
+      )}
+      onClick={onClick}
+      style={{ backgroundColor: color || "#8b5cf6" }}
+    >
+      <AvatarFallback
+        className="bg-transparent text-white"
+        style={{ backgroundColor: color || "#8b5cf6" }}
+      >
+        {initials(name)}
+      </AvatarFallback>
+    </Avatar>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -284,55 +346,34 @@ export function ChatApp() {
     };
   }, []);
 
-  // Close the thread panel when switching channels — a thread parent
-  // belongs to one channel; leaving that channel makes the panel stale.
   useEffect(() => {
     setThreadMessageId(null);
   }, [activeChannelId]);
 
-  // Global keyboard shortcuts. Centralized here so every shortcut has one
-  // obvious home — easier to reason about conflicts, and one cleanup path.
   useEffect(() => {
     if (!currentUser) return;
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
-      // ⌘K — command palette
       if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen(true);
         return;
       }
-      // ⌘Shift+D — new DM picker
       if (mod && e.shiftKey && e.key.toLowerCase() === "d") {
         e.preventDefault();
         setDmPickerOpen(true);
         return;
       }
-      // ⌘/ — shortcut help
       if (mod && e.key === "/") {
         e.preventDefault();
         setShortcutsOpen((v) => !v);
         return;
       }
-      // Esc — peel overlays in a predictable order: palette > DM picker >
-      // shortcut help > thread panel.
       if (e.key === "Escape") {
-        if (paletteOpen) {
-          setPaletteOpen(false);
-          return;
-        }
-        if (dmPickerOpen) {
-          setDmPickerOpen(false);
-          return;
-        }
-        if (shortcutsOpen) {
-          setShortcutsOpen(false);
-          return;
-        }
-        if (threadMessageId) {
-          setThreadMessageId(null);
-          return;
-        }
+        if (paletteOpen) return setPaletteOpen(false);
+        if (dmPickerOpen) return setDmPickerOpen(false);
+        if (shortcutsOpen) return setShortcutsOpen(false);
+        if (threadMessageId) return setThreadMessageId(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -365,82 +406,77 @@ export function ChatApp() {
 
   return (
     <UIContext.Provider value={ui}>
-    <div className="app">
-      <Sidebar
-        currentUser={currentUser}
-        activeChannelId={activeChannelId}
-        onSelectChannel={setActiveChannelId}
-        onSignOut={signOut}
-        dmPickerOpen={dmPickerOpen}
-        setDmPickerOpen={setDmPickerOpen}
-      />
-      {activeChannelId ? (
-        <ChannelView
-          channelId={activeChannelId}
+      <div className="grid h-screen grid-cols-[260px_1fr] overflow-hidden bg-background text-foreground data-[thread=true]:grid-cols-[260px_1fr_380px]" data-thread={!!threadMessageId}>
+        <Sidebar
           currentUser={currentUser}
-          threadMessageId={threadMessageId}
-          onOpenThread={setThreadMessageId}
+          activeChannelId={activeChannelId}
+          onSelectChannel={setActiveChannelId}
+          onSignOut={signOut}
+          dmPickerOpen={dmPickerOpen}
+          setDmPickerOpen={setDmPickerOpen}
         />
-      ) : (
-        <div className="main">
-          <EmptyState
-            title="Welcome to Pylon Chat"
-            body="Pick a channel on the left or start a direct message."
+        {activeChannelId ? (
+          <ChannelView
+            channelId={activeChannelId}
+            currentUser={currentUser}
+            threadMessageId={threadMessageId}
+            onOpenThread={setThreadMessageId}
           />
-        </div>
-      )}
-      {threadMessageId && activeChannelId && (
-        <ThreadPanel
-          parentId={threadMessageId}
-          channelId={activeChannelId}
-          currentUser={currentUser}
-          onClose={() => setThreadMessageId(null)}
-        />
-      )}
-      {paletteOpen && (
-        <CommandPalette
-          currentUser={currentUser}
-          onClose={() => setPaletteOpen(false)}
-          onSelectChannel={(id) => {
-            setActiveChannelId(id);
-            setPaletteOpen(false);
-          }}
-        />
-      )}
-      {shortcutsOpen && (
-        <ShortcutsHelp onClose={() => setShortcutsOpen(false)} />
-      )}
-      {profileUserId && (
-        <ProfileModal
-          userId={profileUserId}
-          currentUser={currentUser}
-          onClose={() => setProfileUserId(null)}
-          onStartDm={(channelId) => {
-            setProfileUserId(null);
-            setActiveChannelId(channelId);
-          }}
-        />
-      )}
-      {channelDetailsId && (
-        <ChannelDetailsModal
-          channelId={channelDetailsId}
-          currentUser={currentUser}
-          onClose={() => setChannelDetailsId(null)}
-          onOpenProfile={(id) => {
-            setChannelDetailsId(null);
-            setProfileUserId(id);
-          }}
-        />
-      )}
-    </div>
+        ) : (
+          <main className="flex min-h-0 flex-col">
+            <EmptyState
+              title="Welcome to Pylon Chat"
+              body="Pick a channel on the left or start a direct message."
+            />
+          </main>
+        )}
+        {threadMessageId && activeChannelId && (
+          <ThreadPanel
+            parentId={threadMessageId}
+            channelId={activeChannelId}
+            currentUser={currentUser}
+            onClose={() => setThreadMessageId(null)}
+          />
+        )}
+        {paletteOpen && (
+          <CommandPalette
+            currentUser={currentUser}
+            onClose={() => setPaletteOpen(false)}
+            onSelectChannel={(id) => {
+              setActiveChannelId(id);
+              setPaletteOpen(false);
+            }}
+          />
+        )}
+        {shortcutsOpen && (
+          <ShortcutsHelp onClose={() => setShortcutsOpen(false)} />
+        )}
+        {profileUserId && (
+          <ProfileModal
+            userId={profileUserId}
+            currentUser={currentUser}
+            onClose={() => setProfileUserId(null)}
+            onStartDm={(channelId) => {
+              setProfileUserId(null);
+              setActiveChannelId(channelId);
+            }}
+          />
+        )}
+        {channelDetailsId && (
+          <ChannelDetailsModal
+            channelId={channelDetailsId}
+            currentUser={currentUser}
+            onClose={() => setChannelDetailsId(null)}
+            onOpenProfile={(id) => {
+              setChannelDetailsId(null);
+              setProfileUserId(id);
+            }}
+          />
+        )}
+      </div>
     </UIContext.Provider>
   );
 }
-
-// UIContext — short-path for deep children (message rows, sidebar user chip)
-// to pop open profile / channel-details modals without threading the
-// openers through every prop. Kept local to this file; real apps would
-// probably split this into smaller contexts.
 
 const UIContext = React.createContext<{
   openProfile: (userId: string) => void;
@@ -553,7 +589,7 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// Unread-count hook — single source of truth for sidebar badges.
+// Unread counts
 // ---------------------------------------------------------------------------
 
 function useUnreadCounts(currentUser: User): Record<string, number> {
@@ -611,9 +647,6 @@ function Sidebar({
     [myMemberships],
   );
 
-  // Split into three buckets: starred (regular channels only), non-starred
-  // public channels, and DMs (private channels with the dm: name prefix
-  // that the current user is a member of).
   const { starred, regular, dms } = useMemo(() => {
     const s: Channel[] = [];
     const r: Channel[] = [];
@@ -643,57 +676,46 @@ function Sidebar({
 
   return (
     <>
-      <aside className="sidebar">
+      <aside className="flex min-h-0 flex-col border-r border-border bg-card/40">
         <div
-          className="sidebar-user clickable"
-          onClick={() => ui.openProfile(currentUser.id)}
           role="button"
           tabIndex={0}
+          onClick={() => ui.openProfile(currentUser.id)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               ui.openProfile(currentUser.id);
             }
           }}
+          className="flex shrink-0 cursor-pointer items-center gap-2.5 border-b border-border px-3 py-2.5 hover:bg-accent/40"
         >
-          <div
-            className="avatar avatar-md avatar-online-ring"
-            style={{ backgroundColor: currentUser.avatarColor || "#8b5cf6" }}
-            aria-hidden="true"
-          >
-            {initials(currentUser.displayName)}
+          <div className="relative">
+            <ColorAvatar name={currentUser.displayName} color={currentUser.avatarColor} />
+            <span className="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-emerald-500 ring-2 ring-card" />
           </div>
-          <div className="sidebar-user-meta">
-            <div className="sidebar-user-name">{currentUser.displayName}</div>
-            <div className="sidebar-user-status">Online</div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium">{currentUser.displayName}</div>
+            <div className="text-[11px] text-muted-foreground">Online</div>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground hover:text-foreground"
             onClick={(e) => {
               e.stopPropagation();
               onSignOut();
             }}
-            className="icon-btn"
             title="Sign out"
             aria-label="Sign out"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+            <LogOut className="size-4" />
+          </Button>
         </div>
 
-        <nav className="sidebar-list">
+        <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1.5 py-2">
           {starred.length > 0 && (
-            <>
-              <div className="sidebar-section">
-                <span>Starred</span>
-              </div>
+            <div>
+              <SidebarSection label="Starred" />
               {starred.map((ch) => (
                 <ChannelRow
                   key={ch.id}
@@ -705,87 +727,78 @@ function Sidebar({
                   onToggleStar={() => toggleStar(ch.id)}
                 />
               ))}
-            </>
-          )}
-
-          <div className="sidebar-section">
-            <span>
-              Channels{" "}
-              <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>
-                {regular.length}
-              </span>
-            </span>
-            <button
-              onClick={() => setCreateModalOpen(true)}
-              className="icon-btn"
-              title="Create channel"
-              aria-label="Create channel"
-              style={{ width: 20, height: 20 }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                <path
-                  d="M12 5v14M5 12h14"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </button>
-          </div>
-          {regular.map((ch) => (
-            <ChannelRow
-              key={ch.id}
-              channel={ch}
-              active={ch.id === activeChannelId}
-              unread={unread[ch.id] ?? 0}
-              starred={false}
-              onSelect={() => onSelectChannel(ch.id)}
-              onToggleStar={() => toggleStar(ch.id)}
-            />
-          ))}
-
-          <div className="sidebar-section">
-            <span>Direct Messages</span>
-            <button
-              onClick={() => setDmPickerOpen(true)}
-              className="icon-btn"
-              title="Start a DM"
-              aria-label="Start a DM"
-              style={{ width: 20, height: 20 }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                <path
-                  d="M12 5v14M5 12h14"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </button>
-          </div>
-          {dms.map((ch) => (
-            <DmRow
-              key={ch.id}
-              channel={ch}
-              currentUser={currentUser}
-              active={ch.id === activeChannelId}
-              unread={unread[ch.id] ?? 0}
-              onSelect={() => onSelectChannel(ch.id)}
-            />
-          ))}
-          {dms.length === 0 && (
-            <div
-              style={{
-                padding: "2px 10px 8px",
-                fontSize: 12,
-                color: "var(--text-dim)",
-              }}
-            >
-              No DMs yet.
             </div>
           )}
-        </nav>
 
+          <div>
+            <SidebarSection
+              label={
+                <>
+                  Channels{" "}
+                  <span className="font-normal text-muted-foreground/70">
+                    {regular.length}
+                  </span>
+                </>
+              }
+              action={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-5 text-muted-foreground hover:text-foreground"
+                  onClick={() => setCreateModalOpen(true)}
+                  title="Create channel"
+                  aria-label="Create channel"
+                >
+                  <Plus className="size-3" />
+                </Button>
+              }
+            />
+            {regular.map((ch) => (
+              <ChannelRow
+                key={ch.id}
+                channel={ch}
+                active={ch.id === activeChannelId}
+                unread={unread[ch.id] ?? 0}
+                starred={false}
+                onSelect={() => onSelectChannel(ch.id)}
+                onToggleStar={() => toggleStar(ch.id)}
+              />
+            ))}
+          </div>
+
+          <div>
+            <SidebarSection
+              label="Direct Messages"
+              action={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-5 text-muted-foreground hover:text-foreground"
+                  onClick={() => setDmPickerOpen(true)}
+                  title="Start a DM"
+                  aria-label="Start a DM"
+                >
+                  <Plus className="size-3" />
+                </Button>
+              }
+            />
+            {dms.map((ch) => (
+              <DmRow
+                key={ch.id}
+                channel={ch}
+                currentUser={currentUser}
+                active={ch.id === activeChannelId}
+                unread={unread[ch.id] ?? 0}
+                onSelect={() => onSelectChannel(ch.id)}
+              />
+            ))}
+            {dms.length === 0 && (
+              <div className="px-3 pb-2 pt-0.5 text-xs text-muted-foreground">
+                No DMs yet.
+              </div>
+            )}
+          </div>
+        </nav>
       </aside>
       {createModalOpen && (
         <CreateChannelModal
@@ -810,6 +823,21 @@ function Sidebar({
   );
 }
 
+function SidebarSection({
+  label,
+  action,
+}: {
+  label: React.ReactNode;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-0.5 flex items-center justify-between px-2.5 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <span>{label}</span>
+      {action}
+    </div>
+  );
+}
+
 function ChannelRow({
   channel,
   active,
@@ -827,44 +855,44 @@ function ChannelRow({
 }) {
   return (
     <div
-      className={
-        "channel-btn" +
-        (active ? " active" : "") +
-        (unread > 0 ? " unread" : "")
-      }
-      onClick={onSelect}
       role="button"
       tabIndex={0}
+      onClick={onSelect}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect();
         }
       }}
+      className={cn(
+        "group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+        active && "bg-primary/15 text-foreground hover:bg-primary/20",
+        unread > 0 && !active && "font-semibold text-foreground",
+      )}
     >
-      <span className="channel-prefix">
-        {channel.isPrivate ? "🔒" : "#"}
+      <span className="flex size-4 items-center justify-center text-muted-foreground/70">
+        {channel.isPrivate ? <Lock className="size-3" /> : <Hash className="size-3.5" />}
       </span>
-      <span className="channel-name">{channel.name}</span>
-      {unread > 0 && <span className="unread-badge">{unread}</span>}
+      <span className="flex-1 truncate">{channel.name}</span>
+      {unread > 0 && (
+        <Badge variant="default" className="h-4 min-w-4 rounded-full px-1.5 text-[10px] leading-none">
+          {unread}
+        </Badge>
+      )}
       <button
         type="button"
-        className={"channel-star" + (starred ? " starred" : "")}
         onClick={(e) => {
           e.stopPropagation();
           onToggleStar();
         }}
         title={starred ? "Unstar" : "Star"}
         aria-label={starred ? "Unstar" : "Star"}
+        className={cn(
+          "flex size-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100",
+          starred && "text-amber-400 opacity-100",
+        )}
       >
-        <svg viewBox="0 0 24 24" fill={starred ? "currentColor" : "none"}>
-          <path
-            d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <Star className={cn("size-3", starred && "fill-current")} />
       </button>
     </div>
   );
@@ -889,30 +917,34 @@ function DmRow({
 
   return (
     <div
-      className={
-        "channel-btn" +
-        (active ? " active" : "") +
-        (unread > 0 ? " unread" : "")
-      }
-      onClick={onSelect}
       role="button"
       tabIndex={0}
+      onClick={onSelect}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect();
         }
       }}
+      className={cn(
+        "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+        active && "bg-primary/15 text-foreground hover:bg-primary/20",
+        unread > 0 && !active && "font-semibold text-foreground",
+      )}
     >
-      <span className="dm-presence-dot online" />
-      <span className="channel-name">{label}</span>
-      {unread > 0 && <span className="unread-badge">{unread}</span>}
+      <span className="size-2 rounded-full bg-emerald-500" />
+      <span className="flex-1 truncate">{label}</span>
+      {unread > 0 && (
+        <Badge variant="default" className="h-4 min-w-4 rounded-full px-1.5 text-[10px] leading-none">
+          {unread}
+        </Badge>
+      )}
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Create-channel modal — name + public/private toggle
+// Create-channel modal
 // ---------------------------------------------------------------------------
 
 function CreateChannelModal({
@@ -930,14 +962,6 @@ function CreateChannelModal({
     { name: string; topic: string; isPrivate: boolean },
     { channelId: string }
   >("createChannel");
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   async function submit() {
     const cleaned = name.trim().toLowerCase();
@@ -969,98 +993,75 @@ function CreateChannelModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 420 }}
-        role="dialog"
-        aria-modal="true"
-      >
-        <div className="modal-title">Create a channel</div>
-        <div className="modal-subtitle">
-          Channels are where conversations happen around a topic.
-        </div>
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input
-            autoFocus
-            value={name}
-            onChange={(e) => {
-              setName(e.target.value);
-              if (err) setErr(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !busy) void submit();
-            }}
-            placeholder="team-chat"
-            className="input"
-          />
-        </label>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 10,
-            padding: "10px 12px",
-            marginTop: 4,
-            background: "var(--surface-raised)",
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            cursor: "pointer",
-            userSelect: "none",
-          }}
-          onClick={() => setIsPrivate((v) => !v)}
-        >
-          <input
-            type="checkbox"
-            checked={isPrivate}
-            onChange={(e) => setIsPrivate(e.target.checked)}
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              accentColor: "var(--accent)",
-              marginTop: 2,
-              flexShrink: 0,
-            }}
-          />
-          <div>
-            <div style={{ fontSize: 13.5, fontWeight: 500 }}>
-              {isPrivate ? "🔒 Private channel" : "# Public channel"}
-            </div>
-            <div
-              style={{
-                fontSize: 12,
-                color: "var(--text-muted)",
-                marginTop: 2,
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Create a channel</DialogTitle>
+          <DialogDescription>
+            Channels are where conversations happen around a topic.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="channel-name">Name</Label>
+            <Input
+              id="channel-name"
+              autoFocus
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (err) setErr(null);
               }}
-            >
-              {isPrivate
-                ? "Only invited members can see or join."
-                : "Anyone in the workspace can see and join."}
-            </div>
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy) void submit();
+              }}
+              placeholder="team-chat"
+            />
           </div>
+          <label
+            className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-accent/30 px-3 py-2.5 hover:bg-accent/40"
+          >
+            <Checkbox
+              checked={isPrivate}
+              onCheckedChange={(v) => setIsPrivate(!!v)}
+              className="mt-0.5"
+            />
+            <div>
+              <div className="text-sm font-medium">
+                {isPrivate ? "🔒 Private channel" : "# Public channel"}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {isPrivate
+                  ? "Only invited members can see or join."
+                  : "Anyone in the workspace can see and join."}
+              </div>
+            </div>
+          </label>
+          {err && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {err}
+            </div>
+          )}
         </div>
-        {err && <div className="login-error">{err}</div>}
-        <div className="modal-footer">
-          <button className="btn-secondary" onClick={onClose}>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="btn-primary"
-            style={{ margin: 0, width: "auto", padding: "8px 18px" }}
+          </Button>
+          <Button
             onClick={() => void submit()}
             disabled={busy || name.trim().length === 0}
           >
+            {busy && <Loader2 className="size-4 animate-spin" />}
             {busy ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // ---------------------------------------------------------------------------
-// DM picker modal — pick a user to open a DM with.
+// DM picker
 // ---------------------------------------------------------------------------
 
 function DmPicker({
@@ -1103,72 +1104,52 @@ function DmPicker({
     }
   }
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
-        <div className="modal-title">Start a direct message</div>
-        <div className="modal-subtitle">Pick someone to chat with.</div>
-        <input
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Start a direct message</DialogTitle>
+          <DialogDescription>Pick someone to chat with.</DialogDescription>
+        </DialogHeader>
+        <Input
+          autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search by name or email…"
-          className="input"
-          autoFocus
-          style={{ marginBottom: 10 }}
         />
-        <div className="user-list">
+        <div className="-mx-6 max-h-[320px] overflow-y-auto px-2">
           {filtered.length === 0 ? (
-            <div
-              style={{
-                padding: "16px 10px",
-                fontSize: 13,
-                color: "var(--text-dim)",
-              }}
-            >
+            <div className="px-3 py-4 text-sm text-muted-foreground">
               No users match.
             </div>
           ) : (
             filtered.map((u) => (
               <button
                 key={u.id}
-                className="user-row"
                 onClick={() => void open(u)}
                 disabled={opening === u.id}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left hover:bg-accent disabled:opacity-50"
               >
-                <div
-                  className="avatar avatar-md"
-                  style={{ backgroundColor: u.avatarColor || "#8b5cf6" }}
-                >
-                  {initials(u.displayName)}
-                </div>
-                <div className="user-row-meta">
-                  <div className="user-row-name">{u.displayName}</div>
-                  <div className="user-row-email">{u.email}</div>
+                <ColorAvatar name={u.displayName} color={u.avatarColor} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">
+                    {u.displayName}
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {u.email}
+                  </div>
                 </div>
               </button>
             ))
           )}
         </div>
-        <div className="modal-footer">
-          <button className="btn-secondary" onClick={onClose}>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1197,41 +1178,37 @@ function ChannelView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId]);
 
-  if (!channel) return <div className="main" />;
+  if (!channel) return <main className="flex min-h-0 flex-col" />;
 
   const isDm = isDmChannel(channel);
   const ui = React.useContext(UIContext);
 
   return (
-    <main className="main">
-      <header className="channel-header">
-        <div className="channel-title-group">
+    <main className="flex min-h-0 flex-col bg-background">
+      <header className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
+        <div className="flex min-w-0 items-center gap-2">
           {isDm ? (
             <DmHeader channel={channel} currentUser={currentUser} />
           ) : (
             <>
-              <span
-                className="channel-title channel-header-title"
+              <button
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[15px] font-semibold hover:bg-accent"
                 onClick={() => ui.openChannelDetails(channel.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    ui.openChannelDetails(channel.id);
-                  }
-                }}
                 title="Channel details"
               >
-                <span className="channel-title-prefix">
-                  {channel.isPrivate ? "🔒 " : "# "}
-                </span>
-                {channel.name}
-              </span>
+                {channel.isPrivate ? (
+                  <Lock className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <Hash className="size-4 text-muted-foreground" />
+                )}
+                <span className="truncate">{channel.name}</span>
+              </button>
               {channel.topic && (
                 <>
-                  <span className="channel-divider">·</span>
-                  <span className="channel-topic">{channel.topic}</span>
+                  <span className="text-muted-foreground">·</span>
+                  <span className="truncate text-sm text-muted-foreground">
+                    {channel.topic}
+                  </span>
                 </>
               )}
             </>
@@ -1265,27 +1242,18 @@ function DmHeader({
   const { data: peer } = db.useQueryOne<User>("User", peerId ?? "");
   const ui = React.useContext(UIContext);
   return (
-    <span
-      className="channel-title channel-header-title"
+    <button
+      className="flex items-center gap-2 rounded-md px-1.5 py-0.5 text-[15px] font-semibold hover:bg-accent"
       onClick={() => peerId && ui.openProfile(peerId)}
-      role="button"
-      tabIndex={0}
       title="View profile"
     >
-      <span style={{ marginRight: 8 }}>
-        <span
-          className="avatar avatar-sm"
-          style={{
-            display: "inline-flex",
-            verticalAlign: "middle",
-            backgroundColor: peer?.avatarColor || "#8b5cf6",
-          }}
-        >
-          {initials(peer?.displayName)}
-        </span>
-      </span>
-      {peer?.displayName ?? "Direct message"}
-    </span>
+      <ColorAvatar
+        name={peer?.displayName}
+        color={peer?.avatarColor}
+        size="sm"
+      />
+      <span>{peer?.displayName ?? "Direct message"}</span>
+    </button>
   );
 }
 
@@ -1303,7 +1271,6 @@ function ChannelPresenceCount({
   const total = others.length + 1;
   const [open, setOpen] = useState(false);
 
-  // Click-outside to close the popover.
   const wrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -1317,19 +1284,21 @@ function ChannelPresenceCount({
   }, [open]);
 
   return (
-    <div className="popover-wrap" ref={wrapRef}>
+    <div className="relative" ref={wrapRef}>
       <button
         type="button"
-        className="presence-btn"
         onClick={() => setOpen((v) => !v)}
         title="Who's here"
+        className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
       >
-        <span className="presence-dot" />
+        <span className="size-1.5 rounded-full bg-emerald-500" />
         <span>{others.length === 0 ? "Just you" : `${total} here`}</span>
       </button>
       {open && (
-        <div className="popover">
-          <div className="popover-header">In this channel</div>
+        <div className="absolute right-0 top-full z-20 mt-1 w-56 overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md">
+          <div className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            In this channel
+          </div>
           <PopoverPeerRow
             userId={currentUser.id}
             selfFallback={currentUser}
@@ -1356,31 +1325,13 @@ function PopoverPeerRow({
   const { data: user } = db.useQueryOne<User>("User", userId);
   const display = user ?? selfFallback;
   return (
-    <div className="popover-item">
-      <div
-        className="avatar avatar-sm"
-        style={{ backgroundColor: display?.avatarColor || "#8b5cf6" }}
-      >
-        {initials(display?.displayName)}
+    <div className="flex items-center gap-2 px-3 py-2">
+      <ColorAvatar name={display?.displayName} color={display?.avatarColor} size="sm" />
+      <div className="min-w-0 flex-1 truncate text-sm">
+        {display?.displayName ?? "…"}
+        {isMe && <span className="ml-1.5 text-muted-foreground">(you)</span>}
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: 13,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {display?.displayName ?? "…"}
-          {isMe && (
-            <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>
-              (you)
-            </span>
-          )}
-        </div>
-      </div>
-      <span className="popover-item-status">●</span>
+      <span className="text-[10px] text-emerald-500">●</span>
     </div>
   );
 }
@@ -1400,8 +1351,6 @@ function MessageList({
   onOpenThread: (id: string | null) => void;
   threadMessageId: string | null;
 }) {
-  // Only top-level messages (no parent) in the main list. Thread replies
-  // surface in the thread panel.
   const { data: allMessages } = db.useQuery<Message>("Message", {
     where: { channelId },
     orderBy: { createdAt: "asc" },
@@ -1413,8 +1362,6 @@ function MessageList({
       ),
     [allMessages],
   );
-  // Reply counts per parent id — lets a message know how many replies it has
-  // without a per-row query. Counted client-side from the same sync store.
   const replyCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const m of allMessages ?? []) {
@@ -1430,9 +1377,6 @@ function MessageList({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
 
-  // Track whether the user is pinned to the bottom. If yes, auto-scroll on
-  // new messages. If not, we show the "Jump to latest" button instead — no
-  // yanking the scroll out from under someone reading older history.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1454,7 +1398,6 @@ function MessageList({
     }
   }, [visible.length, atBottom]);
 
-  // Scroll on channel switch — force to bottom regardless of prior scroll.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1466,7 +1409,7 @@ function MessageList({
 
   if (visible.length === 0) {
     return (
-      <div className="messages" ref={scrollRef}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" ref={scrollRef}>
         <EmptyState
           title="No messages yet"
           body="Say something — the whole channel is listening."
@@ -1483,12 +1426,15 @@ function MessageList({
     const needsDivider = !prev || !prevDate || !sameDay(prevDate, thisDate);
     if (needsDivider) {
       rows.push(
-        <div key={`day-${m.id}`} className="date-divider">
-          <div className="date-divider-line" />
-          <div className="date-divider-label">
+        <div
+          key={`day-${m.id}`}
+          className="my-3 flex items-center gap-3 px-5 text-[11px] uppercase tracking-wider text-muted-foreground"
+        >
+          <div className="h-px flex-1 bg-border" />
+          <div className="rounded-full border border-border bg-card px-3 py-0.5 font-semibold">
             {formatDateHeading(m.createdAt)}
           </div>
-          <div className="date-divider-line" />
+          <div className="h-px flex-1 bg-border" />
         </div>,
       );
     }
@@ -1512,32 +1458,30 @@ function MessageList({
   }
 
   return (
-    <>
-      <div ref={scrollRef} className="messages">
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto pt-2 pb-1"
+      >
         {rows}
       </div>
       <button
-        className={"jump-bottom" + (atBottom ? "" : " visible")}
-        onClick={() => {
+        onClick={() =>
           scrollRef.current?.scrollTo({
             top: scrollRef.current.scrollHeight,
             behavior: "smooth",
-          });
-        }}
+          })
+        }
         aria-label="Jump to latest"
+        className={cn(
+          "pointer-events-none absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground opacity-0 shadow-md transition-opacity",
+          !atBottom && "pointer-events-auto opacity-100",
+        )}
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M12 5v14M5 12l7 7 7-7"
-            stroke="currentColor"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <ChevronDown className="size-3" />
         Jump to latest
       </button>
-    </>
+    </div>
   );
 }
 
@@ -1575,130 +1519,107 @@ function MessageRow({
     return Object.entries(map);
   }, [reactions, currentUser.id]);
 
-  const rowClass =
-    "message-row" + (compact ? " compact" : " first-in-group");
   const ui = React.useContext(UIContext);
   const openAuthor = () => ui.openProfile(message.authorId);
 
   return (
-    <div className={rowClass}>
+    <div
+      className={cn(
+        "group relative flex items-start gap-3 px-5 py-0.5 hover:bg-accent/30",
+        !compact && "mt-2 pt-1.5",
+      )}
+    >
       {compact ? (
-        <div className="message-timestamp-hover">
+        <div className="w-8 shrink-0 pt-1 text-right text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
           {formatTime(message.createdAt)}
         </div>
       ) : (
-        <div className="message-avatar-inline">
-          <div
-            className="avatar avatar-md clickable"
-            style={{ backgroundColor: author?.avatarColor || "#8b5cf6" }}
+        <div className="w-8 shrink-0">
+          <ColorAvatar
+            name={author?.displayName}
+            color={author?.avatarColor}
             onClick={openAuthor}
-            role="button"
-            tabIndex={0}
-            title="View profile"
-          >
-            {initials(author?.displayName)}
-          </div>
+          />
         </div>
       )}
-      <div className="message-content">
+      <div className="min-w-0 flex-1">
         {!compact && (
-          <div className="message-meta">
-            <span
-              className="message-author clickable"
+          <div className="mb-0.5 flex items-baseline gap-2">
+            <button
               onClick={openAuthor}
-              role="button"
-              tabIndex={0}
+              className="text-sm font-semibold hover:underline"
               title="View profile"
             >
               {author?.displayName ?? "…"}
-            </span>
-            <span className="message-time">
+            </button>
+            <span className="text-[11px] text-muted-foreground">
               {formatTime(message.createdAt)}
             </span>
           </div>
         )}
         <RichBody body={message.body} />
         {message.editedAt && (
-          <span className="message-edited">(edited)</span>
+          <span className="ml-1 text-[11px] text-muted-foreground">
+            (edited)
+          </span>
         )}
         {grouped.length > 0 && (
-          <div className="reactions">
+          <div className="mt-1 flex flex-wrap gap-1">
             {grouped.map(([emoji, { count, mine }]) => (
               <button
                 key={emoji}
                 onClick={() =>
                   void toggle.mutate({ messageId: message.id, emoji })
                 }
-                className={"reaction" + (mine ? " mine" : "")}
+                className={cn(
+                  "flex items-center gap-1 rounded-full border border-border bg-card px-1.5 py-0.5 text-xs hover:bg-accent",
+                  mine && "border-primary/50 bg-primary/15 text-foreground",
+                )}
               >
                 <span>{emoji}</span>
-                <span className="reaction-count">{count}</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {count}
+                </span>
               </button>
             ))}
           </div>
         )}
         {replyCount > 0 && (
           <button
-            className="reply-count"
             onClick={onOpenThread}
+            className="mt-1 flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs font-medium text-primary hover:bg-accent"
             title="Open thread"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <MessageSquare className="size-3" />
             {replyCount} {replyCount === 1 ? "reply" : "replies"}
           </button>
         )}
       </div>
-      <div className="message-actions" aria-hidden="true">
-        <button
-          onClick={() =>
-            void toggle.mutate({ messageId: message.id, emoji: "👍" })
-          }
-          className="action-btn"
-          title="React 👍"
-        >
-          👍
-        </button>
-        <button
-          onClick={() =>
-            void toggle.mutate({ messageId: message.id, emoji: "❤️" })
-          }
-          className="action-btn"
-          title="React ❤️"
-        >
-          ❤️
-        </button>
-        <button
-          onClick={() =>
-            void toggle.mutate({ messageId: message.id, emoji: "🎉" })
-          }
-          className="action-btn"
-          title="React 🎉"
-        >
-          🎉
-        </button>
+      <div
+        className="absolute right-5 top-0 hidden items-center gap-0.5 rounded-md border border-border bg-card p-0.5 shadow-sm group-hover:flex"
+        aria-hidden="true"
+      >
+        {["👍", "❤️", "🎉"].map((emoji) => (
+          <button
+            key={emoji}
+            onClick={() =>
+              void toggle.mutate({ messageId: message.id, emoji })
+            }
+            className="flex size-6 items-center justify-center rounded hover:bg-accent"
+            title={`React ${emoji}`}
+          >
+            {emoji}
+          </button>
+        ))}
         <button
           onClick={onOpenThread}
-          className="action-btn"
+          className={cn(
+            "flex size-6 items-center justify-center rounded hover:bg-accent",
+            threadOpen && "text-primary",
+          )}
           title={threadOpen ? "Close thread" : "Reply in thread"}
-          style={threadOpen ? { color: "var(--accent)" } : undefined}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <MessageSquare className="size-3.5" />
         </button>
       </div>
     </div>
@@ -1740,22 +1661,15 @@ function ThreadPanel({
 
   if (!parent) {
     return (
-      <aside className="thread-panel">
-        <header className="thread-header">
-          <div>
-            <div className="thread-title">Thread</div>
-          </div>
-          <button
-            onClick={onClose}
-            className="icon-btn"
-            title="Close"
-            aria-label="Close thread"
-          >
-            <CloseIcon />
-          </button>
+      <aside className="flex min-h-0 flex-col border-l border-border bg-card/40">
+        <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
+          <div className="text-sm font-semibold">Thread</div>
+          <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
+            <X className="size-4" />
+          </Button>
         </header>
-        <div className="empty" style={{ padding: 40 }}>
-          <div className="empty-body">Loading…</div>
+        <div className="grid flex-1 place-items-center p-10 text-sm text-muted-foreground">
+          Loading…
         </div>
       </aside>
     );
@@ -1764,42 +1678,28 @@ function ThreadPanel({
   const replyList = replies ?? [];
 
   return (
-    <aside className="thread-panel">
-      <header className="thread-header">
+    <aside className="flex min-h-0 flex-col border-l border-border bg-card/40">
+      <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
         <div>
-          <div className="thread-title">Thread</div>
-          <div className="thread-subtitle">
+          <div className="text-sm font-semibold">Thread</div>
+          <div className="text-xs text-muted-foreground">
             {replyList.length} {replyList.length === 1 ? "reply" : "replies"}
           </div>
         </div>
-        <button
-          onClick={onClose}
-          className="icon-btn"
-          title="Close"
-          aria-label="Close thread"
-        >
-          <CloseIcon />
-        </button>
+        <Button variant="ghost" size="icon" className="size-7" onClick={onClose} aria-label="Close thread">
+          <X className="size-4" />
+        </Button>
       </header>
-      <div className="thread-body" ref={scrollRef}>
-        <div className="thread-parent">
-          <div className="message-row first-in-group" style={{ padding: 0 }}>
-            <div className="message-avatar-inline">
-              <div
-                className="avatar avatar-md"
-                style={{
-                  backgroundColor: parentAuthor?.avatarColor || "#8b5cf6",
-                }}
-              >
-                {initials(parentAuthor?.displayName)}
-              </div>
-            </div>
-            <div className="message-content">
-              <div className="message-meta">
-                <span className="message-author">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-1 pb-1" ref={scrollRef}>
+        <div className="border-b border-border px-4 py-3">
+          <div className="flex items-start gap-3">
+            <ColorAvatar name={parentAuthor?.displayName} color={parentAuthor?.avatarColor} />
+            <div className="min-w-0 flex-1">
+              <div className="mb-0.5 flex items-baseline gap-2">
+                <span className="text-sm font-semibold">
                   {parentAuthor?.displayName ?? "…"}
                 </span>
-                <span className="message-time">
+                <span className="text-[11px] text-muted-foreground">
                   {formatTime(parent.createdAt)}
                 </span>
               </div>
@@ -1807,7 +1707,7 @@ function ThreadPanel({
             </div>
           </div>
         </div>
-        <div className="thread-replies">
+        <div className="flex flex-col py-1">
           {replyList.map((m, i) => {
             const prev = replyList[i - 1];
             const compact =
@@ -1827,7 +1727,7 @@ function ThreadPanel({
           })}
         </div>
       </div>
-      <div className="thread-composer">
+      <div className="shrink-0 border-t border-border p-3">
         <ThreadComposer
           parentId={parentId}
           channelId={channelId}
@@ -1866,49 +1766,44 @@ function ThreadReplyRow({
     return Object.entries(map);
   }, [reactions, currentUser.id]);
 
-  const rowClass =
-    "message-row" + (compact ? " compact" : " first-in-group");
-
   return (
-    <div className={rowClass}>
+    <div className={cn("flex items-start gap-3 px-4 py-1", !compact && "mt-1.5")}>
       {compact ? (
-        <div className="message-timestamp-hover">
+        <div className="w-8 shrink-0 pt-1 text-right text-[10px] text-muted-foreground">
           {formatTime(message.createdAt)}
         </div>
       ) : (
-        <div className="message-avatar-inline">
-          <div
-            className="avatar avatar-md"
-            style={{ backgroundColor: author?.avatarColor || "#8b5cf6" }}
-          >
-            {initials(author?.displayName)}
-          </div>
+        <div className="w-8 shrink-0">
+          <ColorAvatar name={author?.displayName} color={author?.avatarColor} />
         </div>
       )}
-      <div className="message-content">
+      <div className="min-w-0 flex-1">
         {!compact && (
-          <div className="message-meta">
-            <span className="message-author">
+          <div className="mb-0.5 flex items-baseline gap-2">
+            <span className="text-sm font-semibold">
               {author?.displayName ?? "…"}
             </span>
-            <span className="message-time">
+            <span className="text-[11px] text-muted-foreground">
               {formatTime(message.createdAt)}
             </span>
           </div>
         )}
         <RichBody body={message.body} />
         {grouped.length > 0 && (
-          <div className="reactions">
+          <div className="mt-1 flex flex-wrap gap-1">
             {grouped.map(([emoji, { count, mine }]) => (
               <button
                 key={emoji}
                 onClick={() =>
                   void toggle.mutate({ messageId: message.id, emoji })
                 }
-                className={"reaction" + (mine ? " mine" : "")}
+                className={cn(
+                  "flex items-center gap-1 rounded-full border border-border bg-card px-1.5 py-0.5 text-xs hover:bg-accent",
+                  mine && "border-primary/50 bg-primary/15 text-foreground",
+                )}
               >
                 <span>{emoji}</span>
-                <span className="reaction-count">{count}</span>
+                <span className="text-[11px] text-muted-foreground">{count}</span>
               </button>
             ))}
           </div>
@@ -1958,11 +1853,7 @@ function ThreadComposer({
     store.notify();
 
     try {
-      await send.mutate({
-        channelId,
-        body: text,
-        parentMessageId: parentId,
-      });
+      await send.mutate({ channelId, body: text, parentMessageId: parentId });
     } catch (e) {
       console.error("reply failed", e);
     } finally {
@@ -1978,7 +1869,6 @@ function ThreadComposer({
   }
 
   const canSend = body.trim().length > 0;
-
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     const el = textareaRef.current;
@@ -1994,38 +1884,15 @@ function ThreadComposer({
         void submit();
       }}
     >
-      <div className="composer-inner">
-        <textarea
-          ref={textareaRef}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Reply to thread…"
-          className="composer-textarea"
-          rows={1}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-        />
-        <button
-          type="submit"
-          disabled={!canSend}
-          className="btn-send"
-          aria-label="Send reply"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M5 12h14M13 6l6 6-6 6"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      </div>
+      <ComposerInner
+        textareaRef={textareaRef}
+        value={body}
+        onChange={setBody}
+        placeholder="Reply to thread…"
+        canSend={canSend}
+        onSubmit={submit}
+        ariaLabel="Send reply"
+      />
     </form>
   );
 }
@@ -2051,7 +1918,7 @@ function Presence({
       (p.data as { typing?: boolean })?.typing,
   );
 
-  if (typing.length === 0) return <div className="presence-bar" />;
+  if (typing.length === 0) return <div className="h-5 shrink-0" />;
 
   const names = typing
     .map((p) => (p.data as { displayName?: string })?.displayName ?? "Someone")
@@ -2064,12 +1931,12 @@ function Presence({
         : `${names.length} people are typing`;
 
   return (
-    <div className="presence-bar">
-      <span className="typing">
-        <span className="typing-dots">
-          <span className="typing-dot" />
-          <span className="typing-dot" />
-          <span className="typing-dot" />
+    <div className="h-5 shrink-0 px-5 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5">
+        <span className="inline-flex gap-0.5">
+          <span className="size-1 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.3s]" />
+          <span className="size-1 animate-bounce rounded-full bg-muted-foreground [animation-delay:-0.15s]" />
+          <span className="size-1 animate-bounce rounded-full bg-muted-foreground" />
         </span>
         <span>{label}</span>
       </span>
@@ -2080,6 +1947,53 @@ function Presence({
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
+
+function ComposerInner({
+  textareaRef,
+  value,
+  onChange,
+  placeholder,
+  canSend,
+  onSubmit,
+  ariaLabel,
+}: {
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  canSend: boolean;
+  onSubmit: () => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-3 py-2 shadow-sm focus-within:border-ring/80 focus-within:ring-2 focus-within:ring-ring/20">
+      <Textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={1}
+        className="min-h-0 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onSubmit();
+          }
+        }}
+      />
+      <Button
+        type="submit"
+        size="icon"
+        disabled={!canSend}
+        className="size-8 shrink-0 rounded-lg"
+        aria-label={ariaLabel}
+        title="Send (Enter)"
+      >
+        <Send className="size-3.5" />
+      </Button>
+    </div>
+  );
+}
 
 function Composer({
   channelId,
@@ -2165,51 +2079,27 @@ function Composer({
 
   return (
     <form
-      className="composer"
+      className="shrink-0 px-4 pb-3 pt-1"
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
       }}
     >
-      <div className="composer-inner">
-        <textarea
-          ref={textareaRef}
-          value={body}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
-          className="composer-textarea"
-          rows={1}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-        />
-        <button
-          type="submit"
-          disabled={!canSend}
-          className="btn-send"
-          title="Send (Enter)"
-          aria-label="Send message"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M5 12h14M13 6l6 6-6 6"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      </div>
+      <ComposerInner
+        textareaRef={textareaRef}
+        value={body}
+        onChange={onChange}
+        placeholder={placeholder}
+        canSend={canSend}
+        onSubmit={submit}
+        ariaLabel="Send message"
+      />
     </form>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Command palette — fuzzy switcher over channels + DMs + people
+// Command palette
 // ---------------------------------------------------------------------------
 
 type PaletteItem =
@@ -2292,8 +2182,6 @@ function CommandPalette({
       .slice(0, 40);
   }, [items, query]);
 
-  // Reset selection when the filtered list changes so an arrow-key press
-  // doesn't drop off the end of a shrunken list.
   useEffect(() => {
     setSel(0);
   }, [query, filtered.length]);
@@ -2303,7 +2191,6 @@ function CommandPalette({
       onSelectChannel(item.channel.id);
       return;
     }
-    // A user with no existing DM — start one.
     try {
       const res = await startDm.mutate({ otherUserId: item.user.id });
       if (res?.channelId) onSelectChannel(res.channelId);
@@ -2326,70 +2213,45 @@ function CommandPalette({
     }
   };
 
-  // Split the filtered list into sections for visual clarity.
   const channelsOut = filtered.filter((i) => i.kind === "channel");
   const dmsOut = filtered.filter((i) => i.kind === "dm");
   const usersOut = filtered.filter((i) => i.kind === "user");
-
-  // Selected item global index → check each section sequentially. A single
-  // `sel` index over the flattened list keeps keyboard navigation simple.
   const flatIndex = (item: PaletteItem) =>
     filtered.findIndex((x) => x.id === item.id);
 
   return (
     <div
-      className="palette-backdrop"
+      className="fixed inset-0 z-50 grid place-items-start bg-black/50 pt-[14vh] backdrop-blur-sm"
       onClick={onClose}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onClose();
-      }}
     >
       <div
-        className="palette"
+        className="mx-auto w-full max-w-lg overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
       >
-        <div className="palette-input-row">
-          <svg
-            className="palette-search-icon"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-          >
-            <circle
-              cx="11"
-              cy="11"
-              r="7"
-              stroke="currentColor"
-              strokeWidth="2"
-            />
-            <path
-              d="M21 21l-4.35-4.35"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-            />
-          </svg>
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
+          <Search className="size-4 text-muted-foreground" />
           <input
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKey}
             placeholder="Jump to channel, DM, or person…"
-            className="palette-input"
+            className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
-          <kbd className="palette-kbd">Esc</kbd>
+          <Kbd>Esc</Kbd>
         </div>
-        <div className="palette-list">
+        <div className="max-h-[50vh] overflow-y-auto py-1.5">
           {filtered.length === 0 ? (
-            <div className="palette-empty">No matches.</div>
+            <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+              No matches.
+            </div>
           ) : (
             <>
               {channelsOut.length > 0 && (
                 <>
-                  <div className="palette-section-label">Channels</div>
+                  <PaletteSection label="Channels" />
                   {channelsOut.map((it) => (
                     <PaletteRow
                       key={it.id}
@@ -2403,7 +2265,7 @@ function CommandPalette({
               )}
               {dmsOut.length > 0 && (
                 <>
-                  <div className="palette-section-label">Direct messages</div>
+                  <PaletteSection label="Direct messages" />
                   {dmsOut.map((it) => (
                     <PaletteRow
                       key={it.id}
@@ -2417,7 +2279,7 @@ function CommandPalette({
               )}
               {usersOut.length > 0 && (
                 <>
-                  <div className="palette-section-label">People</div>
+                  <PaletteSection label="People" />
                   {usersOut.map((it) => (
                     <PaletteRow
                       key={it.id}
@@ -2432,20 +2294,36 @@ function CommandPalette({
             </>
           )}
         </div>
-        <div className="palette-footer">
-          <span className="palette-hint">
-            <kbd className="palette-kbd">↑</kbd>
-            <kbd className="palette-kbd">↓</kbd> navigate
+        <div className="flex items-center gap-3 border-t border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd> navigate
           </span>
-          <span className="palette-hint">
-            <kbd className="palette-kbd">↵</kbd> select
+          <span className="inline-flex items-center gap-1">
+            <Kbd>↵</Kbd> select
           </span>
-          <span className="palette-hint" style={{ marginLeft: "auto" }}>
-            <kbd className="palette-kbd">⌘/</kbd> shortcuts
+          <span className="ml-auto inline-flex items-center gap-1">
+            <Kbd>⌘/</Kbd> shortcuts
           </span>
         </div>
       </div>
     </div>
+  );
+}
+
+function PaletteSection({ label }: { label: string }) {
+  return (
+    <div className="px-3 pt-2 pb-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+      {label}
+    </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex min-w-[18px] items-center justify-center rounded border border-border bg-card px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground shadow-[0_1px_0_oklch(from_var(--color-border)_l_c_h/0.8)]">
+      {children}
+    </kbd>
   );
 }
 
@@ -2462,33 +2340,30 @@ function PaletteRow({
 }) {
   return (
     <div
-      className={"palette-item" + (selected ? " selected" : "")}
+      className={cn(
+        "flex cursor-pointer items-center gap-2.5 px-3 py-2",
+        selected && "bg-accent",
+      )}
       onClick={onActivate}
       onMouseEnter={onHover}
       role="option"
       aria-selected={selected}
     >
-      <div className="palette-item-icon">
+      <div className="flex size-6 items-center justify-center text-muted-foreground">
         {item.kind === "channel" ? (
-          <span>{item.channel.isPrivate ? "🔒" : "#"}</span>
+          item.channel.isPrivate ? (
+            <Lock className="size-3.5" />
+          ) : (
+            <Hash className="size-4" />
+          )
         ) : item.kind === "dm" ? (
-          <div
-            className="avatar avatar-sm"
-            style={{ backgroundColor: item.peer.avatarColor || "#8b5cf6" }}
-          >
-            {initials(item.peer.displayName)}
-          </div>
+          <ColorAvatar name={item.peer.displayName} color={item.peer.avatarColor} size="sm" />
         ) : (
-          <div
-            className="avatar avatar-sm"
-            style={{ backgroundColor: item.user.avatarColor || "#8b5cf6" }}
-          >
-            {initials(item.user.displayName)}
-          </div>
+          <ColorAvatar name={item.user.displayName} color={item.user.avatarColor} size="sm" />
         )}
       </div>
-      <div className="palette-item-label">{item.label}</div>
-      <div className="palette-item-meta">
+      <div className="flex-1 truncate text-sm">{item.label}</div>
+      <div className="text-[11px] text-muted-foreground">
         {item.kind === "channel"
           ? "Channel"
           : item.kind === "dm"
@@ -2500,7 +2375,7 @@ function PaletteRow({
 }
 
 // ---------------------------------------------------------------------------
-// Shortcut help overlay
+// Shortcut help
 // ---------------------------------------------------------------------------
 
 function ShortcutsHelp({ onClose }: { onClose: () => void }) {
@@ -2516,42 +2391,38 @@ function ShortcutsHelp({ onClose }: { onClose: () => void }) {
     { label: "Shortcut help", keys: [mod, "/"] },
   ];
   return (
-    <div className="palette-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 420, maxHeight: "auto" }}
-        role="dialog"
-        aria-modal="true"
-      >
-        <div className="modal-title">Keyboard shortcuts</div>
-        <div className="modal-subtitle">Fly around without touching a mouse.</div>
-        <div className="shortcuts-grid">
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Keyboard shortcuts</DialogTitle>
+          <DialogDescription>
+            Fly around without touching a mouse.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 py-1">
           {rows.map((r) => (
             <React.Fragment key={r.label}>
-              <div className="shortcut-label">{r.label}</div>
-              <div className="shortcut-keys">
+              <div className="text-sm text-muted-foreground">{r.label}</div>
+              <div className="flex items-center gap-1">
                 {r.keys.map((k) => (
-                  <kbd key={k} className="palette-kbd">
-                    {k}
-                  </kbd>
+                  <Kbd key={k}>{k}</Kbd>
                 ))}
               </div>
             </React.Fragment>
           ))}
         </div>
-        <div className="modal-footer">
-          <button className="btn-secondary" onClick={onClose}>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
             Close
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Profile modal — read-only for others, editable for self.
+// Profile modal
 // ---------------------------------------------------------------------------
 
 const AVATAR_COLORS = [
@@ -2598,14 +2469,6 @@ function ProfileModal({
     }
   }, [user?.displayName, user?.email, user?.avatarColor]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   async function save() {
     if (!user) return;
     setBusy(true);
@@ -2616,7 +2479,6 @@ function ProfileModal({
         email,
         avatarColor: color,
       });
-      // Also refresh the cached user in localStorage if editing self.
       if (isMe) {
         const next = {
           ...currentUser,
@@ -2645,119 +2507,111 @@ function ProfileModal({
 
   if (!user) {
     return (
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal" onClick={(e) => e.stopPropagation()}>
-          <div className="modal-title">Profile</div>
-          <div className="modal-subtitle">Loading…</div>
-        </div>
-      </div>
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Profile</DialogTitle>
+            <DialogDescription>Loading…</DialogDescription>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
     );
   }
 
   const displayColor = editing ? color : user.avatarColor || "#8b5cf6";
   const displayName = editing ? name : user.displayName;
-  const displayInitials = initials(displayName);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 440 }}
-        role="dialog"
-        aria-modal="true"
-      >
-        <div className="detail-header">
-          <div
-            className="avatar"
-            style={{ backgroundColor: displayColor }}
-          >
-            {displayInitials}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="detail-name">
-              {displayName}
-              {isMe && (
-                <span
-                  style={{ color: "var(--text-dim)", marginLeft: 8, fontSize: 14 }}
-                >
-                  (you)
-                </span>
-              )}
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <div className="flex items-center gap-3">
+            <ColorAvatar name={displayName} color={displayColor} size="lg" />
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="flex items-baseline gap-2">
+                <span className="truncate">{displayName}</span>
+                {isMe && (
+                  <span className="text-sm font-normal text-muted-foreground">
+                    (you)
+                  </span>
+                )}
+              </DialogTitle>
+              <DialogDescription>{user.email}</DialogDescription>
             </div>
-            <div className="detail-sub">{user.email}</div>
           </div>
-        </div>
+        </DialogHeader>
 
         {editing ? (
-          <>
-            <label className="field">
-              <span className="field-label">Display name</span>
-              <input
-                className="input"
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="profile-name">Display name</Label>
+              <Input
+                id="profile-name"
+                autoFocus
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                autoFocus
               />
-            </label>
-            <label className="field">
-              <span className="field-label">Email</span>
-              <input
-                className="input"
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="profile-email">Email</Label>
+              <Input
+                id="profile-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
               />
-            </label>
-            <div className="detail-field">
-              <div className="detail-field-label">Avatar color</div>
-              <div className="color-swatches">
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Avatar color</Label>
+              <div className="flex flex-wrap gap-1.5">
                 {AVATAR_COLORS.map((c) => (
                   <button
                     key={c}
                     type="button"
-                    className={
-                      "color-swatch" +
-                      (color.toLowerCase() === c.toLowerCase()
-                        ? " selected"
-                        : "")
-                    }
-                    style={{ background: c }}
                     onClick={() => setColor(c)}
                     aria-label={`Color ${c}`}
+                    className={cn(
+                      "size-7 rounded-full ring-offset-background transition-all hover:scale-110",
+                      color.toLowerCase() === c.toLowerCase() &&
+                        "ring-2 ring-ring ring-offset-2",
+                    )}
+                    style={{ backgroundColor: c }}
                   />
                 ))}
               </div>
             </div>
-            {err && <div className="login-error">{err}</div>}
-          </>
+            {err && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {err}
+              </div>
+            )}
+          </div>
         ) : (
-          <>
-            <div className="detail-field">
-              <div className="detail-field-label">Email</div>
-              <div className="detail-field-value">{user.email}</div>
+          <div className="grid gap-3">
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                Email
+              </Label>
+              <div className="mt-1 text-sm">{user.email}</div>
             </div>
-          </>
+          </div>
         )}
 
-        <div className="modal-footer">
+        <DialogFooter>
           {!isMe && !editing && (
-            <button className="btn-secondary" onClick={() => void dm()}>
+            <Button variant="outline" onClick={() => void dm()}>
               Send message
-            </button>
+            </Button>
           )}
           {isMe && !editing && (
-            <button
-              className="btn-secondary"
-              onClick={() => setEditing(true)}
-            >
+            <Button variant="outline" onClick={() => setEditing(true)}>
               Edit profile
-            </button>
+            </Button>
           )}
           {editing && (
             <>
-              <button
-                className="btn-secondary"
+              <Button
+                variant="outline"
                 onClick={() => {
                   setEditing(false);
                   setErr(null);
@@ -2765,30 +2619,26 @@ function ProfileModal({
                 disabled={busy}
               >
                 Cancel
-              </button>
-              <button
-                className="btn-primary"
-                style={{ margin: 0, width: "auto", padding: "8px 18px" }}
-                onClick={() => void save()}
-                disabled={busy}
-              >
+              </Button>
+              <Button onClick={() => void save()} disabled={busy}>
+                {busy && <Loader2 className="size-4 animate-spin" />}
                 {busy ? "Saving…" : "Save"}
-              </button>
+              </Button>
             </>
           )}
           {!editing && (
-            <button className="btn-secondary" onClick={onClose}>
+            <Button variant="outline" onClick={onClose}>
               Close
-            </button>
+            </Button>
           )}
-        </div>
-      </div>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Channel details modal — info + edit for creator
+// Channel details modal
 // ---------------------------------------------------------------------------
 
 function ChannelDetailsModal({
@@ -2836,22 +2686,16 @@ function ChannelDetailsModal({
     }
   }, [channel?.name, channel?.topic, channel?.isPrivate]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   if (!channel) {
     return (
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal" onClick={(e) => e.stopPropagation()}>
-          <div className="modal-title">Channel</div>
-          <div className="modal-subtitle">Loading…</div>
-        </div>
-      </div>
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Channel</DialogTitle>
+            <DialogDescription>Loading…</DialogDescription>
+          </DialogHeader>
+        </DialogContent>
+      </Dialog>
     );
   }
 
@@ -2883,145 +2727,112 @@ function ChannelDetailsModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 460 }}
-        role="dialog"
-        aria-modal="true"
-      >
-        <div className="detail-header">
-          <div
-            className="avatar"
-            style={{
-              background: channel.isPrivate
-                ? "linear-gradient(135deg, #6366f1, #8b5cf6)"
-                : "var(--surface-active)",
-              color: channel.isPrivate ? "white" : "var(--text)",
-            }}
-          >
-            {channel.isPrivate ? "🔒" : "#"}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="detail-name">
-              {channel.isPrivate ? "🔒 " : "# "}
-              {channel.name}
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <div className="flex items-center gap-3">
+            <div
+              className="grid size-14 shrink-0 place-items-center rounded-full text-xl font-semibold"
+              style={{
+                background: channel.isPrivate
+                  ? "linear-gradient(135deg, #6366f1, #8b5cf6)"
+                  : "var(--color-accent)",
+                color: channel.isPrivate ? "white" : "var(--color-foreground)",
+              }}
+            >
+              {channel.isPrivate ? "🔒" : "#"}
             </div>
-            <div className="detail-sub">
-              {channel.isPrivate ? "Private channel" : "Public channel"}
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="truncate">
+                {channel.isPrivate ? "🔒 " : "# "}
+                {channel.name}
+              </DialogTitle>
+              <DialogDescription>
+                {channel.isPrivate ? "Private channel" : "Public channel"}
+              </DialogDescription>
             </div>
           </div>
-        </div>
+        </DialogHeader>
 
         {editing ? (
-          <>
-            <label className="field">
-              <span className="field-label">Name</span>
-              <input
-                className="input"
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="channel-edit-name">Name</Label>
+              <Input
+                id="channel-edit-name"
+                autoFocus
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                autoFocus
               />
-            </label>
-            <label className="field">
-              <span className="field-label">Topic</span>
-              <input
-                className="input"
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="channel-edit-topic">Topic</Label>
+              <Input
+                id="channel-edit-topic"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="What's this channel about?"
               />
-            </label>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "10px 12px",
-                marginTop: 10,
-                background: "var(--surface-raised)",
-                border: "1px solid var(--border)",
-                borderRadius: 10,
-                cursor: "pointer",
-                userSelect: "none",
-              }}
-            >
-              <input
-                type="checkbox"
+            </div>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-accent/30 px-3 py-2.5">
+              <Checkbox
                 checked={isPrivate}
-                onChange={(e) => setIsPrivate(e.target.checked)}
-                style={{ accentColor: "var(--accent)" }}
+                onCheckedChange={(v) => setIsPrivate(!!v)}
+                className="mt-0.5"
               />
               <div>
-                <div style={{ fontSize: 13.5, fontWeight: 500 }}>
-                  Private channel
-                </div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: "var(--text-muted)",
-                    marginTop: 2,
-                  }}
-                >
+                <div className="text-sm font-medium">Private channel</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
                   Only invited members can see or join.
                 </div>
               </div>
             </label>
-            {err && <div className="login-error">{err}</div>}
-          </>
-        ) : (
-          <>
-            {channel.topic ? (
-              <div className="detail-field">
-                <div className="detail-field-label">Topic</div>
-                <div className="detail-field-value">{channel.topic}</div>
-              </div>
-            ) : (
-              <div className="detail-field">
-                <div className="detail-field-label">Topic</div>
-                <div
-                  className="detail-field-value"
-                  style={{ color: "var(--text-dim)", fontStyle: "italic" }}
-                >
-                  No topic set.
-                </div>
+            {err && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {err}
               </div>
             )}
-            <div className="detail-field">
-              <div className="detail-field-label">Created by</div>
+          </div>
+        ) : (
+          <div className="grid gap-4">
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                Topic
+              </Label>
               <div
-                className="detail-field-value clickable"
-                style={{ display: "flex", alignItems: "center", gap: 10 }}
-                onClick={() =>
-                  creator ? onOpenProfile(creator.id) : undefined
-                }
+                className={cn(
+                  "mt-1 text-sm",
+                  !channel.topic && "italic text-muted-foreground",
+                )}
               >
-                <div
-                  className="avatar avatar-sm"
-                  style={{
-                    backgroundColor: creator?.avatarColor || "#8b5cf6",
-                  }}
-                >
-                  {initials(creator?.displayName)}
-                </div>
-                <span>{creator?.displayName ?? "Unknown"}</span>
+                {channel.topic || "No topic set."}
               </div>
             </div>
-            <div className="detail-field">
-              <div className="detail-field-label">
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                Created by
+              </Label>
+              <button
+                className="mt-1 flex items-center gap-2 rounded-md px-1 py-0.5 hover:bg-accent"
+                onClick={() => creator && onOpenProfile(creator.id)}
+              >
+                <ColorAvatar
+                  name={creator?.displayName}
+                  color={creator?.avatarColor}
+                  size="sm"
+                />
+                <span className="text-sm">
+                  {creator?.displayName ?? "Unknown"}
+                </span>
+              </button>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 Members · {(memberships ?? []).length}
-              </div>
-              <div className="member-list">
+              </Label>
+              <div className="mt-1 max-h-[240px] overflow-y-auto">
                 {(memberships ?? []).length === 0 ? (
-                  <div
-                    style={{
-                      padding: "10px",
-                      fontSize: 13,
-                      color: "var(--text-dim)",
-                    }}
-                  >
+                  <div className="p-2 text-sm text-muted-foreground">
                     No explicit members — anyone in the workspace can join.
                   </div>
                 ) : (
@@ -3036,22 +2847,19 @@ function ChannelDetailsModal({
                 )}
               </div>
             </div>
-          </>
+          </div>
         )}
 
-        <div className="modal-footer">
+        <DialogFooter>
           {canEdit && !editing && (
-            <button
-              className="btn-secondary"
-              onClick={() => setEditing(true)}
-            >
+            <Button variant="outline" onClick={() => setEditing(true)}>
               Edit channel
-            </button>
+            </Button>
           )}
           {editing && (
             <>
-              <button
-                className="btn-secondary"
+              <Button
+                variant="outline"
                 onClick={() => {
                   setEditing(false);
                   setErr(null);
@@ -3059,25 +2867,21 @@ function ChannelDetailsModal({
                 disabled={busy}
               >
                 Cancel
-              </button>
-              <button
-                className="btn-primary"
-                style={{ margin: 0, width: "auto", padding: "8px 18px" }}
-                onClick={() => void save()}
-                disabled={busy}
-              >
+              </Button>
+              <Button onClick={() => void save()} disabled={busy}>
+                {busy && <Loader2 className="size-4 animate-spin" />}
                 {busy ? "Saving…" : "Save"}
-              </button>
+              </Button>
             </>
           )}
           {!editing && (
-            <button className="btn-secondary" onClick={onClose}>
+            <Button variant="outline" onClick={onClose}>
               Close
-            </button>
+            </Button>
           )}
-        </div>
-      </div>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -3092,33 +2896,23 @@ function MemberRow({
 }) {
   const { data: user } = db.useQueryOne<User>("User", userId);
   return (
-    <button className="user-row" onClick={onClick}>
-      <div
-        className="avatar avatar-md"
-        style={{ backgroundColor: user?.avatarColor || "#8b5cf6" }}
-      >
-        {initials(user?.displayName)}
-      </div>
-      <div className="user-row-meta">
-        <div className="user-row-name">{user?.displayName ?? "…"}</div>
-        <div className="user-row-email">{user?.email ?? ""}</div>
+    <button
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-accent"
+    >
+      <ColorAvatar name={user?.displayName} color={user?.avatarColor} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">
+          {user?.displayName ?? "…"}
+        </div>
+        <div className="truncate text-xs text-muted-foreground">
+          {user?.email ?? ""}
+        </div>
       </div>
       {role && (
-        <span
-          style={{
-            fontSize: 10.5,
-            fontWeight: 600,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            color: "var(--text-dim)",
-            padding: "2px 8px",
-            background: "var(--surface-raised)",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
-          }}
-        >
+        <Badge variant="secondary" className="text-[10px] uppercase tracking-wider">
           {role}
-        </span>
+        </Badge>
       )}
     </button>
   );
@@ -3130,22 +2924,11 @@ function MemberRow({
 
 function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <div className="empty">
-      <div className="empty-title">{title}</div>
-      <div className="empty-body">{body}</div>
+    <div className="grid flex-1 place-items-center p-10 text-center">
+      <div>
+        <div className="mb-1 text-lg font-semibold">{title}</div>
+        <div className="max-w-sm text-sm text-muted-foreground">{body}</div>
+      </div>
     </div>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M18 6L6 18M6 6l12 12"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }

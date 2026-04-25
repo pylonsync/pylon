@@ -28,6 +28,3 @@
 
   --radius-lg: 0.5rem;
 }
-
-/* Original example styles — kept while we migrate components to shadcn. */
-@import "./legacy.css";

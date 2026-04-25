@@ -1,30 +1,34 @@
+/* ERP token aliases — bridge the example-app's class system to the
+   shadcn semantic tokens defined in index.css's `@theme` block. Any
+   color/border tweak made to the @theme block automatically cascades
+   through the rest of this file. */
 :root {
-        --bg: #f7f8fa;
-        --surface: #ffffff;
-        --surface-raised: #fdfdfe;
-        --surface-hover: #f3f4f7;
-        --surface-active: #eceef3;
-        --border: rgba(15, 23, 42, 0.08);
-        --border-strong: rgba(15, 23, 42, 0.14);
-        --border-focus: rgba(99, 102, 241, 0.5);
-        --text: #0f172a;
-        --text-muted: #52525b;
-        --text-dim: #94a3b8;
-        --text-placeholder: #a1a1aa;
-        --accent: #4f46e5;
-        --accent-hover: #6366f1;
-        --accent-soft: rgba(79, 70, 229, 0.1);
-        --accent-glow: rgba(79, 70, 229, 0.25);
-        --success: #059669;
-        --success-soft: rgba(5, 150, 105, 0.12);
-        --warning: #d97706;
-        --warning-soft: rgba(217, 119, 6, 0.12);
-        --danger: #dc2626;
-        --danger-soft: rgba(220, 38, 38, 0.12);
-        --info: #0284c7;
-        --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
-        --shadow-md: 0 4px 14px -2px rgba(15, 23, 42, 0.10);
-        --shadow-lg: 0 20px 50px -12px rgba(15, 23, 42, 0.20);
+        --bg: var(--color-background);
+        --surface: var(--color-card);
+        --surface-raised: var(--color-popover);
+        --surface-hover: var(--color-accent);
+        --surface-active: var(--color-muted);
+        --border: var(--color-border);
+        --border-strong: color-mix(in oklch, var(--color-border) 60%, var(--color-foreground));
+        --border-focus: var(--color-ring);
+        --text: var(--color-foreground);
+        --text-muted: var(--color-muted-foreground);
+        --text-dim: color-mix(in oklch, var(--color-muted-foreground) 70%, transparent);
+        --text-placeholder: color-mix(in oklch, var(--color-muted-foreground) 70%, transparent);
+        --accent: var(--color-primary);
+        --accent-hover: color-mix(in oklch, var(--color-primary) 88%, white);
+        --accent-soft: color-mix(in oklch, var(--color-primary) 12%, transparent);
+        --accent-glow: color-mix(in oklch, var(--color-primary) 28%, transparent);
+        --success: oklch(0.62 0.16 158);
+        --success-soft: color-mix(in oklch, oklch(0.62 0.16 158) 14%, transparent);
+        --warning: oklch(0.72 0.16 60);
+        --warning-soft: color-mix(in oklch, oklch(0.72 0.16 60) 14%, transparent);
+        --danger: var(--color-destructive);
+        --danger-soft: color-mix(in oklch, var(--color-destructive) 14%, transparent);
+        --info: oklch(0.65 0.14 230);
+        --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.06);
+        --shadow-md: 0 4px 14px -2px oklch(0 0 0 / 0.10);
+        --shadow-lg: 0 20px 50px -12px oklch(0 0 0 / 0.20);
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body, #root { height: 100%; }

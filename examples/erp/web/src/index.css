@@ -29,5 +29,8 @@
   --radius-lg: 0.625rem;
 }
 
-/* Original example styles — kept while we migrate components to shadcn. */
-@import "./legacy.css";
+/* ERP back-office design system — opinionated business-app tokens.
+   Loaded into the `components` layer so Tailwind utilities still win. */
+@layer components {
+  @import "./components.css";
+}
