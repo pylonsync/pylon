@@ -486,7 +486,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -518,7 +518,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "dependencies": {
         "@pylonsync/sdk": "file:../sdk",
         "@pylonsync/sync": "file:../sync",
@@ -550,11 +550,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.2.3",
+      "version": "0.2.4",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.2.3",
+      "version": "0.2.4",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -1433,6 +1433,8 @@
 
     "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
+    "@pylonsync/loro/@pylonsync/react": ["@pylonsync/react@file:packages/react", { "dependencies": { "@pylonsync/sdk": "file:../sdk", "@pylonsync/sync": "file:../sync" }, "devDependencies": { "@types/react": "^19.0.0" }, "peerDependencies": { "react": ">=18.0.0" } }],
+
     "@pylonsync/loro/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
@@ -1606,6 +1608,10 @@
     "world3d-web/tailwindcss": ["tailwindcss@4.2.4", "", {}, "sha512-HhKppgO81FQof5m6TEnuBWCZGgfRAWbaeOaGT00KOy/Pf/j6oUihdvBpA7ltCeAvZpFhW3j0PTclkxsd4IXYDA=="],
 
     "wrap-ansi/ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
+
+    "@pylonsync/loro/@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/loro/@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@pylonsync/react-native/@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
