@@ -72,7 +72,13 @@ impl Shard {
     /// lock, then contend only with per-client mutexes to do the writes.
     /// This is what lets a reader thread hold its client's mutex for a
     /// socket.read() without stalling broadcasts for the whole shard.
-    fn broadcast(&self, msg: &str) {
+    ///
+    /// `msg` is `Arc<str>` rather than `&str` so the caller can serialize
+    /// the JSON exactly once and share the same allocation across all
+    /// 16 shards. Per-client `Message::Text` still allocates an owned
+    /// String (tungstenite 0.24 requires it), but the broadcast no
+    /// longer pays N copies of the JSON across shard channels.
+    fn broadcast(&self, msg: &Arc<str>) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
             clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
@@ -87,7 +93,11 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if guard.send(Message::Text(msg.to_string())).is_err() {
+            // Owned String per send is the tungstenite 0.24 contract.
+            // The clone here copies the string contents; sharing the
+            // raw bytes via Utf8Bytes would be the next-level
+            // optimization but requires a tungstenite version bump.
+            if guard.send(Message::Text((**msg).to_string())).is_err() {
                 dead.push(id);
             }
         }
@@ -123,7 +133,12 @@ pub struct WsHub {
     /// Bounded-capacity senders for each shard's broadcast worker. When
     /// a send would block because the queue is full, `broadcast_raw` drains
     /// the oldest queued messages so new ones aren't lost to a stuck worker.
-    broadcast_txs: Vec<mpsc::SyncSender<String>>,
+    ///
+    /// Carries `Arc<str>` so a single broadcast event allocates the JSON
+    /// once and the 16 shard sends are cheap refcount bumps. Was a 16×
+    /// String clone hotspot under high write rates with thousands of
+    /// subscribers per shard.
+    broadcast_txs: Vec<mpsc::SyncSender<Arc<str>>>,
     /// Matching receivers are held by each worker thread and also exposed
     /// here so the "drop oldest" fallback can drain them on full. Keeping
     /// the receiver handle alongside the sender is only safe because mpsc
@@ -142,7 +157,7 @@ impl WsHub {
             let shard = Arc::new(Shard::new());
             // Bounded queue — if a broadcast worker stalls, `try_send` fails
             // with Full and `broadcast_raw` drops the oldest to make room.
-            let (tx, rx) = mpsc::sync_channel::<String>(BROADCAST_QUEUE_DEPTH);
+            let (tx, rx) = mpsc::sync_channel::<Arc<str>>(BROADCAST_QUEUE_DEPTH);
 
             let shard_clone = Arc::clone(&shard);
             thread::Builder::new()
@@ -168,20 +183,26 @@ impl WsHub {
 
     /// Broadcast a change event to ALL connected clients across all shards.
     /// Non-blocking: pushes to each shard's channel and returns immediately.
+    ///
+    /// Serializes the event JSON exactly once into an `Arc<str>` and
+    /// shares it across the 16 shard senders. Each shard's worker
+    /// thread receives the same Arc and pays only a refcount bump.
     pub fn broadcast(&self, event: &ChangeEvent) {
         let json = match serde_json::to_string(event) {
             Ok(j) => j,
             Err(_) => return,
         };
-        self.broadcast_raw(&json);
+        let shared: Arc<str> = Arc::from(json.into_boxed_str());
+        self.broadcast_shared(shared);
     }
 
     /// Broadcast a raw string message to all clients (used for presence updates).
     pub fn broadcast_presence(&self, msg: &str) {
-        self.broadcast_raw(msg);
+        let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
+        self.broadcast_shared(shared);
     }
 
-    /// Internal: fan out a message string to all shard broadcast channels.
+    /// Internal: fan out a single shared message to every shard worker.
     ///
     /// Uses `try_send`; on full we log once (per call) and drop the message
     /// for that shard. Previously the channel was unbounded, so a stuck
@@ -189,9 +210,9 @@ impl WsHub {
     /// means a slow/stuck subscriber at worst loses broadcast events —
     /// correctness for critical data still comes through the change-log
     /// cursor on a reconnect.
-    fn broadcast_raw(&self, msg: &str) {
+    fn broadcast_shared(&self, msg: Arc<str>) {
         for tx in &self.broadcast_txs {
-            match tx.try_send(msg.to_string()) {
+            match tx.try_send(Arc::clone(&msg)) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
                     tracing::warn!("[ws] broadcast queue full — dropping event for one shard");
