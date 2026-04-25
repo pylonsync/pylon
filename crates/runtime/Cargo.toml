@@ -23,6 +23,7 @@ pylon-plugin = { path = "../plugin", version = "0.2.3" }
 pylon-sync = { path = "../sync", version = "0.2.3" }
 pylon-studio-api = { path = "../studio_api" }
 pylon-storage = { path = "../storage", version = "0.2.3" }
+pylon-crdt = { path = "../crdt", version = "0.2.3" }
 pylon-functions = { path = "../functions", version = "0.2.3" }
 pylon-migrate = { path = "../migrate", version = "0.2.3" }
 pylon-observability = { path = "../observability", version = "0.2.3" }

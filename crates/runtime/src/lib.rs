@@ -7,6 +7,7 @@ pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
 pub mod log;
+pub mod loro_store;
 pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
