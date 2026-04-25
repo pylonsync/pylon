@@ -118,6 +118,32 @@ pub struct ManifestEntity {
     /// tables on schema push and maintain them on every write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<ManifestSearchConfig>,
+    /// Local-first / CRDT mode. Default `true` — every entity is backed
+    /// by a Loro doc, mutations merge as CRDTs, multi-device offline
+    /// edits converge cleanly. Set `false` to opt out per entity (audit
+    /// logs, append-only archives, anything that doesn't need offline
+    /// merge and where you want to skip the per-write Loro overhead).
+    /// The SQLite-projected row shape is identical either way; queries
+    /// and indexes don't change between modes.
+    #[serde(default = "default_crdt_enabled")]
+    pub crdt: bool,
+}
+
+fn default_crdt_enabled() -> bool {
+    true
+}
+
+impl Default for ManifestEntity {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            fields: Vec::new(),
+            indexes: Vec::new(),
+            relations: Vec::new(),
+            search: None,
+            crdt: true,
+        }
+    }
 }
 
 /// Per-entity search declaration. Lives on the manifest so both the

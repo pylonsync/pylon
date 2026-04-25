@@ -543,6 +543,7 @@ mod tests {
                 indexes: vec![],
                 relations: vec![],
                 search: None,
+                    crdt: true,
         }],
             routes: vec![],
             queries: vec![],
@@ -628,6 +629,7 @@ mod tests {
             indexes: vec![],
             relations: vec![],
             search: None,
+                    crdt: true,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -882,6 +884,7 @@ mod tests {
                 indexes: vec![],
                 relations: vec![],
                 search: None,
+                    crdt: true,
         }],
             routes: vec![],
             queries: vec![],
@@ -933,6 +936,7 @@ mod tests {
                 }],
                 relations: vec![],
                 search: None,
+                    crdt: true,
         }],
             routes: vec![],
             queries: vec![],

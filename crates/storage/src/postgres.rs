@@ -987,6 +987,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
+                                    crdt: true,
                 },
                 ManifestEntity {
                     name: "Todo".into(),
@@ -1003,6 +1004,7 @@ mod tests {
                     }],
                     relations: vec![],
                     search: None,
+                                    crdt: true,
                 },
             ],
             queries: vec![],

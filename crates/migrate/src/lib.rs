@@ -468,6 +468,7 @@ mod tests {
             indexes,
             relations: vec![],
             search: None,
+            crdt: true,
         }
     }
 

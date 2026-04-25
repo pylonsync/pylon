@@ -34,6 +34,7 @@ fn counter_manifest() -> AppManifest {
             indexes: vec![],
             relations: vec![],
             search: None,
+                    crdt: true,
         }],
         routes: vec![],
         queries: vec![],

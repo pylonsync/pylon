@@ -4,6 +4,7 @@ members = [
   "crates/auth",
   "crates/cli",
   "crates/core",
+  "crates/crdt",
   "crates/functions",
   "crates/http",
   "crates/migrate",
@@ -41,6 +42,10 @@ rusqlite = { version = "0.35", features = ["bundled"] }
 tiny_http = "0.12"
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 tungstenite = "0.24"
+# Loro — Rust-native CRDT library used as Pylon's local-first substrate.
+# Same library powers Remboard's iOS (loro-swift) and web (loro-crdt npm)
+# clients, so all three platforms speak the same wire format.
+loro = "1.11"
 hmac = "0.12"
 sha2 = "0.10"
 sha1 = "0.10"

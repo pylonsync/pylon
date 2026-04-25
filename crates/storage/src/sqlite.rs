@@ -770,6 +770,7 @@ mod tests {
                 }],
                 relations: vec![],
                 search: None,
+                            crdt: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1015,6 +1016,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
+                                    crdt: true,
                 },
                 ManifestEntity {
                     name: "User".into(),
@@ -1027,6 +1029,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
+                                    crdt: true,
                 },
             ],
             routes: vec![],

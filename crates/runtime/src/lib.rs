@@ -1978,6 +1978,7 @@ mod tests {
                 }],
                 relations: vec![],
                 search: None,
+                            crdt: true,
             }],
             routes: vec![],
             queries: vec![],
