@@ -482,12 +482,33 @@ fn start_server(
     // the new tab would have to wait for the next write before catching
     // up to the converged state. Encodes into the same length-prefixed
     // wire frame as the broadcast path so the client decoder is shared.
+    //
+    // Authz is enforced HERE, not at the WS layer: the closure runs the
+    // row through `check_entity_read` against the caller's auth ctx and
+    // returns None on deny. The caller (handle_crdt_control) treats
+    // None as "don't subscribe" — so a denied client can't sit on a
+    // subscription waiting for a future write to leak state.
     {
         let hub = Arc::clone(&ws_hub);
         let sessions = Arc::clone(&session_store);
         let runtime_for_fetcher = Arc::clone(&runtime);
-        let fetcher: crate::ws::SnapshotFetcher = Arc::new(move |entity, row_id| {
+        let pe_for_fetcher = Arc::clone(&policy_engine);
+        let fetcher: crate::ws::SnapshotFetcher = Arc::new(move |auth_ctx, entity, row_id| {
             use pylon_http::DataStore;
+            // Fetch the row first so the policy engine can evaluate
+            // row-level predicates (`data.authorId == auth.userId`
+            // etc). Missing row → deny silently; the client just
+            // never gets a frame and can't probe existence.
+            let row = match runtime_for_fetcher.get_by_id(entity, row_id) {
+                Ok(Some(v)) => v,
+                _ => return None,
+            };
+            if !matches!(
+                pe_for_fetcher.check_entity_read(entity, auth_ctx, Some(&row)),
+                pylon_policy::PolicyResult::Allowed
+            ) {
+                return None;
+            }
             let snap = match runtime_for_fetcher.crdt_snapshot(entity, row_id) {
                 Ok(Some(bytes)) => bytes,
                 _ => return None,

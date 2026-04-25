@@ -382,6 +382,18 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     /// every connected client a write happened, so non-subscribed
     /// clients can re-fetch via the regular query path if they care.
     ///
+    /// Authz: the policy check happens at SUBSCRIBE TIME (in
+    /// `start_ws_server`'s SnapshotFetcher closure) — clients on the
+    /// subscriber list have already passed `check_entity_read` for
+    /// the row at that moment. We don't re-check on every broadcast
+    /// because the broadcast hot path runs from the write thread
+    /// without per-client auth context. A consequence: if a client is
+    /// already subscribed and their permissions change mid-session
+    /// (e.g. they're removed from a private channel), they'll keep
+    /// receiving CRDT frames for that row until they disconnect.
+    /// Future work: index subscribers by auth context so the broadcast
+    /// can re-check, or invalidate subscriptions on policy changes.
+    ///
     /// Frame-encode failure (entity / row_id over the 16-bit length
     /// header) gets logged and dropped — the row's regular JSON change
     /// event already shipped via `notify`, so clients still see the
