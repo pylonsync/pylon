@@ -1,6 +1,6 @@
 import { SyncEngine, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { callFn, getBaseUrl, storageKey } from "./index";
+import { callFn, getBaseUrl, getReactStorage, storageKey } from "./index";
 
 // ---------------------------------------------------------------------------
 // Query shapes
@@ -706,10 +706,7 @@ export function useAggregate<Row = Record<string, unknown>>(
     setError(null);
     try {
       const baseUrl = getBaseUrl();
-      const token =
-        typeof window !== "undefined" && window.localStorage
-          ? window.localStorage.getItem(storageKey("token"))
-          : null;
+      const token = getReactStorage().get(storageKey("token"));
       const res = await fetch(`${baseUrl}/api/aggregate/${entity}`, {
         method: "POST",
         headers: {
@@ -855,10 +852,7 @@ export function useSearch<T = Row>(
     setError(null);
     try {
       const baseUrl = getBaseUrl();
-      const token =
-        typeof window !== "undefined" && window.localStorage
-          ? window.localStorage.getItem(storageKey("token"))
-          : null;
+      const token = getReactStorage().get(storageKey("token"));
       const body = JSON.stringify({
         query: spec.query ?? "",
         filters: spec.filters ?? {},

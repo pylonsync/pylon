@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getBaseUrl, storageKey } from './index';
+import { getBaseUrl, getReactStorage, storageKey } from './index';
 
 // ---------------------------------------------------------------------------
 // Room types
@@ -59,15 +59,14 @@ export interface UseRoomReturn {
  * ```
  */
 /**
- * Read the current pylon token from localStorage, matching the
- * convention used by `callFn` and the sync engine. Keeps the hook working
- * even when the caller doesn't explicitly thread a token — otherwise every
- * useRoom request hits the server as anonymous and 401s under any
- * authenticated room policy.
+ * Read the current pylon token from the configured storage adapter
+ * (default: localStorage on web, AsyncStorage on RN, etc). Keeps the
+ * hook working even when the caller doesn't explicitly thread a token
+ * — otherwise every useRoom request hits the server as anonymous and
+ * 401s under any authenticated room policy.
  */
 function readStoredToken(): string | undefined {
-  if (typeof window === 'undefined' || !window.localStorage) return undefined;
-  return window.localStorage.getItem(storageKey('token')) ?? undefined;
+  return getReactStorage().get(storageKey('token')) ?? undefined;
 }
 
 export function useRoom(

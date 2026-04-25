@@ -1,6 +1,8 @@
 export { defineRoute } from "@pylonsync/sdk";
 export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 
+import { defaultStorage, type Storage as PylonStorage } from "@pylonsync/sync";
+
 // React hooks — high-level ergonomic shape
 export {
   useQuery,
@@ -366,15 +368,31 @@ export function startSessionAutoRefresh(
  * ```
  */
 /**
- * Read the auth token from the browser. Falls back to `localStorage`
- * under the conventional `pylon_token` key so components and hooks
- * that don't explicitly carry auth still send it. Production apps that
- * use httpOnly cookies pass `credentials: "include"` via `configureClient`
- * instead; see docs/ops/DEPLOY.md.
+ * Read the auth token from the configured storage adapter (default:
+ * localStorage on the web). React Native and other non-browser hosts
+ * inject their own adapter via `setReactStorage` so `callFn` and the
+ * other free helpers send the right token without each call site
+ * threading it explicitly.
  */
 function currentAuthToken(): string | undefined {
-  if (typeof window === "undefined" || !window.localStorage) return undefined;
-  return window.localStorage.getItem(storageKey("token")) ?? undefined;
+  return _storage.get(storageKey("token")) ?? undefined;
+}
+
+let _storage: PylonStorage = defaultStorage();
+
+/**
+ * Swap the storage adapter used by the React free helpers (`callFn`,
+ * `useSession`, `getAuthToken`, etc). React Native's `init()` calls this
+ * with an AsyncStorage-backed adapter so token reads/writes go through
+ * the same backend as the sync engine.
+ */
+export function setReactStorage(storage: PylonStorage): void {
+  _storage = storage;
+}
+
+/** Current storage adapter used by the React layer. Exposed for adapters. */
+export function getReactStorage(): PylonStorage {
+  return _storage;
 }
 
 export async function callFn<T = unknown>(

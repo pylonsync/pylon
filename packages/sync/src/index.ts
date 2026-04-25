@@ -3,6 +3,13 @@
 // ---------------------------------------------------------------------------
 
 export { IndexedDBPersistence, persistChange } from "./persistence";
+export {
+  defaultStorage,
+  createWriteThroughStorage,
+  type Storage,
+} from "./storage";
+
+import { defaultStorage } from "./storage";
 
 export interface ChangeEvent {
   seq: number;
@@ -425,27 +432,25 @@ export interface SyncEngineConfig {
   persist?: boolean;
   /** App name for IndexedDB database naming. Default: "default". */
   appName?: string;
+  /**
+   * Sync key-value adapter for hot-path state (auth token, client_id).
+   * Default: localStorage on the web, in-memory no-op elsewhere. Non-browser
+   * hosts (RN, Tauri, Workers) inject an adapter to persist these values.
+   */
+  storage?: import("./storage").Storage;
 }
 
 /**
- * Generate a stable client_id. Prefers a persisted id from localStorage
+ * Generate a stable client_id. Prefers a persisted id from `storage`
  * (so a reload keeps the same identifier) and falls back to a fresh UUID.
- * Not persisted when there's no window/localStorage (SSR, workers).
  */
-function generateClientId(): string {
-  try {
-    if (typeof window !== "undefined" && window.localStorage) {
-      const key = "pylon:client_id";
-      const existing = window.localStorage.getItem(key);
-      if (existing) return existing;
-      const fresh = newUuidLike();
-      window.localStorage.setItem(key, fresh);
-      return fresh;
-    }
-  } catch {
-    // localStorage disabled / quota exceeded — fall through.
-  }
-  return newUuidLike();
+function generateClientId(storage: import("./storage").Storage): string {
+  const key = "pylon:client_id";
+  const existing = storage.get(key);
+  if (existing) return existing;
+  const fresh = newUuidLike();
+  storage.set(key, fresh);
+  return fresh;
 }
 
 function newUuidLike(): string {
@@ -532,11 +537,15 @@ export class SyncEngine {
     return this._resolvedSession;
   }
 
+  /** Sync key-value adapter for hot-path state (token, client_id). */
+  readonly storage: import("./storage").Storage;
+
   constructor(config: SyncEngineConfig) {
     this.config = config;
     this.store = new LocalStore();
     this.mutations = new MutationQueue();
-    this.clientId = generateClientId();
+    this.storage = config.storage ?? defaultStorage();
+    this.clientId = generateClientId(this.storage);
   }
 
   /**
@@ -691,9 +700,8 @@ export class SyncEngine {
     // Native clients can still set Authorization: Bearer via headers.
     const token =
       this.config.token ??
-      (typeof window !== "undefined" && window.localStorage
-        ? window.localStorage.getItem(this.tokenStorageKey()) ?? undefined
-        : undefined);
+      this.storage.get(this.tokenStorageKey()) ??
+      undefined;
     try {
       if (token) {
         const proto = `bearer.${encodeURIComponent(token)}`;
@@ -905,11 +913,10 @@ export class SyncEngine {
     return app === "default" ? "pylon_token" : `pylon:${app}:token`;
   }
 
-  /** Current auth token from config or localStorage. Null when neither has one. */
+  /** Current auth token from config or the storage adapter. Null when neither has one. */
   private currentToken(): string | null {
     if (this.config.token) return this.config.token;
-    if (typeof window === "undefined" || !window.localStorage) return null;
-    return window.localStorage.getItem(this.tokenStorageKey());
+    return this.storage.get(this.tokenStorageKey());
   }
 
   /** Pull changes from the server. */
@@ -1271,9 +1278,8 @@ export class SyncEngine {
     // once the anon bucket fills.
     const token =
       this.config.token ??
-      (typeof window !== "undefined" && window.localStorage
-        ? window.localStorage.getItem(this.tokenStorageKey()) ?? undefined
-        : undefined);
+      this.storage.get(this.tokenStorageKey()) ??
+      undefined;
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
     const res = await fetch(`${this.config.baseUrl}${path}`, {
