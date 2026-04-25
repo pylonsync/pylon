@@ -1488,13 +1488,23 @@ fn route_inner(
         };
         let presence_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
 
+        // Same idempotency story as leave: a presence update sent
+        // before the join lands (typing fires immediately, join is
+        // async) silently no-ops with `updated: false` instead of
+        // 404'ing. Without this the chat composer's first keystroke
+        // after channel switch produced a red NOT_IN_ROOM in the
+        // network tab even though the typing indicator caught up
+        // fine on the next keystroke after join completed.
         if let Some(presence_event) = ctx.rooms.set_presence(room, user_id, presence_data) {
             if let Ok(json) = serde_json::to_string(&presence_event) {
                 ctx.notifier.notify_presence(&json);
             }
             return (200, serde_json::json!({"updated": true}).to_string());
         }
-        return (404, json_error("NOT_IN_ROOM", "User is not in this room"));
+        return (
+            200,
+            serde_json::json!({"updated": false, "reason": "not_in_room"}).to_string(),
+        );
     }
 
     if url == "/api/rooms/broadcast" && method == HttpMethod::Post {
@@ -1532,13 +1542,20 @@ fn route_inner(
         };
         let broadcast_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
 
+        // Broadcast to a room nobody is in is a clean no-op — same
+        // idempotency story as leave / presence. A client racing the
+        // join shouldn't see a red 404 for messages that just had no
+        // listeners yet.
         if let Some(broadcast_event) = ctx.rooms.broadcast(room, sender, topic, broadcast_data) {
             if let Ok(json) = serde_json::to_string(&broadcast_event) {
                 ctx.notifier.notify_presence(&json);
             }
             return (200, serde_json::json!({"broadcasted": true}).to_string());
         }
-        return (404, json_error("ROOM_NOT_FOUND", "Room does not exist"));
+        return (
+            200,
+            serde_json::json!({"broadcasted": false, "reason": "room_empty"}).to_string(),
+        );
     }
 
     // GET /api/rooms
