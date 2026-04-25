@@ -4,14 +4,18 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-[[bench]]
-name = "search"
-harness = false
+[workspace]
+# Stand-alone — keeps the benchmark out of the main Cargo workspace
+# so `cargo build` for the framework doesn't pull in rand/etc.
+
+[[bin]]
+name = "pylon-search-bench"
 path = "search.rs"
 
 [dependencies]
 pylon-runtime = { path = "../../crates/runtime" }
 pylon-storage = { path = "../../crates/storage" }
 pylon-kernel = { path = "../../crates/core" }
+pylon-http = { path = "../../crates/http" }
 serde_json = "1"
 rand = "0.8"

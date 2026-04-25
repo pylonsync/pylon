@@ -424,6 +424,37 @@ impl Runtime {
         })
     }
 
+    /// Create the search index tables (`_facet_bitmap` and per-entity
+    /// `_fts_<Entity>`) for every searchable entity in the manifest.
+    ///
+    /// Production deployments do this via the storage adapter's
+    /// `apply_schema` / migration plan; that path also handles
+    /// adding/removing the tables when a `search:` block is added or
+    /// removed across deploys. This method is a quick path for tests
+    /// and benchmarks that build a `Runtime::in_memory(...)` directly
+    /// without going through the schema-plan pipeline.
+    pub fn ensure_search_indexes(&self) -> Result<(), RuntimeError> {
+        let conn = self.lock_write_conn()?;
+        conn.execute(pylon_storage::search::create_facet_table_sql(), [])
+            .map_err(|e| RuntimeError {
+                code: "FACET_TABLE_FAILED".into(),
+                message: format!("create _facet_bitmap: {e}"),
+            })?;
+        for entity in &self.manifest.entities {
+            if let Some(cfg) = &entity.search {
+                if let Some(sql) =
+                    pylon_storage::search::create_fts_table_sql(&entity.name, cfg)
+                {
+                    conn.execute(&sql, []).map_err(|e| RuntimeError {
+                        code: "FTS_TABLE_FAILED".into(),
+                        message: format!("create FTS table for {}: {e}", entity.name),
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Return a reference to the app manifest.
     pub fn manifest(&self) -> &AppManifest {
         &self.manifest

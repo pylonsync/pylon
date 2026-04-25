@@ -68,19 +68,43 @@ cargo bench --manifest-path benchmarks/search/Cargo.toml
 
 ## Reading the numbers
 
-Reference workstation: M2 Pro, 32GB RAM, NVMe. Single Pylon process, SQLite default settings + the pragma tuning landed in this repo.
+Measured on an M2 Pro, 32GB RAM, NVMe. Single Pylon process, in-memory
+SQLite, post-tuning (the pragma + `prepare_cached` work that lives
+upstream of these benches).
 
-| Workload | Throughput | p95 |
-|---|---|---|
-| `entity_get_by_id` | 60K ops/sec | 0.02ms |
-| `entity_insert` (single row) | 8K ops/sec | 0.15ms |
-| `entity_insert` (txn batch of 100) | 200K rows/sec | — |
-| `search` (10K rows, 3 facets) | 12K queries/sec | 0.4ms |
-| `search` (1M rows, 3 facets) | 2K queries/sec | 1.5ms |
-| WS fanout (1K subscribers, 100 writes/sec) | — | 4ms |
-| WS fanout (10K subscribers, 100 writes/sec) | — | 35ms |
+### Search (`benchmarks/search`)
 
-Subtract 30–50% if you're on a $5 VPS instead of an M2.
+```
+=== 10K rows ===
+  empty query, page 0                  363µs/op    2,754 ops/sec
+  text 'red'                           624µs/op    1,602 ops/sec
+  filter brand+category                351µs/op    2,850 ops/sec
+  sort price asc, page 5               7.57ms/op     132 ops/sec
+
+=== 100K rows ===
+  empty query, page 0                  2.61ms/op     383 ops/sec
+  text 'red'                           5.57ms/op     179 ops/sec
+  filter brand                         2.69ms/op     371 ops/sec
+```
+
+Notes from the run:
+- Filter + facet queries scale near-linearly with matching set size,
+  not table size. 100K rows is only ~7× slower than 10K because the
+  bitmap intersection touches the same number of bits.
+- Text search is dominated by FTS5 token scoring; "red" matches ~half
+  the catalog so the BM25 ranking step does real work.
+- Sorted pagination hits a known bottleneck: the planner currently
+  materializes every hit into a temp table for `ORDER BY price ASC`,
+  which collapses to 132 ops/sec. There's a planned optimization to
+  push the sort down to an index when `sort` matches a sortable
+  column.
+
+### What you should expect
+
+Subtract 30–50% on a $5 VPS. Add roughly 1ms per request for HTTP
+overhead, 2ms for an authenticated REST call (policy eval + JSON
+serialize/deserialize). WebSocket-delivered live-query updates skip
+both.
 
 ## Iterating on a perf change
 

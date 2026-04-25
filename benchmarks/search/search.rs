@@ -6,6 +6,7 @@
 //! Run: cargo bench --manifest-path benchmarks/search/Cargo.toml
 use std::time::Instant;
 
+use pylon_http::DataStore;
 use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestSearchConfig};
 use pylon_runtime::Runtime;
 use rand::seq::SliceRandom;
@@ -18,21 +19,31 @@ const COLORS: &[&str] = &["red", "blue", "green", "black", "white"];
 const ADJ: &[&str] = &["lightweight", "rugged", "minimalist", "vintage", "premium"];
 const NOUN: &[&str] = &["cruiser", "runner", "trainer", "shirt", "tote"];
 
+fn f(name: &str, ty: &str) -> ManifestField {
+    ManifestField {
+        name: name.into(),
+        field_type: ty.into(),
+        optional: false,
+        unique: false,
+    }
+}
+
 fn build_manifest() -> AppManifest {
     let entity = ManifestEntity {
         name: "Product".into(),
         fields: vec![
-            ManifestField::required("name", "string"),
-            ManifestField::required("description", "richtext"),
-            ManifestField::required("brand", "string"),
-            ManifestField::required("category", "string"),
-            ManifestField::required("color", "string"),
-            ManifestField::required("price", "float"),
-            ManifestField::required("rating", "float"),
-            ManifestField::required("stock", "int"),
-            ManifestField::required("createdAt", "datetime"),
+            f("name", "string"),
+            f("description", "richtext"),
+            f("brand", "string"),
+            f("category", "string"),
+            f("color", "string"),
+            f("price", "float"),
+            f("rating", "float"),
+            f("stock", "int"),
+            f("createdAt", "datetime"),
         ],
         indexes: vec![],
+        relations: vec![],
         search: Some(ManifestSearchConfig {
             text: vec!["name".into(), "description".into()],
             facets: vec!["brand".into(), "category".into(), "color".into()],
@@ -53,7 +64,7 @@ fn build_manifest() -> AppManifest {
 
 fn seed(rt: &Runtime, count: usize) {
     let mut rng = rand::thread_rng();
-    for i in 0..count {
+    for _i in 0..count {
         let brand = BRANDS.choose(&mut rng).unwrap();
         let category = CATEGORIES.choose(&mut rng).unwrap();
         let color = COLORS.choose(&mut rng).unwrap();
@@ -77,7 +88,7 @@ fn seed(rt: &Runtime, count: usize) {
                 "createdAt": "2026-01-01T00:00:00Z",
             }),
         )
-        .unwrap_or_else(|_| panic!("seed insert {i} failed"));
+        .unwrap_or_else(|e| panic!("seed insert failed: {e}"));
     }
 }
 
@@ -106,10 +117,12 @@ fn main() {
     let manifest = build_manifest();
     println!("[search-bench] seeding 10K rows…");
     let rt_10k = Runtime::in_memory(manifest.clone()).unwrap();
+    rt_10k.ensure_search_indexes().unwrap();
     seed(&rt_10k, 10_000);
 
     println!("[search-bench] seeding 100K rows…");
     let rt_100k = Runtime::in_memory(manifest.clone()).unwrap();
+    rt_100k.ensure_search_indexes().unwrap();
     seed(&rt_100k, 100_000);
 
     println!("\n=== 10K rows ===");
