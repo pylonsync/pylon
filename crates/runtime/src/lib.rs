@@ -167,6 +167,11 @@ pub struct Runtime {
     /// Set by the constructor — NOT derived from `conn.path()` (that path
     /// conflates "no filename" with "in-memory"; see `is_in_memory` doc).
     is_in_memory: bool,
+    /// Per-row LoroDoc cache + sidecar persistence. Used for entities with
+    /// `crdt: true` (the default). Reads still hit SQLite directly via the
+    /// read pool — the LoroDoc just produces the projected JSON that gets
+    /// materialized into SQLite columns on every write.
+    crdt: crate::loro_store::LoroStore,
 }
 
 /// Number of read-only connections to open in the pool.
@@ -415,6 +420,13 @@ impl Runtime {
             Vec::new()
         };
 
+        // Sidecar table for CRDT snapshots — created always so toggling
+        // `crdt: true` on an entity post-deploy doesn't need a migration.
+        crate::loro_store::ensure_sidecar(&conn).map_err(|e| RuntimeError {
+            code: "CRDT_SIDECAR_FAILED".into(),
+            message: format!("create CRDT sidecar table: {e}"),
+        })?;
+
         Ok(Self {
             write_conn: Mutex::new(conn),
             read_pool,
@@ -422,6 +434,7 @@ impl Runtime {
             manifest,
             entities,
             is_in_memory,
+            crdt: crate::loro_store::LoroStore::new(),
         })
     }
 
@@ -486,10 +499,57 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
+    // CRDT helpers
+    // -----------------------------------------------------------------------
+
+    /// Map an entity's manifest fields → the [`pylon_crdt::CrdtField`] vec
+    /// the LoroStore needs. Resolves each field's CRDT shape from the
+    /// (type, annotation) pair via `pylon_crdt::field_kind`. Caches
+    /// nothing yet — called per write, fine at our entity counts.
+    fn crdt_fields_for(
+        &self,
+        ent: &ManifestEntity,
+    ) -> Result<Vec<pylon_crdt::CrdtField>, RuntimeError> {
+        let mut out = Vec::with_capacity(ent.fields.len());
+        for f in &ent.fields {
+            // Skip the implicit `id` column — it's the row key, not a
+            // CRDT-managed value. SQLite's PRIMARY KEY constraint owns it.
+            if f.name == "id" {
+                continue;
+            }
+            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt.as_deref())
+                .map_err(|e| RuntimeError {
+                    code: "INVALID_CRDT_FIELD".into(),
+                    message: format!(
+                        "{}.{}: {e} (declared type={}, crdt={:?})",
+                        ent.name, f.name, f.field_type, f.crdt
+                    ),
+                })?;
+            out.push(pylon_crdt::CrdtField {
+                name: f.name.clone(),
+                kind,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Borrow the CRDT store. Tests use this to inspect cache state and
+    /// the WS handler will use it to fetch snapshots on subscribe.
+    pub fn crdt_store(&self) -> &crate::loro_store::LoroStore {
+        &self.crdt
+    }
+
+    // -----------------------------------------------------------------------
     // CRUD operations
     // -----------------------------------------------------------------------
 
     /// Insert a new row. Returns the generated ID.
+    ///
+    /// For entities with `crdt: true` (the default) the LoroDoc is written
+    /// first and the SQLite row is the materialized projection. For
+    /// `crdt: false` entities the SQLite write is direct (legacy LWW path).
+    /// Both produce the same on-disk row shape, so reads, indexes, FTS,
+    /// and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
@@ -500,6 +560,31 @@ impl Runtime {
             code: "INVALID_DATA".into(),
             message: "Insert data must be a JSON object".into(),
         })?;
+
+        // CRDT path — write to the LoroDoc first so the doc + sidecar
+        // snapshot exist before the materialized SQLite row. On a crash
+        // between the two writes the doc is durable; the next read
+        // through the doc rebuilds the materialized row.
+        //
+        // We keep the SQL INSERT below regardless of mode because the
+        // materialized view is what queries / indexes / FTS hit; the
+        // doc never replaces SQLite, it sits in front of it.
+        if ent.crdt {
+            let crdt_fields = self.crdt_fields_for(ent)?;
+            // Validate columns up-front so we don't write a doc for a
+            // patch that the SQL INSERT will reject anyway.
+            for key in obj.keys() {
+                if key != "id" {
+                    validate_column_name(key, ent)?;
+                }
+            }
+            self.crdt
+                .apply_patch(&conn, entity, &id, &crdt_fields, data)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("crdt write {entity}/{id}: {e}"),
+                })?;
+        }
 
         let mut col_names = vec![quote_ident("id")];
         let mut placeholders = vec!["?1".to_string()];
@@ -655,6 +740,10 @@ impl Runtime {
     }
 
     /// Update a row by ID. Returns true if a row was found and updated.
+    ///
+    /// For entities with `crdt: true` (the default) the LoroDoc receives
+    /// the patch first; the SQLite UPDATE writes the same fields so the
+    /// materialized view stays in lockstep with the doc state.
     pub fn update(
         &self,
         entity: &str,
@@ -668,6 +757,26 @@ impl Runtime {
             code: "INVALID_DATA".into(),
             message: "Update data must be a JSON object".into(),
         })?;
+
+        // CRDT path — patch the doc + persist the snapshot before the
+        // SQL UPDATE. Same crash-safety story as insert: doc is durable
+        // first, materialized view rebuilds from the doc on next read.
+        if ent.crdt && !obj.is_empty() {
+            let crdt_fields = self.crdt_fields_for(ent)?;
+            // Validate columns up-front so a doomed SQL UPDATE doesn't
+            // leave the doc ahead of the materialized view.
+            for key in obj.keys() {
+                if key != "id" {
+                    validate_column_name(key, ent)?;
+                }
+            }
+            self.crdt
+                .apply_patch(&conn, entity, id, &crdt_fields, data)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("crdt write {entity}/{id}: {e}"),
+                })?;
+        }
 
         let mut set_clauses = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -2026,6 +2135,134 @@ mod tests {
             .unwrap();
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["email"], "a@b.com");
+    }
+
+    /// CRDT-mode entities (the default) populate the sidecar snapshot
+    /// table on every write — the LoroDoc is the source of truth, the
+    /// SQLite row is the materialized projection. This proves the CRDT
+    /// branch in `insert` actually fires.
+    #[test]
+    fn crdt_default_writes_through_loro_store() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "x@y.com", "displayName": "Eric"}),
+            )
+            .unwrap();
+
+        // Sidecar contains exactly one snapshot for the new row.
+        let conn = rt.lock_write_conn().unwrap();
+        let snap_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _pylon_crdt_snapshots
+                 WHERE entity = ?1 AND row_id = ?2",
+                rusqlite::params!["User", &id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(snap_count, 1, "sidecar should have one row after insert");
+
+        // Loro doc is cached in memory after the write — proves
+        // get_or_hydrate ran during apply_patch.
+        assert!(rt.crdt_store().cached_rows() >= 1);
+
+        // SQLite materialized view has the projected row.
+        drop(conn);
+        let row = rt.get_by_id("User", &id).unwrap().unwrap();
+        assert_eq!(row["email"], "x@y.com");
+        assert_eq!(row["displayName"], "Eric");
+    }
+
+    /// Updates write through the LoroDoc as well — verifies the sidecar
+    /// snapshot grows (Loro tracks new ops) and the materialized row
+    /// reflects the new value.
+    #[test]
+    fn crdt_update_persists_new_snapshot() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "x@y.com", "displayName": "Eric"}),
+            )
+            .unwrap();
+
+        let snap_after_insert: Vec<u8> = {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.query_row(
+                "SELECT snapshot FROM _pylon_crdt_snapshots
+                 WHERE entity = 'User' AND row_id = ?1",
+                rusqlite::params![&id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        rt.update(
+            "User",
+            &id,
+            &serde_json::json!({"displayName": "Eric C"}),
+        )
+        .unwrap();
+
+        let snap_after_update: Vec<u8> = {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.query_row(
+                "SELECT snapshot FROM _pylon_crdt_snapshots
+                 WHERE entity = 'User' AND row_id = ?1",
+                rusqlite::params![&id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_ne!(
+            snap_after_insert, snap_after_update,
+            "snapshot bytes should change after an update"
+        );
+
+        let row = rt.get_by_id("User", &id).unwrap().unwrap();
+        assert_eq!(row["displayName"], "Eric C");
+        assert_eq!(row["email"], "x@y.com");
+    }
+
+    /// Entities with `crdt: false` skip the LoroDoc entirely — no sidecar
+    /// row, no Loro cache entry. Proves the opt-out actually opts out.
+    #[test]
+    fn crdt_false_skips_loro_store() {
+        let mut manifest = test_manifest();
+        // Flip the User entity to LWW-only mode.
+        manifest.entities[0].crdt = false;
+        let rt = Runtime::in_memory(manifest).unwrap();
+
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "lww@example.com", "displayName": "Plain"}),
+            )
+            .unwrap();
+
+        let conn = rt.lock_write_conn().unwrap();
+        let snap_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _pylon_crdt_snapshots
+                 WHERE entity = 'User' AND row_id = ?1",
+                rusqlite::params![&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(snap_count, 0, "crdt:false should not touch the sidecar");
+        assert_eq!(
+            rt.crdt_store().cached_rows(),
+            0,
+            "crdt:false should not warm the cache"
+        );
+
+        // SQLite path still works — the row landed via the legacy
+        // direct-write path.
+        drop(conn);
+        let row = rt.get_by_id("User", &id).unwrap().unwrap();
+        assert_eq!(row["email"], "lww@example.com");
     }
 
     #[test]
