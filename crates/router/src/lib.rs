@@ -173,6 +173,22 @@ mod crdt_frame_tests {
     }
 
     #[test]
+    fn hex_roundtrip() {
+        assert_eq!(super::decode_hex(""), Some(vec![]));
+        assert_eq!(super::decode_hex("00"), Some(vec![0x00]));
+        assert_eq!(super::decode_hex("ab"), Some(vec![0xab]));
+        assert_eq!(super::decode_hex("AB"), Some(vec![0xab]));
+        assert_eq!(super::decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn hex_rejects_malformed() {
+        assert_eq!(super::decode_hex("a"), None); // odd length
+        assert_eq!(super::decode_hex("xy"), None); // non-hex
+        assert_eq!(super::decode_hex("ab cd"), None); // space inside
+    }
+
+    #[test]
     fn entity_too_long_errors() {
         let huge_entity = "x".repeat(u16::MAX as usize + 1);
         let err = encode_crdt_frame(CRDT_FRAME_SNAPSHOT, &huge_entity, "y", &[])
@@ -1853,6 +1869,99 @@ fn route_inner(
     if url == "/api/files/upload" && method == HttpMethod::Post {
         let (s, b) = ctx.files.upload(body);
         return (s, b);
+    }
+
+    // -----------------------------------------------------------------------
+    // CRDT client push — POST /api/crdt/<entity>/<row_id>
+    //
+    // The client sends a Loro update for a CRDT-mode row; the server
+    // imports it into the row's LoroDoc, re-projects to the materialized
+    // SQLite columns, and broadcasts the post-merge snapshot to all
+    // subscribed clients (including the sender, since the WS is the
+    // authoritative source of truth and clients trust their server-acked
+    // state more than their local optimistic apply).
+    //
+    // Body shape: `{"update": "<hex>"}`. The hex encoding sidesteps the
+    // existing UTF-8-only `body: &str` channel through `route()` —
+    // a binary-aware bypass at the server.rs level is the right
+    // long-term fix (matches the WS upstream Remboard pattern), but
+    // the hex-in-JSON path is small, debuggable from curl, and
+    // unblocks the end-to-end demo without churning the whole router
+    // signature.
+    if let Some(rest) = url.strip_prefix("/api/crdt/") {
+        let rest = rest.split('?').next().unwrap_or(rest);
+        if method == HttpMethod::Post {
+            if let Some(err) = require_auth(ctx) {
+                return err;
+            }
+            let mut parts = rest.splitn(2, '/');
+            let entity = parts.next().unwrap_or("");
+            let row_id = parts.next().unwrap_or("");
+            if entity.is_empty() || row_id.is_empty() {
+                return (
+                    400,
+                    json_error(
+                        "BAD_PATH",
+                        "Expected /api/crdt/<entity>/<row_id>",
+                    ),
+                );
+            }
+            let parsed: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        400,
+                        json_error_safe(
+                            "INVALID_JSON",
+                            "Invalid request body",
+                            &format!("Invalid JSON: {e}"),
+                        ),
+                    )
+                }
+            };
+            let hex_str = match parsed.get("update").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    return (
+                        400,
+                        json_error(
+                            "MISSING_UPDATE",
+                            "Body must contain `update` (hex-encoded Loro bytes)",
+                        ),
+                    )
+                }
+            };
+            let update_bytes = match decode_hex(hex_str) {
+                Some(b) => b,
+                None => {
+                    return (
+                        400,
+                        json_error(
+                            "INVALID_HEX",
+                            "`update` must be lowercase hex of even length",
+                        ),
+                    )
+                }
+            };
+            match ctx.store.crdt_apply_update(entity, row_id, &update_bytes) {
+                Ok(snapshot) => {
+                    // Broadcast the post-merge snapshot to all subscribed
+                    // clients — every tab gets the canonical merged state
+                    // straight from the server, no per-client recompute.
+                    ctx.notifier.notify_crdt(entity, row_id, &snapshot);
+                    return (200, serde_json::json!({"ok": true}).to_string());
+                }
+                Err(e) => {
+                    let status = match e.code.as_str() {
+                        "ENTITY_NOT_FOUND" => 404,
+                        "NOT_SUPPORTED" => 400,
+                        "CRDT_DECODE_FAILED" => 400,
+                        _ => 500,
+                    };
+                    return (status, json_error(&e.code, &e.message));
+                }
+            }
+        }
     }
 
     if let Some(file_id) = url.strip_prefix("/api/files/") {
@@ -3650,6 +3759,35 @@ pub fn broadcast_change_with_crdt(
     }
     if let Ok(Some(snapshot)) = store.crdt_snapshot(entity, row_id) {
         notifier.notify_crdt(entity, row_id, &snapshot);
+    }
+}
+
+/// Tiny lowercase-hex decoder. Returns `None` on any malformed input
+/// (odd length, non-hex character). Used by the CRDT push endpoint to
+/// turn the JSON `{update: "<hex>"}` payload back into binary Loro
+/// bytes without pulling in a base64 dep just for one route.
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

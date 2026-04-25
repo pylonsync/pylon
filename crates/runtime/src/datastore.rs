@@ -228,6 +228,114 @@ impl DataStore for Runtime {
             })?;
         Ok(Some(snap))
     }
+
+    /// Client-pushed Loro update. Imports into the row's LoroDoc,
+    /// re-projects the doc state into the materialized SQLite columns
+    /// (so subsequent reads see the merged content), and returns the
+    /// fresh full-row snapshot for the router to broadcast to other
+    /// clients.
+    ///
+    /// Wrapped in a single SQLite transaction — same crash-safety
+    /// shape as `Runtime::insert/update`. Either the LoroStore +
+    /// SQLite columns both update or neither does.
+    fn crdt_apply_update(
+        &self,
+        entity: &str,
+        row_id: &str,
+        update: &[u8],
+    ) -> Result<Vec<u8>, DataError> {
+        // Find the entity so we can build the projection field list +
+        // confirm CRDT mode is on. Cheap manifest scan; counts are tiny.
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?
+            .clone();
+        if !ent.crdt {
+            return Err(DataError {
+                code: "NOT_SUPPORTED".into(),
+                message: format!(
+                    "Entity {entity} has crdt: false; client push requires CRDT mode"
+                ),
+            });
+        }
+        let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
+
+        let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        crate::with_write_tx(&conn, || -> Result<Vec<u8>, crate::RuntimeError> {
+            // Apply the update to the LoroDoc + persist the new snapshot
+            // to the sidecar. Returns the projected JSON shape for the
+            // post-merge state.
+            let projected = self
+                .crdt_store()
+                .apply_remote_update(&conn, entity, row_id, &crdt_fields, update)
+                .map_err(|e| crate::RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("apply_remote_update {entity}/{row_id}: {e}"),
+                })?;
+
+            // Re-project into the materialized SQLite row so SELECT
+            // queries see the merged content. Build SET clauses from
+            // the projection — every CRDT-managed field gets rewritten.
+            let projection = projected.as_object().ok_or_else(|| crate::RuntimeError {
+                code: "CRDT_PROJECTION_INVALID".into(),
+                message: "projected row was not a JSON object".into(),
+            })?;
+
+            let mut set_clauses = Vec::with_capacity(projection.len());
+            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut idx = 1;
+            for (key, val) in projection {
+                if key == "id" {
+                    continue;
+                }
+                set_clauses.push(format!(
+                    "{} = ?{idx}",
+                    crate::quote_ident(key.as_str())
+                ));
+                values.push(crate::json_to_sql(val));
+                idx += 1;
+            }
+            if set_clauses.is_empty() {
+                // No projected fields — happens when the doc has no
+                // top-level keys yet (fresh row from a peer subscribing
+                // before any writes). Skip the UPDATE; row may not exist
+                // in SQLite. Subsequent inserts will materialize it.
+            } else {
+                values.push(Box::new(row_id.to_string()));
+                let sql = format!(
+                    "UPDATE {} SET {} WHERE \"id\" = ?{idx}",
+                    crate::quote_ident(entity),
+                    set_clauses.join(", ")
+                );
+                let params: Vec<&dyn rusqlite::types::ToSql> =
+                    values.iter().map(|v| v.as_ref()).collect();
+                conn.execute(&sql, params.as_slice())
+                    .map_err(|e| crate::RuntimeError {
+                        code: "UPDATE_FAILED".into(),
+                        message: format!(
+                            "post-merge UPDATE {entity}/{row_id}: {e}"
+                        ),
+                    })?;
+            }
+
+            // Return the new snapshot for the router to broadcast.
+            let snap = self
+                .crdt_store()
+                .snapshot(&conn, entity, row_id)
+                .map_err(|e| crate::RuntimeError {
+                    code: "CRDT_SNAPSHOT_FAILED".into(),
+                    message: format!("post-merge snapshot {entity}/{row_id}: {e}"),
+                })?;
+            Ok(snap)
+        })
+        .map_err(into_data_error)
+    }
 }
 
 fn into_data_error(e: crate::RuntimeError) -> DataError {

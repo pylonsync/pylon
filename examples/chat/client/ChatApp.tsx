@@ -34,6 +34,7 @@ import { Input } from "@pylonsync/example-ui/input";
 import { Label } from "@pylonsync/example-ui/label";
 import { Card, CardContent } from "@pylonsync/example-ui/card";
 import { Textarea } from "@pylonsync/example-ui/textarea";
+import { useCollabText } from "@pylonsync/loro";
 import {
   Dialog,
   DialogContent,
@@ -1245,14 +1246,8 @@ function ChannelView({
                 )}
                 <span className="truncate">{channel.name}</span>
               </button>
-              {channel.topic && (
-                <>
-                  <span className="text-muted-foreground">·</span>
-                  <span className="truncate text-sm text-muted-foreground">
-                    {channel.topic}
-                  </span>
-                </>
-              )}
+              <span className="text-muted-foreground">·</span>
+              <CollabTopic channelId={channel.id} />
             </>
           )}
         </div>
@@ -1270,6 +1265,30 @@ function ChannelView({
       <Presence channelId={channelId} currentUser={currentUser} />
       <Composer channelId={channelId} currentUser={currentUser} />
     </main>
+  );
+}
+
+/**
+ * Inline-editable channel topic, backed by a Loro text CRDT.
+ * Two browser tabs typing in the same channel header converge
+ * character-by-character — concurrent edits to disjoint regions
+ * both land instead of one stomping the other (which is what the
+ * legacy LWW path would have done).
+ *
+ * Plays the role of the visible "this is real" demo for Pylon's
+ * CRDT integration. The plumbing (server LoroStore, binary WS
+ * broadcast, useLoroDoc hook, POST /api/crdt push endpoint) all
+ * lights up the moment this component mounts and a user types.
+ */
+function CollabTopic({ channelId }: { channelId: string }) {
+  const [value, setValue] = useCollabText("Channel", channelId, "topic");
+  return (
+    <input
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      placeholder="Set a topic — try editing this in two browser tabs"
+      className="min-w-0 flex-1 truncate bg-transparent text-sm text-muted-foreground outline-none placeholder:text-muted-foreground/60 focus:text-foreground"
+    />
   );
 }
 

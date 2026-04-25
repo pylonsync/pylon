@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@pylonsync/example-ui": "workspace:*",
+    "@pylonsync/loro": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sync": "workspace:*",
     "react": "^19.2.0",

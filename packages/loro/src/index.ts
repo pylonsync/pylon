@@ -19,7 +19,7 @@
 
 import { useSyncExternalStore, useEffect } from "react";
 import type { LoroDoc, LoroText, LoroMap } from "loro-crdt";
-import { db } from "@pylonsync/react";
+import { db, getBaseUrl, getReactStorage, storageKey } from "@pylonsync/react";
 import type { SyncEngine } from "@pylonsync/sync";
 import { globalRegistry, LoroRegistry } from "./registry";
 
@@ -107,6 +107,104 @@ export function getLoroText(doc: LoroDoc, key: string): LoroText {
  */
 export function getLoroMap(doc: LoroDoc, key: string): LoroMap {
   return doc.getMap(key);
+}
+
+/**
+ * High-level hook for the most common CRDT case: a single text field
+ * shared across clients. Returns `[value, setValue]` matching React's
+ * useState shape so existing controlled-input components drop in.
+ *
+ * Two tabs editing the same `(entity, id, field)` converge through
+ * Loro's text CRDT — concurrent same-position writes interleave
+ * deterministically rather than one stomping the other.
+ *
+ * `setValue` performs a whole-text replace on every call. Loro's
+ * text-CRDT update path treats this as a delete-then-insert against
+ * the prior version vector, so concurrent edits to disjoint regions
+ * still merge correctly. After applying locally, the hook ships the
+ * incremental update to the server (POST /api/crdt/<entity>/<id>),
+ * which re-projects to SQLite and broadcasts the merged snapshot
+ * back to every connected tab. A future variant could expose lower-
+ * level insert/delete ops for IME-friendly diff-aware editing.
+ *
+ * For boring CRUD use `db.useQueryOne` instead — this hook only
+ * lights up for entities marked `crdt: true` (the default) AND
+ * fields with `crdt: "text"` (or `richtext` type, which defaults
+ * to LoroText).
+ */
+export function useCollabText(
+  entity: string,
+  id: string,
+  field: string,
+): [string, (next: string) => void] {
+  const doc = useLoroDoc(entity, id);
+  const text = doc.getText(field);
+  const value = text.toString();
+  const setValue = (next: string): void => {
+    // Capture the version vector BEFORE the mutation so we can ship
+    // exactly the new ops to the server (incremental delta, not the
+    // whole snapshot). Loro's `export({mode: "update", from: vv})`
+    // returns the bytes the server hasn't seen.
+    const beforeVv = doc.oplogVersion();
+    const len = text.length;
+    if (len > 0) {
+      text.delete(0, len);
+    }
+    if (next.length > 0) {
+      text.insert(0, next);
+    }
+    doc.commit();
+
+    const update = doc.export({ mode: "update", from: beforeVv });
+    if (update.length === 0) {
+      return; // No-op (e.g. setValue called with the same value)
+    }
+    void pushCrdtUpdate(entity, id, update);
+  };
+  return [value, setValue];
+}
+
+// ---------------------------------------------------------------------------
+// Upstream push — POST /api/crdt/<entity>/<row_id>
+//
+// Wraps the binary Loro update in a JSON envelope ({update: hex}) so it
+// flows through Pylon's existing UTF-8-only HTTP body channel. Hex
+// (vs base64) keeps the encoder zero-dep on both sides; bandwidth
+// overhead is 2x, fine for the typical sub-1KB CRDT delta.
+// ---------------------------------------------------------------------------
+
+async function pushCrdtUpdate(
+  entity: string,
+  id: string,
+  update: Uint8Array,
+): Promise<void> {
+  const baseUrl = getBaseUrl();
+  const token = getReactStorage().get(storageKey("token"));
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  try {
+    await fetch(
+      `${baseUrl}/api/crdt/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ update: bytesToHex(update) }),
+      },
+    );
+    // Server acknowledges with {ok: true}. The merged-state broadcast
+    // arrives over the WS, applied automatically by the registry; no
+    // need to read the response body here.
+  } catch (err) {
+    console.warn(`[loro] CRDT push failed for ${entity}/${id}:`, err);
+  }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  const out = new Array<string>(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    out[i] = bytes[i].toString(16).padStart(2, "0");
+  }
+  return out.join("");
 }
 
 /**

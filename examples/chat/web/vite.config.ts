@@ -20,6 +20,14 @@ export default defineConfig({
       "@pylonsync/react",
       "@pylonsync/sdk",
       "@pylonsync/functions",
+      // Loro ships WASM; let Vite serve it as an asset rather than
+      // try to pre-bundle the .wasm import (which the dev pre-bundler
+      // can't resolve through the workspace package layout).
+      "loro-crdt",
+      "@pylonsync/loro",
     ],
   },
+  // Treat .wasm files as static assets so loro-crdt's `import wasm
+  // from "./loro_wasm_bg.wasm?url"` resolves at build time.
+  assetsInclude: ["**/*.wasm"],
 });

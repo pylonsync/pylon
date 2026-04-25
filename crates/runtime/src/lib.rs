@@ -501,7 +501,7 @@ impl Runtime {
     /// the LoroStore needs. Resolves each field's CRDT shape from the
     /// (type, annotation) pair via `pylon_crdt::field_kind`. Caches
     /// nothing yet — called per write, fine at our entity counts.
-    fn crdt_fields_for(
+    pub(crate) fn crdt_fields_for(
         &self,
         ent: &ManifestEntity,
     ) -> Result<Vec<pylon_crdt::CrdtField>, RuntimeError> {

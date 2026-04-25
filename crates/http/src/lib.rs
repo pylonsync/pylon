@@ -216,6 +216,36 @@ pub trait DataStore: Send + Sync {
     fn crdt_snapshot(&self, _entity: &str, _row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
         Ok(None)
     }
+
+    /// Apply a binary CRDT update from a client to the row's LoroDoc,
+    /// project the new state into the SQLite materialized view, and
+    /// return the post-merge snapshot bytes (so the caller can
+    /// broadcast them to OTHER subscribed clients).
+    ///
+    /// `update` is opaque Loro bytes — either a snapshot or an
+    /// incremental delta. Loro's import contract accepts both shapes,
+    /// so the store doesn't need to know which the client sent.
+    ///
+    /// Errors:
+    /// - `ENTITY_NOT_FOUND` — unknown entity in the manifest.
+    /// - `NOT_SUPPORTED` — entity is `crdt: false` (LWW opt-out) or
+    ///   the backend doesn't implement CRDT mode.
+    /// - `CRDT_DECODE_FAILED` — bytes weren't a valid Loro update.
+    /// - Storage failures from the underlying SQLite write.
+    ///
+    /// Default impl returns `NOT_SUPPORTED` so backends without CRDT
+    /// support compile cleanly.
+    fn crdt_apply_update(
+        &self,
+        _entity: &str,
+        _row_id: &str,
+        _update: &[u8],
+    ) -> Result<Vec<u8>, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "crdt_apply_update() is not implemented by this backend".into(),
+        })
+    }
 }
 
 #[cfg(test)]

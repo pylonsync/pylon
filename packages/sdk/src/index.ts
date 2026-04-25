@@ -21,16 +21,51 @@ export type FieldType =
 // Field builder
 // ---------------------------------------------------------------------------
 
+/**
+ * CRDT container override for a field. Wire format is the kebab-case
+ * string each variant maps to (`"text"`, `"counter"`, `"movable-list"`,
+ * etc.). Mirror of `pylon_kernel::CrdtAnnotation` on the Rust side.
+ *
+ * - `"text"` upgrades a `string` to LoroText (collaborative
+ *   character-level merge instead of LWW).
+ * - `"counter"` flips an `int` / `float` to LoroCounter so concurrent
+ *   increments add instead of stomping each other.
+ * - `"list"`, `"movable-list"`, `"tree"` are reserved for ordered /
+ *   reorderable / hierarchical collections — wire format locked in,
+ *   server-side projection still pending implementation.
+ * - `"lww"` is explicit (matches the default for most scalar types).
+ */
+export type CrdtAnnotation =
+  | "lww"
+  | "text"
+  | "counter"
+  | "list"
+  | "movable-list"
+  | "tree";
+
 export interface FieldDefinition {
   type: FieldType;
   optional: boolean;
   unique: boolean;
+  /** CRDT container override. Omitted entirely for the default
+   *  (LWW for scalars, LoroText for richtext). */
+  crdt?: CrdtAnnotation;
 }
 
 interface FieldBuilder {
   readonly _def: FieldDefinition;
   optional(): FieldBuilder;
   unique(): FieldBuilder;
+  /**
+   * Override the CRDT container for this field. See [`CrdtAnnotation`]
+   * for the full list. Most apps never call this — the default mapping
+   * (string→LWW, richtext→LoroText, …) is the right answer.
+   *
+   * Example: `field.string().crdt("text")` upgrades a string to a
+   * collaborative LoroText so two browser tabs editing the field
+   * concurrently merge cleanly instead of last-write-wins.
+   */
+  crdt(annotation: CrdtAnnotation): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -45,6 +80,9 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     unique() {
       return buildField({ ...def, unique: true });
+    },
+    crdt(annotation) {
+      return buildField({ ...def, crdt: annotation });
     },
   };
 }
@@ -247,6 +285,9 @@ export interface ManifestField {
   type: FieldType;
   optional: boolean;
   unique: boolean;
+  /** CRDT container override; matches `pylon_kernel::CrdtAnnotation` on
+   *  the Rust side. Omitted entirely when the field uses the default. */
+  crdt?: CrdtAnnotation;
 }
 
 export interface ManifestIndex {
@@ -334,12 +375,20 @@ export function entitiesToManifest(
   return entities.map((e) => {
     const result: ManifestEntity = {
       name: e.name,
-      fields: Object.entries(e.fields).map(([name, fb]) => ({
-        name,
-        type: fb._def.type,
-        optional: fb._def.optional,
-        unique: fb._def.unique,
-      })),
+      fields: Object.entries(e.fields).map(([name, fb]) => {
+        const f: ManifestField = {
+          name,
+          type: fb._def.type,
+          optional: fb._def.optional,
+          unique: fb._def.unique,
+        };
+        // Emit `crdt` only when set — keeps default-shape manifests
+        // visually identical to pre-CRDT versions in JSON diffs.
+        if (fb._def.crdt !== undefined) {
+          f.crdt = fb._def.crdt;
+        }
+        return f;
+      }),
       indexes: (e.indexes ?? []).map((idx) => ({
         name: idx.name,
         fields: idx.fields,

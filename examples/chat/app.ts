@@ -25,7 +25,12 @@ const Channel = entity(
   "Channel",
   {
     name: field.string().unique(),
-    topic: field.string().optional(),
+    // Topic is the per-channel collaborative-editing demo target.
+    // Two browser tabs editing the same channel's topic converge
+    // through Loro's text CRDT — concurrent edits to disjoint
+    // regions both land. The chat header surfaces this via the
+    // useCollabText hook from @pylonsync/loro.
+    topic: field.string().crdt("text").optional(),
     isPrivate: field.bool(),
     createdBy: field.id("User"),
     createdAt: field.datetime(),
@@ -54,7 +59,12 @@ const Message = entity(
     channelId: field.id("Channel"),
     authorId: field.id("User"),
     parentMessageId: field.id("Message").optional(),
-    body: field.string(),
+    // Body is collaborative — concurrent edits from two browser tabs
+    // converge through Loro's text CRDT instead of LWW. The server
+    // broadcasts a binary Loro snapshot on every write; the client's
+    // useLoroDoc hook keeps the rendered text in lockstep with the
+    // CRDT state.
+    body: field.string().crdt("text"),
     editedAt: field.datetime().optional(),
     createdAt: field.datetime(),
   },
