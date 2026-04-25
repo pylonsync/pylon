@@ -988,7 +988,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
-                                    crdt: true,
+                    crdt: true,
                 },
                 ManifestEntity {
                     name: "Todo".into(),
@@ -1005,7 +1005,7 @@ mod tests {
                     }],
                     relations: vec![],
                     search: None,
-                                    crdt: true,
+                    crdt: true,
                 },
             ],
             queries: vec![],
@@ -1136,8 +1136,14 @@ mod tests {
         // + 1 CREATE INDEX for Todo.by_user_done. The Todo manifest also
         // declares a unique by_email index on User which lands as part of
         // the table. Final count: 2 tables + 2 indexes.
-        let create_tables = stmts.iter().filter(|s| s.starts_with("CREATE TABLE")).count();
-        let create_indexes = stmts.iter().filter(|s| s.starts_with("CREATE INDEX") || s.starts_with("CREATE UNIQUE INDEX")).count();
+        let create_tables = stmts
+            .iter()
+            .filter(|s| s.starts_with("CREATE TABLE"))
+            .count();
+        let create_indexes = stmts
+            .iter()
+            .filter(|s| s.starts_with("CREATE INDEX") || s.starts_with("CREATE UNIQUE INDEX"))
+            .count();
         assert_eq!(create_tables, 2);
         assert!(create_indexes >= 1);
         assert!(stmts[0].starts_with("CREATE TABLE"));

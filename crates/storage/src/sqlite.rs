@@ -535,27 +535,19 @@ impl SqliteAdapter {
                         );
                         self.conn.execute(&idx_sql, []).map_err(|e| StorageError {
                             code: "SQLITE_EXEC_FAILED".into(),
-                            message: format!(
-                                "create sort index {entity}.{field} failed: {e}"
-                            ),
+                            message: format!("create sort index {entity}.{field} failed: {e}"),
                         })?;
                     }
                 }
                 SchemaOperation::RemoveSearchIndex { entity } => {
                     self.conn
-                        .execute(
-                            &format!("DROP TABLE IF EXISTS \"_fts_{entity}\""),
-                            [],
-                        )
+                        .execute(&format!("DROP TABLE IF EXISTS \"_fts_{entity}\""), [])
                         .map_err(|e| StorageError {
                             code: "SQLITE_EXEC_FAILED".into(),
                             message: format!("drop _fts_{entity} failed: {e}"),
                         })?;
                     self.conn
-                        .execute(
-                            "DELETE FROM \"_facet_bitmap\" WHERE entity = ?1",
-                            [entity],
-                        )
+                        .execute("DELETE FROM \"_facet_bitmap\" WHERE entity = ?1", [entity])
                         .map_err(|e| StorageError {
                             code: "SQLITE_EXEC_FAILED".into(),
                             message: format!("clear facet bitmaps for {entity} failed: {e}"),
@@ -773,7 +765,7 @@ mod tests {
                 }],
                 relations: vec![],
                 search: None,
-                            crdt: true,
+                crdt: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1020,7 +1012,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
-                                    crdt: true,
+                    crdt: true,
                 },
                 ManifestEntity {
                     name: "User".into(),
@@ -1034,7 +1026,7 @@ mod tests {
                     indexes: vec![],
                     relations: vec![],
                     search: None,
-                                    crdt: true,
+                    crdt: true,
                 },
             ],
             routes: vec![],

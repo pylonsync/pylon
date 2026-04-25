@@ -517,7 +517,7 @@ mod tests {
                 indexes: vec![],
                 relations: vec![],
                 search: None,
-                            crdt: true,
+                crdt: true,
             }],
             routes: vec![],
             queries: vec![],

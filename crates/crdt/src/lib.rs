@@ -148,9 +148,7 @@ pub fn field_kind(
     let kind = match annotation {
         CrdtAnnotation::Lww => match default {
             // Already LWW — annotation is just documentation.
-            k @ (CrdtFieldKind::LwwString
-            | CrdtFieldKind::LwwNumber
-            | CrdtFieldKind::LwwBool) => k,
+            k @ (CrdtFieldKind::LwwString | CrdtFieldKind::LwwNumber | CrdtFieldKind::LwwBool) => k,
             // For richtext, "lww" downgrades to LWW string.
             CrdtFieldKind::Text => CrdtFieldKind::LwwString,
             other => other,
@@ -208,11 +206,7 @@ pub struct CrdtField {
 /// Returns `Err` only when the patch contains a value of the wrong shape
 /// for its declared field (e.g. a number on a `Bool` field). Type mismatch
 /// at this layer means the schema and the caller disagree — surface it.
-pub fn apply_patch(
-    doc: &LoroDoc,
-    fields: &[CrdtField],
-    patch: &Value,
-) -> Result<(), String> {
+pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result<(), String> {
     let obj = patch.as_object().ok_or("patch must be a JSON object")?;
     let map = root_map(doc);
 
@@ -222,9 +216,9 @@ pub fn apply_patch(
         };
         match field.kind {
             CrdtFieldKind::Text => {
-                let s = value.as_str().ok_or_else(|| {
-                    format!("field {}: expected string, got {value}", field.name)
-                })?;
+                let s = value
+                    .as_str()
+                    .ok_or_else(|| format!("field {}: expected string, got {value}", field.name))?;
                 let text = match map.get(&field.name) {
                     Some(ValueOrContainer::Container(loro::Container::Text(t))) => t,
                     _ => map
@@ -252,9 +246,9 @@ pub fn apply_patch(
                     map.delete(&field.name).ok();
                     continue;
                 }
-                let n = value.as_f64().ok_or_else(|| {
-                    format!("field {}: expected number, got {value}", field.name)
-                })?;
+                let n = value
+                    .as_f64()
+                    .ok_or_else(|| format!("field {}: expected number, got {value}", field.name))?;
                 map.insert(&field.name, n)
                     .map_err(|e| format!("write number {}: {e}", field.name))?;
             }
@@ -263,9 +257,9 @@ pub fn apply_patch(
                     map.delete(&field.name).ok();
                     continue;
                 }
-                let b = value.as_bool().ok_or_else(|| {
-                    format!("field {}: expected bool, got {value}", field.name)
-                })?;
+                let b = value
+                    .as_bool()
+                    .ok_or_else(|| format!("field {}: expected bool, got {value}", field.name))?;
                 map.insert(&field.name, b)
                     .map_err(|e| format!("write bool {}: {e}", field.name))?;
             }
@@ -274,9 +268,9 @@ pub fn apply_patch(
                     map.delete(&field.name).ok();
                     continue;
                 }
-                let s = value.as_str().ok_or_else(|| {
-                    format!("field {}: expected string, got {value}", field.name)
-                })?;
+                let s = value
+                    .as_str()
+                    .ok_or_else(|| format!("field {}: expected string, got {value}", field.name))?;
                 map.insert(&field.name, s.to_string())
                     .map_err(|e| format!("write string {}: {e}", field.name))?;
             }
@@ -335,7 +329,9 @@ fn loro_to_json(v: LoroValue) -> Option<Value> {
         LoroValue::String(s) => Some(Value::String(s.to_string())),
         LoroValue::Binary(_) => None,
         LoroValue::List(list) => Some(Value::Array(
-            list.iter().filter_map(|v| loro_to_json(v.clone())).collect(),
+            list.iter()
+                .filter_map(|v| loro_to_json(v.clone()))
+                .collect(),
         )),
         LoroValue::Map(m) => {
             let mut out = JsonMap::new();
@@ -358,8 +354,7 @@ fn loro_to_json(v: LoroValue) -> Option<Value> {
 /// it subscribes to a row; ~200-500 bytes for a row that's been edited a
 /// handful of times after Loro's compaction.
 pub fn encode_snapshot(doc: &LoroDoc) -> Vec<u8> {
-    doc.export(loro::ExportMode::Snapshot)
-        .unwrap_or_default()
+    doc.export(loro::ExportMode::Snapshot).unwrap_or_default()
 }
 
 /// Encode an incremental update relative to a peer's known version.
@@ -411,12 +406,18 @@ mod tests {
 
     #[test]
     fn field_kind_defaults() {
-        assert_eq!(field_kind("string", None).unwrap(), CrdtFieldKind::LwwString);
+        assert_eq!(
+            field_kind("string", None).unwrap(),
+            CrdtFieldKind::LwwString
+        );
         assert_eq!(field_kind("richtext", None).unwrap(), CrdtFieldKind::Text);
         assert_eq!(field_kind("int", None).unwrap(), CrdtFieldKind::LwwNumber);
         assert_eq!(field_kind("float", None).unwrap(), CrdtFieldKind::LwwNumber);
         assert_eq!(field_kind("bool", None).unwrap(), CrdtFieldKind::LwwBool);
-        assert_eq!(field_kind("datetime", None).unwrap(), CrdtFieldKind::LwwString);
+        assert_eq!(
+            field_kind("datetime", None).unwrap(),
+            CrdtFieldKind::LwwString
+        );
         assert_eq!(
             field_kind("id(User)", None).unwrap(),
             CrdtFieldKind::LwwString
@@ -472,7 +473,10 @@ mod tests {
         let err: Result<pylon_kernel::ManifestField, _> = serde_json::from_str(
             r#"{"name":"x","type":"string","optional":false,"unique":false,"crdt":"nonsense"}"#,
         );
-        assert!(err.is_err(), "typo in crdt annotation must fail to deserialize");
+        assert!(
+            err.is_err(),
+            "typo in crdt annotation must fail to deserialize"
+        );
         // Make sure the valid form still works.
         let ok: pylon_kernel::ManifestField = serde_json::from_str(
             r#"{"name":"x","type":"string","optional":false,"unique":false,"crdt":"text"}"#,

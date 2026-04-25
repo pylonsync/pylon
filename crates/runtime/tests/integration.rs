@@ -106,7 +106,7 @@ fn test_manifest() -> AppManifest {
                 indexes: vec![],
                 relations: vec![],
                 search: None,
-                            crdt: true,
+                crdt: true,
             },
             ManifestEntity {
                 name: "User".into(),
@@ -129,7 +129,7 @@ fn test_manifest() -> AppManifest {
                 indexes: vec![],
                 relations: vec![],
                 search: None,
-                            crdt: true,
+                crdt: true,
             },
         ],
         routes: vec![],

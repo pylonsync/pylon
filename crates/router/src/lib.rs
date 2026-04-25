@@ -126,9 +126,8 @@ pub fn encode_crdt_frame(
     }
     let entity_len = entity_bytes.len() as u16;
     let row_id_len = row_id_bytes.len() as u16;
-    let mut out = Vec::with_capacity(
-        1 + 2 + entity_bytes.len() + 2 + row_id_bytes.len() + payload.len(),
-    );
+    let mut out =
+        Vec::with_capacity(1 + 2 + entity_bytes.len() + 2 + row_id_bytes.len() + payload.len());
     out.push(frame_type);
     out.extend_from_slice(&entity_len.to_be_bytes());
     out.extend_from_slice(entity_bytes);
@@ -859,7 +858,10 @@ fn route_inner(
             None => return (400, json_error("MISSING_EMAIL", "email is required")),
         };
         if !email.contains('@') {
-            return (400, json_error("INVALID_EMAIL", "email must be well-formed"));
+            return (
+                400,
+                json_error("INVALID_EMAIL", "email must be well-formed"),
+            );
         }
         let password = match data.get("password").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -898,8 +900,8 @@ fn route_inner(
         // entity doesn't have an `avatarColor` field are fine too —
         // the storage layer ignores unknown fields on insert.
         let palette = [
-            "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#10b981",
-            "#84cc16", "#eab308", "#f97316", "#ef4444", "#ec4899",
+            "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#10b981", "#84cc16", "#eab308", "#f97316",
+            "#ef4444", "#ec4899",
         ];
         let mut hash_val: i32 = 0;
         for b in email.as_bytes() {
@@ -2359,7 +2361,10 @@ fn route_inner(
     if let Some(rest) = url.strip_prefix("/api/search/") {
         let entity_name = rest.split('?').next().unwrap_or(rest).trim_end_matches('/');
         if entity_name.is_empty() {
-            return (400, json_error("MISSING_ENTITY", "search path is /api/search/<Entity>"));
+            return (
+                400,
+                json_error("MISSING_ENTITY", "search path is /api/search/<Entity>"),
+            );
         }
         if method != HttpMethod::Post {
             return (

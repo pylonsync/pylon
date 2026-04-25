@@ -90,8 +90,8 @@ use std::sync::{Arc, Mutex};
 
 use pylon_crdt::{
     apply_patch, apply_update as crdt_apply_update, encode_snapshot, encode_update_since,
-    project_doc_to_json, CrdtField,
     loro::{LoroDoc, VersionVector},
+    project_doc_to_json, CrdtField,
 };
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -428,7 +428,10 @@ mod tests {
         assert_eq!(store.cached_rows(), 0);
 
         let snap = store.snapshot(&conn, "Note", "n1").unwrap();
-        assert!(!snap.is_empty(), "snapshot should be non-empty after writes");
+        assert!(
+            !snap.is_empty(),
+            "snapshot should be non-empty after writes"
+        );
         assert_eq!(store.cached_rows(), 1, "snapshot() rehydrated the cache");
     }
 
@@ -560,9 +563,7 @@ mod tests {
             )
             .unwrap();
 
-        let delta = store
-            .update_since(&conn, "Note", "n1", &early_vv)
-            .unwrap();
+        let delta = store.update_since(&conn, "Note", "n1", &early_vv).unwrap();
         assert!(
             delta.len() < snap_full.len(),
             "incremental delta ({}) must be smaller than full snapshot ({})",

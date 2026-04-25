@@ -457,9 +457,7 @@ impl Runtime {
             })?;
         for entity in &self.manifest.entities {
             if let Some(cfg) = &entity.search {
-                if let Some(sql) =
-                    pylon_storage::search::create_fts_table_sql(&entity.name, cfg)
-                {
+                if let Some(sql) = pylon_storage::search::create_fts_table_sql(&entity.name, cfg) {
                     conn.execute(&sql, []).map_err(|e| RuntimeError {
                         code: "FTS_TABLE_FAILED".into(),
                         message: format!("create FTS table for {}: {e}", entity.name),
@@ -472,10 +470,7 @@ impl Runtime {
                     );
                     conn.execute(&idx_sql, []).map_err(|e| RuntimeError {
                         code: "SORT_INDEX_FAILED".into(),
-                        message: format!(
-                            "create sort index for {}.{field}: {e}",
-                            entity.name
-                        ),
+                        message: format!("create sort index for {}.{field}: {e}", entity.name),
                     })?;
                 }
             }
@@ -517,14 +512,13 @@ impl Runtime {
             if f.name == "id" {
                 continue;
             }
-            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt)
-                .map_err(|e| RuntimeError {
-                    code: "INVALID_CRDT_FIELD".into(),
-                    message: format!(
-                        "{}.{}: {e} (declared type={}, crdt={:?})",
-                        ent.name, f.name, f.field_type, f.crdt
-                    ),
-                })?;
+            let kind = pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| RuntimeError {
+                code: "INVALID_CRDT_FIELD".into(),
+                message: format!(
+                    "{}.{}: {e} (declared type={}, crdt={:?})",
+                    ent.name, f.name, f.field_type, f.crdt
+                ),
+            })?;
             out.push(pylon_crdt::CrdtField {
                 name: f.name.clone(),
                 kind,
@@ -619,13 +613,11 @@ impl Runtime {
             // the search index inconsistent with the row table.
             if let Some(cfg) = ent.search.as_ref() {
                 if !cfg.is_empty() {
-                    pylon_storage::search_maintenance::apply_insert(
-                        &conn, entity, &id, data, cfg,
-                    )
-                    .map_err(|e| RuntimeError {
-                        code: "SEARCH_MAINTENANCE_FAILED".into(),
-                        message: format!("search index update on insert {entity}: {e}"),
-                    })?;
+                    pylon_storage::search_maintenance::apply_insert(&conn, entity, &id, data, cfg)
+                        .map_err(|e| RuntimeError {
+                            code: "SEARCH_MAINTENANCE_FAILED".into(),
+                            message: format!("search index update on insert {entity}: {e}"),
+                        })?;
                 }
             }
             Ok(())
@@ -793,11 +785,7 @@ impl Runtime {
             // Capture pre-UPDATE row for search-maintenance diff INSIDE the
             // tx. Matches the contract of search_maintenance::apply_update
             // — old state must be read before the UPDATE lands.
-            let searchable = ent
-                .search
-                .as_ref()
-                .map(|c| !c.is_empty())
-                .unwrap_or(false);
+            let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
             let old_row = if searchable {
                 self.get_by_id_with_conn(&conn, entity, id)?
             } else {
@@ -844,23 +832,17 @@ impl Runtime {
 
         // Apply search-maintenance BEFORE the DELETE — we still need
         // the row's facet values to clear the bitmap bits.
-        let searchable = ent
-            .search
-            .as_ref()
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
+        let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
         if searchable {
             if let (Some(cfg), Ok(Some(row))) = (
                 ent.search.as_ref(),
                 self.get_by_id_with_conn(&conn, entity, id),
             ) {
-                pylon_storage::search_maintenance::apply_delete(
-                    &conn, entity, id, &row, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on delete {entity}: {e}"),
-                })?;
+                pylon_storage::search_maintenance::apply_delete(&conn, entity, id, &row, cfg)
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on delete {entity}: {e}"),
+                    })?;
             }
         }
 
@@ -1269,13 +1251,11 @@ impl Runtime {
         // for entities that don't declare `search:` in their schema.
         if let Some(cfg) = ent.search.as_ref() {
             if !cfg.is_empty() {
-                pylon_storage::search_maintenance::apply_insert(
-                    conn, entity, &id, data, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on insert {entity}: {e}"),
-                })?;
+                pylon_storage::search_maintenance::apply_insert(conn, entity, &id, data, cfg)
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on insert {entity}: {e}"),
+                    })?;
             }
         }
 
@@ -1316,11 +1296,7 @@ impl Runtime {
         // Read happens before the UPDATE so apply_update sees the OLD
         // state of any facet field. Cheap — single-row lookup on the
         // `id` primary-key index.
-        let searchable = ent
-            .search
-            .as_ref()
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
+        let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
         let old_row = if searchable {
             self.get_by_id_with_conn(conn, entity, id)?
         } else {
@@ -1343,13 +1319,11 @@ impl Runtime {
 
         if affected > 0 && searchable {
             if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
-                pylon_storage::search_maintenance::apply_update(
-                    conn, entity, id, &old, data, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on update {entity}: {e}"),
-                })?;
+                pylon_storage::search_maintenance::apply_update(conn, entity, id, &old, data, cfg)
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on update {entity}: {e}"),
+                    })?;
             }
         }
 
@@ -1367,22 +1341,17 @@ impl Runtime {
 
         // Apply search maintenance BEFORE the DELETE so we still have
         // the row's facet values to diff against.
-        let searchable = ent
-            .search
-            .as_ref()
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
+        let searchable = ent.search.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
         if searchable {
-            if let (Some(cfg), Ok(Some(row))) =
-                (ent.search.as_ref(), self.get_by_id_with_conn(conn, entity, id))
-            {
-                pylon_storage::search_maintenance::apply_delete(
-                    conn, entity, id, &row, cfg,
-                )
-                .map_err(|e| RuntimeError {
-                    code: "SEARCH_MAINTENANCE_FAILED".into(),
-                    message: format!("search index update on delete {entity}: {e}"),
-                })?;
+            if let (Some(cfg), Ok(Some(row))) = (
+                ent.search.as_ref(),
+                self.get_by_id_with_conn(conn, entity, id),
+            ) {
+                pylon_storage::search_maintenance::apply_delete(conn, entity, id, &row, cfg)
+                    .map_err(|e| RuntimeError {
+                        code: "SEARCH_MAINTENANCE_FAILED".into(),
+                        message: format!("search index update on delete {entity}: {e}"),
+                    })?;
             }
         }
 
@@ -2007,10 +1976,11 @@ fn with_write_tx<T, F>(conn: &rusqlite::Connection, body: F) -> Result<T, Runtim
 where
     F: FnOnce() -> Result<T, RuntimeError>,
 {
-    conn.execute("BEGIN IMMEDIATE", []).map_err(|e| RuntimeError {
-        code: "TX_BEGIN_FAILED".into(),
-        message: format!("BEGIN: {e}"),
-    })?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| RuntimeError {
+            code: "TX_BEGIN_FAILED".into(),
+            message: format!("BEGIN: {e}"),
+        })?;
     match body() {
         Ok(v) => {
             conn.execute("COMMIT", []).map_err(|e| RuntimeError {
@@ -2138,7 +2108,7 @@ mod tests {
                 }],
                 relations: vec![],
                 search: None,
-                            crdt: true,
+                crdt: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -2254,11 +2224,8 @@ mod tests {
         // and pylon dev migrates the table forward.
         {
             let conn = rt.lock_write_conn().unwrap();
-            conn.execute(
-                "ALTER TABLE \"User\" ADD COLUMN \"passwordHash\" TEXT",
-                [],
-            )
-            .unwrap();
+            conn.execute("ALTER TABLE \"User\" ADD COLUMN \"passwordHash\" TEXT", [])
+                .unwrap();
             conn.execute(
                 "UPDATE \"User\" SET \"passwordHash\" = ?1 WHERE \"id\" = ?2",
                 rusqlite::params!["hashed-password", &id],
@@ -2342,12 +2309,8 @@ mod tests {
             .unwrap()
         };
 
-        rt.update(
-            "User",
-            &id,
-            &serde_json::json!({"displayName": "Eric C"}),
-        )
-        .unwrap();
+        rt.update("User", &id, &serde_json::json!({"displayName": "Eric C"}))
+            .unwrap();
 
         let snap_after_update: Vec<u8> = {
             let conn = rt.lock_write_conn().unwrap();

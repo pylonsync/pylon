@@ -182,16 +182,18 @@ impl DataStore for Runtime {
             code: "SEARCH_NOT_CONFIGURED".into(),
             message: format!("Entity {entity} has no `search:` config"),
         })?;
-        let parsed: pylon_storage::search::SearchQuery =
-            serde_json::from_value(query.clone()).map_err(|e| DataError {
+        let parsed: pylon_storage::search::SearchQuery = serde_json::from_value(query.clone())
+            .map_err(|e| DataError {
                 code: "INVALID_QUERY".into(),
                 message: format!("search query body: {e}"),
             })?;
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        let result = pylon_storage::search_query::run_search(&conn, entity, cfg, &parsed)
-            .map_err(|e| DataError {
-                code: e.code,
-                message: e.message,
+        let result =
+            pylon_storage::search_query::run_search(&conn, entity, cfg, &parsed).map_err(|e| {
+                DataError {
+                    code: e.code,
+                    message: e.message,
+                }
             })?;
         serde_json::to_value(&result).map_err(|e| DataError {
             code: "SEARCH_SERIALIZE_FAILED".into(),
@@ -203,11 +205,7 @@ impl DataStore for Runtime {
     /// entity with `crdt: false` (the LWW opt-out) — the router uses
     /// that to decide whether to ship a binary update over WebSocket
     /// after the write.
-    fn crdt_snapshot(
-        &self,
-        entity: &str,
-        row_id: &str,
-    ) -> Result<Option<Vec<u8>>, DataError> {
+    fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
         let ent = self
             .manifest()
             .entities
@@ -221,12 +219,13 @@ impl DataStore for Runtime {
             return Ok(None);
         }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        let snap = self.crdt_store().snapshot(&conn, entity, row_id).map_err(
-            |e| DataError {
+        let snap = self
+            .crdt_store()
+            .snapshot(&conn, entity, row_id)
+            .map_err(|e| DataError {
                 code: "CRDT_SNAPSHOT_FAILED".into(),
                 message: format!("snapshot {entity}/{row_id}: {e}"),
-            },
-        )?;
+            })?;
         Ok(Some(snap))
     }
 }
@@ -283,9 +282,7 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         ) {
             Ok(frame) => self.ws.broadcast_binary(frame),
             Err(e) => {
-                tracing::warn!(
-                    "[crdt] dropping binary frame for {entity}/{row_id}: {e}"
-                );
+                tracing::warn!("[crdt] dropping binary frame for {entity}/{row_id}: {e}");
             }
         }
     }
@@ -1300,18 +1297,10 @@ pub fn try_spawn_functions(
 /// trusted-server-side caller would have. The args come from the
 /// job payload, which the schedule hook copies verbatim from the
 /// `runAfter(ms, fn, args)` invocation.
-fn register_function_job_handlers(
-    ops: &Arc<FnOpsImpl>,
-    job_queue: &Arc<crate::jobs::JobQueue>,
-) {
+fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::jobs::JobQueue>) {
     use pylon_router::FnOps as _;
 
-    let fn_names: Vec<String> = ops
-        .registry
-        .list()
-        .into_iter()
-        .map(|d| d.name)
-        .collect();
+    let fn_names: Vec<String> = ops.registry.list().into_iter().map(|d| d.name).collect();
 
     for name in fn_names {
         let weak = Arc::downgrade(ops);

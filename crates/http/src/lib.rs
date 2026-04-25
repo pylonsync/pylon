@@ -213,11 +213,7 @@ pub trait DataStore: Send + Sync {
     /// CRDT mode (e.g. the Workers D1 store at time of writing)
     /// compile without ceremony. Per the Ok(None) semantics above,
     /// this is correct behavior, not a stub.
-    fn crdt_snapshot(
-        &self,
-        _entity: &str,
-        _row_id: &str,
-    ) -> Result<Option<Vec<u8>>, DataError> {
+    fn crdt_snapshot(&self, _entity: &str, _row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
         Ok(None)
     }
 }

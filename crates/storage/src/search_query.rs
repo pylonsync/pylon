@@ -203,9 +203,7 @@ fn load_fts_matches(
     // entity rowid; we read that into the base bitmap. Ranked best-first
     // by default (rowid order is stable enough for v1; BM25 ordering
     // lands when we plumb rank through hit materialization).
-    let sql = format!(
-        "SELECT entity_id FROM \"_fts_{entity}\" WHERE \"_fts_{entity}\" MATCH ?1"
-    );
+    let sql = format!("SELECT entity_id FROM \"_fts_{entity}\" WHERE \"_fts_{entity}\" MATCH ?1");
     let mut stmt = conn
         .prepare_cached(&sql)
         .map_err(|e| StorageError::new("FTS_PREPARE_FAILED", &e.to_string()))?;
@@ -305,9 +303,8 @@ fn fetch_rows_by_rowid(
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!(
-        "SELECT * FROM \"{entity}\" WHERE rowid IN ({placeholders}) ORDER BY rowid ASC"
-    );
+    let sql =
+        format!("SELECT * FROM \"{entity}\" WHERE rowid IN ({placeholders}) ORDER BY rowid ASC");
     let mut stmt = conn
         .prepare_cached(&sql)
         .map_err(|e| StorageError::new("HIT_PREPARE_FAILED", &e.to_string()))?;
@@ -598,7 +595,7 @@ mod tests {
                 sort: None,
                 page: 0,
                 page_size: 20,
-                    },
+            },
         )
         .unwrap();
         // Seed pattern: every 9th product is Nike+shoes.
@@ -650,7 +647,11 @@ mod tests {
             },
         )
         .unwrap();
-        let prices: Vec<f64> = r.hits.iter().map(|h| h["price"].as_f64().unwrap()).collect();
+        let prices: Vec<f64> = r
+            .hits
+            .iter()
+            .map(|h| h["price"].as_f64().unwrap())
+            .collect();
         let mut sorted = prices.clone();
         sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
         assert_eq!(prices, sorted);
@@ -733,11 +734,7 @@ mod tests {
         .unwrap();
         // Rowid-ascending order = insertion order, so the 'name 0' row
         // (inserted first) comes before 'name 9'.
-        let names: Vec<&str> = r
-            .hits
-            .iter()
-            .map(|h| h["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = r.hits.iter().map(|h| h["name"].as_str().unwrap()).collect();
         assert_eq!(
             names[0].split(' ').last().unwrap(),
             "0",
