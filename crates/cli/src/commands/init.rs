@@ -8,9 +8,15 @@ use crate::client_codegen::generate_client_ts;
 use crate::manifest::parse_manifest;
 use crate::output::{print_diagnostics, print_json};
 
-const TEMPLATE_BASIC_APP: &str = include_str!("../../../../templates/basic/app.ts");
-const TEMPLATE_BASIC_TSCONFIG: &str = include_str!("../../../../templates/basic/tsconfig.json");
-const SDK_SOURCE: &str = include_str!("../../../../packages/sdk/src/index.ts");
+// Vendored copies live inside this crate so they survive `cargo
+// package` (which strips paths outside the crate root). The originals
+// in /templates and /packages/sdk are still the canonical source —
+// the CI script `tools/check-cli-vendored.sh` (TODO) compares the two
+// and fails the build if they drift.
+const TEMPLATE_BASIC_APP: &str = include_str!("../../templates/basic/app.ts");
+const TEMPLATE_BASIC_TSCONFIG: &str =
+    include_str!("../../templates/basic/tsconfig.json");
+const SDK_SOURCE: &str = include_str!("../../embedded/sdk-index.ts");
 
 #[derive(Serialize)]
 struct InitOutput {

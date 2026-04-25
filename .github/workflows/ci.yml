@@ -56,6 +56,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  cli-vendored:
+    name: cli vendored files in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Catches drift between /templates + /packages/sdk and the
+      # copies vendored into crates/cli/. The vendored copies exist
+      # because cargo publish strips paths outside the crate root.
+      - run: bash tools/check-cli-vendored.sh
+
   clippy:
     name: clippy
     needs: changes
