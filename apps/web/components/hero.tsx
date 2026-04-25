@@ -110,9 +110,6 @@ function GithubButton() {
         <path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.3 1.19-3.11-.12-.3-.52-1.49.12-3.1 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.78 0c2.21-1.49 3.18-1.18 3.18-1.18.64 1.61.24 2.8.12 3.1.74.81 1.19 1.85 1.19 3.11 0 4.43-2.7 5.41-5.27 5.69.41.36.78 1.06.78 2.15v3.19c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z" />
       </svg>
       View on GitHub
-      <span className="text-dim text-mono" style={{ fontSize: 11, marginLeft: 4 }}>
-        ★ 2.4k
-      </span>
     </a>
   );
 }
@@ -123,8 +120,8 @@ const SEED_MESSAGES = [
   { name: "rhea", color: "#5EE6A6", text: "useQuery fires in 4ms here, sub is instant" },
   { name: "maya", color: "#F5B946", text: "cranking area-of-interest up to 150m" },
   { name: "dani", color: "#C89DFF", text: "so the shard handles 600 entities?" },
-  { name: "jonas", color: "#7AB7FF", text: "✓ green on staging" },
-  { name: "rhea", color: "#5EE6A6", text: "merging now, pushing to Workers" },
+  { name: "jonas", color: "#7AB7FF", text: "running the shard replay test" },
+  { name: "rhea", color: "#5EE6A6", text: "reviewing the sync trace now" },
   { name: "maya", color: "#F5B946", text: "love that we dropped 3 services for this" },
 ];
 
@@ -627,15 +624,15 @@ const msgPolicy = policy({
 // ---- Dashboard ------------------------------------------------------------
 
 function DashboardApp() {
-  // Rotating "live" metrics — numbers tick up to feel alive.
+  // Rotating example metrics for the live-query demo.
   const [tick, setTick] = React.useState(0);
   React.useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 1600);
     return () => clearInterval(t);
   }, []);
-  const revenue = 12439 + tick * 17;
-  const orders = 142 + Math.floor(tick / 3);
-  const online = 47 + (tick % 5);
+  const events = 12439 + tick * 17;
+  const writes = 142 + Math.floor(tick / 3);
+  const clients = 47 + (tick % 5);
   const bars = [32, 48, 61, 58, 72, 84, 76, 92, 68, 74, 88, 96]
     .map((v, i) => (i === 11 ? 40 + ((tick * 3) % 60) : v));
 
@@ -652,18 +649,18 @@ function DashboardApp() {
       </div>
       <div className="dash-metrics">
         <div className="dash-metric">
-          <div className="dash-metric-label">Revenue (24h)</div>
-          <div className="dash-metric-value">${revenue.toLocaleString("en-US")}</div>
-          <div className="dash-metric-delta up">↑ 12.4%</div>
+          <div className="dash-metric-label">Events</div>
+          <div className="dash-metric-value">{events.toLocaleString("en-US")}</div>
+          <div className="dash-metric-delta up">streaming</div>
         </div>
         <div className="dash-metric">
-          <div className="dash-metric-label">Orders</div>
-          <div className="dash-metric-value">{orders}</div>
-          <div className="dash-metric-delta up">↑ 3 new</div>
+          <div className="dash-metric-label">Writes</div>
+          <div className="dash-metric-value">{writes}</div>
+          <div className="dash-metric-delta up">live</div>
         </div>
         <div className="dash-metric">
-          <div className="dash-metric-label">Online</div>
-          <div className="dash-metric-value">{online}</div>
+          <div className="dash-metric-label">Clients</div>
+          <div className="dash-metric-value">{clients}</div>
           <div className="dash-metric-delta">steady</div>
         </div>
       </div>
@@ -922,9 +919,8 @@ export function Hero() {
       <div className="hero-grid-bg" />
       <div className="container-page hero-inner">
         <div className="hero-eyebrow">
-          <span className="chip">NEW</span>
-          <span>Pylon Cloud — deploy anywhere, idle at $0</span>
-          <span className="arrow">→</span>
+          <span className="chip">OSS</span>
+          <span>Self-hosted · SQLite or Postgres · pre-1.0</span>
         </div>
 
         <h1 className="hero-h1">
@@ -935,8 +931,8 @@ export function Hero() {
 
         <p className="hero-sub">
           Declarative schema, live sync, TypeScript functions, and tick-based game
-          shards — as a single Rust binary. Run it on a <code>VPS</code>,{" "}
-          <code>AWS</code>, or <code>Cloudflare Workers</code>.
+          shards — as a single Rust binary. Run it with <code>SQLite</code> or{" "}
+          <code>Postgres</code> on a VPS or AWS.
         </p>
 
         <div className="cta-row">

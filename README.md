@@ -7,7 +7,7 @@ A self-hostable, single-binary backend for web, mobile, and real-time apps.
 
 pylon gives you what Convex / Firebase / Supabase do — declarative schema,
 real-time sync, server functions, auth, file storage — but as a single Rust
-binary you can `scp` to a VPS or run on Cloudflare Workers.
+binary you can `scp` to a VPS or run with SQLite or Postgres.
 
 ```sh
 # Install
@@ -43,7 +43,7 @@ Visit `http://localhost:4321/studio` for the inspector.
 |  | pylon | Convex | Supabase | Firebase |
 |---|---|---|---|---|
 | Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
-| Deploy targets | self-host, Workers, AWS | their cloud only | their cloud / k8s | their cloud only |
+| Deploy targets | self-host, AWS, Workers (experimental) | their cloud only | their cloud / k8s | their cloud only |
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
 | Game shards | ✅ tick-based | ❌ | ❌ | ❌ |
@@ -221,9 +221,10 @@ Operational docs:
 
 ## Project status
 
-**Pre-1.0.** API is stable enough to build with but may evolve. Production
-self-hosted SQLite deployments are well-tested. Workers / Postgres are
-experimental — see `SECURITY.md` for a list of pre-1.0 hardening gaps.
+**Pre-1.0.** API is stable enough to build with but may evolve. SQLite is
+the default backend and Postgres is supported for deployments that need an
+external database or horizontal database operations. Cloudflare Workers / D1
+is experimental — see `SECURITY.md` for a list of pre-1.0 hardening gaps.
 
 ## Contributing
 

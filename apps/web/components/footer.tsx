@@ -79,11 +79,7 @@ export function Footer() {
 
         <div className="footer-bottom">
           <div>© 2026 pylon contributors · MIT / Apache-2.0</div>
-          <div style={{ display: "flex", gap: 16 }}>
-            <span>v0.8.2</span>
-            <span>commit 4e8f2a1</span>
-            <span style={{ color: "var(--green)" }}>● all systems nominal</span>
-          </div>
+          <div>Pre-1.0 · see GitHub for current release status</div>
         </div>
       </div>
     </footer>

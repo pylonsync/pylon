@@ -34,8 +34,8 @@ A map of the pylon codebase for new contributors. Pairs with [README.md](README.
 
 The boundary between platform-agnostic logic and the self-hosted server is
 `crates/http`'s `DataStore` trait. The same `route()` function in
-`crates/router` runs on top of the SQLite-backed `Runtime` in self-host mode
-and (eventually) on top of D1 in the Cloudflare Workers adapter.
+`crates/router` runs on top of SQLite, Postgres, or D1-compatible storage
+adapters.
 
 ## Crate responsibilities
 
@@ -57,8 +57,8 @@ and (eventually) on top of D1 in the Cloudflare Workers adapter.
 ### Storage
 
 - **`crates/storage`** — SQL generation (`quote_ident`, `validate_column_name`,
-  `create_table_sql`), SQLite adapter, optional Postgres adapter behind the
-  `postgres` feature flag, file-storage helpers.
+  `create_table_sql`), SQLite adapter, Postgres adapter behind the
+  `postgres-live` feature flag, file-storage helpers.
 - **`crates/runtime/src/datastore.rs`** — `impl DataStore for Runtime` plus
   `TxStore` (the in-transaction handle passed to TS mutations).
 - **`crates/migrate`** — schema diff engine. Compares current `AppManifest`
@@ -174,9 +174,6 @@ Two unrelated systems share the word "real-time":
 
 - `crates/workers` — D1 DataStore is partially implemented; routes don't all
   work; WebSocket via Durable Objects is sketched but not wired.
-- `crates/storage` Postgres adapter — basic CRUD works, but `query_filtered`,
-  `lookup`, and `query_graph` still go through SQLite-shaped paths in places.
-  See task list in `SECURITY.md`.
 
 ## Adding a new feature: where does it go?
 

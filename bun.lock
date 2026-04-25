@@ -499,6 +499,22 @@
         "bun-types",
       ],
     },
+    "packages/loro": {
+      "name": "@pylonsync/loro",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pylonsync/react": "file:../react",
+        "@pylonsync/sync": "file:../sync",
+        "loro-crdt": "^1.10.6",
+      },
+      "devDependencies": {
+        "@types/react": "^19.0.0",
+        "typescript": "^5.5",
+      },
+      "peerDependencies": {
+        "react": ">=18.0.0",
+      },
+    },
     "packages/react": {
       "name": "@pylonsync/react",
       "version": "0.2.3",
@@ -705,6 +721,8 @@
     "@pylonsync/example-ui": ["@pylonsync/example-ui@workspace:examples/_shared"],
 
     "@pylonsync/functions": ["@pylonsync/functions@workspace:packages/functions"],
+
+    "@pylonsync/loro": ["@pylonsync/loro@workspace:packages/loro"],
 
     "@pylonsync/react": ["@pylonsync/react@workspace:packages/react"],
 
@@ -1152,6 +1170,8 @@
 
     "loose-envify": ["loose-envify@1.4.0", "", { "dependencies": { "js-tokens": "^3.0.0 || ^4.0.0" }, "bin": { "loose-envify": "cli.js" } }, "sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q=="],
 
+    "loro-crdt": ["loro-crdt@1.11.1", "", {}, "sha512-R+Ksyy2FPYoOfJAkVY6BqGk11AtlgWZ1B91V/G7TaQxitxuvUvMd1URhO33LYfFUIT2CSn0Nikl+bbRZ2RGuZg=="],
+
     "lru-cache": ["lru-cache@5.1.1", "", { "dependencies": { "yallist": "^3.0.2" } }, "sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w=="],
 
     "lucide-react": ["lucide-react@0.475.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-NJzvVu1HwFVeZ+Gwq2q00KygM1aBhy/ZrhY9FsAgJtpB+E4R7uxRk9M2iKvHa6/vNxZydIB59htha4c2vvwvVg=="],
@@ -1412,9 +1432,15 @@
 
     "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
+    "@pylonsync/loro/@pylonsync/react": ["@pylonsync/react@file:packages/react", { "dependencies": { "@pylonsync/sdk": "file:../sdk", "@pylonsync/sync": "file:../sync" }, "devDependencies": { "@types/react": "^19.0.0" }, "peerDependencies": { "react": ">=18.0.0" } }],
+
+    "@pylonsync/loro/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
     "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
     "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/react-native/@pylonsync/react": ["@pylonsync/react@file:packages/react", { "dependencies": { "@pylonsync/sdk": "file:../sdk", "@pylonsync/sync": "file:../sync" }, "devDependencies": { "@types/react": "^19.0.0" }, "peerDependencies": { "react": ">=18.0.0" } }],
 
     "@pylonsync/react-native/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
@@ -1581,6 +1607,14 @@
     "world3d-web/tailwindcss": ["tailwindcss@4.2.4", "", {}, "sha512-HhKppgO81FQof5m6TEnuBWCZGgfRAWbaeOaGT00KOy/Pf/j6oUihdvBpA7ltCeAvZpFhW3j0PTclkxsd4IXYDA=="],
 
     "wrap-ansi/ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
+
+    "@pylonsync/loro/@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/loro/@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
+
+    "@pylonsync/react-native/@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react-native/@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@radix-ui/react-arrow/@radix-ui/react-primitive/@radix-ui/react-slot": ["@radix-ui/react-slot@1.2.3", "", { "dependencies": { "@radix-ui/react-compose-refs": "1.1.2" }, "peerDependencies": { "@types/react": "*", "react": "^16.8 || ^17.0 || ^18.0 || ^19.0 || ^19.0.0-rc" }, "optionalPeers": ["@types/react"] }, "sha512-aeNmHnBxbi2St0au6VBVC7JXFlhLlOnvIIlePNniyUNAClzmtAUEY8/pBiK3iHjufOlwA+c20/8jngo7xcrg8A=="],
 

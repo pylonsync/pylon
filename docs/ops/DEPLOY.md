@@ -1,7 +1,8 @@
 # Production deploy
 
 pylon runs as a single binary behind a TLS-terminating reverse proxy.
-This doc covers the four deploy shapes the codebase actively supports.
+This doc covers the supported self-hosted deploy shapes plus the
+experimental Workers path.
 
 ## Required environment
 
@@ -84,14 +85,14 @@ Test restore quarterly per the test at `crates/runtime/tests/backup_restore.rs`.
 
 Minimum bill: ~$25/mo for a production deployment.
 
-Compiled with `--features postgres-live` and `PYLON_DB_BACKEND=postgres`
-+ `PYLON_DB_URL=postgres://...`.
+Compiled with `--features postgres-live` and
+`DATABASE_URL=postgres://...`.
 
-## Shape 3: Cloudflare Workers (edge)
+## Shape 3: Cloudflare Workers (edge, experimental)
 
 `crates/workers/` builds a WASM bundle (`worker-build --release`) that
 runs on Workers with a D1 binding. See `crates/workers/README.md` for
-the full recipe. Scale-to-zero: idle apps cost $0. Cost rises with
+current limitations. Scale-to-zero: idle apps cost $0. Cost rises with
 actual request volume. See `docs/ops/WORKERS_COSTS.md`.
 
 Realtime shards (tick-based sims) are not yet supported on Workers —

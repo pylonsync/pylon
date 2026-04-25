@@ -124,7 +124,7 @@ Returns:
 
 ## Performance
 
-Native search trades the operational cost of a separate index server for slightly higher per-query latency on enormous datasets (>10M rows). For the ~99% of B2B SaaS workloads (10K–10M rows), it's faster end-to-end because there's no network hop, no async indexing lag, and no second system to monitor.
+Native search trades the operational cost of a separate index server for slightly higher per-query latency on enormous datasets (>10M rows). For many B2B SaaS workloads, it can be faster end-to-end because there's no network hop, no async indexing lag, and no second system to monitor.
 
 The `examples/store` example runs a 10,000-product catalog with 3-facet search at sub-5ms p95 on a $5 VPS.
 

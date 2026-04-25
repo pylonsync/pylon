@@ -2376,7 +2376,7 @@ pre,
     gap: 8px;
   }
   .nav-right a[href*="github"] .text-dim {
-    display: none; /* hide "★ 2.4k" on phone */
+    display: none;
   }
   .nav-right a[href*="github"] {
     padding: 0 10px;

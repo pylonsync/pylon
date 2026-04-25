@@ -174,8 +174,8 @@ export function DemoSection() {
           </div>
           <div className="text-mono text-dim" style={{ fontSize: 12 }}>
             {tab === "app"
-              ? "// collaborative chat — ~60 LOC server, ~20 LOC client"
-              : "// authoritative multiplayer match — ~80 LOC server, ~25 LOC client"}
+              ? "// collaborative chat — schema, mutation, live query"
+              : "// authoritative multiplayer match — sim, shard, client hook"}
           </div>
         </div>
 

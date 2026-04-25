@@ -17,8 +17,8 @@ const STEPS = [
     num: "03",
     title: "Workers",
     meta: "cloudflare edge",
-    desc: "Run on Cloudflare Workers with Durable Objects for shards. Scale-to-zero, global by default.",
-    tag: { label: "scale-to-zero", accent: true },
+    desc: "Experimental D1/Workers path for edge workloads. Track the adapter as it hardens toward full parity.",
+    tag: { label: "experimental", accent: true },
   },
   {
     num: "04",
