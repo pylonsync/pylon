@@ -259,23 +259,33 @@
   "actions": [],
   "policies": [
     {
-      "name": "channels_require_auth",
-      "allow": "auth.userId != null",
+      "name": "channel_ownership",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.createdBy",
+      "allowDelete": "auth.userId == data.createdBy",
       "entity": "Channel"
     },
     {
-      "name": "messages_require_auth",
-      "allow": "auth.userId != null",
+      "name": "message_ownership",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.authorId",
+      "allowDelete": "auth.userId == data.authorId",
       "entity": "Message"
     },
     {
-      "name": "reactions_require_auth",
-      "allow": "auth.userId != null",
+      "name": "reaction_ownership",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowDelete": "auth.userId == data.userId",
       "entity": "Reaction"
     },
     {
-      "name": "memberships_require_auth",
-      "allow": "auth.userId != null",
+      "name": "membership_ownership",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowDelete": "auth.userId == data.userId",
       "entity": "Membership"
     }
   ]

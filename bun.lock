@@ -517,6 +517,7 @@
       "name": "@pylonsync/react-native",
       "version": "0.1.0",
       "dependencies": {
+        "@pylonsync/react": "file:../react",
         "@pylonsync/sdk": "file:../sdk",
         "@pylonsync/sync": "file:../sync",
       },
@@ -1410,6 +1411,10 @@
     "@pylonsync/example-stage/@pylonsync/functions": ["@pylonsync/functions@file:packages/functions", { "devDependencies": { "typescript": "^5.5" }, "peerDependencies": { "bun-types": "*" }, "optionalPeers": ["bun-types"], "bin": { "pylon-functions-runtime": "src/runtime.ts" } }],
 
     "@pylonsync/example-stage/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
+
+    "@pylonsync/react/@pylonsync/sync": ["@pylonsync/sync@file:packages/sync", {}],
 
     "@pylonsync/react-native/@pylonsync/sdk": ["@pylonsync/sdk@file:packages/sdk", {}],
 
