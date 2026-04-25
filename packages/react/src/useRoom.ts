@@ -102,8 +102,17 @@ export function useRoom(
   }, [token]);
 
   // ------- lifecycle: join / heartbeat / leave -------
+  //
+  // React StrictMode double-mounts every effect in dev: mount → unmount →
+  // re-mount. The `joined` ref tracks whether the join() call actually
+  // landed before the cleanup ran. If join hadn't completed yet, the
+  // cleanup skips leave entirely — there's nothing to leave on the
+  // server's side. If join did land, leave fires normally. Server-side
+  // leave is also idempotent now (200 with was_present:false on
+  // duplicate), so even a race on this can't error in the network tab.
   useEffect(() => {
     let mounted = true;
+    let joined = false;
 
     const join = async () => {
       try {
@@ -120,6 +129,7 @@ export function useRoom(
         if (!mounted) return;
 
         if (res.ok) {
+          joined = true;
           setIsConnected(true);
           setError(null);
           if (body.snapshot?.peers) {
@@ -166,12 +176,17 @@ export function useRoom(
       mounted = false;
       if (intervalRef.current) clearInterval(intervalRef.current);
 
-      // Best-effort leave on unmount (fire-and-forget).
-      fetch(`${baseUrl}/api/rooms/leave`, {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ room: roomId, user_id: userId }),
-      }).catch(() => {});
+      // Skip the leave call when join never completed — fixes the
+      // StrictMode double-mount race that produced spurious "user
+      // not in this room" errors. Server leave is also idempotent so
+      // a stray duplicate would 200 anyway, but we save the round trip.
+      if (joined) {
+        fetch(`${baseUrl}/api/rooms/leave`, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify({ room: roomId, user_id: userId }),
+        }).catch(() => {});
+      }
     };
     // Re-run the entire lifecycle when identity or connection details change.
     // eslint-disable-next-line react-hooks/exhaustive-deps

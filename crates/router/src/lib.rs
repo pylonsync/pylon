@@ -1425,13 +1425,25 @@ fn route_inner(
             }
         };
 
+        // Leave is idempotent — a client that posts leave for a room
+        // it never joined (or joined-then-left already) gets a clean
+        // 200 with `was_present: false`. Previously we 404'd here,
+        // which made React StrictMode double-mount cycles look like
+        // genuine errors in the network tab even though the protocol
+        // semantically allows duplicate leaves.
         if let Some(leave_event) = ctx.rooms.leave(room, user_id) {
             if let Ok(json) = serde_json::to_string(&leave_event) {
                 ctx.notifier.notify_presence(&json);
             }
-            return (200, serde_json::json!({"left": room}).to_string());
+            return (
+                200,
+                serde_json::json!({"left": room, "was_present": true}).to_string(),
+            );
         }
-        return (404, json_error("NOT_IN_ROOM", "User is not in this room"));
+        return (
+            200,
+            serde_json::json!({"left": room, "was_present": false}).to_string(),
+        );
     }
 
     if url == "/api/rooms/presence" && method == HttpMethod::Post {
