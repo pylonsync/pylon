@@ -83,6 +83,25 @@ function ensureAttached(): void {
 export function useLoroDoc(entity: string, id: string): LoroDoc {
   ensureAttached();
 
+  // Tell the server we want binary CRDT frames for this row. Refcounted
+  // inside the sync engine, so two components watching the same row
+  // don't fight over the subscription. Without this the server never
+  // sends a binary frame and the LoroDoc stays empty forever — the
+  // notifier filters by subscriber set rather than fanning out to
+  // every WS client.
+  //
+  // We use `useEffect` (not `useSyncExternalStore`'s subscribe) because
+  // the subscribe call is a side effect on the network, not a React
+  // store subscription. The store subscription stays registry-local
+  // and fires on every applied frame.
+  useEffect(() => {
+    const sync = db.sync;
+    sync.subscribeCrdt(entity, id);
+    return () => {
+      sync.unsubscribeCrdt(entity, id);
+    };
+  }, [entity, id]);
+
   // useSyncExternalStore drives re-renders. The snapshot is the doc
   // itself (referentially stable across calls — same instance from
   // the registry), so React's bail-out keeps re-renders bounded to
@@ -220,7 +239,3 @@ export function detachLoro(): void {
   attachedSync = null;
 }
 
-// Suppress unused-import error on `useEffect` — keeping the import in
-// scope for the upcoming useLoroSubscribe(entity, id) variant that
-// needs it.
-void useEffect;

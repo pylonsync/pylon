@@ -178,7 +178,10 @@ mod crdt_frame_tests {
         assert_eq!(super::decode_hex("00"), Some(vec![0x00]));
         assert_eq!(super::decode_hex("ab"), Some(vec![0xab]));
         assert_eq!(super::decode_hex("AB"), Some(vec![0xab]));
-        assert_eq!(super::decode_hex("DEADBEEF"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(
+            super::decode_hex("DEADBEEF"),
+            Some(vec![0xde, 0xad, 0xbe, 0xef])
+        );
     }
 
     #[test]
@@ -1900,10 +1903,7 @@ fn route_inner(
             if entity.is_empty() || row_id.is_empty() {
                 return (
                     400,
-                    json_error(
-                        "BAD_PATH",
-                        "Expected /api/crdt/<entity>/<row_id>",
-                    ),
+                    json_error("BAD_PATH", "Expected /api/crdt/<entity>/<row_id>"),
                 );
             }
             let parsed: serde_json::Value = match serde_json::from_str(body) {

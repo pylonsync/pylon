@@ -476,11 +476,32 @@ fn start_server(
     let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(csrf_origins));
 
     // Start WebSocket server on port+1.
+    //
+    // The snapshot fetcher gives the WS reader a way to ship the current
+    // CRDT snapshot to a client the instant it subscribes — without it
+    // the new tab would have to wait for the next write before catching
+    // up to the converged state. Encodes into the same length-prefixed
+    // wire frame as the broadcast path so the client decoder is shared.
     {
         let hub = Arc::clone(&ws_hub);
         let sessions = Arc::clone(&session_store);
+        let runtime_for_fetcher = Arc::clone(&runtime);
+        let fetcher: crate::ws::SnapshotFetcher = Arc::new(move |entity, row_id| {
+            use pylon_http::DataStore;
+            let snap = match runtime_for_fetcher.crdt_snapshot(entity, row_id) {
+                Ok(Some(bytes)) => bytes,
+                _ => return None,
+            };
+            pylon_router::encode_crdt_frame(
+                pylon_router::CRDT_FRAME_SNAPSHOT,
+                entity,
+                row_id,
+                &snap,
+            )
+            .ok()
+        });
         std::thread::spawn(move || {
-            crate::ws::start_ws_server(hub, sessions, ws_port);
+            crate::ws::start_ws_server(hub, sessions, ws_port, Some(fetcher));
         });
     }
 

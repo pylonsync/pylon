@@ -562,6 +562,20 @@ export class SyncEngine {
   private binaryHandlers: Set<(bytes: Uint8Array) => void> = new Set();
 
   /**
+   * Active CRDT subscriptions, keyed `${entity}\x00${rowId}`. Tracked
+   * here so a WS reconnect can re-send the same subscriptions to the
+   * fresh socket — the server clears its per-client subscription state
+   * on disconnect (in `WsHub::handle_ws_connection`'s Close path), so
+   * without re-sending the binary frames would stop arriving on the
+   * new connection.
+   *
+   * Refcount-aware via `crdtSubscribers` so two `useLoroDoc` callers on
+   * the same row don't unsubscribe each other when one unmounts.
+   */
+  private crdtSubscriptions: Set<string> = new Set();
+  private crdtSubscribers: Map<string, number> = new Map();
+
+  /**
    * Register a binary-frame handler. Returns an unsubscribe fn that
    * pulls the handler back out — call on hook unmount / module
    * teardown so handlers don't leak.
@@ -768,6 +782,14 @@ export class SyncEngine {
         this.reconnectAttempts = 0;
         this.wsStableTimer = null;
       }, 5_000);
+      // Re-send any active CRDT subscriptions across the new socket.
+      // The server purged them on disconnect (`unsubscribe_all`), so
+      // without this resync a tab that was subscribed before a network
+      // blip would silently stop receiving binary CRDT frames.
+      for (const key of this.crdtSubscriptions) {
+        const [entity, rowId] = key.split("\x00");
+        this.sendWs({ type: "crdt-subscribe", entity, rowId });
+      }
     };
 
     // Bind binaryType BEFORE installing the handler so the first
@@ -1359,6 +1381,51 @@ export class SyncEngine {
       topic,
       data,
     });
+  }
+
+  /**
+   * Subscribe this client to binary CRDT updates for one row. Refcounted
+   * so two `useLoroDoc` consumers on the same `(entity, rowId)` don't
+   * unsubscribe each other on unmount — only the last `unsubscribeCrdt`
+   * call ships the unsubscribe message to the server.
+   *
+   * The first subscriber for a row sends the `crdt-subscribe` over WS,
+   * which prompts the server to ship the current snapshot back as a
+   * binary frame so the new tab converges to the latest state.
+   *
+   * Idempotent at the WS level: re-calling for the same row with no
+   * intervening unsubscribe just bumps the refcount.
+   */
+  subscribeCrdt(entity: string, rowId: string): void {
+    const key = `${entity}\x00${rowId}`;
+    const prev = this.crdtSubscribers.get(key) ?? 0;
+    this.crdtSubscribers.set(key, prev + 1);
+    if (prev === 0) {
+      this.crdtSubscriptions.add(key);
+      this.sendWs({ type: "crdt-subscribe", entity, rowId });
+    }
+  }
+
+  /**
+   * Decrement the refcount for a row. When it hits zero we ship a
+   * `crdt-unsubscribe` to the server and forget the row, so a future
+   * reconnect won't try to resubscribe.
+   *
+   * Calling `unsubscribeCrdt` more times than `subscribeCrdt` is a
+   * no-op rather than an error — keeps React's StrictMode double-
+   * invocation in dev from over-decrementing past zero.
+   */
+  unsubscribeCrdt(entity: string, rowId: string): void {
+    const key = `${entity}\x00${rowId}`;
+    const prev = this.crdtSubscribers.get(key) ?? 0;
+    if (prev <= 0) return;
+    if (prev === 1) {
+      this.crdtSubscribers.delete(key);
+      this.crdtSubscriptions.delete(key);
+      this.sendWs({ type: "crdt-unsubscribe", entity, rowId });
+    } else {
+      this.crdtSubscribers.set(key, prev - 1);
+    }
   }
 
   private sendWs(msg: unknown): void {

@@ -259,9 +259,7 @@ impl DataStore for Runtime {
         if !ent.crdt {
             return Err(DataError {
                 code: "NOT_SUPPORTED".into(),
-                message: format!(
-                    "Entity {entity} has crdt: false; client push requires CRDT mode"
-                ),
+                message: format!("Entity {entity} has crdt: false; client push requires CRDT mode"),
             });
         }
         let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
@@ -294,10 +292,7 @@ impl DataStore for Runtime {
                 if key == "id" {
                     continue;
                 }
-                set_clauses.push(format!(
-                    "{} = ?{idx}",
-                    crate::quote_ident(key.as_str())
-                ));
+                set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
                 values.push(crate::json_to_sql(val));
                 idx += 1;
             }
@@ -318,9 +313,7 @@ impl DataStore for Runtime {
                 conn.execute(&sql, params.as_slice())
                     .map_err(|e| crate::RuntimeError {
                         code: "UPDATE_FAILED".into(),
-                        message: format!(
-                            "post-merge UPDATE {entity}/{row_id}: {e}"
-                        ),
+                        message: format!("post-merge UPDATE {entity}/{row_id}: {e}"),
                     })?;
             }
 
@@ -372,23 +365,39 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
 
     /// Encode a CRDT broadcast frame (1-byte type + length-prefixed
     /// entity + length-prefixed row_id + Loro snapshot bytes) and ship
-    /// it to every WS client as a binary message. SSE is text-only so
-    /// it gets skipped — clients on the SSE transport stay on the
-    /// JSON change-event path until a future SSE-friendly encoding
-    /// (base64 or hex-encoded chunks) lands.
+    /// it to clients SUBSCRIBED to this row. SSE is text-only so it
+    /// gets skipped — clients on the SSE transport stay on the JSON
+    /// change-event path until a future SSE-friendly encoding (base64
+    /// or hex-encoded chunks) lands.
+    ///
+    /// Filtering by subscription instead of broadcasting to every WS
+    /// client matters once more than a handful of rows are in flight:
+    /// a 50-channel app with 100 connected users would otherwise fan
+    /// 100x for every keystroke in a single channel. Now each binary
+    /// frame goes only to the (typically small) set of tabs that asked
+    /// to mirror that specific row.
+    ///
+    /// If no clients are subscribed (empty list) the frame is dropped
+    /// silently — the JSON change event from `notify` already told
+    /// every connected client a write happened, so non-subscribed
+    /// clients can re-fetch via the regular query path if they care.
     ///
     /// Frame-encode failure (entity / row_id over the 16-bit length
     /// header) gets logged and dropped — the row's regular JSON change
     /// event already shipped via `notify`, so clients still see the
     /// write happened, they just don't get the binary CRDT delta.
     fn notify_crdt(&self, entity: &str, row_id: &str, snapshot: &[u8]) {
+        let subscribers = self.ws.subscriptions().subscribers(entity, row_id);
+        if subscribers.is_empty() {
+            return;
+        }
         match pylon_router::encode_crdt_frame(
             pylon_router::CRDT_FRAME_SNAPSHOT,
             entity,
             row_id,
             snapshot,
         ) {
-            Ok(frame) => self.ws.broadcast_binary(frame),
+            Ok(frame) => self.ws.broadcast_binary_to(&subscribers, frame),
             Err(e) => {
                 tracing::warn!("[crdt] dropping binary frame for {entity}/{row_id}: {e}");
             }

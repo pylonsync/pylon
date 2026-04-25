@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,111 @@ use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{accept_hdr, Message, WebSocket};
 
 use crate::ip_limit::IpConnCounter;
+
+// ---------------------------------------------------------------------------
+// CRDT subscription manager
+//
+// Per-client subscriptions to (entity, row_id) pairs. Lets the binary CRDT
+// broadcast filter to only the clients that asked, instead of fanning out
+// every CRDT write to every connected WS client.
+//
+// Two reverse maps so both hot paths are O(subscribers per row) and
+// O(rows per client): the broadcast looks up subscribers by row, the
+// disconnect cleanup walks rows by client.
+//
+// Subscriptions are explicit and ephemeral — a client subscribes when
+// useLoroDoc(entity, id) mounts, unsubscribes on unmount or disconnect.
+// Server doesn't persist subscriptions across reconnects; the client
+// re-sends them.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct CrdtSubscriptions {
+    /// (entity, row_id) → set of client_ids subscribed to that row.
+    by_row: Mutex<HashMap<(String, String), HashSet<u64>>>,
+    /// client_id → set of (entity, row_id) it subscribes to.
+    /// Inverted to make disconnect cleanup O(rows per client) instead of
+    /// O(total rows in by_row).
+    by_client: Mutex<HashMap<u64, HashSet<(String, String)>>>,
+}
+
+impl CrdtSubscriptions {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Register a client's interest in a row. Idempotent — re-subscribing
+    /// the same client to the same row is a no-op (HashSet semantics).
+    pub fn subscribe(&self, client_id: u64, entity: &str, row_id: &str) {
+        let key = (entity.to_string(), row_id.to_string());
+        self.by_row
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default()
+            .insert(client_id);
+        self.by_client
+            .lock()
+            .unwrap()
+            .entry(client_id)
+            .or_default()
+            .insert(key);
+    }
+
+    /// Drop one subscription. Cleans up empty maps so the working set
+    /// stays bounded — long-running connections that subscribe and
+    /// unsubscribe to many rows over their lifetime don't accumulate
+    /// orphan empty entries.
+    pub fn unsubscribe(&self, client_id: u64, entity: &str, row_id: &str) {
+        let key = (entity.to_string(), row_id.to_string());
+        let mut by_row = self.by_row.lock().unwrap();
+        if let Some(set) = by_row.get_mut(&key) {
+            set.remove(&client_id);
+            if set.is_empty() {
+                by_row.remove(&key);
+            }
+        }
+        let mut by_client = self.by_client.lock().unwrap();
+        if let Some(set) = by_client.get_mut(&client_id) {
+            set.remove(&key);
+            if set.is_empty() {
+                by_client.remove(&client_id);
+            }
+        }
+    }
+
+    /// Drop every subscription for a client (called on WS disconnect).
+    pub fn unsubscribe_all(&self, client_id: u64) {
+        let rows: Vec<(String, String)> = {
+            let by_client = self.by_client.lock().unwrap();
+            by_client
+                .get(&client_id)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default()
+        };
+        for (entity, row_id) in &rows {
+            self.unsubscribe(client_id, entity, row_id);
+        }
+    }
+
+    /// Snapshot the subscriber set for a row. Returns an owned `Vec`
+    /// rather than a guard so the broadcast hot path doesn't hold the
+    /// mutex during the per-client send loop.
+    pub fn subscribers(&self, entity: &str, row_id: &str) -> Vec<u64> {
+        let key = (entity.to_string(), row_id.to_string());
+        self.by_row
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Diagnostic: total number of (client, row) pairs.
+    pub fn total_subscriptions(&self) -> usize {
+        self.by_row.lock().unwrap().values().map(|s| s.len()).sum()
+    }
+}
 
 /// Number of shards for distributing WebSocket clients.
 /// Must be a power of two for even modulo distribution.
@@ -109,6 +214,37 @@ impl Shard {
         }
     }
 
+    /// Send a binary frame to a SPECIFIC subset of this shard's clients.
+    /// Used by the per-client subscription path — `WsHub::broadcast_binary_to`
+    /// computes which ids each shard owns and calls this with just those.
+    ///
+    /// Same per-client lock pattern as `broadcast` / `broadcast_binary`,
+    /// just filtered up front instead of iterating the whole shard.
+    fn send_binary_to(&self, ids: &[u64], msg: &Arc<[u8]>) {
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            ids.iter()
+                .filter_map(|id| clients.get(id).map(|h| (*id, Arc::clone(h))))
+                .collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            let mut guard = match handle.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.send(Message::Binary(msg.to_vec())).is_err() {
+                dead.push(id);
+            }
+        }
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for id in &dead {
+                clients.remove(id);
+            }
+        }
+    }
+
     /// Binary fanout for CRDT updates. Same per-client lock pattern as
     /// `broadcast` above; the only difference is `Message::Binary` and
     /// the payload is `Arc<[u8]>` so a single Loro snapshot allocates
@@ -174,6 +310,12 @@ pub struct WsHub {
     /// worker, and the sender-side uses `try_send` + drain retry.
     #[allow(dead_code)]
     queue_depth: usize,
+    /// Per-client CRDT subscriptions. Reader threads register `(entity,
+    /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
+    /// the binary CRDT broadcast path uses `subscribers()` to filter the
+    /// fanout. Wrapped in Arc so the notifier (which holds `Arc<WsHub>`)
+    /// can read the subscriber set without taking an extra lock layer.
+    subscriptions: Arc<CrdtSubscriptions>,
 }
 
 impl WsHub {
@@ -206,7 +348,15 @@ impl WsHub {
             next_id: Mutex::new(0),
             broadcast_txs,
             queue_depth: BROADCAST_QUEUE_DEPTH,
+            subscriptions: CrdtSubscriptions::new(),
         })
+    }
+
+    /// Access the per-client CRDT subscription registry. The notifier
+    /// looks up subscribers via `subscriptions().subscribers(entity, row)`
+    /// and feeds them to `broadcast_binary_to`.
+    pub fn subscriptions(&self) -> &Arc<CrdtSubscriptions> {
+        &self.subscriptions
     }
 
     /// Broadcast a change event to ALL connected clients across all shards.
@@ -247,6 +397,46 @@ impl WsHub {
         for shard in &self.shards {
             shard.broadcast_binary(&shared);
         }
+    }
+
+    /// Send a binary frame to a specific subset of client IDs only.
+    /// Used by the CRDT broadcast path to fan out only to clients
+    /// subscribed to the row that just changed (instead of every
+    /// connected client). Routes each id to its owning shard via
+    /// `id % NUM_SHARDS`.
+    ///
+    /// `client_ids` typically comes from `CrdtSubscriptions::subscribers`.
+    /// An empty list is a no-op — the row had no subscribers, so the
+    /// CRDT write is durable on the server but no client sees the
+    /// binary frame (they'll learn about the change via the JSON
+    /// change-event broadcast which always fires).
+    pub fn broadcast_binary_to(&self, client_ids: &[u64], bytes: Vec<u8>) {
+        if client_ids.is_empty() {
+            return;
+        }
+        let shared: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+        // Group ids by shard so each shard's per-client lock is only
+        // grabbed once even if many subscribers landed in the same one.
+        let mut by_shard: Vec<Vec<u64>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for id in client_ids {
+            by_shard[(*id as usize) % NUM_SHARDS].push(*id);
+        }
+        for (idx, ids) in by_shard.iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            self.shards[idx].send_binary_to(ids, &shared);
+        }
+    }
+
+    /// Send a binary frame to a single client by id. Used by the
+    /// subscribe path: when a client subscribes to a row, the server
+    /// immediately ships the current snapshot so the new subscriber
+    /// has the up-to-date state without waiting for the next write.
+    pub fn send_binary_to_one(&self, client_id: u64, bytes: Vec<u8>) {
+        let shared: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+        let shard_idx = (client_id as usize) % NUM_SHARDS;
+        self.shards[shard_idx].send_binary_to(&[client_id], &shared);
     }
 
     /// Internal: fan out a single shared message to every shard worker.
@@ -294,6 +484,15 @@ impl WsHub {
     }
 }
 
+/// Snapshot fetcher: given (entity, row_id), return the encoded binary
+/// CRDT frame for the row's current state, or `None` if the row has no
+/// snapshot yet (uninitialized CRDT or non-CRDT entity).
+///
+/// Wrapped in an Arc<dyn Fn> so the runtime can build it once, capturing
+/// the LoroStore handle, and hand the same closure to every accepted
+/// connection.
+pub type SnapshotFetcher = Arc<dyn Fn(&str, &str) -> Option<Vec<u8>> + Send + Sync>;
+
 /// Start the WebSocket server on the given port.
 ///
 /// The accept loop runs on the calling thread (blocking). Each accepted
@@ -306,7 +505,18 @@ impl WsHub {
 /// browsers can't set WS headers directly). Previously the notifier hub
 /// accepted any connection and streamed every ChangeEvent/presence event
 /// to it, which was a silent read-policy bypass.
-pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) {
+///
+/// `snapshot_fetcher` is optional — when present, the reader will ship
+/// the current CRDT snapshot to the subscribing client immediately on
+/// `crdt-subscribe`, so the new tab sees the latest converged state
+/// without waiting for the next write. When absent, subscribe is still
+/// recorded but the catch-up frame is skipped.
+pub fn start_ws_server(
+    hub: Arc<WsHub>,
+    sessions: Arc<SessionStore>,
+    port: u16,
+    snapshot_fetcher: Option<SnapshotFetcher>,
+) {
     let addr = format!("0.0.0.0:{port}");
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
@@ -348,6 +558,7 @@ pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) 
 
         let hub = Arc::clone(&hub);
         let sessions = Arc::clone(&sessions);
+        let fetcher = snapshot_fetcher.clone();
         // Spawn a reader thread per client with a small stack.
         // 64KB stack * 10k connections = ~640MB, vs 2-8MB default * 10k = 20-80GB.
         let spawn_result = thread::Builder::new()
@@ -358,7 +569,7 @@ pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) 
                 // what makes the decrement-on-disconnect contract work. Not
                 // `let _ = guard;` — that drops immediately.
                 let _conn_slot = guard;
-                handle_ws_connection(hub, sessions, stream);
+                handle_ws_connection(hub, sessions, stream, fetcher);
             });
         if spawn_result.is_err() {
             // Thread creation failed — guard is already dropped here, slot
@@ -374,7 +585,12 @@ pub fn start_ws_server(hub: Arc<WsHub>, sessions: Arc<SessionStore>, port: u16) 
 /// Sets a read timeout to prevent zombie threads on dead connections.
 /// Handles ping/pong for keepalive, presence/topic message relay,
 /// and clean disconnect with presence broadcast.
-fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: TcpStream) {
+fn handle_ws_connection(
+    hub: Arc<WsHub>,
+    sessions: Arc<SessionStore>,
+    stream: TcpStream,
+    snapshot_fetcher: Option<SnapshotFetcher>,
+) {
     // Short read timeout bounds how long the PER-CLIENT mutex is held
     // while this thread is blocked in socket.read(). Each client now has
     // its own mutex (not a shard-wide one), so a quiet client only stalls
@@ -474,6 +690,10 @@ fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: Tc
                     || text.starts_with("{\"type\":\"topic\"")
                 {
                     hub.broadcast_presence(&text);
+                } else if text.starts_with("{\"type\":\"crdt-subscribe\"")
+                    || text.starts_with("{\"type\":\"crdt-unsubscribe\"")
+                {
+                    handle_crdt_control(&hub, client_id, &text, snapshot_fetcher.as_ref());
                 }
             }
             Ok(Message::Ping(data)) => {
@@ -483,6 +703,10 @@ fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: Tc
                 }
             }
             Ok(Message::Close(_)) => {
+                // Drop every CRDT subscription this client held BEFORE
+                // remove_client so the broadcast path can never look up
+                // a stale client_id between the two ops.
+                hub.subscriptions.unsubscribe_all(client_id);
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -508,6 +732,7 @@ fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: Tc
                 continue;
             }
             Err(_) => {
+                hub.subscriptions.unsubscribe_all(client_id);
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -519,6 +744,63 @@ fn handle_ws_connection(hub: Arc<WsHub>, sessions: Arc<SessionStore>, stream: Tc
             }
             _ => {}
         }
+    }
+}
+
+/// Parse and apply a `crdt-subscribe` / `crdt-unsubscribe` control
+/// message from a WS client. Both messages have the shape:
+///
+///   { "type": "crdt-subscribe",   "entity": "<E>", "rowId": "<id>" }
+///   { "type": "crdt-unsubscribe", "entity": "<E>", "rowId": "<id>" }
+///
+/// On subscribe, if a snapshot fetcher is wired and a snapshot exists,
+/// we ship it to the subscribing client immediately so the new tab
+/// converges to the latest state without waiting for the next write.
+///
+/// Malformed messages are silently dropped — there's no client-visible
+/// ACK protocol, so a typo in the payload would just look like a
+/// row that never receives updates. The `text.starts_with` filter at
+/// the call site already gated on the type prefix.
+fn handle_crdt_control(
+    hub: &Arc<WsHub>,
+    client_id: u64,
+    text: &str,
+    snapshot_fetcher: Option<&SnapshotFetcher>,
+) {
+    let parsed: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let kind = match parsed.get("type").and_then(|v| v.as_str()) {
+        Some(k) => k,
+        None => return,
+    };
+    let entity = match parsed.get("entity").and_then(|v| v.as_str()) {
+        Some(e) if !e.is_empty() => e,
+        _ => return,
+    };
+    let row_id = match parsed
+        .get("rowId")
+        .or_else(|| parsed.get("row_id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(r) if !r.is_empty() => r,
+        _ => return,
+    };
+
+    match kind {
+        "crdt-subscribe" => {
+            hub.subscriptions.subscribe(client_id, entity, row_id);
+            if let Some(fetcher) = snapshot_fetcher {
+                if let Some(bytes) = fetcher(entity, row_id) {
+                    hub.send_binary_to_one(client_id, bytes);
+                }
+            }
+        }
+        "crdt-unsubscribe" => {
+            hub.subscriptions.unsubscribe(client_id, entity, row_id);
+        }
+        _ => {}
     }
 }
 
@@ -592,6 +874,59 @@ mod tests {
             NUM_SHARDS.is_power_of_two(),
             "NUM_SHARDS ({NUM_SHARDS}) must be a power of two for even distribution"
         );
+    }
+
+    #[test]
+    fn crdt_subscriptions_subscribe_dedups() {
+        let subs = CrdtSubscriptions::default();
+        subs.subscribe(1, "Channel", "abc");
+        subs.subscribe(1, "Channel", "abc");
+        assert_eq!(subs.subscribers("Channel", "abc"), vec![1]);
+        assert_eq!(subs.total_subscriptions(), 1);
+    }
+
+    #[test]
+    fn crdt_subscriptions_returns_all_subscribers() {
+        let subs = CrdtSubscriptions::default();
+        subs.subscribe(1, "Channel", "abc");
+        subs.subscribe(2, "Channel", "abc");
+        subs.subscribe(3, "Channel", "abc");
+        let mut ids = subs.subscribers("Channel", "abc");
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn crdt_subscriptions_unsubscribe_cleans_empty_rows() {
+        let subs = CrdtSubscriptions::default();
+        subs.subscribe(1, "Channel", "abc");
+        subs.unsubscribe(1, "Channel", "abc");
+        assert!(subs.subscribers("Channel", "abc").is_empty());
+        // total should drop the empty by_row entry, not leave a 0-set
+        // around forever.
+        assert_eq!(subs.total_subscriptions(), 0);
+    }
+
+    #[test]
+    fn crdt_subscriptions_unsubscribe_all_drops_every_row() {
+        let subs = CrdtSubscriptions::default();
+        subs.subscribe(1, "Channel", "a");
+        subs.subscribe(1, "Channel", "b");
+        subs.subscribe(1, "Message", "m1");
+        subs.subscribe(2, "Channel", "a"); // someone else, must survive
+        subs.unsubscribe_all(1);
+        assert!(subs.subscribers("Channel", "b").is_empty());
+        assert!(subs.subscribers("Message", "m1").is_empty());
+        // Client 2 is still there.
+        assert_eq!(subs.subscribers("Channel", "a"), vec![2]);
+    }
+
+    #[test]
+    fn crdt_subscriptions_unsubscribe_unknown_client_is_noop() {
+        let subs = CrdtSubscriptions::default();
+        subs.unsubscribe(99, "Channel", "abc");
+        subs.unsubscribe_all(99);
+        assert_eq!(subs.total_subscriptions(), 0);
     }
 
     #[test]
