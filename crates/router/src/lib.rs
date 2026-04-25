@@ -21,6 +21,16 @@ use pylon_sync::{ChangeKind, ChangeLog, SyncCursor};
 pub trait ChangeNotifier: Send + Sync {
     fn notify(&self, event: &pylon_sync::ChangeEvent);
     fn notify_presence(&self, json: &str);
+
+    /// Ship a binary CRDT update for one row to subscribed clients.
+    /// Called after every successful write to a CRDT-mode entity. The
+    /// payload is a Loro snapshot (or eventually an incremental delta);
+    /// the implementation owns wire-format framing — see
+    /// `encode_crdt_frame` for the canonical Pylon shape.
+    ///
+    /// Default impl is a no-op so backends without WebSocket support
+    /// (Workers, no-op notifier) compile without ceremony.
+    fn notify_crdt(&self, _entity: &str, _row_id: &str, _snapshot: &[u8]) {}
 }
 
 /// No-op notifier for platforms without real-time push.
@@ -29,6 +39,95 @@ pub struct NoopNotifier;
 impl ChangeNotifier for NoopNotifier {
     fn notify(&self, _event: &pylon_sync::ChangeEvent) {}
     fn notify_presence(&self, _json: &str) {}
+}
+
+// ---------------------------------------------------------------------------
+// CRDT wire format
+//
+// Every CRDT broadcast frame is a single binary WebSocket message shaped:
+//
+//   [type: u8] [entity_len: u16 BE] [entity utf8] [row_id_len: u16 BE] [row_id utf8] [payload bytes]
+//
+// Type bytes (matching the Remboard pattern that proved out in production):
+//
+//   0x10 = full Loro snapshot (sent on subscribe / first writes)
+//   0x11 = incremental Loro update (sent on subsequent writes)
+//
+// For the first slice we always send 0x10 — Loro's snapshots are bounded
+// by internal compaction so the bandwidth is fine; switching to deltas
+// is a non-breaking optimization (just flip the type byte and the
+// payload encoding) once we have per-client version-vector tracking.
+// ---------------------------------------------------------------------------
+
+/// Frame type for a full CRDT snapshot.
+pub const CRDT_FRAME_SNAPSHOT: u8 = 0x10;
+/// Frame type for an incremental CRDT update (reserved — not yet emitted).
+pub const CRDT_FRAME_UPDATE: u8 = 0x11;
+
+/// Encode a CRDT broadcast frame. Layout documented at the top of this
+/// module. Returns a single owned `Vec<u8>` ready to ship as a binary
+/// WebSocket frame; client decoders mirror this in
+/// `@pylonsync/loro/src/wire.ts`.
+pub fn encode_crdt_frame(
+    frame_type: u8,
+    entity: &str,
+    row_id: &str,
+    payload: &[u8],
+) -> Vec<u8> {
+    let entity_bytes = entity.as_bytes();
+    let row_id_bytes = row_id.as_bytes();
+    // Header is bounded so `as u16` truncation can't silently corrupt.
+    // Entity / row_id strings well under 64 KiB in practice; truncate
+    // header values explicitly here so the wire shape stays valid even
+    // for pathological inputs (server logs the cap; client just sees
+    // a frame that won't decode and ignores).
+    let entity_len = entity_bytes.len().min(u16::MAX as usize) as u16;
+    let row_id_len = row_id_bytes.len().min(u16::MAX as usize) as u16;
+    let mut out = Vec::with_capacity(
+        1 + 2 + entity_bytes.len() + 2 + row_id_bytes.len() + payload.len(),
+    );
+    out.push(frame_type);
+    out.extend_from_slice(&entity_len.to_be_bytes());
+    out.extend_from_slice(&entity_bytes[..entity_len as usize]);
+    out.extend_from_slice(&row_id_len.to_be_bytes());
+    out.extend_from_slice(&row_id_bytes[..row_id_len as usize]);
+    out.extend_from_slice(payload);
+    out
+}
+
+#[cfg(test)]
+mod crdt_frame_tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_header_layout() {
+        let frame = encode_crdt_frame(
+            CRDT_FRAME_SNAPSHOT,
+            "Message",
+            "msg_123",
+            &[0xab, 0xcd, 0xef],
+        );
+        assert_eq!(frame[0], 0x10);
+        // entity_len = 7 ("Message") in BE
+        assert_eq!(&frame[1..3], &[0, 7]);
+        assert_eq!(&frame[3..10], b"Message");
+        // row_id_len = 7 ("msg_123") in BE
+        assert_eq!(&frame[10..12], &[0, 7]);
+        assert_eq!(&frame[12..19], b"msg_123");
+        // payload trails after both headers
+        assert_eq!(&frame[19..], &[0xab, 0xcd, 0xef]);
+    }
+
+    #[test]
+    fn empty_payload_still_carries_headers() {
+        let frame = encode_crdt_frame(CRDT_FRAME_UPDATE, "X", "y", &[]);
+        assert_eq!(frame[0], 0x11);
+        assert_eq!(&frame[1..3], &[0, 1]);
+        assert_eq!(&frame[3..4], b"X");
+        assert_eq!(&frame[4..6], &[0, 1]);
+        assert_eq!(&frame[6..7], b"y");
+        assert_eq!(frame.len(), 7);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2380,8 +2479,9 @@ fn route_inner(
                                 ChangeKind::Insert,
                                 Some(data.clone()),
                             );
-                            broadcast_change(
+                            broadcast_change_with_crdt(
                                 ctx.notifier,
+                                ctx.store,
                                 seq,
                                 entity,
                                 &id,
@@ -2409,8 +2509,9 @@ fn route_inner(
                                     ChangeKind::Update,
                                     Some(data.clone()),
                                 );
-                                broadcast_change(
+                                broadcast_change_with_crdt(
                                     ctx.notifier,
+                                    ctx.store,
                                     seq,
                                     entity,
                                     id,
@@ -3355,8 +3456,9 @@ fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u16, String)
             let seq = ctx
                 .change_log
                 .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
-            broadcast_change(
+            broadcast_change_with_crdt(
                 ctx.notifier,
+                ctx.store,
                 seq,
                 entity,
                 &id,
@@ -3396,8 +3498,9 @@ fn handle_update(ctx: &RouterContext, entity: &str, id: &str, body: &str) -> (u1
             let seq = ctx
                 .change_log
                 .append(entity, id, ChangeKind::Update, Some(data.clone()));
-            broadcast_change(
+            broadcast_change_with_crdt(
                 ctx.notifier,
+                ctx.store,
                 seq,
                 entity,
                 id,
@@ -3456,6 +3559,33 @@ fn broadcast_change(
         timestamp: String::new(),
     };
     notifier.notify(&event);
+}
+
+/// Convenience: emit BOTH the JSON change event AND the binary CRDT
+/// snapshot frame after a successful insert/update on a CRDT-mode
+/// entity. The CRDT snapshot is fetched via [`DataStore::crdt_snapshot`];
+/// for `crdt: false` entities (the LWW opt-out) it returns `Ok(None)`
+/// and we skip the binary broadcast cleanly.
+///
+/// Delete operations don't ship a CRDT frame — Loro doesn't have a
+/// "row gone" concept; the JSON change event with `kind: "delete"` is
+/// the canonical signal. Clients drop the LoroDoc on receipt.
+pub fn broadcast_change_with_crdt(
+    notifier: &dyn ChangeNotifier,
+    store: &dyn DataStore,
+    seq: u64,
+    entity: &str,
+    row_id: &str,
+    kind: ChangeKind,
+    data: Option<&serde_json::Value>,
+) {
+    broadcast_change(notifier, seq, entity, row_id, kind.clone(), data);
+    if matches!(kind, ChangeKind::Delete) {
+        return;
+    }
+    if let Ok(Some(snapshot)) = store.crdt_snapshot(entity, row_id) {
+        notifier.notify_crdt(entity, row_id, &snapshot);
+    }
 }
 
 pub fn json_error(code: &str, message: &str) -> String {

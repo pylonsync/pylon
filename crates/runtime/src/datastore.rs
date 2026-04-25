@@ -262,6 +262,22 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         self.ws.broadcast_presence(json);
         self.sse.broadcast_message(json);
     }
+
+    /// Encode a CRDT broadcast frame (1-byte type + length-prefixed
+    /// entity + length-prefixed row_id + Loro snapshot bytes) and ship
+    /// it to every WS client as a binary message. SSE is text-only so
+    /// it gets skipped — clients on the SSE transport stay on the
+    /// JSON change-event path until a future SSE-friendly encoding
+    /// (base64 or hex-encoded chunks) lands.
+    fn notify_crdt(&self, entity: &str, row_id: &str, snapshot: &[u8]) {
+        let frame = pylon_router::encode_crdt_frame(
+            pylon_router::CRDT_FRAME_SNAPSHOT,
+            entity,
+            row_id,
+            snapshot,
+        );
+        self.ws.broadcast_binary(frame);
+    }
 }
 
 /// Serialize a value to JSON, falling back to `{}` on failure.

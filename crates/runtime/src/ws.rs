@@ -109,6 +109,34 @@ impl Shard {
         }
     }
 
+    /// Binary fanout for CRDT updates. Same per-client lock pattern as
+    /// `broadcast` above; the only difference is `Message::Binary` and
+    /// the payload is `Arc<[u8]>` so a single Loro snapshot allocates
+    /// once and the per-client send pays a refcount bump + the
+    /// tungstenite-required Vec clone.
+    fn broadcast_binary(&self, msg: &Arc<[u8]>) {
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            let mut guard = match handle.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.send(Message::Binary(msg.to_vec())).is_err() {
+                dead.push(id);
+            }
+        }
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for id in &dead {
+                clients.remove(id);
+            }
+        }
+    }
+
     fn count(&self) -> usize {
         self.clients.lock().unwrap().len()
     }
@@ -200,6 +228,25 @@ impl WsHub {
     pub fn broadcast_presence(&self, msg: &str) {
         let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
         self.broadcast_shared(shared);
+    }
+
+    /// Broadcast a binary frame to every connected client across all
+    /// shards. Used for CRDT updates (see `pylon_router::encode_crdt_frame`
+    /// for the wire shape). The bytes are wrapped in an `Arc` so each
+    /// shard's per-client fanout shares one allocation; the per-send
+    /// `to_vec()` cost is the tungstenite 0.24 contract.
+    ///
+    /// Synchronous fanout — iterates shards directly rather than going
+    /// through the per-shard mpsc workers. CRDT writes happen at most
+    /// once per logical mutation so the throughput shape is "occasional
+    /// burst" not "every keystroke", and direct fanout avoids growing a
+    /// second per-shard channel (Arc<[u8]> can't share the Arc<str>
+    /// channel without an enum, which costs more than the bypass).
+    pub fn broadcast_binary(&self, bytes: Vec<u8>) {
+        let shared: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+        for shard in &self.shards {
+            shard.broadcast_binary(&shared);
+        }
     }
 
     /// Internal: fan out a single shared message to every shard worker.
