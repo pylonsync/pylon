@@ -87,6 +87,41 @@ fn validate_column_name(name: &str, entity: &ManifestEntity) -> Result<(), Runti
 }
 
 // ---------------------------------------------------------------------------
+// Connection tuning
+// ---------------------------------------------------------------------------
+
+/// Apply the production pragma set on a SQLite connection. Identical
+/// values to `pylon_storage::sqlite::tune_connection` — kept here too
+/// because the Runtime opens its own connections directly (write +
+/// read pool) without going through the storage adapter.
+///
+/// See `crates/storage/src/sqlite.rs` for the rationale on each
+/// pragma. Skipping it on writes drops throughput by 5–10×.
+fn tune_runtime_connection(conn: &Connection, in_memory: bool) {
+    let pragmas: &[(&str, &str)] = if in_memory {
+        &[
+            ("temp_store", "MEMORY"),
+            ("cache_size", "-65536"),
+            ("foreign_keys", "ON"),
+        ]
+    } else {
+        &[
+            ("journal_mode", "WAL"),
+            ("synchronous", "NORMAL"),
+            ("cache_size", "-65536"),
+            ("mmap_size", "268435456"),
+            ("temp_store", "MEMORY"),
+            ("busy_timeout", "5000"),
+            ("foreign_keys", "ON"),
+            ("wal_autocheckpoint", "1000"),
+        ]
+    };
+    for (key, value) in pragmas {
+        let _ = conn.pragma_update(None, key, value);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Read connection guard
 // ---------------------------------------------------------------------------
 
@@ -211,8 +246,8 @@ impl Runtime {
         manifest: AppManifest,
         is_in_memory: bool,
     ) -> Result<Self, RuntimeError> {
-        // Enable WAL mode for better concurrency.
-        conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+        // Apply the production pragma set on the write connection.
+        tune_runtime_connection(&conn, is_in_memory);
 
         // Build entity lookup map.
         let entities: HashMap<String, ManifestEntity> = manifest
@@ -370,7 +405,7 @@ impl Runtime {
                     code: "POOL_OPEN_FAILED".into(),
                     message: format!("Failed to open read connection: {e}"),
                 })?;
-                read_conn.execute_batch("PRAGMA journal_mode=WAL;").ok();
+                tune_runtime_connection(&read_conn, false);
                 pool.push(Mutex::new(read_conn));
             }
             pool
@@ -479,7 +514,7 @@ impl Runtime {
         let conn = self.lock_read_conn()?;
 
         let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(entity));
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
@@ -499,7 +534,7 @@ impl Runtime {
         let conn = self.lock_read_conn()?;
 
         let sql = format!("SELECT * FROM {} ORDER BY \"id\"", quote_ident(entity));
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
@@ -552,7 +587,7 @@ impl Runtime {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|v| v.as_ref()).collect();
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
@@ -707,7 +742,7 @@ impl Runtime {
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let result = conn.prepare(&sql).ok().and_then(|mut stmt| {
+        let result = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
                 Ok(row_to_json(row, &columns))
             })
@@ -926,7 +961,7 @@ impl Runtime {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             values.iter().map(|v| v.as_ref()).collect();
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare filtered query: {e}"),
         })?;
@@ -1219,7 +1254,7 @@ impl Runtime {
     ) -> Result<Option<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(entity));
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
@@ -1237,7 +1272,7 @@ impl Runtime {
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let sql = format!("SELECT * FROM {} ORDER BY \"id\"", quote_ident(entity));
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
@@ -1274,7 +1309,7 @@ impl Runtime {
         };
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|v| v.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare: {e}"),
         })?;
@@ -1303,7 +1338,7 @@ impl Runtime {
             quote_ident(field)
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
-        Ok(conn.prepare(&sql).ok().and_then(|mut stmt| {
+        Ok(conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
                 Ok(row_to_json(row, &columns))
             })
@@ -1490,7 +1525,7 @@ impl Runtime {
         );
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             values.iter().map(|v| v.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare: {e}"),
         })?;
@@ -1703,7 +1738,7 @@ impl Runtime {
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             values.iter().map(|v| v.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(|e| RuntimeError {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare aggregate: {e}"),
         })?;

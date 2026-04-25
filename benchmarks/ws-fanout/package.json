@@ -1,0 +1,9 @@
+{
+  "name": "pylon-bench-ws-fanout",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "bun run.ts"
+  }
+}

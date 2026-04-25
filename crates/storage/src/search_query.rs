@@ -165,7 +165,7 @@ fn load_all_rows(conn: &Connection, entity: &str) -> Result<RoaringBitmap, Stora
     // `SELECT rowid FROM entity` + insert-into-bitmap.
     let sql = format!("SELECT rowid FROM \"{entity}\"");
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| StorageError::new("SEARCH_PREPARE_FAILED", &e.to_string()))?;
     let mut rows = stmt
         .query([])
@@ -196,7 +196,7 @@ fn load_fts_matches(
         "SELECT entity_id FROM \"_fts_{entity}\" WHERE \"_fts_{entity}\" MATCH ?1"
     );
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| StorageError::new("FTS_PREPARE_FAILED", &e.to_string()))?;
     let mut rows = stmt
         .query([match_text])
@@ -298,7 +298,7 @@ fn fetch_rows_by_rowid(
         "SELECT * FROM \"{entity}\" WHERE rowid IN ({placeholders}) ORDER BY rowid ASC"
     );
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| StorageError::new("HIT_PREPARE_FAILED", &e.to_string()))?;
 
     let i64_vals: Vec<i64> = rowids.iter().map(|r| *r as i64).collect();
@@ -339,7 +339,7 @@ fn fetch_rows_sorted(
 
     {
         let mut insert = conn
-            .prepare("INSERT INTO \"_search_hits\" (rowid) VALUES (?1)")
+            .prepare_cached("INSERT INTO \"_search_hits\" (rowid) VALUES (?1)")
             .map_err(|e| StorageError::new("TEMP_PREPARE_FAILED", &e.to_string()))?;
         for rid in base.iter() {
             insert
@@ -360,7 +360,7 @@ fn fetch_rows_sorted(
          LIMIT ?1 OFFSET ?2"
     );
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| StorageError::new("SORT_PREPARE_FAILED", &e.to_string()))?;
 
     let limit_i64 = limit as i64;

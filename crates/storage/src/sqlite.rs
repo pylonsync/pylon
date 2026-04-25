@@ -122,6 +122,7 @@ impl SqliteAdapter {
             code: "SQLITE_OPEN_FAILED".into(),
             message: format!("Failed to open SQLite database at {path}: {e}"),
         })?;
+        tune_connection(&conn, /* in_memory */ false)?;
         Ok(Self { conn })
     }
 
@@ -131,8 +132,72 @@ impl SqliteAdapter {
             code: "SQLITE_OPEN_FAILED".into(),
             message: format!("Failed to open in-memory SQLite database: {e}"),
         })?;
+        tune_connection(&conn, /* in_memory */ true)?;
         Ok(Self { conn })
     }
+}
+
+/// Apply the production pragma set on a freshly opened SQLite
+/// connection. The defaults SQLite ships with are conservative — a
+/// 5-page cache, full fsync per commit, no mmap. The values below are
+/// what every pragma-tuning post on the internet recommends and they
+/// move the needle by 5–10× on write-heavy workloads:
+///
+/// - `journal_mode=WAL`: writers don't block readers and vice versa.
+///   Critical for live queries that need to read while the change-log
+///   thread is appending.
+/// - `synchronous=NORMAL`: fsync at WAL checkpoint boundaries instead
+///   of every commit. Trades ~10ms of unflushed writes on power loss
+///   for a ~3× write throughput win. The DB file itself remains
+///   consistent — only recently-committed transactions can be lost.
+/// - `cache_size=-65536` (negative = KB): 64MB page cache. Every B-tree
+///   walk that hits cache skips a syscall. Default of 2MB drops cache
+///   on every backup or schema query.
+/// - `mmap_size=268435456`: memory-map the first 256MB of the database
+///   for reads. Bypasses the read() syscall and OS page cache double-
+///   buffering for the hot pages.
+/// - `temp_store=MEMORY`: temp tables (used by sort + GROUP BY +
+///   the search planner's `_search_hits` projection) live in RAM, not
+///   in the temp dir.
+/// - `busy_timeout=5000`: when a write conflicts with another
+///   connection's transaction, wait 5s before erroring. With WAL the
+///   only conflicts are schema migrations.
+/// - `foreign_keys=ON`: SQLite has FK declarations off by default.
+///   Defensive even though Pylon's policies enforce ownership above.
+///
+/// In-memory databases skip the persistence-relevant pragmas (WAL,
+/// synchronous, mmap) since none apply.
+fn tune_connection(conn: &Connection, in_memory: bool) -> Result<(), StorageError> {
+    let pragmas: &[(&str, &str)] = if in_memory {
+        &[
+            ("temp_store", "MEMORY"),
+            ("cache_size", "-65536"),
+            ("foreign_keys", "ON"),
+        ]
+    } else {
+        &[
+            ("journal_mode", "WAL"),
+            ("synchronous", "NORMAL"),
+            ("cache_size", "-65536"),
+            ("mmap_size", "268435456"),
+            ("temp_store", "MEMORY"),
+            ("busy_timeout", "5000"),
+            ("foreign_keys", "ON"),
+            // Auto-checkpoint every 1000 pages (~4MB). Smaller values
+            // keep WAL bounded for backup/replication; larger values
+            // amortize fsync better. 1000 is the SQLite default; we
+            // set it explicitly so it isn't surprising.
+            ("wal_autocheckpoint", "1000"),
+        ]
+    };
+    for (key, value) in pragmas {
+        conn.pragma_update(None, key, value)
+            .map_err(|e| StorageError {
+                code: "SQLITE_PRAGMA_FAILED".into(),
+                message: format!("PRAGMA {key}={value} failed: {e}"),
+            })?;
+    }
+    Ok(())
 }
 
 impl SqliteAdapter {
@@ -327,7 +392,7 @@ impl SqliteAdapter {
             ),
         };
 
-        let mut stmt = self.conn.prepare(&sql).map_err(sqlite_err)?;
+        let mut stmt = self.conn.prepare_cached(&sql).map_err(sqlite_err)?;
 
         let entries = stmt
             .query_map([], |row| {

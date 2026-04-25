@@ -1,0 +1,17 @@
+[package]
+name = "pylon-search-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bench]]
+name = "search"
+harness = false
+path = "search.rs"
+
+[dependencies]
+pylon-runtime = { path = "../../crates/runtime" }
+pylon-storage = { path = "../../crates/storage" }
+pylon-kernel = { path = "../../crates/core" }
+serde_json = "1"
+rand = "0.8"
