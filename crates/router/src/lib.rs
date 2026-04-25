@@ -812,23 +812,40 @@ fn route_inner(
         };
         match ctx.magic_codes.try_verify(email, code) {
             Ok(()) => {
+                let now = format!(
+                    "{}Z",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                );
                 let user_id = match ctx.store.lookup("User", "email", email) {
-                    Ok(Some(row)) => row["id"].as_str().unwrap_or("").to_string(),
-                    _ => {
-                        let now = format!(
-                            "{}Z",
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                        );
-                        ctx.store
-                            .insert(
+                    Ok(Some(row)) => {
+                        let id = row["id"].as_str().unwrap_or("").to_string();
+                        // Magic-link login implicitly verifies the
+                        // email — the caller proved control by typing
+                        // the code we sent there. Stamp emailVerified
+                        // if not already set.
+                        if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                            let _ = ctx.store.update(
                                 "User",
-                                &serde_json::json!({"email": email, "displayName": email, "createdAt": now}),
-                            )
-                            .unwrap_or_else(|_| email.to_string())
+                                &id,
+                                &serde_json::json!({ "emailVerified": now }),
+                            );
+                        }
+                        id
                     }
+                    _ => ctx.store
+                        .insert(
+                            "User",
+                            &serde_json::json!({
+                                "email": email,
+                                "displayName": email,
+                                "emailVerified": now,
+                                "createdAt": now,
+                            }),
+                        )
+                        .unwrap_or_else(|_| email.to_string()),
                 };
                 let session = ctx.session_store.create(user_id.clone());
                 return (
@@ -1354,21 +1371,45 @@ fn route_inner(
                 );
             };
 
+            let now = format!(
+                "{}Z",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
             let user_id = match ctx.store.lookup("User", "email", &email) {
-                Ok(Some(row)) => row["id"].as_str().unwrap_or("").to_string(),
+                Ok(Some(row)) => {
+                    let id = row["id"].as_str().unwrap_or("").to_string();
+                    // Returning OAuth user: opportunistically stamp
+                    // emailVerified if not already set. The provider
+                    // just vouched for the address; no reason to make
+                    // them go through the verify flow again. Best-effort
+                    // — schemas without the field silently drop it.
+                    if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                        let _ = ctx.store.update(
+                            "User",
+                            &id,
+                            &serde_json::json!({ "emailVerified": now }),
+                        );
+                    }
+                    id
+                }
                 _ => {
                     let display_name = name.as_deref().unwrap_or(&email);
-                    let now = format!(
-                        "{}Z",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    );
+                    // New OAuth signup: include emailVerified in the
+                    // initial insert so it lands atomically. Provider
+                    // already verified, so skipping the verify step
+                    // is the expected UX.
                     ctx.store
                         .insert(
                             "User",
-                            &serde_json::json!({"email": email, "displayName": display_name, "createdAt": now}),
+                            &serde_json::json!({
+                                "email": email,
+                                "displayName": display_name,
+                                "emailVerified": now,
+                                "createdAt": now,
+                            }),
                         )
                         .unwrap_or_else(|_| email.clone())
                 }
