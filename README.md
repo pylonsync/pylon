@@ -180,7 +180,7 @@ pylon/
     ├── react-native/    RN hooks + offline storage
     ├── next/            Next.js integration
     ├── functions/       Function definitions + Bun runtime
-    ├── sync/            Local-first sync engine
+    ├── sync/            Sync engine (optimistic + offline-capable)
     ├── workflows/       Durable workflow runner
     └── create-pylon/  Project scaffolder
 ```
@@ -206,6 +206,11 @@ PYLON_DEV_MODE=false
 - **Self-host**: `cargo install` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
+
+Architecture docs:
+- [RUNTIME.md](docs/RUNTIME.md) — how TypeScript functions execute, what JS engine, what we evaluated
+- [SYNC.md](docs/SYNC.md) — sync semantics, what is and isn't local-first, conflict resolution
+- [ARCHITECTURE.md](ARCHITECTURE.md) — crate-by-crate map of the system
 
 Operational docs:
 - [DEPLOY.md](docs/ops/DEPLOY.md) — env vars, reverse proxy, health checks

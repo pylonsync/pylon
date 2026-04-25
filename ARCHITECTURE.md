@@ -111,7 +111,10 @@ and (eventually) on top of D1 in the Cloudflare Workers adapter.
   RPCs from stdin and dispatches to handlers.
 - **`packages/react`** — `useQuery`, `useMutation`, `useInfiniteQuery`,
   `useFn`, `useShard`, plus `createTypedDb<S>()` for codegen-driven typing.
-- **`packages/sync`** — local-first replica + offline queue.
+- **`packages/sync`** — client-side replica with optimistic mutations and an
+  offline write queue. Server-authoritative LWW with field-level merge —
+  not CRDT-backed, not local-first in the Ink & Switch sense; see
+  [docs/SYNC.md](docs/SYNC.md) for what convergence guarantees this provides.
 - **`packages/react-native`** — RN hooks + Expo SQLite-backed replica.
 - **`packages/workflows`** — durable workflow runner (sidecar process).
 

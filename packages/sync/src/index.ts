@@ -1,5 +1,10 @@
 // ---------------------------------------------------------------------------
-// pylon sync client — local-first sync engine
+// pylon sync client
+//
+// Server-authoritative sync with optimistic mutations and an offline write
+// queue. Field-level LWW on update; tombstones on delete. NOT CRDT-backed;
+// see docs/SYNC.md for convergence semantics and what this is/isn't good
+// for. Concurrent same-field writes resolve by server arrival order.
 // ---------------------------------------------------------------------------
 
 export { IndexedDBPersistence, persistChange } from "./persistence";
