@@ -25,6 +25,12 @@
           "unique": false
         },
         {
+          "name": "passwordHash",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
           "name": "createdAt",
           "type": "datetime",
           "optional": false,

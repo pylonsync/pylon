@@ -9,6 +9,7 @@ export interface User {
   email: string;
   displayName: string;
   avatarColor: string;
+  passwordHash: string;
   createdAt: string;
 }
 
