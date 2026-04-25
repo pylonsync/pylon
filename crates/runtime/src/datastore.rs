@@ -198,6 +198,37 @@ impl DataStore for Runtime {
             message: e.to_string(),
         })
     }
+
+    /// Return the binary CRDT snapshot for a row. `Ok(None)` for any
+    /// entity with `crdt: false` (the LWW opt-out) — the router uses
+    /// that to decide whether to ship a binary update over WebSocket
+    /// after the write.
+    fn crdt_snapshot(
+        &self,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Option<Vec<u8>>, DataError> {
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        if !ent.crdt {
+            return Ok(None);
+        }
+        let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        let snap = self.crdt_store().snapshot(&conn, entity, row_id).map_err(
+            |e| DataError {
+                code: "CRDT_SNAPSHOT_FAILED".into(),
+                message: format!("snapshot {entity}/{row_id}: {e}"),
+            },
+        )?;
+        Ok(Some(snap))
+    }
 }
 
 fn into_data_error(e: crate::RuntimeError) -> DataError {

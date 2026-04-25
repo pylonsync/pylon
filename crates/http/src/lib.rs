@@ -188,6 +188,23 @@ pub trait DataStore: Send + Sync {
             message: "search() is not implemented by this backend".into(),
         })
     }
+
+    /// Return the binary CRDT snapshot for a row, if the entity is in
+    /// CRDT mode (`crdt: true` in the manifest, the default). Returns
+    /// `Ok(None)` for `crdt: false` entities so callers can branch
+    /// without a separate "is this entity CRDT" probe.
+    ///
+    /// Used by the router to ship a binary update over WebSocket after
+    /// every successful write. Default impl returns `None` so backends
+    /// that don't support CRDT mode (e.g. the Workers D1 store at
+    /// time of writing) compile without ceremony.
+    fn crdt_snapshot(
+        &self,
+        _entity: &str,
+        _row_id: &str,
+    ) -> Result<Option<Vec<u8>>, DataError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
