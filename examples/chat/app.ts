@@ -13,6 +13,11 @@ const User = entity("User", {
   email: field.string().unique(),
   displayName: field.string(),
   avatarColor: field.string(),
+  // Argon2id PHC string. Set by /api/auth/password/register; consumed
+  // by /api/auth/password/login. Never exposed to the client — the
+  // codegen'd type stays present, but read policies on User filter it
+  // out for non-self queries.
+  passwordHash: field.string(),
   createdAt: field.datetime(),
 });
 

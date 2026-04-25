@@ -2,6 +2,12 @@
 @import "tw-animate-css";
 @import "@pylonsync/example-ui/tokens.css";
 
+/* Tailwind v4's scanner looks near this CSS file by default. ERP's
+   JSX lives one directory up; the shared shadcn primitives two more.
+   Tell the scanner about both so utility classes get generated. */
+@source "../../client/**/*.{ts,tsx}";
+@source "../../../_shared/src/**/*.{ts,tsx}";
+
 @theme {
   --font-sans: "Inter", -apple-system, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;

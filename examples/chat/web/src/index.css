@@ -2,6 +2,14 @@
 @import "tw-animate-css";
 @import "@pylonsync/example-ui/tokens.css";
 
+/* Tailwind v4's scanner looks near this CSS file by default. The chat
+   app's JSX lives one directory up (examples/chat/client/), and the
+   shared shadcn primitives live two more up (examples/_shared/). Tell
+   the scanner about both so the utility classes those files use
+   actually get generated. */
+@source "../../client/**/*.{ts,tsx}";
+@source "../../../_shared/src/**/*.{ts,tsx}";
+
 @theme {
   --font-sans: "Inter", -apple-system, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;

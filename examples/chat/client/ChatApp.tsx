@@ -12,7 +12,6 @@ import {
   init,
   db,
   useRoom,
-  callFn,
   configureClient,
   storageKey,
 } from "@pylonsync/react";
@@ -491,8 +490,10 @@ const UIContext = React.createContext<{
 // ---------------------------------------------------------------------------
 
 function Login({ onReady }: { onReady: (u: User) => void }) {
-  const [email, setEmail] = useState("alice@example.com");
-  const [name, setName] = useState("Alice");
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -500,27 +501,32 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
     setLoading(true);
     setErr(null);
     try {
-      const session = await fetch(`${BASE_URL}/api/auth/guest`, {
+      const path =
+        mode === "signup"
+          ? "/api/auth/password/register"
+          : "/api/auth/password/login";
+      const body =
+        mode === "signup" ? { email, password, displayName: name } : { email, password };
+      const res = await fetch(`${BASE_URL}${path}`, {
         method: "POST",
-      }).then((r) => r.json());
-      const token: string = session.token;
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json?.error?.message ?? `HTTP ${res.status}`);
+      }
+      const token: string = json.token;
       localStorage.setItem(storageKey("token"), token);
       configureClient({ baseUrl: BASE_URL });
-      const user = await callFn<User>("upsertUser", {
-        email,
-        displayName: name,
-      });
-      await fetch(`${BASE_URL}/api/auth/upgrade`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ user_id: user.id }),
-      });
-      localStorage.setItem(storageKey("user"), JSON.stringify(user));
+      // Server returns user_id; fetch the row for the cached User shape
+      // the rest of the app expects in localStorage.
+      const me = await fetch(`${BASE_URL}/api/entities/User/${json.user_id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((r) => r.json());
+      localStorage.setItem(storageKey("user"), JSON.stringify(me));
       void db.sync.pull();
-      onReady(user);
+      onReady(me as User);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -538,7 +544,9 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
               <path d="M12 11v10M4 7l8 4 8-4" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
             </svg>
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">Sign in to Pylon</h1>
+          <h1 className="text-xl font-semibold tracking-tight">
+            {mode === "signup" ? "Create your account" : "Sign in to Pylon"}
+          </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Local-first chat, powered by live sync.
           </p>
@@ -554,19 +562,38 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
               <Input
                 id="login-email"
                 type="email"
+                autoComplete="email"
                 autoFocus
+                required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
               />
             </div>
+            {mode === "signup" && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="login-name">Display name</Label>
+                <Input
+                  id="login-name"
+                  autoComplete="name"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Alice"
+                />
+              </div>
+            )}
             <div className="grid gap-1.5">
-              <Label htmlFor="login-name">Display name</Label>
+              <Label htmlFor="login-password">Password</Label>
               <Input
-                id="login-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Alice"
+                id="login-password"
+                type="password"
+                autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                required
+                minLength={8}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={mode === "signup" ? "At least 8 characters" : "Your password"}
               />
             </div>
             {err && (
@@ -576,11 +603,26 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
             )}
             <Button type="submit" disabled={loading} className="mt-1">
               {loading && <Loader2 className="size-4 animate-spin" />}
-              {loading ? "Signing in…" : "Continue"}
+              {loading
+                ? mode === "signup"
+                  ? "Creating account…"
+                  : "Signing in…"
+                : mode === "signup"
+                  ? "Create account"
+                  : "Sign in"}
             </Button>
-            <p className="pt-1 text-center text-[11px] text-muted-foreground">
-              Demo-only. Real deploys wire up magic codes or OAuth.
-            </p>
+            <button
+              type="button"
+              className="pt-1 text-center text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setErr(null);
+                setMode((m) => (m === "signin" ? "signup" : "signin"));
+              }}
+            >
+              {mode === "signin"
+                ? "Don't have an account? Create one"
+                : "Already have an account? Sign in"}
+            </button>
           </form>
         </CardContent>
       </Card>

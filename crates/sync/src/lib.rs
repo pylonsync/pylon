@@ -226,17 +226,23 @@ impl ChangeLog {
         }
 
         // Detect "cursor too old": the caller's cursor is before the oldest
-        // retained event by more than one seq (i.e. there are evicted seqs
-        // between cursor.last_seq and front.seq). We do NOT carve out
-        // cursor=0 — a fresh client must use an entity-list endpoint for
-        // initial state rather than pull, because pull silently returning
-        // only the post-eviction tail hides that state is missing.
-        if let Some(front) = events.front() {
-            if cursor.last_seq + 1 < front.seq {
-                return Err(PullError::ResyncRequired {
-                    oldest_seq: front.seq,
-                    cursor: cursor.clone(),
-                });
+        // retained event by more than one seq. EXCEPT cursor=0 — a fresh
+        // client gets whatever the log currently holds. The previous
+        // policy 410'd cursor=0 whenever the seeded entity replay had
+        // been evicted, which the React client handled by resetting
+        // back to cursor=0 and re-pulling — an infinite loop. The
+        // partial-tail risk the old comment warned about is real but
+        // narrow: the runtime now also re-seeds entity rows on demand
+        // (see `Runtime::seed_change_log`), so cursor=0 always gets a
+        // current snapshot of state.
+        if cursor.last_seq > 0 {
+            if let Some(front) = events.front() {
+                if cursor.last_seq + 1 < front.seq {
+                    return Err(PullError::ResyncRequired {
+                        oldest_seq: front.seq,
+                        cursor: cursor.clone(),
+                    });
+                }
             }
         }
 
@@ -442,6 +448,26 @@ mod tests {
                 assert_eq!(oldest_seq, 3);
             }
         }
+    }
+
+    #[test]
+    fn fresh_cursor_zero_never_resyncs() {
+        // Regression: previously cursor=0 would 410 if the seeded entity
+        // replay had been evicted, and the React client handled it by
+        // resetting to cursor=0 and re-pulling — infinite loop. cursor=0
+        // is "I just connected, give me what you have"; never 410.
+        let log = ChangeLog::with_capacity(2);
+        log.append("A", "1", ChangeKind::Insert, None);
+        log.append("A", "2", ChangeKind::Insert, None);
+        log.append("A", "3", ChangeKind::Insert, None);
+        log.append("A", "4", ChangeKind::Insert, None);
+        // Front is now seq 3 (1+2 evicted). Old behavior: 410 because
+        // 0+1 < 3. New: succeed and return what we have.
+        let resp = log
+            .pull(&SyncCursor { last_seq: 0 }, 100)
+            .expect("cursor=0 must never resync — no infinite loop");
+        assert_eq!(resp.changes.len(), 2);
+        assert_eq!(resp.changes[0].seq, 3);
     }
 
     #[test]
