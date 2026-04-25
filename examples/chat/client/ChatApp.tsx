@@ -16,6 +16,11 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import { Loader2 } from "lucide-react";
+import { Button } from "@pylonsync/example-ui/button";
+import { Input } from "@pylonsync/example-ui/input";
+import { Label } from "@pylonsync/example-ui/label";
+import { Card, CardContent } from "@pylonsync/example-ui/card";
 
 const BASE_URL = "http://localhost:4321";
 // Give this app its own namespace so chat's auth + replica don't clobber
@@ -488,58 +493,61 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
   }
 
   return (
-    <div className="login">
-      <div className="login-card">
-        <div className="login-logo" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M4 7l8-4 8 4v10l-8 4-8-4V7z"
-              stroke="white"
-              strokeWidth="2"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M12 11v10M4 7l8 4 8-4"
-              stroke="white"
-              strokeWidth="2"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
-        <div className="login-title">Sign in to Pylon</div>
-        <div className="login-subtitle">
-          Local-first chat, powered by live sync.
-        </div>
-        <label className="field">
-          <span className="field-label">Email</span>
-          <input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            className="input"
-            autoFocus
-          />
-        </label>
-        <label className="field">
-          <span className="field-label">Display name</span>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Alice"
-            className="input"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void go();
+    <div className="grid min-h-screen place-items-center bg-gradient-to-br from-primary/15 via-background to-background p-6">
+      <Card className="w-full max-w-sm">
+        <CardContent className="p-7">
+          <div className="mb-6 grid size-10 place-items-center rounded-lg bg-primary text-primary-foreground">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M4 7l8-4 8 4v10l-8 4-8-4V7z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+              <path d="M12 11v10M4 7l8 4 8-4" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-semibold tracking-tight">Sign in to Pylon</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Local-first chat, powered by live sync.
+          </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void go();
             }}
-          />
-        </label>
-        {err && <div className="login-error">{err}</div>}
-        <button onClick={go} disabled={loading} className="btn-primary">
-          {loading ? "Signing in…" : "Continue"}
-        </button>
-        <div className="login-footer">
-          Demo-only. Real deploys wire up magic codes or OAuth.
-        </div>
-      </div>
+            className="mt-5 flex flex-col gap-3"
+          >
+            <div className="grid gap-1.5">
+              <Label htmlFor="login-email">Email</Label>
+              <Input
+                id="login-email"
+                type="email"
+                autoFocus
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="login-name">Display name</Label>
+              <Input
+                id="login-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Alice"
+              />
+            </div>
+            {err && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {err}
+              </div>
+            )}
+            <Button type="submit" disabled={loading} className="mt-1">
+              {loading && <Loader2 className="size-4 animate-spin" />}
+              {loading ? "Signing in…" : "Continue"}
+            </Button>
+            <p className="pt-1 text-center text-[11px] text-muted-foreground">
+              Demo-only. Real deploys wire up magic codes or OAuth.
+            </p>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
