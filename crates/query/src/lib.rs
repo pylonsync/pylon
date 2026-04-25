@@ -132,6 +132,7 @@ mod tests {
                 field_type: "string".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
         };
         let desc = QueryDescriptor::from_manifest(&mq);

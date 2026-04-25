@@ -1285,6 +1285,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: false,
                     unique: true,
+                    crdt: None,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -1348,6 +1349,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: false,
+            crdt: None,
         });
         let changes = compute_diff(&old, &new);
         assert!(changes.iter().any(|c| c.kind == "field_added"

@@ -30,6 +30,7 @@ fn counter_manifest() -> AppManifest {
                 field_type: "int".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
             indexes: vec![],
             relations: vec![],

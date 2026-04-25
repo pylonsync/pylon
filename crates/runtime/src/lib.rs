@@ -1963,12 +1963,14 @@ mod tests {
                         field_type: "string".into(),
                         optional: false,
                         unique: true,
+                        crdt: None,
                     },
                     ManifestField {
                         name: "displayName".into(),
                         field_type: "string".into(),
                         optional: false,
                         unique: false,
+                        crdt: None,
                     },
                 ],
                 indexes: vec![ManifestIndex {

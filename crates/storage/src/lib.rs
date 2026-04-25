@@ -539,6 +539,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: false,
                     unique: true,
+                    crdt: None,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -625,6 +626,7 @@ mod tests {
                 field_type: "string".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
             indexes: vec![],
             relations: vec![],
@@ -665,6 +667,7 @@ mod tests {
             field_type: "string".into(),
             optional: false,
             unique: false,
+            crdt: None,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -873,12 +876,14 @@ mod tests {
                         field_type: "string".into(),
                         optional: false,
                         unique: true,
+                        crdt: None,
                     },
                     ManifestField {
                         name: "name".into(),
                         field_type: "string".into(),
                         optional: false,
                         unique: false,
+                        crdt: None,
                     },
                 ],
                 indexes: vec![],
@@ -928,6 +933,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: false,
                     unique: true,
+                    crdt: None,
                 }],
                 indexes: vec![ManifestIndex {
                     name: "by_email".into(),

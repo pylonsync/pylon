@@ -971,6 +971,7 @@ mod tests {
             field_type: ty.into(),
             optional: opt,
             unique: uniq,
+            crdt: None,
         };
         AppManifest {
             manifest_version: 1,

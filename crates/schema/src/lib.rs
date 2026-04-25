@@ -1208,6 +1208,7 @@ mod tests {
                 field_type: "id(X)".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
@@ -1403,6 +1404,7 @@ mod tests {
                 field_type: "id(Missing)".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
         }];
         let diags = validate(&s);
@@ -1421,6 +1423,7 @@ mod tests {
                 field_type: "id(Nope)".into(),
                 optional: false,
                 unique: false,
+                crdt: None,
             }],
         }];
         let diags = validate(&s);
@@ -1450,6 +1453,7 @@ mod tests {
                     field_type: "id(".into(), // malformed
                     optional: false,
                     unique: false,
+                    crdt: None,
                 }],
             }],
             actions: vec![],
@@ -1488,6 +1492,7 @@ mod tests {
             field_type: ft.into(),
             optional,
             unique: false,
+            crdt: None,
         }
     }
 

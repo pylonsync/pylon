@@ -185,6 +185,19 @@ pub struct ManifestField {
     pub field_type: String,
     pub optional: bool,
     pub unique: bool,
+    /// CRDT container override for this field. `None` = pick a sensible
+    /// default for the field type (most things are LWW; `richtext` defaults
+    /// to LoroText). Set to escape the default — `"text"` upgrades a
+    /// `string` to LoroText for collaborative editing, `"counter"` flips
+    /// a numeric field to LoroCounter so concurrent increments don't
+    /// stomp each other, `"list"` / `"movable-list"` for ordered
+    /// collections, `"tree"` for hierarchical data, `"lww"` to be
+    /// explicit (matches the default for most scalar types).
+    ///
+    /// Ignored when the entity has `crdt: false` (the LWW-only escape
+    /// hatch on the entity itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crdt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

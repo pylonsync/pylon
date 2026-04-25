@@ -9,21 +9,42 @@
 //!
 //! Each Pylon entity row corresponds to one [`LoroDoc`]. The doc holds a
 //! single root [`LoroMap`] called `"row"`; its keys are the entity's
-//! field names, its values are typed as:
+//! field names, its values are typed by [`CrdtFieldKind`].
 //!
-//! | Field type      | Loro container       |
-//! |-----------------|----------------------|
-//! | `string`        | `LoroText`           |
-//! | `richtext`      | `LoroText`           |
-//! | `int` / `float` | LWW value (number)   |
-//! | `bool`          | LWW value (bool)     |
-//! | `datetime`      | LWW value (string)   |
-//! | `id(Entity)`    | LWW value (string)   |
+//! ## Defaults
 //!
-//! Strings get rich CRDT semantics (concurrent prepend / append / midword
-//! insert all converge). Other scalars are plain LWW registers — same as
-//! today, just with deterministic resolution via Loro's internal
-//! versioning instead of server-arrival-order.
+//! | Manifest field type | Default container |
+//! |---------------------|-------------------|
+//! | `string`            | LWW string register |
+//! | `richtext`          | `LoroText` (collaborative editing) |
+//! | `int` / `float`     | LWW number register |
+//! | `bool`              | LWW bool register |
+//! | `datetime`          | LWW string register |
+//! | `id(Entity)`        | LWW string register |
+//!
+//! Most strings in real apps (email, name, slug, status enum, URL) don't
+//! need character-level merge — defaulting to LWW keeps the boring case
+//! cheap. Pay LoroText overhead only when you opt in.
+//!
+//! ## Per-field overrides
+//!
+//! Set `crdt:` on a manifest field to escape the default:
+//!
+//! | Annotation       | Container         | Use for |
+//! |------------------|-------------------|---------|
+//! | `"text"`         | `LoroText`        | Long-form text where collaborative merge matters |
+//! | `"counter"`      | `LoroCounter`     | Distributed counters (views, votes, likes) |
+//! | `"list"`         | `LoroList`        | Ordered collections |
+//! | `"movable-list"` | `LoroMovableList` | Reorderable lists (kanban, prioritized todo) |
+//! | `"tree"`         | `LoroTree`        | Hierarchical data (folders, threaded comments) |
+//! | `"lww"`          | LWW register      | Explicit (matches default for most types) |
+//!
+//! `counter`, `list`, `movable-list`, `tree` are reserved in the type
+//! system (see [`CrdtFieldKind`]) but not yet implemented in
+//! `apply_patch` / `project_doc_to_json` — a follow-up commit lights them
+//! up. Setting one today returns `Err("unsupported CRDT kind")` from
+//! `apply_patch`; the surface is locked in so adding implementation
+//! later isn't a breaking schema change.
 //!
 //! The projector (`project_doc_to_json`) materializes the doc into the
 //! shape the rest of Pylon already expects: a flat `serde_json::Value`
@@ -53,16 +74,110 @@ pub fn root_map(doc: &LoroDoc) -> loro::LoroMap {
 // Field type — what the projector knows about each column.
 // ---------------------------------------------------------------------------
 
-/// Subset of Pylon's manifest field types that the projector cares about.
-/// Mapped from `pylon_kernel::FieldType` at the call site so this crate
-/// stays free of the kernel dep cycle.
+/// CRDT shape for one column. Computed from the field's manifest type
+/// plus the optional per-field `crdt:` annotation via [`field_kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrdtFieldKind {
-    Text,    // string + richtext → LoroText
-    Number,  // int + float → LWW f64
-    Bool,    // bool → LWW bool
-    Iso,     // datetime → LWW string
-    Ref,     // id(Entity) → LWW string
+    /// LWW string register. Default for `string`, `datetime`, `id(...)`.
+    LwwString,
+    /// LWW number register. Default for `int`, `float`.
+    LwwNumber,
+    /// LWW bool register. Default for `bool`.
+    LwwBool,
+    /// LoroText. Default for `richtext`; opt-in for `string` via
+    /// `crdt: "text"`. Concurrent prepend / append / midword inserts all
+    /// converge via Loro's text CRDT.
+    Text,
+    /// LoroCounter. Opt-in for `int`/`float` via `crdt: "counter"`.
+    /// Concurrent increments add up instead of one stomping the other.
+    /// **Reserved — not yet implemented.**
+    Counter,
+    /// LoroList. Opt-in via `crdt: "list"`. **Reserved — not yet implemented.**
+    List,
+    /// LoroMovableList. Opt-in via `crdt: "movable-list"`. Move ops
+    /// preserve a peer's intended position even after concurrent inserts.
+    /// **Reserved — not yet implemented.**
+    MovableList,
+    /// LoroTree. Opt-in via `crdt: "tree"`. **Reserved — not yet implemented.**
+    Tree,
+}
+
+impl CrdtFieldKind {
+    /// Returns true if this kind is implemented in `apply_patch` /
+    /// `project_doc_to_json`. The rest are surface-only stubs that
+    /// `apply_patch` rejects with `Err`. Caller can use this to fail
+    /// fast on schema load instead of at first write.
+    pub fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Self::LwwString | Self::LwwNumber | Self::LwwBool | Self::Text
+        )
+    }
+}
+
+/// Resolve a manifest field type + optional `crdt:` annotation into the
+/// CRDT shape. `field_type` is the raw type string from the manifest
+/// (`"string"`, `"int"`, `"id(User)"`, etc.); `crdt` is the annotation
+/// (`Some("text")`, `Some("counter")`, etc., or `None` for the default).
+///
+/// Returns `Err` when the annotation isn't valid for the field type
+/// (e.g. `crdt: "counter"` on a `bool`). Catches schema mistakes at load
+/// time, not at first write.
+pub fn field_kind(field_type: &str, crdt: Option<&str>) -> Result<CrdtFieldKind, String> {
+    let base = base_type(field_type);
+    let default = match base {
+        "string" | "datetime" => CrdtFieldKind::LwwString,
+        "int" | "float" => CrdtFieldKind::LwwNumber,
+        "bool" => CrdtFieldKind::LwwBool,
+        "richtext" => CrdtFieldKind::Text,
+        // `id(EntityName)` — base_type strips the parens; the prefix is "id".
+        "id" => CrdtFieldKind::LwwString,
+        other => {
+            return Err(format!("unknown field type: {other}"));
+        }
+    };
+    let Some(annotation) = crdt else {
+        return Ok(default);
+    };
+    let kind = match annotation {
+        "lww" => match default {
+            // Already LWW — annotation is just documentation.
+            k @ (CrdtFieldKind::LwwString
+            | CrdtFieldKind::LwwNumber
+            | CrdtFieldKind::LwwBool) => k,
+            // For richtext, "lww" downgrades to LWW string.
+            CrdtFieldKind::Text => CrdtFieldKind::LwwString,
+            other => other,
+        },
+        "text" => {
+            if !matches!(base, "string" | "richtext") {
+                return Err(format!(
+                    "crdt: \"text\" only valid on string/richtext fields, got {base}"
+                ));
+            }
+            CrdtFieldKind::Text
+        }
+        "counter" => {
+            if !matches!(base, "int" | "float") {
+                return Err(format!(
+                    "crdt: \"counter\" only valid on int/float fields, got {base}"
+                ));
+            }
+            CrdtFieldKind::Counter
+        }
+        "list" => CrdtFieldKind::List,
+        "movable-list" => CrdtFieldKind::MovableList,
+        "tree" => CrdtFieldKind::Tree,
+        other => return Err(format!("unknown crdt annotation: {other}")),
+    };
+    Ok(kind)
+}
+
+fn base_type(field_type: &str) -> &str {
+    field_type
+        .find('(')
+        .map(|idx| &field_type[..idx])
+        .unwrap_or(field_type)
 }
 
 /// One column the projector knows how to handle. The field's *Loro shape*
@@ -127,7 +242,7 @@ pub fn apply_patch(
                         .map_err(|e| format!("write text {}: {e}", field.name))?;
                 }
             }
-            CrdtFieldKind::Number => {
+            CrdtFieldKind::LwwNumber => {
                 if value.is_null() {
                     map.delete(&field.name).ok();
                     continue;
@@ -138,7 +253,7 @@ pub fn apply_patch(
                 map.insert(&field.name, n)
                     .map_err(|e| format!("write number {}: {e}", field.name))?;
             }
-            CrdtFieldKind::Bool => {
+            CrdtFieldKind::LwwBool => {
                 if value.is_null() {
                     map.delete(&field.name).ok();
                     continue;
@@ -149,7 +264,7 @@ pub fn apply_patch(
                 map.insert(&field.name, b)
                     .map_err(|e| format!("write bool {}: {e}", field.name))?;
             }
-            CrdtFieldKind::Iso | CrdtFieldKind::Ref => {
+            CrdtFieldKind::LwwString => {
                 if value.is_null() {
                     map.delete(&field.name).ok();
                     continue;
@@ -159,6 +274,15 @@ pub fn apply_patch(
                 })?;
                 map.insert(&field.name, s.to_string())
                     .map_err(|e| format!("write string {}: {e}", field.name))?;
+            }
+            CrdtFieldKind::Counter
+            | CrdtFieldKind::List
+            | CrdtFieldKind::MovableList
+            | CrdtFieldKind::Tree => {
+                return Err(format!(
+                    "field {}: crdt kind {:?} reserved but not yet implemented",
+                    field.name, field.kind
+                ));
             }
         }
     }
@@ -265,17 +389,98 @@ mod tests {
             },
             CrdtField {
                 name: "qty".into(),
-                kind: CrdtFieldKind::Number,
+                kind: CrdtFieldKind::LwwNumber,
             },
             CrdtField {
                 name: "active".into(),
-                kind: CrdtFieldKind::Bool,
+                kind: CrdtFieldKind::LwwBool,
             },
             CrdtField {
                 name: "createdAt".into(),
-                kind: CrdtFieldKind::Iso,
+                kind: CrdtFieldKind::LwwString,
             },
         ]
+    }
+
+    #[test]
+    fn field_kind_defaults() {
+        assert_eq!(field_kind("string", None).unwrap(), CrdtFieldKind::LwwString);
+        assert_eq!(
+            field_kind("richtext", None).unwrap(),
+            CrdtFieldKind::Text
+        );
+        assert_eq!(field_kind("int", None).unwrap(), CrdtFieldKind::LwwNumber);
+        assert_eq!(field_kind("float", None).unwrap(), CrdtFieldKind::LwwNumber);
+        assert_eq!(field_kind("bool", None).unwrap(), CrdtFieldKind::LwwBool);
+        assert_eq!(field_kind("datetime", None).unwrap(), CrdtFieldKind::LwwString);
+        assert_eq!(
+            field_kind("id(User)", None).unwrap(),
+            CrdtFieldKind::LwwString
+        );
+    }
+
+    #[test]
+    fn field_kind_text_opt_in_upgrades_string() {
+        assert_eq!(
+            field_kind("string", Some("text")).unwrap(),
+            CrdtFieldKind::Text
+        );
+        assert_eq!(
+            field_kind("richtext", Some("text")).unwrap(),
+            CrdtFieldKind::Text
+        );
+    }
+
+    #[test]
+    fn field_kind_lww_downgrades_richtext() {
+        assert_eq!(
+            field_kind("richtext", Some("lww")).unwrap(),
+            CrdtFieldKind::LwwString
+        );
+    }
+
+    #[test]
+    fn field_kind_text_rejects_non_string_types() {
+        assert!(field_kind("int", Some("text")).is_err());
+        assert!(field_kind("bool", Some("text")).is_err());
+    }
+
+    #[test]
+    fn field_kind_counter_only_on_numbers() {
+        assert_eq!(
+            field_kind("int", Some("counter")).unwrap(),
+            CrdtFieldKind::Counter
+        );
+        assert_eq!(
+            field_kind("float", Some("counter")).unwrap(),
+            CrdtFieldKind::Counter
+        );
+        assert!(field_kind("string", Some("counter")).is_err());
+    }
+
+    #[test]
+    fn field_kind_unknown_annotation_is_error() {
+        assert!(field_kind("string", Some("nonsense")).is_err());
+    }
+
+    #[test]
+    fn unimplemented_kinds_fail_apply_patch() {
+        let doc = LoroDoc::new();
+        let unsupported = vec![CrdtField {
+            name: "tally".into(),
+            kind: CrdtFieldKind::Counter,
+        }];
+        let err = apply_patch(&doc, &unsupported, &serde_json::json!({"tally": 1}))
+            .expect_err("counter not yet implemented");
+        assert!(err.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn is_implemented_marks_reserved_kinds() {
+        assert!(CrdtFieldKind::LwwString.is_implemented());
+        assert!(CrdtFieldKind::Text.is_implemented());
+        assert!(!CrdtFieldKind::Counter.is_implemented());
+        assert!(!CrdtFieldKind::List.is_implemented());
     }
 
     #[test]

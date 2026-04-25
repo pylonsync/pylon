@@ -125,12 +125,14 @@ mod tests {
                     field_type: "string".into(),
                     optional: false,
                     unique: false,
+                    crdt: None,
                 },
                 ManifestField {
                     name: "y".into(),
                     field_type: "int".into(),
                     optional: true,
                     unique: false,
+                    crdt: None,
                 },
             ],
         };

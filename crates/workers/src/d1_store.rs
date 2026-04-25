@@ -512,6 +512,7 @@ mod tests {
                     field_type: "string".into(),
                     optional: false,
                     unique: false,
+                    crdt: None,
                 }],
                 indexes: vec![],
                 relations: vec![],

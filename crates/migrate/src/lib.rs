@@ -478,6 +478,7 @@ mod tests {
             field_type: ft.into(),
             optional: false,
             unique: false,
+            crdt: None,
         }
     }
 
