@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 If you discover a security vulnerability, please **do not open a public issue**.
-Instead, email **security@pylon.dev** with:
+Instead, email **security@pylonsync.com** with:
 
 - A description of the vulnerability
 - Steps to reproduce

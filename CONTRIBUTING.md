@@ -12,7 +12,7 @@ You need:
 Clone and build:
 
 ```sh
-git clone https://github.com/ericc59/agentdb.git
+git clone https://github.com/pylonsync/pylon.git
 cd pylon
 cargo build
 bun install
@@ -66,7 +66,7 @@ faster than a rewrite.
 
 - **Bug reports:** include a minimal reproduction. A failing test is ideal.
 - **Feature requests:** describe the use case before the proposed API.
-- **Security vulnerabilities:** email security@pylon.dev, not a GitHub issue.
+- **Security vulnerabilities:** email security@pylonsync.com, not a GitHub issue.
   See `SECURITY.md`.
 
 ## Code style

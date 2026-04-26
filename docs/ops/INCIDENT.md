@@ -2,7 +2,7 @@
 
 ## Reporting
 
-**Security vulnerabilities**: email `security@pylon.dev`. Do NOT file a
+**Security vulnerabilities**: email `security@pylonsync.com`. Do NOT file a
 public issue. Acknowledgement within 48 hours. Target remediation 7 days
 for high severity, 30 days for medium.
 
@@ -105,6 +105,6 @@ user-impacting incidents per your privacy policy.
 
 ## Contacts
 
-- Security: `security@pylon.dev`
-- Public issues / feature requests: github.com/ericc59/agentdb/issues
+- Security: `security@pylonsync.com`
+- Public issues / feature requests: github.com/pylonsync/pylon/issues
 - Your oncall: (fill in your rotation)

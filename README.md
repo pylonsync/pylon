@@ -235,7 +235,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and PRs welcome.
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and hardening
-notes. **Do not file security issues publicly.** Email security@pylon.dev.
+notes. **Do not file security issues publicly.** Email security@pylonsync.com.
 
 ## License
 

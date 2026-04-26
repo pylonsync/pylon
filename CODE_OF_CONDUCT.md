@@ -23,7 +23,7 @@ appearance, race, religion, or sexual identity and orientation.
 
 ## Enforcement
 
-Report unacceptable behavior to the maintainers at conduct@pylon.dev.
+Report unacceptable behavior to the maintainers at conduct@pylonsync.com.
 Reports will be reviewed and investigated promptly and confidentially.
 
 This Code of Conduct is adapted from the

@@ -84,7 +84,7 @@ impl HttpEmailTransport {
         Some(Self {
             endpoint,
             api_key: std::env::var("PYLON_EMAIL_API_KEY").ok()?,
-            from: std::env::var("PYLON_EMAIL_FROM").unwrap_or_else(|_| "noreply@pylon.dev".into()),
+            from: std::env::var("PYLON_EMAIL_FROM").unwrap_or_else(|_| "noreply@pylonsync.com".into()),
             provider,
         })
     }
