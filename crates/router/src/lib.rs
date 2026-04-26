@@ -5198,6 +5198,7 @@ mod auth_gate_tests {
         let alice = AuthContext {
             user_id: Some("u-1".into()),
             is_admin: false,
+            is_guest: false,
             roles: vec![],
             tenant_id: None,
         };
@@ -5225,6 +5226,7 @@ mod auth_gate_tests {
         let alice = AuthContext {
             user_id: Some("u-1".into()),
             is_admin: false,
+            is_guest: false,
             roles: vec![],
             tenant_id: None,
         };
@@ -5251,6 +5253,7 @@ mod auth_gate_tests {
         let alice = AuthContext {
             user_id: Some("u-1".into()),
             is_admin: false,
+            is_guest: false,
             roles: vec![],
             tenant_id: None,
         };

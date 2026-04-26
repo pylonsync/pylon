@@ -23,9 +23,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthContext {
     /// The authenticated user ID, or None for public/anonymous access.
+    /// For guest contexts this is `Some(guest_id)` — a stable
+    /// anonymous identifier, NOT a real user.
     pub user_id: Option<String>,
     /// Whether this is an admin context (bypasses policies).
     pub is_admin: bool,
+    /// True for `AuthContext::guest()` — anonymous-with-stable-id, used
+    /// for cart state and similar pre-login persistence. Routes guarded
+    /// by `AuthMode::User` reject guests; only `is_authenticated()` ==
+    /// "real signed-in user" should pass auth-required gates.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_guest: bool,
     /// Roles granted to this user. Empty for anonymous.
     pub roles: Vec<String>,
     /// Active tenant id (for multi-tenant apps). Set when the user has
@@ -34,12 +42,17 @@ pub struct AuthContext {
     pub tenant_id: Option<String>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
 impl AuthContext {
     /// Create an anonymous/public auth context.
     pub fn anonymous() -> Self {
         Self {
             user_id: None,
             is_admin: false,
+            is_guest: false,
             roles: Vec::new(),
             tenant_id: None,
         }
@@ -50,16 +63,21 @@ impl AuthContext {
         Self {
             user_id: Some(user_id),
             is_admin: false,
+            is_guest: false,
             roles: Vec::new(),
             tenant_id: None,
         }
     }
 
     /// Create a guest auth context with a persistent anonymous ID.
+    /// Guests carry an opaque stable id (cart/session continuity) but
+    /// are NOT considered authenticated — `is_authenticated()` returns
+    /// false and `AuthMode::User` rejects them.
     pub fn guest(guest_id: String) -> Self {
         Self {
             user_id: Some(guest_id),
             is_admin: false,
+            is_guest: true,
             roles: Vec::new(),
             tenant_id: None,
         }
@@ -70,6 +88,7 @@ impl AuthContext {
         Self {
             user_id: Some("__admin__".into()),
             is_admin: true,
+            is_guest: false,
             roles: vec!["admin".into()],
             tenant_id: None,
         }
@@ -92,8 +111,10 @@ impl AuthContext {
     }
 
     /// Check if this context represents an authenticated user.
+    /// Guests intentionally return `false` — they have a stable anonymous
+    /// id but never gain user-level access.
     pub fn is_authenticated(&self) -> bool {
-        self.user_id.is_some()
+        self.user_id.is_some() && !self.is_guest
     }
 
     /// Check if the user has a specific role. Admins have every role implicitly.
@@ -236,8 +257,10 @@ impl Session {
     }
 
     /// Returns true if the session has passed its expires_at time.
+    /// Boundary is inclusive (`>=`) to match the rest of the codebase
+    /// (`magic_codes.expires_at <= now`, `oauth_state.expires_at <= now`).
     pub fn is_expired(&self) -> bool {
-        self.expires_at != 0 && now_secs() > self.expires_at
+        self.expires_at != 0 && now_secs() >= self.expires_at
     }
 }
 
@@ -1285,9 +1308,14 @@ mod tests {
     #[test]
     fn guest_context() {
         let ctx = AuthContext::guest("guest_123".into());
-        assert!(ctx.is_authenticated());
+        // Guests carry a stable id but are NOT authenticated — routes
+        // guarded by AuthMode::User must reject them.
+        assert!(!ctx.is_authenticated());
+        assert!(ctx.is_guest);
         assert!(!ctx.is_admin);
         assert_eq!(ctx.user_id, Some("guest_123".into()));
+        assert!(!AuthMode::User.check(&ctx));
+        assert!(AuthMode::Public.check(&ctx));
     }
 
     #[test]
