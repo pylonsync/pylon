@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
 
-          for pkg in packages/sdk packages/functions packages/react packages/sync; do
+          for pkg in packages/sdk packages/functions packages/react packages/sync packages/next; do
             if [[ -f "$pkg/package.json" ]]; then
               PKG_V="$(node -p "require('./$pkg/package.json').version")"
               if [[ "$PKG_V" != "$TAG" ]]; then
@@ -82,19 +82,27 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: bun install --frozen-lockfile
       - name: Publish @pylonsync/* (skip-if-exists)
+        # `bun publish` (not `npm publish`) is required: bun rewrites
+        # `workspace:*` deps to the concrete sibling version at publish
+        # time. npm publish ships them as-is, which produces broken
+        # tarballs (npm install would try to resolve `workspace:*` and
+        # fail). Auth flows through the .npmrc that actions/setup-node
+        # wrote, which references NODE_AUTH_TOKEN.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          # npm 9.5+ auto-enables provenance whenever id-token: write
-          # is granted on a GitHub Actions runner. The sigstore bundle
-          # would then reference this private repo, which the registry
-          # rejects with E422 ("Unsupported GitHub Actions source
-          # repository visibility: private"). Force it off explicitly
-          # until pylonsync/pylon goes public; flip back to "true" then.
+          # See note above on provenance — sigstore rejects bundles
+          # referencing a private source repo. Flip to "true" once
+          # pylonsync/pylon goes public.
           NPM_CONFIG_PROVENANCE: "false"
         shell: bash
         run: |
           set -euo pipefail
-          for pkg in packages/sdk packages/functions packages/react packages/sync; do
+          # sync first: its siblings depend on it via workspace:*, so
+          # the rewrite during their publish needs sync's published
+          # version range to be queryable. (Bun rewrites to the local
+          # workspace version regardless, but ordering by topology
+          # keeps the registry consistent for anyone watching.)
+          for pkg in packages/sdk packages/sync packages/functions packages/react packages/next; do
             [[ -f "$pkg/package.json" ]] || continue
             NAME="$(node -p "require('./$pkg/package.json').name")"
             VERSION="$(node -p "require('./$pkg/package.json').version")"
@@ -102,7 +110,7 @@ jobs:
               echo "✓ $NAME@$VERSION already published — skipping"
             else
               echo "→ Publishing $NAME@$VERSION"
-              (cd "$pkg" && npm publish --access public --provenance=false)
+              (cd "$pkg" && bun publish --access public)
             fi
           done
 

@@ -83,11 +83,53 @@ mod tests {
     use super::*;
     use pylon_kernel::ManifestField;
 
+    // Synthesizes a manifest with two actions in memory rather than
+    // reading from an example app — examples evolve independently and
+    // pinning these assertions to one of them produced false failures
+    // every time someone trimmed the demo. The shape mirrors what the
+    // SDK's buildManifest emits, so it still exercises the real
+    // ActionRegistry::from_manifest path.
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
-            "../../../examples/todo-app/pylon.manifest.json"
-        ))
-        .unwrap()
+        AppManifest {
+            manifest_version: 1,
+            name: "test".into(),
+            version: "0.0.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            policies: vec![],
+            actions: vec![
+                ManifestAction {
+                    name: "createTodo".into(),
+                    input: vec![
+                        ManifestField {
+                            name: "title".into(),
+                            field_type: "string".into(),
+                            optional: false,
+                            unique: false,
+                            crdt: None,
+                        },
+                        ManifestField {
+                            name: "authorId".into(),
+                            field_type: "id(User)".into(),
+                            optional: false,
+                            unique: false,
+                            crdt: None,
+                        },
+                    ],
+                },
+                ManifestAction {
+                    name: "toggleTodo".into(),
+                    input: vec![ManifestField {
+                        name: "id".into(),
+                        field_type: "id(Todo)".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    }],
+                },
+            ],
+        }
     }
 
     #[test]

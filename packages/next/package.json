@@ -1,0 +1,32 @@
+{
+  "name": "@pylonsync/next",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.2.6",
+  "type": "module",
+  "description": "Next.js helpers for Pylon — cookie-based auth gate, server-side session helpers, and reusable client hooks.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./proxy": "./src/proxy.ts",
+    "./server": "./src/server.ts",
+    "./client": "./src/client.ts",
+    "./auth": "./src/auth.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "next": ">=15.0.0 <17.0.0",
+    "react": ">=18.0.0 <20.0.0",
+    "react-dom": ">=18.0.0 <20.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.0.0"
+  }
+}

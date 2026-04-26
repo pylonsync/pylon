@@ -1205,11 +1205,41 @@ mod tests {
         assert!(parse_quoted_string_list("\"unterminated").is_err());
     }
 
+    // Synthesizes a manifest with the three policies these tests
+    // exercise (one entity-read owner check, one authenticated-only
+    // action, one input-owner action). Keeping it in-memory means the
+    // tests don't break when the example app drops or restructures
+    // its policies — the assertions describe a fixed policy shape,
+    // and that shape lives here next to the assertions.
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
-            "../../../examples/todo-app/pylon.manifest.json"
-        ))
-        .unwrap()
+        let owner_read_todos = pylon_kernel::ManifestPolicy {
+            name: "ownerReadTodos".into(),
+            entity: Some("Todo".into()),
+            allow_read: Some("auth.userId == data.authorId".into()),
+            ..Default::default()
+        };
+        let authenticated_create = pylon_kernel::ManifestPolicy {
+            name: "authenticatedCreate".into(),
+            action: Some("createTodo".into()),
+            allow: "auth.userId != null".into(),
+            ..Default::default()
+        };
+        let owner_toggle = pylon_kernel::ManifestPolicy {
+            name: "ownerToggle".into(),
+            action: Some("toggleTodo".into()),
+            allow: "auth.userId == input.authorId".into(),
+            ..Default::default()
+        };
+        AppManifest {
+            manifest_version: 1,
+            name: "todo-app".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![owner_read_todos, authenticated_create, owner_toggle],
+        }
     }
 
     #[test]

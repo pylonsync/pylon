@@ -402,11 +402,87 @@ fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pylon_kernel::{
+        ManifestAction, ManifestEntity, ManifestField, ManifestIndex, ManifestQuery,
+    };
+
+    // Synthesizes a Todo-style manifest in memory rather than reading
+    // examples/todo-app/pylon.manifest.json. Pinning these assertions
+    // to a real example produced false failures every time the example
+    // was simplified or restructured. The shape here matches what the
+    // SDK's buildManifest emits, so we still exercise the full codegen
+    // path against realistic User+Todo entities, two queries, and two
+    // actions.
     fn todo_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
-            "../../../examples/todo-app/pylon.manifest.json"
-        ))
-        .unwrap()
+        fn f(name: &str, ty: &str, optional: bool) -> ManifestField {
+            ManifestField {
+                name: name.into(),
+                field_type: ty.into(),
+                optional,
+                unique: false,
+                crdt: None,
+            }
+        }
+        AppManifest {
+            manifest_version: 1,
+            name: "todo-app".into(),
+            version: "0.1.0".into(),
+            routes: vec![],
+            policies: vec![],
+            entities: vec![
+                ManifestEntity {
+                    name: "User".into(),
+                    fields: vec![f("email", "string", false)],
+                    indexes: vec![],
+                    relations: vec![],
+                    search: None,
+                    crdt: true,
+                },
+                ManifestEntity {
+                    name: "Todo".into(),
+                    fields: vec![
+                        f("title", "string", false),
+                        f("done", "bool", false),
+                        f("authorId", "id(User)", false),
+                    ],
+                    indexes: vec![ManifestIndex {
+                        name: "by_author".into(),
+                        fields: vec!["authorId".into()],
+                        unique: false,
+                    }],
+                    relations: vec![],
+                    search: None,
+                    crdt: true,
+                },
+            ],
+            queries: vec![
+                ManifestQuery {
+                    name: "todosByAuthor".into(),
+                    input: vec![f("authorId", "id(User)", false)],
+                },
+                ManifestQuery {
+                    name: "allTodos".into(),
+                    input: vec![f("done", "bool", true)],
+                },
+                ManifestQuery {
+                    name: "todoById".into(),
+                    input: vec![f("id", "id(Todo)", false)],
+                },
+            ],
+            actions: vec![
+                ManifestAction {
+                    name: "createTodo".into(),
+                    input: vec![
+                        f("title", "string", false),
+                        f("authorId", "id(User)", false),
+                    ],
+                },
+                ManifestAction {
+                    name: "toggleTodo".into(),
+                    input: vec![f("todoId", "id(Todo)", false)],
+                },
+            ],
+        }
     }
 
     #[test]

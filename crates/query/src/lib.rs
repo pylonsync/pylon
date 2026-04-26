@@ -83,11 +83,44 @@ mod tests {
     use super::*;
     use pylon_kernel::ManifestField;
 
+    // Synthesizes a manifest with three queries in memory rather than
+    // reading examples/todo-app — the example app keeps queries empty
+    // by design (it CRUDs entities directly through the policy-gated
+    // entity API), so pinning these tests to it produced false
+    // failures. The shape mirrors what the SDK's buildManifest emits.
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
-            "../../../examples/todo-app/pylon.manifest.json"
-        ))
-        .unwrap()
+        fn f(name: &str, ty: &str, optional: bool) -> ManifestField {
+            ManifestField {
+                name: name.into(),
+                field_type: ty.into(),
+                optional,
+                unique: false,
+                crdt: None,
+            }
+        }
+        AppManifest {
+            manifest_version: 1,
+            name: "test".into(),
+            version: "0.0.0".into(),
+            entities: vec![],
+            routes: vec![],
+            actions: vec![],
+            policies: vec![],
+            queries: vec![
+                ManifestQuery {
+                    name: "todosByAuthor".into(),
+                    input: vec![f("authorId", "id(User)", false)],
+                },
+                ManifestQuery {
+                    name: "allTodos".into(),
+                    input: vec![f("done", "bool", true)],
+                },
+                ManifestQuery {
+                    name: "todoById".into(),
+                    input: vec![f("id", "id(Todo)", false)],
+                },
+            ],
+        }
     }
 
     #[test]

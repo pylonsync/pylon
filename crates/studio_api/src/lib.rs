@@ -1074,10 +1074,21 @@ mod tests {
     use super::*;
 
     fn test_manifest() -> AppManifest {
-        serde_json::from_str(include_str!(
+        // Start from the example manifest's shape but inject a known
+        // query name (`todosByAuthor`) — the studio HTML test asserts
+        // that it appears verbatim, and the example app keeps queries
+        // empty by design (entities are CRUD'd through the policy-
+        // gated entity API). Patching here keeps the studio-specific
+        // assertion stable across example refactors.
+        let mut m: AppManifest = serde_json::from_str(include_str!(
             "../../../examples/todo-app/pylon.manifest.json"
         ))
-        .unwrap()
+        .unwrap();
+        m.queries.push(pylon_kernel::ManifestQuery {
+            name: "todosByAuthor".into(),
+            input: vec![],
+        });
+        m
     }
 
     #[test]

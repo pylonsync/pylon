@@ -15,8 +15,8 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@pylonsync/react": "file:../react",
-    "@pylonsync/sync": "file:../sync",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sync": "workspace:*",
     "loro-crdt": "^1.10.6"
   },
   "peerDependencies": {

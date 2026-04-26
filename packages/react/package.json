@@ -12,8 +12,8 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@pylonsync/sdk": "file:../sdk",
-    "@pylonsync/sync": "file:../sync"
+    "@pylonsync/sdk": "workspace:*",
+    "@pylonsync/sync": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
