@@ -661,13 +661,21 @@ fn handle_ws_connection(
     // header callback must return synchronously with a Response.
     let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let slot_for_cb = Arc::clone(&token_slot);
-    // Cap incoming frames so a single client can't shovel the
-    // tungstenite default (64 MiB) and starve memory. CRDT updates
-    // for a single row are typically <100 KiB; 1 MiB leaves headroom
-    // for big initial syncs without inviting abuse.
+    // Cap WebSocket frame size to bound memory per connection. The
+    // tungstenite default (64 MiB) is too generous — a single client
+    // can shovel huge frames and starve other connections. The cap
+    // applies BIDIRECTIONALLY (server-sent CRDT snapshots are
+    // checked against it too), so the default must accommodate the
+    // largest legitimate snapshot — 16 MiB covers Loro docs with
+    // long histories. Operators tune via PYLON_WS_MAX_FRAME (bytes)
+    // when they have unusually large or unusually small docs.
+    let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16 * 1024 * 1024);
     let ws_config = WebSocketConfig {
-        max_message_size: Some(1024 * 1024),
-        max_frame_size: Some(1024 * 1024),
+        max_message_size: Some(max_frame),
+        max_frame_size: Some(max_frame),
         ..Default::default()
     };
     let ws = match accept_hdr_with_config(

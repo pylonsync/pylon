@@ -111,12 +111,87 @@ static SERVER_HANDLE: std::sync::OnceLock<Arc<Server>> = std::sync::OnceLock::ne
 // Security headers
 // ---------------------------------------------------------------------------
 
+/// Resolve the real client IP behind `trust_proxy_hops` reverse
+/// proxies. Returns an owned String; empty when no IP can be
+/// determined (callers fall back to "anon" identity downstream).
+///
+/// `trust_proxy_hops == 0` is the safe default: we ignore XFF
+/// entirely and use the socket address. Set to N when N trusted
+/// proxies sit in front of Pylon — we take the Nth-from-the-right
+/// XFF entry, which is the address the closest trusted proxy
+/// observed. Honoring the leftmost (or just trusting the whole
+/// header) lets any caller spoof their source IP by sending an
+/// `X-Forwarded-For: 1.2.3.4` header themselves.
+fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> String {
+    let socket_ip = request
+        .remote_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
+    if trust_proxy_hops == 0 {
+        return socket_ip;
+    }
+    // tiny_http stores field names as AsciiStr; cast back to &str so
+    // we can do the case-insensitive compare RFC 7230 calls for.
+    let xff = request
+        .headers()
+        .iter()
+        .find(|h| {
+            h.field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("X-Forwarded-For")
+        })
+        .map(|h| h.value.as_str().to_string());
+    let Some(xff) = xff else {
+        return socket_ip;
+    };
+    // XFF is "client, proxy1, proxy2" — the leftmost is whatever the
+    // first hop SAID was the client (untrusted), and each subsequent
+    // entry is what the next hop saw. With N trusted proxies, the
+    // Nth-from-right is the IP our closest trusted proxy verified.
+    let entries: Vec<&str> = xff.split(',').map(str::trim).collect();
+    if entries.len() < trust_proxy_hops {
+        // XFF doesn't have enough hops — operator misconfiguration
+        // or a request that bypassed the expected proxy chain.
+        // Fall back to socket IP rather than trusting whatever's
+        // there.
+        return socket_ip;
+    }
+    let candidate = entries[entries.len() - trust_proxy_hops];
+    // Validate it parses as an IP before using as a bucket key —
+    // garbage-in would let attackers poison the rate-limit map.
+    if candidate.parse::<std::net::IpAddr>().is_ok() {
+        candidate.to_string()
+    } else {
+        socket_ip
+    }
+}
+
 /// Common security headers applied to every response.
+///
+/// `Referrer-Policy` and `Permissions-Policy` are defense-in-depth.
+/// `Strict-Transport-Security` is intentionally NOT set here — Pylon
+/// is typically reached through a TLS-terminating proxy (Fly LB,
+/// CloudFront) that owns the HSTS decision; setting it from the
+/// origin would force every plaintext-loopback test deploy to fight
+/// the browser cache.
 fn security_headers() -> Vec<Header> {
     vec![
         Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap(),
         Header::from_bytes("X-Frame-Options", "DENY").unwrap(),
         Header::from_bytes("X-XSS-Protection", "1; mode=block").unwrap(),
+        // Don't leak the full URL to cross-origin destinations on
+        // navigation; same-origin still gets the path so internal
+        // analytics keep working.
+        Header::from_bytes("Referrer-Policy", "strict-origin-when-cross-origin").unwrap(),
+        // Deny every powerful browser API by default. Apps that need
+        // camera/mic/geolocation override per-route via their own
+        // Permissions-Policy header.
+        Header::from_bytes(
+            "Permissions-Policy",
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()",
+        )
+        .unwrap(),
     ]
 }
 
@@ -460,6 +535,20 @@ fn start_server(
     // Admin token: read once at startup, not per-request.
     let admin_token: Option<String> = std::env::var("PYLON_ADMIN_TOKEN").ok();
 
+    // Trusted proxy hops for resolving the real client IP behind a
+    // reverse proxy (Fly LB, nginx, CloudFront, etc.). Default 0 =
+    // ignore X-Forwarded-For and use the socket peer (safe-by-default;
+    // an unconfigured prod deploy can't be tricked into trusting
+    // attacker-supplied XFF). Set to N when there are exactly N
+    // trusted proxies in front of Pylon — the resolver takes the
+    // Nth-from-the-right address in XFF, which is the IP the closest
+    // trusted proxy actually saw the request from. Without this, every
+    // unauth caller behind the proxy shares one rate-limit bucket.
+    let trust_proxy_hops: usize = std::env::var("PYLON_TRUST_PROXY_HOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     // Session cookie config — built once. Cookie name defaults to
     // `${app_name}_session` so multiple Pylon apps on the same parent
     // domain don't clobber each other's cookies. Browsers receive an
@@ -706,10 +795,11 @@ fn start_server(
         }
 
         // --- Rate limiting: check per-IP request count ---
-        let peer_ip = request
-            .remote_addr()
-            .map(|a| a.ip().to_string())
-            .unwrap_or_default();
+        // peer_ip honors PYLON_TRUST_PROXY_HOPS so a deploy behind a
+        // load balancer (Fly, nginx, CloudFront) gets per-client
+        // limiting instead of putting every request through one
+        // bucket keyed by the proxy's IP.
+        let peer_ip = resolve_client_ip(&request, trust_proxy_hops);
 
         // OPTIONS preflights are browser infrastructure, not user intent.
         // Rate-limiting them makes a normal page effectively halve its

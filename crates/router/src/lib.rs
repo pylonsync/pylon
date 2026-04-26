@@ -716,6 +716,39 @@ fn percent_decode(s: &str, plus_is_space: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Redact an email for logging — keeps the first two characters of
+/// the local-part + the domain, masks the rest. `alice@acme.com`
+/// becomes `al***@acme.com`. Compliance-friendly (no full PII in
+/// operator log aggregators) without losing all debuggability.
+fn redact_email(email: &str) -> String {
+    match email.find('@') {
+        Some(at) => {
+            let (user, domain) = email.split_at(at);
+            let prefix_len = user.len().min(2);
+            let prefix: String = user.chars().take(prefix_len).collect();
+            format!("{prefix}***{domain}")
+        }
+        None => "***".to_string(),
+    }
+}
+
+/// Build a redacted view of the manifest safe to serve to anonymous
+/// callers. Drops the body of every policy expression — `allow_read`,
+/// `allow_insert`, etc. — but keeps policy name + entity + action so
+/// client tooling can map a "policy denied: ownerReadTodos" error to
+/// the human label without seeing the raw rule.
+fn public_manifest(m: &pylon_kernel::AppManifest) -> pylon_kernel::AppManifest {
+    let mut out = m.clone();
+    for p in out.policies.iter_mut() {
+        p.allow = String::new();
+        p.allow_read = None;
+        p.allow_insert = None;
+        p.allow_update = None;
+        p.allow_delete = None;
+    }
+    out
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -760,11 +793,27 @@ fn route_inner(
     }
 
     // GET /api/manifest
-    if url == "/api/manifest" && method == HttpMethod::Get {
-        return (
-            200,
-            serde_json::to_string(ctx.store.manifest()).unwrap_or_else(|_| "{}".into()),
-        );
+    // Public manifest. Clients need entity/field/route shapes to call
+    // the API, but they do NOT need raw policy expressions — those are
+    // server-enforcement details, and exposing them ("auth.userId ==
+    // data.ownerId") tells an attacker exactly which condition to
+    // satisfy. Strip allow_* expressions; keep policy NAMES so client
+    // tooling can still surface "denied by ownerReadTodos" errors.
+    // Admins get the full thing for tooling via ?full=1.
+    if url.starts_with("/api/manifest") && method == HttpMethod::Get {
+        let path = url.split('?').next().unwrap_or(url);
+        if path == "/api/manifest" {
+            let want_full = query_param(url, "full")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let manifest = ctx.store.manifest();
+            let body = if want_full && ctx.auth_ctx.is_admin {
+                serde_json::to_string(manifest).unwrap_or_else(|_| "{}".into())
+            } else {
+                serde_json::to_string(&public_manifest(manifest)).unwrap_or_else(|_| "{}".into())
+            };
+            return (200, body);
+        }
     }
 
     // GET /api/openapi.json
@@ -1006,7 +1055,10 @@ fn route_inner(
             format!("Your sign-in code is: {code}\n\nThis code will expire in 10 minutes.");
         if let Err(e) = ctx.email.send(&email, subject, &body_text) {
             if !ctx.is_dev {
-                tracing::warn!("[email] Failed to send magic code to {email}: {e}");
+                tracing::warn!(
+                    "[email] Failed to send magic code to {}: {e}",
+                    redact_email(&email)
+                );
                 return (
                     500,
                     json_error("EMAIL_SEND_FAILED", "Could not send sign-in email"),
@@ -1171,7 +1223,10 @@ fn route_inner(
         );
         if let Err(e) = ctx.email.send(&email, subject, &body_text) {
             if !ctx.is_dev {
-                tracing::warn!("[email] Failed to send verification code to {email}: {e}");
+                tracing::warn!(
+                    "[email] Failed to send verification code to {}: {e}",
+                    redact_email(&email)
+                );
                 return (
                     500,
                     json_error("EMAIL_SEND_FAILED", "Could not send verification email"),
@@ -6163,4 +6218,57 @@ mod auth_gate_tests {
     // Keep the warning silencer until this is used.
     #[allow(dead_code)]
     const _TOUCH_ATOMIC_BOOL: AtomicBool = AtomicBool::new(false);
+
+    // -----------------------------------------------------------------------
+    // Round-3 hardening tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redact_email_keeps_two_chars_and_domain() {
+        assert_eq!(super::redact_email("alice@acme.com"), "al***@acme.com");
+        assert_eq!(super::redact_email("a@b.io"), "a***@b.io");
+        assert_eq!(super::redact_email("ab@x.io"), "ab***@x.io");
+        // Pathological inputs don't crash; just return a marker.
+        assert_eq!(super::redact_email("not-an-email"), "***");
+        assert_eq!(super::redact_email(""), "***");
+        // Multi-byte chars in local-part don't slice mid-codepoint.
+        assert_eq!(super::redact_email("éric@x.io"), "ér***@x.io");
+    }
+
+    #[test]
+    fn public_manifest_strips_policy_expressions() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let m = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0.0.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![ManifestPolicy {
+                name: "ownerOnly".into(),
+                entity: Some("Todo".into()),
+                allow_read: Some("auth.userId == data.ownerId".into()),
+                allow_update: Some("auth.userId == data.ownerId".into()),
+                ..Default::default()
+            }],
+        };
+        let pub_m = super::public_manifest(&m);
+        let p = &pub_m.policies[0];
+        // Name + entity preserved so client tooling can map "denied
+        // by ownerOnly" errors to the human label.
+        assert_eq!(p.name, "ownerOnly");
+        assert_eq!(p.entity.as_deref(), Some("Todo"));
+        // Expressions stripped.
+        assert_eq!(p.allow, "");
+        assert!(p.allow_read.is_none());
+        assert!(p.allow_update.is_none());
+        // The full manifest still has them — sanity check the test
+        // didn't accidentally mutate the input.
+        assert_eq!(
+            m.policies[0].allow_read.as_deref(),
+            Some("auth.userId == data.ownerId")
+        );
+    }
 }
