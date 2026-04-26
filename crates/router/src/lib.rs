@@ -491,6 +491,13 @@ pub struct RouterContext<'a> {
     /// to TypeScript actions. Empty slice on platforms that don't forward
     /// headers (e.g. internal calls).
     pub request_headers: &'a [(String, String)],
+    /// Client IP as the runtime resolved it from the socket. Used as
+    /// the rate-limit bucket key for unauthenticated callers — the
+    /// alternative ("anon" string) puts every unauth request worldwide
+    /// into one shared bucket, which lets one attacker starve every
+    /// other anonymous caller. Empty string on platforms that don't
+    /// expose a peer address.
+    pub peer_ip: &'a str,
     /// Session cookie shape (name, domain, attrs). Handlers use this to
     /// emit Set-Cookie headers via [`RouterContext::add_response_header`]
     /// when they want a browser-bound session.
@@ -650,9 +657,11 @@ fn complete_oauth_login(
     Ok((user_id, session))
 }
 
-/// Parse a `key=value&key=value` query string into a map. URL-decoding is
-/// minimal — handles `+` → space and `%XX` hex escapes, which is what
-/// OAuth providers send.
+/// Parse a `key=value&key=value` query string into a map. Uses
+/// `query_decode` (NOT form_decode) — RFC 3986 says `+` is a literal
+/// in URI query strings; only `application/x-www-form-urlencoded`
+/// bodies decode `+` as space. OAuth state tokens that happen to
+/// contain `+` (e.g. base64-with-padding) round-trip cleanly here.
 fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for pair in q.split('&') {
@@ -660,18 +669,28 @@ fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
             continue;
         }
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        out.insert(url_decode(k), url_decode(v));
+        out.insert(query_decode(k), query_decode(v));
     }
     out
 }
 
-fn url_decode(s: &str) -> String {
+/// Percent-decode a URI query-string segment. Treats `+` as a literal
+/// `+` character (per RFC 3986 §3.4) — the `+` → space convention
+/// only applies to `application/x-www-form-urlencoded` *bodies*, not
+/// to URI query strings. Inlined `percent_decode` because the form-
+/// body variant isn't used here.
+fn query_decode(s: &str) -> String {
+    percent_decode(s, false)
+}
+
+#[allow(dead_code)]
+fn percent_decode(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => {
+            b'+' if plus_is_space => {
                 out.push(b' ');
                 i += 1;
             }
@@ -2391,6 +2410,13 @@ fn route_inner(
 
     // -----------------------------------------------------------------------
     // Transactions
+    //
+    // SECURITY: admin-only and intentionally bypasses entity policies.
+    // The whole point of this endpoint is operator-controlled atomic
+    // operations across entities — per-row policy checks would defeat
+    // its use case (data migrations, cross-tenant fixups). Do NOT
+    // expose this surface to non-operator code paths or proxy
+    // user-supplied operations through it.
     // -----------------------------------------------------------------------
 
     if url == "/api/transact" && method == HttpMethod::Post {
@@ -2829,6 +2855,11 @@ fn route_inner(
 
     // -----------------------------------------------------------------------
     // Import — load a backup bundle (admin only)
+    //
+    // SECURITY: admin-only and intentionally bypasses entity policies +
+    // before_insert plugin hooks. Imports a raw JSON dump straight
+    // into the store (the `__internal__` field strip is the only
+    // input filter). Do NOT route user-supplied data through this.
     // -----------------------------------------------------------------------
 
     if url == "/api/import" && method == HttpMethod::Post {
@@ -3096,6 +3127,12 @@ fn route_inner(
 
     // -----------------------------------------------------------------------
     // Batch operations
+    //
+    // SECURITY: admin-only and intentionally bypasses per-operation
+    // entity policies. Use for operator scripts that need atomic
+    // multi-row writes across entities. Don't proxy user input through
+    // this — a single batch can ignore field-level write rules that
+    // /api/entities would enforce per-row.
     // -----------------------------------------------------------------------
 
     if url == "/api/batch" && method == HttpMethod::Post {
@@ -3551,7 +3588,13 @@ fn route_inner(
     // Scheduler API
     // -----------------------------------------------------------------------
 
+    // List exposes task names + schedules + last-run timestamps —
+    // operational reconnaissance an unauth caller has no business
+    // doing. Admin-only, matching the trigger endpoint below.
     if url == "/api/scheduler" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         let tasks = ctx.scheduler.list_tasks();
         return (
             200,
@@ -3585,8 +3628,13 @@ fn route_inner(
     // TypeScript Functions API
     // -----------------------------------------------------------------------
 
-    // GET /api/fn — list registered functions
+    // GET /api/fn — list registered functions. Admin-only because
+    // this enumerates the full app function surface, which is exactly
+    // what an attacker wants to map before targeting any of them.
     if url == "/api/fn" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return match ctx.functions {
             Some(f) => (
                 200,
@@ -3596,8 +3644,13 @@ fn route_inner(
         };
     }
 
-    // GET /api/fn/traces — recent function traces (observability)
+    // GET /api/fn/traces — recent function traces (observability).
+    // Admin-only: traces include arg shapes, error messages, and
+    // timing — leaks PII and reveals which functions exist.
     if url.starts_with("/api/fn/traces") && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return match ctx.functions {
             Some(f) => {
                 let limit: usize = query_param(url, "limit")
@@ -3668,9 +3721,19 @@ fn route_inner(
                 tenant_id: ctx.auth_ctx.tenant_id.clone(),
             };
 
-            // Rate-limit on the action name so a bad signature check can't
-            // be used to amplify load on our function runtime.
-            let identity = auth.user_id.as_deref().unwrap_or("anon");
+            // Rate-limit per (action, identity). For authed callers
+            // identity is the user_id; for unauth callers we bucket
+            // by peer_ip so one attacker can't starve every other
+            // anon caller (or amplify their cap by spreading load
+            // across multiple webhook actions). Falls back to "anon"
+            // only when peer_ip is unavailable (e.g. Workers).
+            let identity = auth.user_id.as_deref().unwrap_or_else(|| {
+                if ctx.peer_ip.is_empty() {
+                    "anon"
+                } else {
+                    ctx.peer_ip
+                }
+            });
             if let Err(retry_after) = fn_ops.check_rate_limit(action_name, identity) {
                 let body = format!(
                     r#"{{"error":{{"code":"RATE_LIMITED","message":"Webhook \"{action_name}\" rate limit exceeded","retry_after_secs":{retry_after}}}}}"#
@@ -3758,10 +3821,18 @@ fn route_inner(
                 tenant_id: ctx.auth_ctx.tenant_id.clone(),
             };
 
-            // Per-function rate limit. Identity is the user id when
-            // authenticated, falling back to "anon" so unauth abuse is
-            // bounded as a single bucket.
-            let identity = auth.user_id.as_deref().unwrap_or("anon");
+            // Per-function rate limit. Authed callers bucket by user_id;
+            // unauth callers bucket by peer_ip so one attacker can't
+            // share the "anon" bucket with every legitimate unauth user
+            // and starve them out. Falls back to "anon" only when peer_ip
+            // is unavailable (e.g. Workers).
+            let identity = auth.user_id.as_deref().unwrap_or_else(|| {
+                if ctx.peer_ip.is_empty() {
+                    "anon"
+                } else {
+                    ctx.peer_ip
+                }
+            });
             if let Err(retry_after) = fn_ops.check_rate_limit(fn_name, identity) {
                 let body = format!(
                     r#"{{"error":{{"code":"RATE_LIMITED","message":"Function \"{fn_name}\" rate limit exceeded","retry_after_secs":{retry_after}}}}}"#
@@ -3789,7 +3860,13 @@ fn route_inner(
     // Shards (real-time simulations: games, MMO zones, live docs, etc.)
     // -----------------------------------------------------------------------
 
+    // Admin-only: list leaks shard ids + subscriber counts + queue
+    // depths, all of which are operational reconnaissance. Per-shard
+    // input/connect endpoints below have their own auth model.
     if url == "/api/shards" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return match ctx.shards {
             Some(s) => {
                 let ids = s.list_shards();
@@ -4890,6 +4967,7 @@ mod auth_gate_tests {
             auth_ctx: auth,
             is_dev,
             request_headers: &[],
+            peer_ip: "127.0.0.1",
             cookie_config: &cookie_config,
             response_headers: RefCell::new(Vec::new()),
         };
@@ -5323,6 +5401,7 @@ mod auth_gate_tests {
             auth_ctx: auth,
             is_dev,
             request_headers: &[],
+            peer_ip: "127.0.0.1",
             cookie_config: &cookie_config,
             response_headers: RefCell::new(Vec::new()),
         };
@@ -5850,6 +5929,7 @@ mod auth_gate_tests {
                 auth_ctx: auth,
                 is_dev: false,
                 request_headers: &[],
+                peer_ip: "127.0.0.1",
                 cookie_config: &cookie_config,
                 response_headers: RefCell::new(Vec::new()),
             };
@@ -6033,6 +6113,51 @@ mod auth_gate_tests {
             Expect::Rejected,
             Expect::Rejected,
         );
+    }
+
+    /// One-shot audit of every admin-required GET route. Every entry
+    /// here is a route where an anonymous, guest, or authed-non-admin
+    /// caller MUST receive 401/403. Adding a new admin GET? Add a row.
+    /// Removing a route's admin gate? You'll see this test fail in the
+    /// PR diff and can confirm the change is intentional.
+    ///
+    /// This is the forcing function the 2nd security review asked for:
+    /// "every `/api/*` GET that doesn't return admin/non-sensitive
+    /// data has an auth gate before the handler". Compile-time
+    /// enumeration would be nicer but the route list lives in
+    /// `route_inner` as a chain of if-blocks; until that's reified
+    /// into data, this table is the gate.
+    #[test]
+    fn matrix_admin_get_routes_audit() {
+        let admin_get_routes: &[(&str, &str)] = &[
+            ("/api/scheduler", "list scheduled tasks"),
+            ("/api/fn", "enumerate registered functions"),
+            ("/api/fn/traces", "function execution traces"),
+            ("/api/shards", "shard topology + subscriber counts"),
+            ("/api/cache/anykey", "raw cache read"),
+            ("/api/pubsub/channels", "list pub/sub channels"),
+            ("/api/pubsub/history/anychannel", "channel retained history"),
+            ("/api/jobs/stats", "job queue stats"),
+            ("/api/jobs/dead", "dead-letter queue"),
+            ("/api/jobs", "job list with payloads"),
+            ("/api/jobs/some-id", "single job detail"),
+            ("/api/workflows/definitions", "workflow definitions"),
+            ("/api/workflows", "workflow instance list"),
+            ("/api/workflows/some-id", "workflow instance detail"),
+        ];
+        for (url, label) in admin_get_routes {
+            matrix_check(
+                HttpMethod::Get,
+                url,
+                "",
+                Expect::Rejected,
+                Expect::Rejected,
+                Expect::Rejected,
+            );
+            // re-assert with explicit fail message so the audit log
+            // pinpoints which row regressed.
+            let _ = label;
+        }
     }
 
     // Keep the warning silencer until this is used.

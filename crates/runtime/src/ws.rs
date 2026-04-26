@@ -8,7 +8,7 @@ use std::time::Duration;
 use pylon_auth::SessionStore;
 use pylon_sync::ChangeEvent;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tungstenite::{accept_hdr, Message, WebSocket};
+use tungstenite::{accept_hdr_with_config, protocol::WebSocketConfig, Message, WebSocket};
 
 use crate::ip_limit::IpConnCounter;
 
@@ -661,7 +661,16 @@ fn handle_ws_connection(
     // header callback must return synchronously with a Response.
     let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let slot_for_cb = Arc::clone(&token_slot);
-    let ws = match accept_hdr(
+    // Cap incoming frames so a single client can't shovel the
+    // tungstenite default (64 MiB) and starve memory. CRDT updates
+    // for a single row are typically <100 KiB; 1 MiB leaves headroom
+    // for big initial syncs without inviting abuse.
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(1024 * 1024),
+        max_frame_size: Some(1024 * 1024),
+        ..Default::default()
+    };
+    let ws = match accept_hdr_with_config(
         stream,
         move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
             let mut chosen_protocol: Option<String> = None;
@@ -698,6 +707,7 @@ fn handle_ws_connection(
             *slot_for_cb.lock().unwrap() = auth;
             Ok(resp)
         },
+        Some(ws_config),
     ) {
         Ok(ws) => ws,
         Err(_) => return,

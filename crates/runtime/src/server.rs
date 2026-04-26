@@ -1820,6 +1820,7 @@ fn start_server(
                     auth_ctx: &auth_ctx,
                     is_dev,
                     request_headers: &request_headers,
+                    peer_ip: peer_ip.as_str(),
                     cookie_config: cookie_config.as_ref(),
                     response_headers: std::cell::RefCell::new(Vec::new()),
                 };

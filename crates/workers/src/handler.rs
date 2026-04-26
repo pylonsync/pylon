@@ -138,6 +138,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // webhook endpoints won't get signature headers here. Populate
         // when adding webhook support to the Workers target.
         request_headers: &[],
+        // Workers (Cloudflare) doesn't expose a Rust-side peer socket
+        // here — the platform provides the client IP via cf-connecting-ip
+        // headers. Wire that through when we add header forwarding above.
+        peer_ip: "",
         cookie_config: &cookie_config,
         response_headers: std::cell::RefCell::new(Vec::new()),
     };
