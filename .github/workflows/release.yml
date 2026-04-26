@@ -190,8 +190,22 @@ jobs:
         run: |
           shasum -a 256 pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
             > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+      # Publish to the private source repo (so internal tooling, the
+      # release-please flow, and crates/npm jobs all observe the same tag).
       - uses: softprops/action-gh-release@v2
         with:
+          files: |
+            pylon-${{ github.ref_name }}-${{ matrix.target }}.*
+      # Mirror the same artifacts to the public release repo. This is the
+      # download surface install.sh and the Homebrew formula point at — keeps
+      # binaries reachable while the source repo is still private. Append-only
+      # against an existing release tag (idempotent across matrix jobs).
+      - name: Publish to public release repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: pylonsync/pylon-releases
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
+          tag_name: ${{ github.ref_name }}
           files: |
             pylon-${{ github.ref_name }}-${{ matrix.target }}.*
 

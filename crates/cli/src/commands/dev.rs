@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -56,6 +56,18 @@ struct WatchEvent {
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let once_mode = args.iter().any(|a| a == "--once");
+
+    // Load .env / .env.local before anything else so the runtime sees
+    // the resulting env vars when it boots. Process env always wins; among
+    // files, .env.local overrides .env. We walk up from cwd to find them
+    // — monorepos like pylon-cloud put env files at the workspace root
+    // while `pylon dev` runs from apps/<name>/.
+    let loaded_env = load_env_files();
+    if !json_mode && !loaded_env.is_empty() {
+        for p in &loaded_env {
+            println!("  env: {}", p.display());
+        }
+    }
 
     let port: u16 = args
         .windows(2)
@@ -309,10 +321,32 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     let mut last_mtimes = collect_ts_mtimes(watch_dir);
     let functions_dir = watch_dir.join("functions");
 
+    // Watch env files too so editing OAuth secrets etc. triggers a restart
+    // without needing to Ctrl-C. We re-derive the candidate set here (env
+    // files were already loaded in run() so the runtime above sees them);
+    // this just gives us paths to mtime-poll.
+    let env_watch_paths = env_watch_paths();
+    let mut last_env_mtimes = collect_env_mtimes(&env_watch_paths);
+
     loop {
         std::thread::sleep(Duration::from_millis(500));
 
+        let current_env_mtimes = collect_env_mtimes(&env_watch_paths);
+        let env_changed = current_env_mtimes != last_env_mtimes;
+        last_env_mtimes = current_env_mtimes;
+
         let current_mtimes = collect_ts_mtimes(watch_dir);
+        if env_changed {
+            if !json_mode {
+                println!();
+                println!("  ✓ env changed — restarting");
+                println!();
+            }
+            last_mtimes = current_mtimes;
+            exec_restart(json_mode);
+            continue;
+        }
+
         if current_mtimes != last_mtimes {
             // Compute which files actually changed.
             let functions_changed = current_mtimes.iter().any(|(path, mtime)| {
@@ -336,32 +370,8 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                     println!("  ✓ functions changed — restarting");
                     println!();
                 }
-                // Replace the current process with a fresh `pylon dev`.
-                // The terminal stays; sessions + DB + any other on-disk
-                // state survive because they're in .pylon/. Open WS
-                // connections drop and the client reconnects in ~100ms.
-                let args: Vec<String> = std::env::args().collect();
-                let exe = match std::env::current_exe() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("[dev] could not locate self for restart: {e}");
-                        continue;
-                    }
-                };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    let err = std::process::Command::new(&exe).args(&args[1..]).exec();
-                    eprintln!("[dev] exec failed: {err}");
-                }
-                #[cfg(not(unix))]
-                {
-                    // Windows: exec isn't available. Spawn a new process
-                    // and exit, so the supervising shell sees a clean
-                    // restart (the spawned child inherits the terminal).
-                    let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
-                    std::process::exit(0);
-                }
+                exec_restart(json_mode);
+                continue;
             }
 
             // Non-functions change — incremental rebuild only.
@@ -556,6 +566,92 @@ fn write_generated_files(
     let client_path = dir.join("pylon.client.ts");
     let client_ts = generate_client_ts(manifest);
     let _ = std::fs::write(&client_path, client_ts);
+}
+
+/// Walk up from cwd looking for `.env.local` and `.env`, then load them
+/// into the process environment. Stops at the first directory that
+/// contains either file (so monorepo roots win over per-app dirs that
+/// happen to have nothing). Process env always wins; among files,
+/// `.env.local` overrides `.env`.
+fn load_env_files() -> Vec<PathBuf> {
+    let mut loaded = Vec::new();
+    let Ok(cwd) = std::env::current_dir() else {
+        return loaded;
+    };
+    let mut dir: Option<&Path> = Some(cwd.as_path());
+    while let Some(d) = dir {
+        let local = d.join(".env.local");
+        let base = d.join(".env");
+        if local.exists() || base.exists() {
+            // Load .env.local first — dotenvy::from_path doesn't override
+            // already-set vars, so subsequent .env loads only fill gaps.
+            if local.exists() && dotenvy::from_path(&local).is_ok() {
+                loaded.push(local);
+            }
+            if base.exists() && dotenvy::from_path(&base).is_ok() {
+                loaded.push(base);
+            }
+            break;
+        }
+        dir = d.parent();
+    }
+    loaded
+}
+
+/// Paths to watch for env-file changes. Mirrors `load_env_files`'s walk:
+/// stop at the first ancestor with either file. If none exist, fall back
+/// to cwd candidates so creating `.env.local` mid-session still fires.
+fn env_watch_paths() -> Vec<PathBuf> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let mut dir: Option<&Path> = Some(cwd.as_path());
+    while let Some(d) = dir {
+        let local = d.join(".env.local");
+        let base = d.join(".env");
+        if local.exists() || base.exists() {
+            return vec![local, base];
+        }
+        dir = d.parent();
+    }
+    vec![cwd.join(".env.local"), cwd.join(".env")]
+}
+
+/// mtime per env-watch path. Missing files map to `None`, so a transition
+/// from missing → present (or vice versa) registers as a change.
+fn collect_env_mtimes(paths: &[PathBuf]) -> HashMap<PathBuf, Option<SystemTime>> {
+    paths
+        .iter()
+        .map(|p| {
+            let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            (p.clone(), mtime)
+        })
+        .collect()
+}
+
+/// Replace the current process with a fresh `pylon dev` invocation.
+/// On-disk state (sessions, DB, uploads) survives in `.pylon/`. WS
+/// connections drop and reconnect in ~100ms.
+fn exec_restart(_json_mode: bool) {
+    let args: Vec<String> = std::env::args().collect();
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[dev] could not locate self for restart: {e}");
+            return;
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&exe).args(&args[1..]).exec();
+        eprintln!("[dev] exec failed: {err}");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
+        std::process::exit(0);
+    }
 }
 
 /// Collect mtime of `.ts` files in a directory, excluding generated files.

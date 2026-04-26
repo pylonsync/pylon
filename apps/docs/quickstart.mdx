@@ -7,20 +7,31 @@ This walkthrough gets a Pylon server running with a schema, one policy, and one 
 
 ## 1. Install the CLI
 
-Pylon is currently installed from source. A `curl` install script and Homebrew tap are on the roadmap.
-
 ```bash
-git clone https://github.com/pylonsync/pylon
-cd pylon
-cargo install --path crates/cli --locked
+curl -fsSL https://pylonsync.com/install.sh | bash
 ```
 
-Requires Rust ≥ 1.85 and Bun ≥ 1.0.
+Downloads a prebuilt `pylon` binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required.
+
+Bun ≥ 1.0 is needed at runtime to execute server functions.
 
 Verify:
 
 ```bash
 pylon --version
+```
+
+Other ways to install:
+
+```bash
+# Homebrew (macOS + Linux)
+brew install pylonsync/tap/pylon
+
+# Cargo (compiles from source)
+cargo install pylon-cli
+
+# Docker
+docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
 ## 2. Scaffold a new app

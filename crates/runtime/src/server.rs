@@ -430,6 +430,13 @@ fn start_server(
             Set it to an explicit origin (https://app.example.com)."
             .into());
     }
+    // Browsers forbid combining `Access-Control-Allow-Origin: *` with
+    // `Access-Control-Allow-Credentials: true`. Cookie-based auth needs
+    // credentials, so we only emit the credentials header when the origin
+    // is specific. In dev with `*` we lose cookies-from-cross-origin
+    // (acceptable: dev typically uses same-origin proxying), but we
+    // refuse to send a header combo browsers will reject either way.
+    let allow_credentials = cors_origin != "*";
     // Validate the origin once so per-request header construction can never
     // panic on bad bytes. Previously every `Header::from_bytes(...).unwrap()`
     // was a potential request-triggered DoS via env misconfiguration.
@@ -446,6 +453,17 @@ fn start_server(
 
     // Admin token: read once at startup, not per-request.
     let admin_token: Option<String> = std::env::var("PYLON_ADMIN_TOKEN").ok();
+
+    // Session cookie config — built once. Cookie name defaults to
+    // `${app_name}_session` so multiple Pylon apps on the same parent
+    // domain don't clobber each other's cookies. Browsers receive an
+    // HttpOnly+Secure+SameSite=Lax cookie by default; the same opaque
+    // session token continues to work via `Authorization: Bearer …`
+    // for CLI / mobile / server-to-server callers.
+    let cookie_config = Arc::new({
+        let app_name = runtime.manifest().name.as_str();
+        pylon_auth::CookieConfig::from_env(&pylon_auth::CookieConfig::default_name_for(app_name))
+    });
 
     // CSRF protection. Enforced inline at the HTTP layer because the plugin
     // trait's `on_request` hook doesn't see request headers. For
@@ -588,6 +606,8 @@ fn start_server(
         let fn_ops_ref = fn_ops_maybe.clone();
         let shards_ref = shard_registry.clone();
         let cors_origin = cors_origin.clone();
+        let cookie_config = Arc::clone(&cookie_config);
+        let allow_credentials = allow_credentials;
         let is_dev = is_dev;
 
         let method = request.method().clone();
@@ -799,7 +819,12 @@ fn start_server(
         // shard SSE, fn streaming, AI streaming) can enforce auth the same
         // way the router does. Previously these paths ran before auth
         // extraction and bypassed the plugin/router auth chain entirely.
-        let auth_token: Option<String> = request
+        //
+        // Two transports for the same opaque session token:
+        //   1. `Authorization: Bearer <token>` — CLI, mobile, server-to-server
+        //   2. `Cookie: <name>=<token>` — browsers (HttpOnly, XSS can't read)
+        // Bearer wins when both are present (explicit beats ambient).
+        let bearer_token: Option<String> = request
             .headers()
             .iter()
             .find(|h| h.field.as_str() == "Authorization" || h.field.as_str() == "authorization")
@@ -807,6 +832,16 @@ fn start_server(
                 let val = h.value.as_str();
                 val.strip_prefix("Bearer ").map(|t| t.to_string())
             });
+        let cookie_token: Option<String> = if bearer_token.is_some() {
+            None
+        } else {
+            request
+                .headers()
+                .iter()
+                .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+                .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name))
+        };
+        let auth_token: Option<String> = bearer_token.or(cookie_token);
         let auth_ctx = if admin_token.is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
@@ -1650,7 +1685,8 @@ fn start_server(
         // Serving a WWW-Authenticate Basic realm isn't useful here because
         // admin auth is bearer-token based. Callers get a 401 and should
         // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
-        let (status, response_body, content_type, is_studio) = if (url == "/studio"
+        let (status, response_body, content_type, is_studio, extra_headers) = if (url
+            == "/studio"
             || url == "/studio/")
             && method == Method::Get
         {
@@ -1697,7 +1733,7 @@ fn start_server(
                 .unwrap_or_else(|| "http".to_string());
             let base = format!("{scheme}://{host}");
             let html = pylon_studio_api::generate_studio_html(rt.manifest(), &base);
-            (200u16, html, "text/html", true)
+            (200u16, html, "text/html", true, Vec::<(String, String)>::new())
         } else {
             // Run plugin middleware with per-request metadata so rate-limit
             // plugins can bucket by peer IP (not just user id) when the
@@ -1711,12 +1747,13 @@ fn start_server(
                     json_error(&e.code, &e.message),
                     "application/json",
                     false,
+                    Vec::new(),
                 )
             } else if let Some((s, b)) =
                 pr.try_handle_route(method.as_str(), &url, &body, &auth_ctx)
             {
                 // Plugin handled the route.
-                (s, b, "application/json", false)
+                (s, b, "application/json", false, Vec::new())
             } else {
                 let notifier = WsSseNotifier {
                     ws: Arc::clone(&wh),
@@ -1770,6 +1807,8 @@ fn start_server(
                     auth_ctx: &auth_ctx,
                     is_dev,
                     request_headers: &request_headers,
+                    cookie_config: cookie_config.as_ref(),
+                    response_headers: std::cell::RefCell::new(Vec::new()),
                 };
                 let http_method = HttpMethod::from_str(method.as_str());
                 let (s, b, _ct) = pylon_router::route(
@@ -1779,7 +1818,8 @@ fn start_server(
                     &body,
                     auth_token.as_deref(),
                 );
-                (s, b, "application/json", false)
+                let extra_headers = router_ctx.take_response_headers();
+                (s, b, "application/json", false, extra_headers)
             }
         };
 
@@ -1807,6 +1847,29 @@ fn start_server(
                 )
                 .unwrap(),
             );
+        // Cookie-based auth requires `Access-Control-Allow-Credentials:
+        // true` on the response, paired with a specific origin. Vary
+        // ensures intermediaries don't cache one origin's response and
+        // serve it back to a different origin's browser.
+        if allow_credentials {
+            response = response
+                .with_header(
+                    Header::from_bytes("Access-Control-Allow-Credentials", "true").unwrap(),
+                )
+                .with_header(Header::from_bytes("Vary", "Origin").unwrap());
+        }
+
+        // Apply any extra headers handlers attached via the router context
+        // (Set-Cookie on login/logout, Location on OAuth GET callback).
+        // Bytes from these headers come from server-built strings — bad
+        // bytes here would be a programming bug, not request-driven, so a
+        // failed Header::from_bytes is silently dropped rather than
+        // poisoning the response.
+        for (name, value) in extra_headers {
+            if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes().to_vec()) {
+                response = response.with_header(h);
+            }
+        }
 
         // Add Content-Security-Policy for Studio HTML responses.
         //

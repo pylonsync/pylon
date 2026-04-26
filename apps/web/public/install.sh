@@ -2,7 +2,7 @@
 # pylon installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ericc59/agentdb/main/install.sh | bash
+#   curl -fsSL https://pylonsync.com/install.sh | bash
 #
 # Honors:
 #   PYLON_VERSION   release tag to install (default: latest)
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO="ericc59/agentdb"
+REPO="pylonsync/pylon-releases"
 INSTALL_DIR="${PYLON_INSTALL_DIR:-$HOME/.local/bin}"
 
 err() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }

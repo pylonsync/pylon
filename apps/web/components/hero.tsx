@@ -5,9 +5,9 @@ import { CodeLines, type Lang } from "@/lib/highlight";
 
 function InstallCmd() {
   const [copied, setCopied] = React.useState(false);
+  const cmd = "curl -fsSL https://pylonsync.com/install.sh | bash";
   const onClick = () => {
-    const text = "cargo install pylon-cli";
-    navigator.clipboard?.writeText(text);
+    navigator.clipboard?.writeText(cmd);
     setCopied(true);
     setTimeout(() => setCopied(false), 1400);
   };
@@ -18,7 +18,7 @@ function InstallCmd() {
       aria-label="Copy install command"
     >
       <span className="dollar">$</span>
-      <span>cargo install pylon-cli</span>
+      <span>{cmd}</span>
       <svg
         className="copy-ico"
         viewBox="0 0 24 24"
@@ -184,9 +184,9 @@ function ChatDemo() {
 
 function HeroTerminal() {
   const lines = [
-    { t: "prompt", v: "❯ ", c: "cargo install --path crates/cli --locked" },
-    { t: "out", v: "   Compiling pylon-cli v0.1.0" },
-    { t: "out-ok", v: "    Finished release in 41.2s" },
+    { t: "prompt", v: "❯ ", c: "curl -fsSL https://pylonsync.com/install.sh | bash" },
+    { t: "out", v: "   ==> Resolving latest release..." },
+    { t: "out-ok", v: "   ==> Installed pylon v0.2.6 to ~/.local/bin/pylon" },
     { t: "prompt", v: "❯ ", c: "pylon dev app.ts" },
     { t: "out", v: "  ✓ my-app v0.1.0 — 12 entities, 4 policies" },
     { t: "out-accent", v: "  Server:   http://localhost:4321" },

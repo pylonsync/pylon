@@ -108,6 +108,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let auth_ctx = session_store.resolve(auth_token.as_deref());
     let noop = NoopAll::new(&manifest);
     let email = NoopEmailSender;
+    let cookie_config = pylon_auth::CookieConfig::from_env(
+        &pylon_auth::CookieConfig::default_name_for(&manifest.name),
+    );
 
     let ctx = RouterContext {
         store: &store,
@@ -135,6 +138,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // webhook endpoints won't get signature headers here. Populate
         // when adding webhook support to the Workers target.
         request_headers: &[],
+        cookie_config: &cookie_config,
+        response_headers: std::cell::RefCell::new(Vec::new()),
     };
 
     let (status, response_body, _ct) = route(&ctx, method, &url, &body, auth_token.as_deref());

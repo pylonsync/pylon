@@ -5,10 +5,11 @@
 //! no `tungstenite`, no `rusqlite`. It works with any [`DataStore`]
 //! implementation (SQLite Runtime, Cloudflare D1, etc.).
 
-use pylon_auth::{AuthContext, MagicCodeStore, OAuthStateStore, SessionStore};
+use pylon_auth::{AuthContext, CookieConfig, MagicCodeStore, OAuthStateStore, SessionStore};
 use pylon_http::{DataError, DataStore, HttpMethod};
 use pylon_policy::PolicyEngine;
 use pylon_sync::{ChangeKind, ChangeLog, SyncCursor};
+use std::cell::RefCell;
 
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast
@@ -490,6 +491,223 @@ pub struct RouterContext<'a> {
     /// to TypeScript actions. Empty slice on platforms that don't forward
     /// headers (e.g. internal calls).
     pub request_headers: &'a [(String, String)],
+    /// Session cookie shape (name, domain, attrs). Handlers use this to
+    /// emit Set-Cookie headers via [`RouterContext::add_response_header`]
+    /// when they want a browser-bound session.
+    pub cookie_config: &'a CookieConfig,
+    /// Extra response headers handlers want to attach (e.g. Set-Cookie,
+    /// Location). The runtime drains this after `route()` returns and
+    /// merges them into the outgoing response. Interior mutability so
+    /// handlers don't need a `&mut` ctx.
+    pub response_headers: RefCell<Vec<(String, String)>>,
+}
+
+impl<'a> RouterContext<'a> {
+    /// Queue a header to be added to the response built from this request.
+    pub fn add_response_header(&self, name: impl Into<String>, value: impl Into<String>) {
+        self.response_headers
+            .borrow_mut()
+            .push((name.into(), value.into()));
+    }
+
+    /// Drain the queued response headers. Runtime calls this once after
+    /// `route()` returns, before constructing the wire response.
+    pub fn take_response_headers(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.response_headers.borrow_mut())
+    }
+
+    /// Read the request's `Origin` header, if any. Browsers always send
+    /// Origin on cross-origin XHR/fetch and on POSTs; non-browser
+    /// callers (CLI, server-to-server) typically don't.
+    pub fn request_origin(&self) -> Option<&str> {
+        self.request_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Emit a session cookie when the request looks like it came from a
+    /// browser (i.e. carries Origin). Non-browser callers still receive
+    /// the JSON token in the body and ignore the missing cookie.
+    /// Origin allowlisting is enforced at the runtime CSRF layer for
+    /// state-changing methods, so handlers don't need to re-check here.
+    pub fn maybe_set_session_cookie(&self, token: &str) {
+        if self.request_origin().is_some() {
+            self.add_response_header("Set-Cookie", self.cookie_config.set_value(token));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OAuth callback shared logic (POST returns JSON, GET 302s with cookie)
+// ---------------------------------------------------------------------------
+
+struct OAuthError {
+    status: u16,
+    code: &'static str,
+    message: String,
+}
+
+/// Shared OAuth code-for-session exchange. Returns the user_id + minted
+/// session, or a structured error suitable for both JSON (POST) and
+/// 302-redirect-with-error-param (GET) responses.
+fn complete_oauth_login(
+    ctx: &RouterContext,
+    provider: &str,
+    state: Option<&str>,
+    code: Option<&str>,
+    dev_email: Option<&str>,
+    dev_name: Option<&str>,
+) -> Result<(String, pylon_auth::Session), OAuthError> {
+    // CSRF state. Same store the GET /api/auth/login/:provider handler
+    // populated when minting the auth URL.
+    if !state.is_some_and(|s| ctx.oauth_state.validate(s, provider)) {
+        return Err(OAuthError {
+            status: 403,
+            code: "OAUTH_INVALID_STATE",
+            message: "Invalid or missing OAuth state parameter".into(),
+        });
+    }
+
+    // Resolve (email, name): real OAuth code, or dev-mode email shortcut.
+    // The dev shortcut exists so integration tests don't need to spin up
+    // a real provider — gated on PYLON_DEV_MODE so prod can never mint
+    // a session from a caller-supplied email.
+    let (email, name) = if let Some(code) = code {
+        let registry = pylon_auth::OAuthRegistry::from_env();
+        let config = registry.get(provider).cloned().ok_or_else(|| OAuthError {
+            status: 404,
+            code: "PROVIDER_NOT_FOUND",
+            message: format!("OAuth provider \"{provider}\" not configured"),
+        })?;
+        let access_token = config.exchange_code(code).map_err(|err| OAuthError {
+            status: 502,
+            code: "OAUTH_TOKEN_EXCHANGE_FAILED",
+            message: format!("token exchange failed: {err}"),
+        })?;
+        config
+            .fetch_userinfo(&access_token)
+            .map_err(|err| OAuthError {
+                status: 502,
+                code: "OAUTH_TOKEN_EXCHANGE_FAILED",
+                message: format!("userinfo fetch failed: {err}"),
+            })?
+    } else if ctx.is_dev {
+        match dev_email {
+            Some(e) => (e.to_string(), dev_name.map(String::from)),
+            None => {
+                return Err(OAuthError {
+                    status: 400,
+                    code: "MISSING_FIELD",
+                    message: "OAuth callback requires `code` (or `email` in dev mode)".into(),
+                })
+            }
+        }
+    } else {
+        return Err(OAuthError {
+            status: 400,
+            code: "MISSING_FIELD",
+            message: "OAuth callback requires an authorization `code` from the provider".into(),
+        });
+    };
+
+    let now = format!(
+        "{}Z",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let user_id = match ctx.store.lookup("User", "email", &email) {
+        Ok(Some(row)) => {
+            let id = row["id"].as_str().unwrap_or("").to_string();
+            // Returning OAuth user: opportunistically stamp emailVerified
+            // since the provider just vouched for the address. Best-effort
+            // — schemas without the field silently drop it.
+            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                let _ = ctx
+                    .store
+                    .update("User", &id, &serde_json::json!({ "emailVerified": now }));
+            }
+            id
+        }
+        _ => {
+            let display_name = name.as_deref().unwrap_or(&email);
+            ctx.store
+                .insert(
+                    "User",
+                    &serde_json::json!({
+                        "email": email,
+                        "displayName": display_name,
+                        "emailVerified": now,
+                        "createdAt": now,
+                    }),
+                )
+                .unwrap_or_else(|_| email.clone())
+        }
+    };
+    let session = ctx.session_store.create(user_id.clone());
+    Ok((user_id, session))
+}
+
+/// Parse a `key=value&key=value` query string into a map. URL-decoding is
+/// minimal — handles `+` → space and `%XX` hex escapes, which is what
+/// OAuth providers send.
+fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        out.insert(url_decode(k), url_decode(v));
+    }
+    out
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +810,7 @@ fn route_inner(
     // POST /api/auth/guest
     if url == "/api/auth/guest" && method == HttpMethod::Post {
         let session = ctx.session_store.create_guest();
+        ctx.maybe_set_session_cookie(&session.token);
         return (
             201,
             serde_json::json!({"token": session.token, "user_id": session.user_id, "guest": true})
@@ -848,6 +1067,7 @@ fn route_inner(
                         .unwrap_or_else(|_| email.to_string()),
                 };
                 let session = ctx.session_store.create(user_id.clone());
+                ctx.maybe_set_session_cookie(&session.token);
                 return (
                     200,
                     serde_json::json!({"token": session.token, "user_id": user_id, "expires_at": session.expires_at}).to_string(),
@@ -1128,6 +1348,7 @@ fn route_inner(
         };
 
         let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
         return (
             200,
             serde_json::json!({
@@ -1211,6 +1432,7 @@ fn route_inner(
             }
         };
         let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
         return (
             200,
             serde_json::json!({
@@ -1243,15 +1465,32 @@ fn route_inner(
     }
 
     // GET /api/auth/login/:provider
-    if let Some(provider) = url.strip_prefix("/api/auth/login/") {
-        let provider = provider.split('?').next().unwrap_or(provider);
+    //
+    // Two response shapes:
+    //   - Default: returns `{ redirect, state }` JSON. Caller-driven flow
+    //     (SPAs that want to navigate the browser themselves).
+    //   - `?redirect=1`: 302 directly to the provider's auth URL. The
+    //     "click-and-go" browser flow — paired with the GET cookie-mode
+    //     callback, the user never touches the dashboard's JS for OAuth.
+    if let Some(provider_raw) = url.strip_prefix("/api/auth/login/") {
+        let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
         if method == HttpMethod::Get {
             let registry = pylon_auth::OAuthRegistry::from_env();
             if let Some(config) = registry.get(provider) {
                 let state = ctx.oauth_state.create(provider);
+                let redirect = config.auth_url_with_state(&state);
+                let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+                let want_redirect = parse_query(query)
+                    .get("redirect")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if want_redirect {
+                    ctx.add_response_header("Location", redirect);
+                    return (302, String::new());
+                }
                 return (
                     200,
-                    serde_json::json!({"redirect": config.auth_url_with_state(&state), "state": state}).to_string(),
+                    serde_json::json!({"redirect": redirect, "state": state}).to_string(),
                 );
             }
             return (
@@ -1265,12 +1504,17 @@ fn route_inner(
         }
     }
 
-    // POST /api/auth/callback/:provider — exchange authorization code for
-    // a session. Accepts `{code, state}` (real OAuth flow) or a legacy
-    // `{email, state}` shape where the client has already resolved the user
-    // (kept for server-side testing and non-browser clients).
-    if let Some(provider) = url.strip_prefix("/api/auth/callback/") {
-        let provider = provider.split('?').next().unwrap_or(provider);
+    // /api/auth/callback/:provider — exchange authorization code for a
+    // session. Two transports for the same exchange:
+    //   - POST {code, state}: returns the session token in JSON. Used by
+    //     non-browser clients (CLI, mobile, server-to-server) and by SPAs
+    //     that explicitly want bearer-token semantics.
+    //   - GET ?code=…&state=…: the URL Google/GitHub redirect to. Sets the
+    //     session cookie via Set-Cookie and 302s to PYLON_DASHBOARD_URL.
+    //     This is the secure-by-default browser path: token never reaches
+    //     JS, so XSS can't lift the session.
+    if let Some(provider_raw) = url.strip_prefix("/api/auth/callback/") {
+        let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
         if method == HttpMethod::Post {
             let data: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
@@ -1285,154 +1529,81 @@ fn route_inner(
                     )
                 }
             };
-
-            // Validate CSRF state.
             let state = data.get("state").and_then(|v| v.as_str());
-            match state {
-                Some(s) if ctx.oauth_state.validate(s, provider) => {}
+            let code = data.get("code").and_then(|v| v.as_str());
+            let dev_email = data.get("email").and_then(|v| v.as_str());
+            let dev_name = data.get("name").and_then(|v| v.as_str());
+            return match complete_oauth_login(ctx, provider, state, code, dev_email, dev_name) {
+                Ok((user_id, session)) => {
+                    ctx.maybe_set_session_cookie(&session.token);
+                    (
+                        200,
+                        serde_json::json!({
+                            "token": session.token,
+                            "user_id": user_id,
+                            "provider": provider,
+                            "expires_at": session.expires_at,
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(err) => (err.status, json_error(err.code, &err.message)),
+            };
+        }
+        if method == HttpMethod::Get {
+            // Browser callback: redirect target Google/GitHub send the user
+            // to after they approve. Read code+state out of the query
+            // string, run the same exchange, set the session cookie, and
+            // 302 to the dashboard. Errors redirect to
+            // `${dashboard}/login?oauth_error=<code>` so the dashboard
+            // can show a real message instead of a Pylon JSON blob.
+            let dashboard = match std::env::var("PYLON_DASHBOARD_URL") {
+                Ok(v) if !v.is_empty() => v,
                 _ => {
                     return (
-                        403,
+                        500,
                         json_error(
-                            "OAUTH_INVALID_STATE",
-                            "Invalid or missing OAuth state parameter",
+                            "OAUTH_DASHBOARD_URL_MISSING",
+                            "GET /api/auth/callback/:provider requires PYLON_DASHBOARD_URL to know where to redirect after sign-in",
                         ),
                     )
                 }
+            };
+            let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let params = parse_query(query);
+            let state = params.get("state").map(String::as_str);
+            let code = params.get("code").map(String::as_str);
+            match complete_oauth_login(ctx, provider, state, code, None, None) {
+                Ok((_user_id, session)) => {
+                    let cookie_value = ctx.cookie_config.set_value(&session.token);
+                    ctx.add_response_header("Set-Cookie", cookie_value);
+                    ctx.add_response_header("Location", dashboard);
+                    return (302, String::new());
+                }
+                Err(err) => {
+                    let target = format!(
+                        "{}/login?oauth_error={}",
+                        dashboard.trim_end_matches('/'),
+                        url_encode(err.code)
+                    );
+                    ctx.add_response_header("Location", target);
+                    return (302, String::new());
+                }
             }
-
-            // Require a real OAuth authorization code — the provider must
-            // vouch for the email. Previously a legacy `{email, state}` path
-            // allowed any caller who could fetch a state token to mint a
-            // session for any email, which is account takeover. That path is
-            // gone except under PYLON_DEV_MODE=true for integration tests
-            // that don't want to run a real provider.
-            let code = data.get("code").and_then(|v| v.as_str());
-
-            let (email, name) = if let Some(code) = code {
-                let registry = pylon_auth::OAuthRegistry::from_env();
-                let config = match registry.get(provider) {
-                    Some(c) => c.clone(),
-                    None => {
-                        return (
-                            404,
-                            json_error(
-                                "PROVIDER_NOT_FOUND",
-                                &format!("OAuth provider \"{provider}\" not configured"),
-                            ),
-                        )
-                    }
-                };
-                match config.exchange_code(code) {
-                    Ok(access_token) => match config.fetch_userinfo(&access_token) {
-                        Ok((e, n)) => (e, n),
-                        Err(err) => {
-                            return (
-                                502,
-                                json_error(
-                                    "OAUTH_TOKEN_EXCHANGE_FAILED",
-                                    &format!("userinfo fetch failed: {err}"),
-                                ),
-                            )
-                        }
-                    },
-                    Err(err) => {
-                        return (
-                            502,
-                            json_error(
-                                "OAUTH_TOKEN_EXCHANGE_FAILED",
-                                &format!("token exchange failed: {err}"),
-                            ),
-                        )
-                    }
-                }
-            } else if ctx.is_dev {
-                let explicit_email = data.get("email").and_then(|v| v.as_str());
-                let explicit_name = data.get("name").and_then(|v| v.as_str());
-                match explicit_email {
-                    Some(e) => (e.to_string(), explicit_name.map(String::from)),
-                    None => {
-                        return (
-                            400,
-                            json_error(
-                                "MISSING_FIELD",
-                                "OAuth callback requires `code` (or `email` in dev mode)",
-                            ),
-                        )
-                    }
-                }
-            } else {
-                return (
-                    400,
-                    json_error(
-                        "MISSING_FIELD",
-                        "OAuth callback requires an authorization `code` from the provider",
-                    ),
-                );
-            };
-
-            let now = format!(
-                "{}Z",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            );
-            let user_id = match ctx.store.lookup("User", "email", &email) {
-                Ok(Some(row)) => {
-                    let id = row["id"].as_str().unwrap_or("").to_string();
-                    // Returning OAuth user: opportunistically stamp
-                    // emailVerified if not already set. The provider
-                    // just vouched for the address; no reason to make
-                    // them go through the verify flow again. Best-effort
-                    // — schemas without the field silently drop it.
-                    if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                        let _ = ctx.store.update(
-                            "User",
-                            &id,
-                            &serde_json::json!({ "emailVerified": now }),
-                        );
-                    }
-                    id
-                }
-                _ => {
-                    let display_name = name.as_deref().unwrap_or(&email);
-                    // New OAuth signup: include emailVerified in the
-                    // initial insert so it lands atomically. Provider
-                    // already verified, so skipping the verify step
-                    // is the expected UX.
-                    ctx.store
-                        .insert(
-                            "User",
-                            &serde_json::json!({
-                                "email": email,
-                                "displayName": display_name,
-                                "emailVerified": now,
-                                "createdAt": now,
-                            }),
-                        )
-                        .unwrap_or_else(|_| email.clone())
-                }
-            };
-            let session = ctx.session_store.create(user_id.clone());
-            return (
-                200,
-                serde_json::json!({
-                    "token": session.token,
-                    "user_id": user_id,
-                    "provider": provider,
-                    "expires_at": session.expires_at,
-                })
-                .to_string(),
-            );
         }
     }
 
     // DELETE /api/auth/session
+    //
+    // Always emit a clearing Set-Cookie. Idempotent for bearer-only
+    // callers (browser sees nothing to clear) and necessary for cookie
+    // callers — without it the browser would keep sending a now-revoked
+    // token until the cookie's own Max-Age expired.
     if url == "/api/auth/session" && method == HttpMethod::Delete {
         if let Some(token) = auth_token {
             ctx.session_store.revoke(token);
         }
+        ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
         return (200, serde_json::json!({"revoked": true}).to_string());
     }
 
@@ -4213,7 +4384,7 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod auth_gate_tests {
     use super::*;
-    use pylon_auth::{AuthContext, MagicCodeStore, OAuthStateStore, SessionStore};
+    use pylon_auth::{AuthContext, CookieConfig, MagicCodeStore, OAuthStateStore, SessionStore};
     use pylon_kernel::{AppManifest, MANIFEST_VERSION};
     use pylon_policy::PolicyEngine;
     use pylon_sync::ChangeLog;
@@ -4521,6 +4692,7 @@ mod auth_gate_tests {
         let files = StubFiles;
         let openapi = StubOpenApi;
         let email = StubEmail;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
 
         let ctx = RouterContext {
             store: &store,
@@ -4545,6 +4717,8 @@ mod auth_gate_tests {
             auth_ctx: auth,
             is_dev,
             request_headers: &[],
+            cookie_config: &cookie_config,
+            response_headers: RefCell::new(Vec::new()),
         };
         f(&ctx);
     }
@@ -4951,6 +5125,7 @@ mod auth_gate_tests {
             sent: std::sync::Mutex::new(vec![]),
         };
         let hooks = NoopPluginHooks;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
 
         let ctx = RouterContext {
             store: &store,
@@ -4975,6 +5150,8 @@ mod auth_gate_tests {
             auth_ctx: auth,
             is_dev,
             request_headers: &[],
+            cookie_config: &cookie_config,
+            response_headers: RefCell::new(Vec::new()),
         };
         f(&ctx, &store, &email, &magic_codes);
     }

@@ -2,7 +2,7 @@
 
 A self-hostable, single-binary backend for web, mobile, and real-time apps.
 
-[![CI](https://github.com/ericc59/agentdb/actions/workflows/ci.yml/badge.svg)](https://github.com/ericc59/agentdb/actions/workflows/ci.yml)
+[![CI](https://github.com/pylonsync/pylon/actions/workflows/ci.yml/badge.svg)](https://github.com/pylonsync/pylon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 pylon gives you what Convex / Firebase / Supabase do — declarative schema,
@@ -11,7 +11,7 @@ binary you can `scp` to a VPS or run with SQLite or Postgres.
 
 ```sh
 # Install
-cargo install --git https://github.com/ericc59/agentdb pylon-cli
+curl -fsSL https://pylonsync.com/install.sh | bash
 
 # New project
 pylon init my-app
@@ -55,18 +55,20 @@ Visit `http://localhost:4321/studio` for the inspector.
 ### 1. Install
 
 ```sh
-# Curl-pipe-bash (Linux + macOS)
-curl -fsSL https://raw.githubusercontent.com/ericc59/agentdb/main/install.sh | bash
+curl -fsSL https://pylonsync.com/install.sh | bash
+```
 
-# Homebrew
-brew tap ericc59/agentdb https://github.com/ericc59/agentdb
-brew install pylon
+Other install paths:
 
-# From source
-cargo install --git https://github.com/ericc59/agentdb pylon-cli
+```sh
+# Homebrew (macOS + Linux)
+brew install pylonsync/tap/pylon
+
+# Cargo (compiles from source)
+cargo install pylon-cli
 
 # Docker
-docker pull ghcr.io/ericc59/agentdb:latest
+docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
 ### 2. Define your schema
@@ -203,7 +205,7 @@ PYLON_DEV_MODE=false
 
 ## Deployment
 
-- **Self-host**: `cargo install` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
+- **Self-host**: `curl … | bash` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
 

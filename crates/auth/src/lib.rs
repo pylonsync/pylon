@@ -1,5 +1,8 @@
+pub mod cookie;
 pub mod email;
 pub mod password;
+
+pub use cookie::{extract_token as extract_session_cookie, CookieConfig, SameSite};
 
 use serde::{Deserialize, Serialize};
 

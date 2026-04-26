@@ -14,13 +14,13 @@ const QS_STEPS: {
   {
     num: "01",
     title: "Install",
-    desc: "Build the CLI from source. One Rust binary — no services, no Docker required.",
+    desc: "One curl command. Prebuilt binary — no Rust toolchain, no Docker required.",
     filename: "shell",
     lang: "sh",
-    code: `❯ git clone https://github.com/pylonsync/pylon
-❯ cd pylon && cargo install --path crates/cli --locked
+    code: `❯ curl -fsSL https://pylonsync.com/install.sh | bash
+  ==> Installed pylon v0.2.6 to ~/.local/bin/pylon
 ❯ pylon --version
-pylon 0.1.0`,
+pylon 0.2.6`,
   },
   {
     num: "02",
@@ -77,8 +77,8 @@ export function Quickstart() {
         <div className="section-label">Quickstart</div>
         <h2 className="section-title">Four commands to a running backend.</h2>
         <p className="section-sub">
-          No account, no API keys, no waitlist. If you have cargo and a browser,
-          you&apos;re set.
+          No account, no API keys, no waitlist. One curl, one binary, one
+          dev server.
         </p>
 
         <div className="quickstart">
