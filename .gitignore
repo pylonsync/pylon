@@ -65,3 +65,6 @@ turbopack/
 REVIEW.md
 REVIEW.*.md
 /reviews/
+
+# Roadmap is tracked in private planning, not the public repo.
+ROADMAP.md

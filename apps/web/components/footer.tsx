@@ -63,7 +63,6 @@ export function Footer() {
             <ul>
               <li><a href="https://github.com/pylonsync/pylon">GitHub</a></li>
               <li><a href="https://github.com/pylonsync/pylon/releases">Changelog</a></li>
-              <li><a href="https://github.com/pylonsync/pylon/blob/main/ROADMAP.md">Roadmap</a></li>
               <li><a href="https://github.com/pylonsync/pylon/blob/main/SECURITY.md">SECURITY.md</a></li>
             </ul>
           </div>
