@@ -14,9 +14,9 @@ The system has four primitives: entities (typed tables), policies (row-level acc
 
 ## Core concepts
 
-- [Entities](https://docs.pylonsync.com/concepts/entities): Declaring typed tables — `field.string()`, `field.int()`, `field.float()`, `field.bool()` (NOT `field.boolean`), `field.datetime()`, `field.richtext()`, `field.id(target)`, plus `.optional()` / `.unique()` modifiers and composite indexes. `field.number()` does NOT exist — use `field.float()` or `field.int()`.
+- [Entities](https://docs.pylonsync.com/concepts/entities): Declaring typed tables — `field.string()`, `field.int()`, `field.float()` / `field.number()`, `field.bool()` / `field.boolean()`, `field.datetime()`, `field.richtext()`, `field.id(target)`, plus `.optional()` / `.unique()` modifiers, `.crdt("text")` for collaborative text, and composite indexes.
 - [Policies](https://docs.pylonsync.com/concepts/policies): Row-level access rules with expressions referencing `auth.*`, `data.*`, `existing.*`. Omitted actions are denied by default. Server functions bypass policies.
-- [Functions](https://docs.pylonsync.com/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators from `@pylonsync/functions`: `v.string()`, `v.int()`, `v.number()` (NOT `v.float`), `v.boolean()` (NOT `v.bool`), `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`, `v.union(...)`, `v.any()`. Datetimes are plain `v.string()` holding ISO-8601.
+- [Functions](https://docs.pylonsync.com/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators from `@pylonsync/functions`: `v.string()`, `v.int()`, `v.number()` / `v.float()`, `v.boolean()` / `v.bool()`, `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`, `v.union(...)`, `v.any()`. Datetimes are plain `v.datetime()` or `v.string()` holding ISO-8601.
 - [Live queries](https://docs.pylonsync.com/concepts/live-queries): How `db.useQuery` subscribes and fan-outs update on writes. Subscriptions respect policies. Use indexed filter columns for fast fan-out.
 
 ## Packages
@@ -24,6 +24,7 @@ The system has four primitives: entities (typed tables), policies (row-level acc
 - `@pylonsync/sdk` — schema DSL: `entity()`, `field.*`, `policy()`, `buildManifest()`.
 - `@pylonsync/functions` — server function DSL: `query()`, `mutation()`, `action()`, validators (`v.*`).
 - `@pylonsync/react` — client hooks: `db.useQuery`, `db.useOne`, `callFn`, `init`, `configureClient`, `storageKey`, `useSession`.
+- `@pylonsync/loro` — CRDT row hooks: `useLoroDoc`, `useCollabText`, Loro binary-frame decoding.
 
 ## Runtime
 

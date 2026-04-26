@@ -30,7 +30,7 @@ Every entity gets an auto-generated `id` (ULID string) and the column order you 
 | `field.string()` | `TEXT` | Any UTF-8 string |
 | `field.int()` | `INTEGER` | 64-bit signed |
 | `field.float()` | `REAL` | 64-bit IEEE-754 |
-| `field.bool()` | `INTEGER` (0/1) | Boolean (not `field.boolean`) |
+| `field.bool()` | `INTEGER` (0/1) | Boolean (`field.boolean()` is an alias) |
 | `field.datetime()` | `TEXT` (ISO-8601) | Store with `new Date().toISOString()` |
 | `field.richtext()` | `TEXT` | For prose; the client SDK has editors ready |
 | `field.id(entity)` | `TEXT` | Foreign key to another entity's `id` |
@@ -46,6 +46,38 @@ field.string().unique()            // UNIQUE constraint
 field.id("User")                   // FK to User.id
 field.int().optional()             // nullable int
 ```
+
+## CRDT fields
+
+Pylon rows are backed by Loro docs in CRDT mode. The database row is a
+projection of that doc, so ordinary queries, indexes, policies, and search keep
+working while collaborative fields can merge through CRDT updates.
+
+Scalar fields default to LWW registers. `field.richtext()` defaults to
+`LoroText`, and a normal string can be upgraded when you need character-level
+merge:
+
+```ts
+const Note = entity("Note", {
+  title: field.string(),
+  body: field.richtext(),
+  summary: field.string().crdt("text"),
+  updatedAt: field.datetime(),
+});
+```
+
+Current field behavior:
+
+| Field | Default merge behavior |
+|---|---|
+| `string`, `datetime`, `id(...)` | LWW string register |
+| `int`, `float`, `bool` | LWW scalar register |
+| `richtext` | `LoroText` |
+| `.crdt("text")` on `string` / `richtext` | `LoroText` |
+| `.crdt("lww")` | Explicit LWW |
+
+`counter`, `list`, `movable-list`, and `tree` annotations are reserved for
+future Loro containers but are not implemented yet.
 
 ## Indexes
 

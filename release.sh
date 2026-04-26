@@ -135,6 +135,21 @@ done < <(find packages -maxdepth 2 -name package.json -print0)
 perl -pi -e "s/(\"\.\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" .release-please-manifest.json
 
 # --- validate -------------------------------------------------------------
+#
+# Run the same gates CI runs, in the same order CI runs them. Catching
+# them locally is cheaper than burning a tag + release-workflow run on
+# a formatting nit (which has happened — that's why fmt is here).
+
+echo "Running cargo fmt --check…"
+if ! cargo fmt --all -- --check; then
+	cat >&2 <<'EOF'
+
+error: cargo fmt would change files. Run:
+  cargo fmt --all
+…then re-run ./release.sh.
+EOF
+	exit 1
+fi
 
 echo "Running cargo check…"
 cargo check --workspace --quiet

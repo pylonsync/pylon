@@ -839,7 +839,9 @@ fn start_server(
                 .headers()
                 .iter()
                 .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-                .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name))
+                .and_then(|h| {
+                    pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
+                })
         };
         let auth_token: Option<String> = bearer_token.or(cookie_token);
         let auth_ctx = if admin_token.is_some()
@@ -1685,8 +1687,7 @@ fn start_server(
         // Serving a WWW-Authenticate Basic realm isn't useful here because
         // admin auth is bearer-token based. Callers get a 401 and should
         // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
-        let (status, response_body, content_type, is_studio, extra_headers) = if (url
-            == "/studio"
+        let (status, response_body, content_type, is_studio, extra_headers) = if (url == "/studio"
             || url == "/studio/")
             && method == Method::Get
         {
@@ -1733,7 +1734,13 @@ fn start_server(
                 .unwrap_or_else(|| "http".to_string());
             let base = format!("{scheme}://{host}");
             let html = pylon_studio_api::generate_studio_html(rt.manifest(), &base);
-            (200u16, html, "text/html", true, Vec::<(String, String)>::new())
+            (
+                200u16,
+                html,
+                "text/html",
+                true,
+                Vec::<(String, String)>::new(),
+            )
         } else {
             // Run plugin middleware with per-request metadata so rate-limit
             // plugins can bucket by peer IP (not just user id) when the

@@ -119,7 +119,7 @@ console.log(JSON.stringify(manifest, null, 2));
 field.string()        // TEXT
 field.int()           // INTEGER 64-bit
 field.float()         // REAL 64-bit
-field.bool()          // 0/1 stored as INTEGER (not field.boolean)
+field.bool()          // 0/1 stored as INTEGER; field.boolean() alias also works
 field.datetime()      // ISO-8601 string
 field.richtext()      // long-form text
 field.id("OtherEntity") // FK to another entity's id column
@@ -128,10 +128,12 @@ field.id("OtherEntity") // FK to another entity's id column
 **Modifiers (chainable):**
 - `.optional()` — nullable
 - `.unique()` — implicit unique index on one column
+- `.crdt("text")` — upgrade string/richtext to LoroText for collaborative merge
 
 **Common mistakes to avoid:**
 - Both `field.float()` / `field.number()` work (same type). Both `field.bool()` / `field.boolean()` work. Pick whichever reads better.
 - `field.id()` without an entity argument **is invalid** — always pass the target entity name.
+- Scalar fields are LWW by default. Use `field.richtext()` or `.crdt("text")` when concurrent text edits should merge.
 
 ### Indexes
 

@@ -1054,7 +1054,8 @@ fn route_inner(
                         }
                         id
                     }
-                    _ => ctx.store
+                    _ => ctx
+                        .store
                         .insert(
                             "User",
                             &serde_json::json!({

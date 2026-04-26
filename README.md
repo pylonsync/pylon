@@ -43,7 +43,7 @@ Visit `http://localhost:4321/studio` for the inspector.
 |  | pylon | Convex | Supabase | Firebase |
 |---|---|---|---|---|
 | Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
-| Deploy targets | self-host, AWS, Workers (experimental) | their cloud only | their cloud / k8s | their cloud only |
+| Deploy targets | self-host, AWS, Workers (experimental) | their cloud or self-host | their cloud, self-host, k8s | their cloud only |
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
 | Game shards | ✅ tick-based | ❌ | ❌ | ❌ |
@@ -211,7 +211,7 @@ PYLON_DEV_MODE=false
 
 Architecture docs:
 - [RUNTIME.md](docs/RUNTIME.md) — how TypeScript functions execute, what JS engine, what we evaluated
-- [SYNC.md](docs/SYNC.md) — sync semantics, what is and isn't local-first, conflict resolution
+- [SYNC.md](docs/SYNC.md) — sync semantics, CRDT-backed rows, offline behavior
 - [ARCHITECTURE.md](ARCHITECTURE.md) — crate-by-crate map of the system
 
 Operational docs:

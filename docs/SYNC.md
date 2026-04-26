@@ -1,219 +1,157 @@
 # Pylon: Sync Semantics
 
-What Pylon's sync engine actually does, what it does not do, and where we
-draw the line. Read this before claiming Pylon is "local-first" — that
-phrase has a specific meaning and Pylon does not meet it.
+This document describes what Pylon syncs, what converges as a CRDT, and
+where the server is still authoritative.
 
 ## The honest one-liner
 
-**Pylon is server-authoritative sync with optimistic mutations and an
-offline write queue. It is not local-first in the Ink & Switch sense — it
-does not use CRDTs, does not perform offline conflict merging, and the
-server's serialization order is canonical.** Concurrent writers can lose
-field values when both edit the same column.
+**Pylon is a server-backed realtime sync system with a CRDT row substrate.**
+Each CRDT-mode entity row is backed by a Loro document, projected into the
+normal SQLite/Postgres row shape for queries and indexes, and broadcast to
+clients over the same WebSocket used by live queries.
 
-If you need true local-first (multi-device convergence, no central
-authority, offline-capable conflict resolution), Pylon's current sync
-layer isn't the right tool — see *Roadmap* below.
+The important nuance: not every field has the same merge behavior. `richtext`
+and fields marked `crdt: "text"` use `LoroText` and merge concurrent text
+edits. Most scalar fields use LWW registers inside the row doc because names,
+emails, statuses, slugs, and timestamps do not benefit from character-level
+merge.
 
-## What you actually get
+## Two sync layers
 
-### 1. Server-assigned monotonic sequence numbers
+### 1. JSON live-query projection
 
-Every change applied on the server gets a monotonically increasing `seq`.
-Clients pull from a cursor (`since=<last_seq>`) and apply changes in
-seq order. This gives every client a deterministic view of the server's
-write history.
+The React `db.useQuery(...)` path consumes ordinary JSON row changes:
 
-```rust
-// crates/sync/src/lib.rs
-pub fn append(&self, entity: &str, row_id: &str, kind: ChangeKind, data: Option<Value>) -> u64 {
-    let mut seq = self.seq.lock().unwrap();
-    *seq += 1;
-    let event = ChangeEvent { seq: *seq, entity, row_id, kind, data, timestamp: now_iso8601() };
-    // ...
+1. Client opens a WebSocket to the Pylon server.
+2. `useQuery` subscribes to an entity/filter pair.
+3. The server runs the query once and sends the current matching rows.
+4. Writes append to the change log.
+5. Matching subscribers receive row diffs.
+6. The client applies diffs to an IndexedDB-backed local replica.
+
+This layer is what powers live dashboards, lists, search results, policies,
+pagination, and the normal `db.insert/update/delete` APIs.
+
+JSON mutations are optimistic. The client applies them locally, stores pending
+work in the IndexedDB mutation queue, and retries with an `op_id` so server
+replays are idempotent. Deletes use tombstones so stale replay cannot
+resurrect a row.
+
+### 2. Loro row documents
+
+For CRDT-mode entities, the persisted row is also represented as one Loro doc:
+
+```text
+LoroDoc
+  map "row"
+    fieldName -> LWW scalar, LoroText, or another CRDT container
+```
+
+The Rust runtime owns the canonical server copy. On insert/update, Pylon applies
+the patch to the Loro doc, projects the doc back to a flat JSON object, stores
+that projection in the database, appends a normal change-log event, and sends a
+binary CRDT snapshot to subscribed clients.
+
+Clients that need raw CRDT behavior use `@pylonsync/loro`:
+
+```tsx
+import { useCollabText } from "@pylonsync/loro";
+
+export function Editor({ noteId }: { noteId: string }) {
+  const [body, setBody] = useCollabText("Note", noteId, "body");
+  return <textarea value={body} onChange={(e) => setBody(e.target.value)} />;
 }
 ```
 
-### 2. Field-level merge on update
+`useLoroDoc(entity, id)` subscribes to binary CRDT frames for one row. Local
+text edits are encoded as Loro updates and sent to
+`POST /api/crdt/<entity>/<row_id>`. The server imports the update, projects the
+merged document, and broadcasts the post-merge snapshot back over WebSocket.
 
-When an `update` change lands, the client merges new fields onto the
-existing row rather than replacing it wholesale:
+## Field merge behavior
 
-```ts
-// packages/sync/src/index.ts
-case "update":
-  const existing = table.get(change.row_id) ?? { id: change.row_id };
-  table.set(change.row_id, {
-    ...existing,
-    ...change.data,
-    id: change.row_id,
-  });
-```
+Pylon defaults are intentionally mixed:
 
-This means **two clients editing disjoint fields of the same row converge
-correctly** — Alice setting `Order.notes` and Bob setting `Order.dueDate`
-both land. Last-update-wins is per-field, not per-row.
+| Field shape | Default CRDT container | Merge behavior |
+|---|---|---|
+| `string` | LWW register | Last writer wins |
+| `datetime` | LWW string register | Last writer wins |
+| `id(Entity)` | LWW string register | Last writer wins |
+| `int` / `float` | LWW number register | Last writer wins |
+| `bool` | LWW bool register | Last writer wins |
+| `richtext` | `LoroText` | Concurrent text edits converge |
+| `field.string().crdt("text")` | `LoroText` | Concurrent text edits converge |
 
-### 3. Last write wins on the same field
+Reserved annotations exist for future containers:
 
-When two clients set the *same* field on the same row, the second push to
-land on the server wins. There is no per-field timestamp. There is no
-vector clock. Whichever push the server processes last is the value
-everyone sees.
+| Annotation | Intended container | Status |
+|---|---|---|
+| `crdt: "counter"` | `LoroCounter` | Reserved, not implemented |
+| `crdt: "list"` | `LoroList` | Reserved, not implemented |
+| `crdt: "movable-list"` | `LoroMovableList` | Reserved, not implemented |
+| `crdt: "tree"` | `LoroTree` | Reserved, not implemented |
+| `crdt: "lww"` | LWW register | Implemented |
 
-This is fine for most B2B apps — the natural unit of edit is "one user
-clicked Save" and concurrent edits to the same field are rare and
-recoverable. It is **not** fine for collaborative text editing, drawing
-canvases, or anything where two users routinely touch the same property.
+Setting a reserved annotation today fails rather than silently pretending to
+merge.
 
-### 4. Tombstones
+## Local and offline behavior
 
-Deletes record a tombstone with the delete's `seq`. Any subsequent
-insert/update for the same `row_id` with `seq < tombstone_seq` is dropped.
-This prevents "stale resurrects" — a delayed pre-delete update arriving
-after the delete from another client cannot bring the row back.
+Pylon gives clients fast local reads through the IndexedDB mirror and optimistic
+JSON writes through the mutation queue.
 
-Optimistic local deletes use `Number.MAX_SAFE_INTEGER` as the tombstone
-seq so the client view dominates until the server confirms.
+CRDT text edits are applied to the local Loro doc immediately. The current
+`@pylonsync/loro` helper sends the resulting update to the server immediately;
+the server broadcast is the durable acknowledgement. If that HTTP push fails,
+the helper logs the failure and does not yet persist a CRDT-specific retry
+queue. The JSON mutation queue and the CRDT update path are separate.
 
-### 5. Optimistic mutations
+That means:
 
-The React layer's `useMutation` and `db.insert/update/delete` apply
-optimistically against the local store, then push to the server. On
-failure the optimistic write rolls back. Identifiers for optimistic
-inserts are temporary (`_pending_<ts>_<rand>`) and replaced when the
-server-issued id arrives.
+- Normal CRUD writes survive reload/offline through the mutation queue.
+- CRDT text state converges across connected clients through Loro updates.
+- A durable offline queue for unsent CRDT binary updates is still a separate
+  hardening item.
 
-### 6. Offline write queue
+## Cursor and resync behavior
 
-`MutationQueue` persists pending writes through an IndexedDB-backed
-adapter (or any user-supplied `MutationQueuePersistence`). Writes made
-while offline survive reload and push when connectivity returns.
-Idempotent replay is handled by an `op_id` (timestamp + random suffix)
-the server tracks per-client.
+The JSON change log uses monotonic server sequence numbers. Clients pull from a
+cursor (`since=<last_seq>`) and apply events in order.
 
-### 7. Identity-flip resync
+If a client's cursor is older than the oldest retained event, the server returns
+`410 RESYNC_REQUIRED`. The client clears its local replica and pulls a fresh
+seed view. Auth identity changes also trigger a replica reset so one user's
+cached rows do not leak into another user's session.
 
-When the auth token changes (anonymous → signed in, user A → user B,
-sign-out), the server's visible row set changes under the client. The
-sync engine resets the local replica + cursor and pulls fresh under the
-new identity. Without this, a logged-out user could keep seeing the
-previous user's cached rows until the next pull invalidated them.
-
-### 8. Cursor-too-old recovery
-
-If a client's cursor is older than the oldest event the server still
-remembers (the change log is bounded), the server returns
-`410 RESYNC_REQUIRED`. The client clears its replica and pulls from
-seq=0 via the entity-list endpoints (which the server replays as seed
-events on start).
-
-## What you do *not* get
-
-- **CRDT semantics.** No Yjs, no Automerge, no per-field HLCs. Two
-  clients setting the same field concurrently is a coin flip resolved by
-  server arrival order.
-- **Multi-device offline merge.** Two devices both offline, both editing
-  the same row, can't reconcile without the server. The first to push
-  wins; the second's same-field writes are silently overwritten.
-- **Causality preservation across writers.** Pylon does not detect that
-  Alice's update was made *with knowledge of* Bob's prior update. There
-  are no version vectors and no causal-history checks.
-- **Operational transforms.** Text fields are bytes — concurrent edits
-  to the same string overwrite each other. Don't build Google Docs on
-  this.
-- **Local-first per Ink & Switch.** The
-  [seven principles](https://www.inkandswitch.com/local-first/) — no
-  spinners, multi-device, network-optional, longevity, privacy, user
-  ownership, no-failure-modes — are not all met. Pylon meets *some* of
-  them (offline writes, fast local reads), not all.
+CRDT subscriptions are refcounted by `(entity, row_id)` and resent after WebSocket
+reconnect. On subscribe, the server sends the current Loro snapshot for that row.
 
 ## What this is good for
 
-This sync model is well-suited to:
+- Live SaaS dashboards and internal tools.
+- Chat, comments, activity feeds, and presence-backed apps.
+- Rich text fields where two clients may edit the same content.
+- Apps that want local reads, optimistic CRUD, and CRDT merge where it matters.
+- Rows that need search/index/query support while retaining a CRDT source doc.
 
-- **B2B SaaS dashboards.** "User opens record, edits, saves." Concurrent
-  same-field edits are rare; field-level merge handles the common case.
-- **Internal tools.** Same shape — discrete CRUD operations on
-  well-defined records.
-- **Activity feeds, comments, messages.** Each row is owned by one
-  writer; no contention.
-- **Real-time presence and notifications.** Pylon's room layer (separate
-  from sync) handles ephemeral state; sync handles durable state.
-- **Apps that go offline briefly.** A few minutes / hours of disconnect
-  followed by reconnect works. Multi-day offline with concurrent edits
-  is iffy.
+## What still needs care
 
-It is **not** suited to:
+- Scalar fields are LWW unless explicitly backed by a richer CRDT container.
+- `counter`, `list`, `movable-list`, and `tree` annotations are reserved but not
+  implemented yet.
+- `useCollabText` currently does whole-text replace operations. It converges via
+  Loro, but a lower-level insert/delete API will be better for editors, IME, and
+  large documents.
+- CRDT updates do not yet have the same durable offline retry queue as JSON
+  mutations.
+- Pylon still has a canonical server. It is local-first in the product sense of
+  local reads and mergeable CRDT state, not a decentralized no-server database.
 
-- **Collaborative text editing.** Use Yjs or Automerge as a separate layer.
-- **Whiteboards, drawing tools.** Same — needs a real CRDT.
-- **Decentralized / no-central-authority apps.** Pylon requires a server.
-- **Long-offline workflows on shared data.** Field-level merge breaks down
-  when the offline window is long enough that conflicting same-field
-  writes are likely.
+## Positioning rules
 
-## Roadmap
-
-We have three honest options, ordered by effort.
-
-### Option A: Per-field hybrid logical clocks (HLCs)
-
-Replace the implicit "last to land at server" with explicit per-field
-HLC timestamps. Each row stores `{ value: ..., hlc: <node_id, ts, counter> }`
-per writable field. Merges pick the value with the higher HLC.
-
-**Pros:** No more silent data loss on concurrent same-field writes — the
-HLC ordering is deterministic across writers and survives offline merge.
-**Cons:** Schema overhead (~20 bytes per field). Requires a one-time
-migration. Doesn't help text or list types — still last-write-wins, just
-with a defensible tiebreaker.
-**Effort:** ~1 week. Server-side: HLC assignment in `change_log.append`.
-Client-side: HLC tagging on optimistic writes; HLC-aware merge in
-`LocalStore.applyChange`.
-
-This is what we'll ship next if local-first becomes a real customer ask.
-
-### Option B: Yjs adapter as a separate package
-
-Ship `@pylonsync/yjs` that maps a designated `Y.Doc` per entity row onto
-the sync engine. Apps opt in per-entity. The Yjs document is the source
-of truth for that row's contents; Pylon just transports the binary
-update stream.
-
-**Pros:** Real CRDT semantics where you actually need them (text, lists).
-The rest of your schema keeps the cheap LWW model.
-**Cons:** Adds Yjs as a dependency. Schema migrations get more
-interesting. Conflict resolution is now per-field-type, not uniform.
-**Effort:** ~2 weeks for a working integration; longer to harden.
-
-Right answer for apps with both "boring CRUD" tables and "rich
-collaborative" tables.
-
-### Option C: Full CRDT-native rewrite
-
-Rebuild the sync engine on Automerge or a similar CRDT primitive end to
-end. Every row is a CRDT document. Convergence is automatic.
-
-**Pros:** True local-first. Every Ink & Switch principle within reach.
-**Cons:** Major architectural change. Performance characteristics flip
-(CRDT documents are bigger and slower than JSON). No partial migration
-path — the schema layer changes shape. Server's role shrinks
-considerably.
-**Effort:** Multiple months. Probably better as a separate "Pylon CRDT"
-product than a v2 of the existing engine.
-
-## Until then: positioning rules
-
-- Do not say **"local-first"** in marketing or docs. Call it **"optimistic
-  + offline-capable sync"** or **"server-authoritative sync with offline
-  writes"**.
-- Do not say **"no conflicts"**. There are conflicts; the server resolves
-  them by arrival order.
-- Do not say **"CRDT-backed"** or **"multi-device convergence"**. Both are
-  false today.
-- Do say **"local-first for the boring 90% of CRUD"** if you need a
-  punchy line. It's true and unambiguous.
-- Do say **"add Yjs for collaborative text"** when users ask about it —
-  honest acknowledgement of the gap is better than over-claiming.
+- Do say **"CRDT-backed rows"** or **"Loro-backed row documents"**.
+- Do say **"rich text and `crdt(\"text\")` fields merge concurrent edits"**.
+- Do say **"server-backed local-first sync"** when explaining the architecture.
+- Do not imply every scalar field is conflict-free; most scalar fields are LWW.
+- Do not imply CRDT binary updates have durable offline retry until that queue is
+  implemented.

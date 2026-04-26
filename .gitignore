@@ -57,3 +57,11 @@ turbopack/
 *.sst
 *.db-wal
 *.db-shm
+
+# Internal adversarial / security review artifacts. These describe
+# exploitable findings with file:line citations and should never be
+# committed to a public-facing repo. Keep them local — track triage
+# in your private notes / issue tracker instead.
+REVIEW.md
+REVIEW.*.md
+/reviews/

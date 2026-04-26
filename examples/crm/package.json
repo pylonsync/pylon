@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "@pylonsync/functions": "file:../../packages/functions",
-    "@pylonsync/sdk": "file:../../packages/sdk"
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/sdk": "workspace:*"
   }
 }

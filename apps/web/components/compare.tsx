@@ -21,9 +21,14 @@ const APP_ROWS: AppRow[] = [
   { feat: "Live queries", pylon: "yes", convex: "yes", supabase: "part", firebase: "yes" },
   { feat: "TypeScript functions", pylon: "yes", convex: "yes", supabase: "part", firebase: "part" },
   { feat: "Native faceted search", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
-  { feat: "Self-hosted, one binary", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
+  // Convex and Supabase both have self-host paths (docker-compose stacks),
+  // so claiming they don't is both wrong and easily falsifiable — link in
+  // any HN thread about this. The honest differentiator is single-process:
+  // pylon is one binary, the others are multi-service docker-compose.
+  { feat: "Self-hosted", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
+  { feat: "Single process", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
   { feat: "Authoritative game loop", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
-  { feat: "No vendor lock-in", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
+  { feat: "No vendor lock-in", pylon: "yes", convex: "part", supabase: "yes", firebase: "no" },
 ];
 
 const GAME_ROWS: GameRow[] = [

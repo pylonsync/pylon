@@ -7,7 +7,7 @@
     "codegen": "bun ../../packages/create-pylon/src/codegen-runner.ts app.ts || bun x pylon codegen app.ts"
   },
   "dependencies": {
-    "@pylonsync/functions": "file:../../packages/functions",
-    "@pylonsync/sdk": "file:../../packages/sdk"
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/sdk": "workspace:*"
   }
 }

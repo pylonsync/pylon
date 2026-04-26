@@ -14,8 +14,7 @@ use crate::output::{print_diagnostics, print_json};
 // the CI script `tools/check-cli-vendored.sh` (TODO) compares the two
 // and fails the build if they drift.
 const TEMPLATE_BASIC_APP: &str = include_str!("../../templates/basic/app.ts");
-const TEMPLATE_BASIC_TSCONFIG: &str =
-    include_str!("../../templates/basic/tsconfig.json");
+const TEMPLATE_BASIC_TSCONFIG: &str = include_str!("../../templates/basic/tsconfig.json");
 const SDK_SOURCE: &str = include_str!("../../embedded/sdk-index.ts");
 
 #[derive(Serialize)]

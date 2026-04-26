@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
 // pylon sync client
 //
-// Server-authoritative sync with optimistic mutations and an offline write
-// queue. Field-level LWW on update; tombstones on delete. NOT CRDT-backed;
-// see docs/SYNC.md for convergence semantics and what this is/isn't good
-// for. Concurrent same-field writes resolve by server arrival order.
+// JSON live-query sync with optimistic mutations and an offline write queue.
+// CRDT-mode rows travel through the same WebSocket as binary Loro frames,
+// but this package intentionally keeps binary payloads opaque and routes
+// them to consumers such as @pylonsync/loro. See docs/SYNC.md for the full
+// projection + convergence model.
 // ---------------------------------------------------------------------------
 
 export { IndexedDBPersistence, persistChange } from "./persistence";
