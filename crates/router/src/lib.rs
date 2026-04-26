@@ -2324,6 +2324,33 @@ fn route_inner(
                     )
                 }
             };
+            // Update-policy gate. Without this, any caller with a session
+            // (including guest sessions, which auto-mint without
+            // credentials) could mutate any addressable CRDT row.
+            // Load the current row so policies that depend on row data
+            // (e.g. `data.ownerId == auth.userId`) can evaluate. A
+            // missing row is treated as "no row data" — the policy is
+            // free to reject `None` if it requires ownership.
+            let existing_row = ctx.store.get_by_id(entity, row_id).ok().flatten();
+            if let pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } =
+                ctx.policy_engine
+                    .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref())
+            {
+                tracing::warn!(
+                    "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
+                );
+                return (
+                    403,
+                    json_error_with_hint(
+                        "POLICY_DENIED",
+                        "Access denied by policy",
+                        "Check your auth token or the policy rules in your schema",
+                    ),
+                );
+            }
             match ctx.store.crdt_apply_update(entity, row_id, &update_bytes) {
                 Ok(snapshot) => {
                     // Broadcast the post-merge snapshot to all subscribed
@@ -2348,6 +2375,15 @@ fn route_inner(
     if let Some(file_id) = url.strip_prefix("/api/files/") {
         let file_id = file_id.split('?').next().unwrap_or(file_id);
         if method == HttpMethod::Get {
+            // File IDs are timestamp + sanitised filename — predictable
+            // enough that an unauthenticated caller could enumerate
+            // recent uploads. Require any authenticated identity here
+            // (matches what `/api/files/upload` enforces). Apps that
+            // need finer control wrap downloads in a server function;
+            // a future signed-URL flavor would replace this guard.
+            if let Some(err) = require_auth(ctx) {
+                return err;
+            }
             let (s, b) = ctx.files.get_file(file_id);
             return (s, b);
         }
@@ -2401,6 +2437,26 @@ fn route_inner(
             .next()
             .unwrap_or("");
         if !entity.is_empty() && entity != "filtered" {
+            // Entity-level read gate. Without this, any caller could
+            // shape a filter that returns every row of a protected
+            // entity. Same pattern as GET /api/entities/:e.
+            if let pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } = ctx
+                .policy_engine
+                .check_entity_read(entity, ctx.auth_ctx, None)
+            {
+                tracing::warn!("[policy] query {entity} denied by \"{policy_name}\": {reason}");
+                return (
+                    403,
+                    json_error_with_hint(
+                        "POLICY_DENIED",
+                        "Access denied by policy",
+                        "Check your auth token or the policy rules in your schema",
+                    ),
+                );
+            }
             let filter: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(e) => {
@@ -2416,10 +2472,26 @@ fn route_inner(
             };
             match ctx.store.query_filtered(entity, &filter) {
                 Ok(rows) => {
+                    // Row-level filter — drop hits the policy denies
+                    // when given the actual row data. No-op for entities
+                    // whose read policy is row-independent.
+                    let allowed: Vec<serde_json::Value> = rows
+                        .into_iter()
+                        .filter(|row| {
+                            matches!(
+                                ctx.policy_engine.check_entity_read(
+                                    entity,
+                                    ctx.auth_ctx,
+                                    Some(row),
+                                ),
+                                pylon_policy::PolicyResult::Allowed
+                            )
+                        })
+                        .collect();
                     return (
                         200,
-                        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
-                    )
+                        serde_json::to_string(&allowed).unwrap_or_else(|_| "[]".into()),
+                    );
                 }
                 Err(e) => return (400, json_error(&e.code, &e.message)),
             }
@@ -2943,6 +3015,28 @@ fn route_inner(
         let rest_no_qs = rest.split('?').next().unwrap_or(rest);
         if let Some(entity_name) = rest_no_qs.strip_suffix("/cursor") {
             if method == HttpMethod::Get {
+                // Entity-level read gate. Without this an unauthenticated
+                // caller could page through every protected entity by
+                // name. Mirrors the GET /api/entities/:e check below.
+                if let pylon_policy::PolicyResult::Denied {
+                    policy_name,
+                    reason,
+                } = ctx
+                    .policy_engine
+                    .check_entity_read(entity_name, ctx.auth_ctx, None)
+                {
+                    tracing::warn!(
+                        "[policy] cursor {entity_name} denied by \"{policy_name}\": {reason}"
+                    );
+                    return (
+                        403,
+                        json_error_with_hint(
+                            "POLICY_DENIED",
+                            "Access denied by policy",
+                            "Check your auth token or the policy rules in your schema",
+                        ),
+                    );
+                }
                 let after: Option<&str> = url
                     .split("after=")
                     .nth(1)
@@ -2956,10 +3050,29 @@ fn route_inner(
                     .unwrap_or(20)
                     .min(100);
 
+                // Fetch one extra so we can detect has_more even after
+                // row-filtering drops some entries. Page is filtered
+                // post-fetch since the policy may depend on row data
+                // (e.g. `data.ownerId == auth.userId`) which the store
+                // doesn't know about.
                 return match ctx.store.list_after(entity_name, after, limit + 1) {
                     Ok(rows) => {
-                        let has_more = rows.len() > limit;
-                        let page: Vec<serde_json::Value> = rows.into_iter().take(limit).collect();
+                        let filtered: Vec<serde_json::Value> = rows
+                            .into_iter()
+                            .filter(|row| {
+                                matches!(
+                                    ctx.policy_engine.check_entity_read(
+                                        entity_name,
+                                        ctx.auth_ctx,
+                                        Some(row),
+                                    ),
+                                    pylon_policy::PolicyResult::Allowed
+                                )
+                            })
+                            .collect();
+                        let has_more = filtered.len() > limit;
+                        let page: Vec<serde_json::Value> =
+                            filtered.into_iter().take(limit).collect();
                         let next_cursor = page
                             .last()
                             .and_then(|r| r.get("id"))
@@ -3227,16 +3340,30 @@ fn route_inner(
     // Cache API
     // -----------------------------------------------------------------------
 
+    // Cache API. Admin-gated: this is a raw key/value/hash/zset surface
+    // with no per-key auth model. App code should access cache via
+    // server functions (which run with the app's policy decisions);
+    // direct HTTP is for operators only. An open cache lets anyone
+    // read/poison flags, transient auth state, rate-limit counters, etc.
     if url == "/api/cache" && method == HttpMethod::Post {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return ctx.cache.handle_command(body);
     }
 
     if let Some(cache_key) = url.strip_prefix("/api/cache/") {
         let cache_key = cache_key.split('?').next().unwrap_or(cache_key);
         if method == HttpMethod::Get && !cache_key.is_empty() {
+            if let Some(err) = require_admin(ctx) {
+                return err;
+            }
             return ctx.cache.handle_get(cache_key);
         }
         if method == HttpMethod::Delete && !cache_key.is_empty() {
+            if let Some(err) = require_admin(ctx) {
+                return err;
+            }
             return ctx.cache.handle_delete(cache_key);
         }
     }
@@ -3244,18 +3371,33 @@ fn route_inner(
     // -----------------------------------------------------------------------
     // Pub/Sub API
     // -----------------------------------------------------------------------
+    //
+    // Admin-gated for the same reason as cache: raw fan-out with no
+    // per-channel authz. Apps that need to expose pub/sub to end users
+    // wrap it in a server function with the right policy. Open
+    // publish lets attackers inject events; open history lets them
+    // read retained channel state.
 
     if url == "/api/pubsub/publish" && method == HttpMethod::Post {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return ctx.pubsub.handle_publish(body);
     }
 
     if url == "/api/pubsub/channels" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         return ctx.pubsub.handle_channels();
     }
 
     if let Some(channel_name) = url.strip_prefix("/api/pubsub/history/") {
         let channel_name = channel_name.split('?').next().unwrap_or(channel_name);
         if method == HttpMethod::Get && !channel_name.is_empty() {
+            if let Some(err) = require_admin(ctx) {
+                return err;
+            }
             return ctx.pubsub.handle_history(channel_name, url);
         }
     }
@@ -3312,7 +3454,14 @@ fn route_inner(
         );
     }
 
+    // Job read endpoints leak `payload`, `error`, queue names, etc.
+    // Admin-gated to match the write side. App code that needs to
+    // surface job state to end users should re-export filtered data
+    // through a server function with the right policy.
     if url == "/api/jobs/stats" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         let stats = ctx.jobs.stats();
         return (
             200,
@@ -3321,6 +3470,9 @@ fn route_inner(
     }
 
     if url == "/api/jobs/dead" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         let dead = ctx.jobs.dead_letters();
         return (
             200,
@@ -3352,6 +3504,9 @@ fn route_inner(
     if url.starts_with("/api/jobs") && method == HttpMethod::Get {
         let path = url.split('?').next().unwrap_or(url);
         if path == "/api/jobs" {
+            if let Some(err) = require_admin(ctx) {
+                return err;
+            }
             let status_filter = url
                 .split("status=")
                 .nth(1)
@@ -3376,6 +3531,9 @@ fn route_inner(
         let job_id = job_id.split('?').next().unwrap_or(job_id);
         if method == HttpMethod::Get && !job_id.is_empty() && job_id != "stats" && job_id != "dead"
         {
+            if let Some(err) = require_admin(ctx) {
+                return err;
+            }
             if let Some(job) = ctx.jobs.get_job(job_id) {
                 return (
                     200,
@@ -3766,7 +3924,15 @@ fn route_inner(
     // Workflow Engine API
     // -----------------------------------------------------------------------
 
+    // Workflow read endpoints leak `input`, step `outputs`, `errors`,
+    // file names, and execution status — all sensitive operational
+    // detail. Admin-gated to match the start/advance/event side.
+    // Apps that surface workflow state to end users do it through
+    // server functions with explicit policy.
     if url == "/api/workflows/definitions" && method == HttpMethod::Get {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         let defs = ctx.workflows.definitions();
         return (
             200,
@@ -3806,6 +3972,9 @@ fn route_inner(
         && !url.starts_with("/api/workflows/")
         && method == HttpMethod::Get
     {
+        if let Some(err) = require_admin(ctx) {
+            return err;
+        }
         let status_filter = url
             .split("status=")
             .nth(1)
@@ -3827,6 +3996,9 @@ fn route_inner(
         if !wf_id.is_empty() && !wf_id.starts_with("definitions") {
             match (method, sub) {
                 (HttpMethod::Get, None) => {
+                    if let Some(err) = require_admin(ctx) {
+                        return err;
+                    }
                     return match ctx.workflows.get(wf_id) {
                         Some(inst) => (
                             200,
@@ -5523,6 +5695,344 @@ mod auth_gate_tests {
                 assert_ne!(status, 405);
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Auth matrix regression scaffold
+    //
+    // Goal: catch reviewer-class bugs at PR time. Every route in this
+    // table is hit as anonymous, guest, and authed-non-admin. The
+    // EXPECTED column is what the route should return for that
+    // identity. Adding a new route? Add a row. Discovering a bypass?
+    // Add the regression here so it stays caught.
+    //
+    // Status semantics:
+    //   401 = AUTH_REQUIRED            (require_auth)
+    //   403 = FORBIDDEN | POLICY_DENIED (require_admin / policy)
+    //   any = 200..=599 means "anything but 405" — for routes that
+    //         legitimately reach the handler with this identity and
+    //         may 200/400/etc. depending on body.
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Copy)]
+    enum Expect {
+        /// Status must equal this value.
+        Eq(u16),
+        /// Status must be 401 or 403 (rejected before handler logic).
+        Rejected,
+        /// Anything except 405 — handler reached, body validation may
+        /// have triggered other errors.
+        ReachedHandler,
+    }
+
+    fn assert_expect(actual: u16, want: Expect, label: &str) {
+        match want {
+            Expect::Eq(s) => assert_eq!(actual, s, "{label}: expected status {s}, got {actual}"),
+            Expect::Rejected => assert!(
+                actual == 401 || actual == 403,
+                "{label}: expected 401 or 403, got {actual}"
+            ),
+            Expect::ReachedHandler => assert_ne!(
+                actual, 405,
+                "{label}: route should accept this method, got 405"
+            ),
+        }
+    }
+
+    /// Hit a route as anon / guest / authed-non-admin and assert each
+    /// identity gets the documented response. Catches reviewer-class
+    /// bugs (e.g. a P1 finding that an endpoint is_admin-gated drifts
+    /// to public during a refactor).
+    fn matrix_check(
+        method: HttpMethod,
+        url: &str,
+        body: &str,
+        expect_anon: Expect,
+        expect_guest: Expect,
+        expect_user: Expect,
+    ) {
+        let anon = AuthContext::anonymous();
+        let guest = AuthContext::guest("guest-1".into());
+        let user = AuthContext::authenticated("u-1".into());
+
+        for (auth, want, who) in [
+            (&anon, expect_anon, "anon"),
+            (&guest, expect_guest, "guest"),
+            (&user, expect_user, "user"),
+        ] {
+            with_ctx(false, auth, |ctx| {
+                let (status, _body, _ct) = route(ctx, method, url, body, None);
+                assert_expect(status, want, &format!("{who} {method:?} {url}"));
+            });
+        }
+    }
+
+    /// Like matrix_check, but the test scaffold loads a manifest with
+    /// a deny-by-default policy on the named entity. Use this for
+    /// policy-gated routes (cursor, filtered query, CRDT push) where
+    /// the gate's job is "call check_entity_*" — without a denying
+    /// policy in scope the call would silently pass.
+    fn matrix_check_with_deny_policy(
+        deny_entity: &str,
+        method: HttpMethod,
+        url: &str,
+        body: &str,
+        expect_anon: Expect,
+        expect_guest: Expect,
+        expect_user: Expect,
+    ) {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let anon = AuthContext::anonymous();
+        let guest = AuthContext::guest("guest-1".into());
+        let user = AuthContext::authenticated("u-1".into());
+
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![ManifestPolicy {
+                name: "denyAll".into(),
+                entity: Some(deny_entity.into()),
+                allow_read: Some("false".into()),
+                allow_update: Some("false".into()),
+                ..Default::default()
+            }],
+        };
+        let store = StubDataStore {
+            manifest: manifest.clone(),
+        };
+        let session_store = SessionStore::new();
+        let magic_codes = MagicCodeStore::new();
+        let oauth_state = OAuthStateStore::new();
+        let policy_engine = PolicyEngine::from_manifest(&manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let rooms = StubRooms;
+        let cache = StubCache;
+        let pubsub = StubPubSub;
+        let jobs = StubJobs;
+        let scheduler = StubScheduler;
+        let workflows = StubWorkflows;
+        let files = StubFiles;
+        let openapi = StubOpenApi;
+        let email = StubEmail;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
+
+        for (auth, want, who) in [
+            (&anon, expect_anon, "anon"),
+            (&guest, expect_guest, "guest"),
+            (&user, expect_user, "user"),
+        ] {
+            let ctx = RouterContext {
+                store: &store,
+                session_store: &session_store,
+                magic_codes: &magic_codes,
+                oauth_state: &oauth_state,
+                policy_engine: &policy_engine,
+                change_log: &change_log,
+                notifier: &notifier,
+                rooms: &rooms,
+                cache: &cache,
+                pubsub: &pubsub,
+                jobs: &jobs,
+                scheduler: &scheduler,
+                workflows: &workflows,
+                files: &files,
+                openapi: &openapi,
+                functions: None,
+                email: &email,
+                shards: None,
+                plugin_hooks: &NoopPluginHooks,
+                auth_ctx: auth,
+                is_dev: false,
+                request_headers: &[],
+                cookie_config: &cookie_config,
+                response_headers: RefCell::new(Vec::new()),
+            };
+            let (status, _body, _ct) = route(&ctx, method, url, body, None);
+            assert_expect(status, want, &format!("{who} {method:?} {url}"));
+        }
+    }
+
+    #[test]
+    fn matrix_cache_admin_only() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/cache/anykey",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Post,
+            "/api/cache",
+            r#"{"op":"get","key":"x"}"#,
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Delete,
+            "/api/cache/anykey",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_pubsub_admin_only() {
+        matrix_check(
+            HttpMethod::Post,
+            "/api/pubsub/publish",
+            r#"{"channel":"x","message":"y"}"#,
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/pubsub/channels",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/pubsub/history/some-channel",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_jobs_read_admin_only() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/jobs/stats",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/jobs/dead",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/jobs",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/jobs/some-job-id",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_workflows_read_admin_only() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/workflows/definitions",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/workflows",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+        matrix_check(
+            HttpMethod::Get,
+            "/api/workflows/some-id",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_files_download_requires_auth() {
+        // Anon must not enumerate uploads via predictable file IDs.
+        // Guest + user can — files use require_auth, not require_admin.
+        matrix_check(
+            HttpMethod::Get,
+            "/api/files/some-file-id",
+            "",
+            Expect::Eq(401),
+            Expect::ReachedHandler,
+            Expect::ReachedHandler,
+        );
+    }
+
+    #[test]
+    fn matrix_crdt_push_respects_update_policy() {
+        // Pre-fix: any session (incl. guest) could push a CRDT update
+        // to any addressable row. Now: when the entity has an update
+        // policy that denies, even authed non-admins are blocked. Anon
+        // bounces at the require_auth gate before policy is consulted.
+        matrix_check_with_deny_policy(
+            "Doc",
+            HttpMethod::Post,
+            "/api/crdt/Doc/some-row",
+            r#"{"update":"00"}"#,
+            Expect::Eq(401),
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_filtered_query_respects_read_policy() {
+        matrix_check_with_deny_policy(
+            "Secret",
+            HttpMethod::Post,
+            "/api/query/Secret",
+            r#"{"where":{}}"#,
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
+    }
+
+    #[test]
+    fn matrix_cursor_pagination_respects_read_policy() {
+        matrix_check_with_deny_policy(
+            "Secret",
+            HttpMethod::Get,
+            "/api/entities/Secret/cursor?limit=10",
+            "",
+            Expect::Rejected,
+            Expect::Rejected,
+            Expect::Rejected,
+        );
     }
 
     // Keep the warning silencer until this is used.

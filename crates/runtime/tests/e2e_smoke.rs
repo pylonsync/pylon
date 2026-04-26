@@ -71,6 +71,13 @@ fn available_port() -> u16 {
 fn start_server() -> (u16, Arc<Runtime>) {
     let port = available_port();
     let manifest = test_manifest();
+    // Server defaults to non-dev (production-safe), which requires
+    // PYLON_CORS_ORIGIN. Tests don't set one, so opt into dev mode.
+    // SAFETY: tests run single-threaded for env mutations like this;
+    // setting once before the server thread spawns is fine.
+    unsafe {
+        std::env::set_var("PYLON_DEV_MODE", "1");
+    }
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {

@@ -91,10 +91,17 @@ jobs:
         # `workspace:*` deps to the concrete sibling version at publish
         # time. npm publish ships them as-is, which produces broken
         # tarballs (npm install would try to resolve `workspace:*` and
-        # fail). Auth flows through the .npmrc that actions/setup-node
-        # wrote, which references NODE_AUTH_TOKEN.
+        # fail).
+        #
+        # Auth: we write .npmrc into the repo root with the literal
+        # token baked in. Earlier this step let actions/setup-node
+        # write a temp .npmrc using ${NODE_AUTH_TOKEN} interpolation —
+        # bun's discovery walks up from cwd, doesn't honor
+        # $npm_config_userconfig the way npm does, so the temp file
+        # was invisible after `cd $pkg`. Writing at the repo root
+        # makes it discoverable from every package subdir.
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           # See note above on provenance — sigstore rejects bundles
           # referencing a private source repo. Flip to "true" once
           # pylonsync/pylon goes public.
@@ -102,6 +109,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Sanity: prove the env binding is working before we touch
+          # the registry. An empty NPM_TOKEN is the most common cause
+          # of "missing authentication" — this fails loudly so the
+          # cause shows up in the run summary instead of being buried.
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is empty in this job — the Production environment is not injecting it. Verify Settings → Environments → Production → Environment secrets contains NPM_TOKEN, and that the deployment branch/tag rules allow this ref." >&2
+            exit 2
+          fi
+          echo "→ NPM_TOKEN length: ${#NPM_TOKEN}"
+
+          # Write .npmrc with the literal token (no env-var ref). bun
+          # discovers .npmrc by walking up from cwd, so a file at
+          # the repo root is visible from every packages/* subdir.
+          printf '//registry.npmjs.org/:_authToken=%s\nregistry=https://registry.npmjs.org/\nalways-auth=true\n' "$NPM_TOKEN" > .npmrc
+          # Defense in depth: gitignore the file in this run so a
+          # future `git add -A` somewhere can't accidentally commit it.
+          echo ".npmrc" >> .gitignore
+
+          # Prove npm itself accepts the token before bun gets a turn.
+          # If this errors, the token is rejected by the registry —
+          # regenerate at npmjs.com.
+          npm whoami --registry=https://registry.npmjs.org
+
           # sync first: its siblings depend on it via workspace:*, so
           # the rewrite during their publish needs sync's published
           # version range to be queryable. (Bun rewrites to the local
@@ -118,6 +149,8 @@ jobs:
               (cd "$pkg" && bun publish --access public)
             fi
           done
+
+          rm -f .npmrc
 
   # ---------------------------------------------------------------
   # crates.io publish. katyo/publish-crates walks the workspace,

@@ -67,6 +67,11 @@ fn available_port() -> u16 {
 
 fn start_server(rt: Arc<Runtime>) -> u16 {
     let port = available_port();
+    // Tests don't set PYLON_CORS_ORIGIN — opt into dev mode so the
+    // server doesn't refuse to start under the new safe-by-default.
+    unsafe {
+        std::env::set_var("PYLON_DEV_MODE", "1");
+    }
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start(rt2, port);

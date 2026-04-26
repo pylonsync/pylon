@@ -746,7 +746,23 @@ fn handle_ws_connection(
                 };
                 let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match kind {
-                    "presence" | "topic" => hub.broadcast_presence(&text),
+                    "presence" | "topic" => {
+                        // Stamp the authenticated sender server-side,
+                        // overriding any client-provided `from`. Without
+                        // this, any client could spoof presence/topic
+                        // events as another user — every connected
+                        // client would see a forged "alice typed…"
+                        // message attributed to alice.
+                        let mut stamped = parsed.clone();
+                        if let Some(obj) = stamped.as_object_mut() {
+                            let from = auth_ctx
+                                .user_id
+                                .clone()
+                                .unwrap_or_else(|| "admin".to_string());
+                            obj.insert("from".into(), serde_json::Value::String(from));
+                        }
+                        hub.broadcast_presence(&stamped.to_string());
+                    }
                     "crdt-subscribe" | "crdt-unsubscribe" => handle_crdt_control(
                         &hub,
                         client_id,

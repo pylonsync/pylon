@@ -253,6 +253,17 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         }
 
+        // `pylon dev` is interactive local development — opt into dev
+        // mode automatically. The runtime defaults this to false now
+        // (production-safe), so without this flip every `pylon dev`
+        // would refuse to start without PYLON_CORS_ORIGIN set, magic
+        // codes wouldn't appear in JSON for testing, etc.
+        unsafe {
+            if std::env::var("PYLON_DEV_MODE").is_err() {
+                std::env::set_var("PYLON_DEV_MODE", "1");
+            }
+        }
+
         // Dev-mode rate limits — production defaults (30 fn calls / min)
         // strangle realtime demos like world3d that write pose at 10 Hz.
         // Operators can still override any of these for stress testing.

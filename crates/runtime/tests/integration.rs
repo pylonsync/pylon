@@ -214,6 +214,11 @@ fn start_test_server() -> String {
     let manifest = test_manifest();
     let runtime = Arc::new(Runtime::in_memory(manifest).unwrap());
 
+    // Server defaults to non-dev mode; tests need dev mode opted in
+    // because they don't set PYLON_CORS_ORIGIN.
+    unsafe {
+        std::env::set_var("PYLON_DEV_MODE", "1");
+    }
     let rt = Arc::clone(&runtime);
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start(rt, port);
@@ -469,27 +474,40 @@ fn transaction() {
 fn cache_via_http() {
     let base = start_test_server();
 
+    // /api/cache/* is admin-gated post-pentest review (raw kv with no
+    // per-key authz; app code reaches it through server functions
+    // that apply policy). Pass the admin token on every call.
+    let admin = Some(TEST_ADMIN_TOKEN);
+
     // SET
-    let (status, body) = http_request(
+    let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/cache"),
         Some(r#"{"cmd": "SET", "key": "test_key", "value": "hello"}"#),
+        admin,
     );
     assert_eq!(status, 200, "cache SET: {body}");
 
     // GET
-    let (status, body) = http_request("GET", &format!("{base}/api/cache/test_key"), None);
+    let (status, body) =
+        http_request_with_auth("GET", &format!("{base}/api/cache/test_key"), None, admin);
     assert_eq!(status, 200, "cache GET: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(resp["result"], "hello");
 
     // DEL
-    let (status, _) = http_request("DELETE", &format!("{base}/api/cache/test_key"), None);
+    let (status, _) =
+        http_request_with_auth("DELETE", &format!("{base}/api/cache/test_key"), None, admin);
     assert_eq!(status, 200, "cache DEL should succeed");
 
     // GET after DEL (miss).
-    let (status, _) = http_request("GET", &format!("{base}/api/cache/test_key"), None);
+    let (status, _) =
+        http_request_with_auth("GET", &format!("{base}/api/cache/test_key"), None, admin);
     assert_eq!(status, 404, "cache GET after DEL should be 404");
+
+    // Anon request must be rejected — that's the gate's whole point.
+    let (status, _) = http_request("GET", &format!("{base}/api/cache/test_key"), None);
+    assert_eq!(status, 403, "cache GET without admin should be 403");
 }
 
 #[test]

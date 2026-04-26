@@ -402,10 +402,16 @@ fn start_server(
         fn_notifier,
     );
 
-    // Dev mode flag: when false, sensitive data (e.g. magic codes) is omitted from responses.
+    // Dev mode flag. Gates a *lot* of permissive behavior: magic codes
+    // appear in JSON responses, /studio is open without admin auth,
+    // POST /api/auth/session can mint sessions for arbitrary user_ids,
+    // OAuth callback accepts a caller-supplied email, CORS defaults to
+    // `*`, etc. Defaulting to `true` meant a prod deploy that simply
+    // forgot the env var was trivially compromisable — flip to safe-
+    // by-default and let the CLI's `pylon dev` opt in explicitly.
     let is_dev = std::env::var("PYLON_DEV_MODE")
         .map(|v| v == "1" || v == "true")
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     // CORS origin. Defaults to `*` in dev for convenience; in prod we refuse
     // to start with a wildcard because the server sends `Access-Control-
