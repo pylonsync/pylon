@@ -31,7 +31,17 @@ Optional:
 PYLON_JOBS_DB=/var/lib/pylon/jobs.db  # durable job queue
 PYLON_OAUTH_GOOGLE_CLIENT_ID=...         # enable Google OAuth
 PYLON_OAUTH_GITHUB_CLIENT_ID=...         # enable GitHub OAuth
-PYLON_EMAIL_HTTP_URL=https://api.resend.com/emails  # or SMTP via transport config
+PYLON_EMAIL_PROVIDER=stack0              # or sendgrid | resend | webhook
+PYLON_EMAIL_API_KEY=sk_live_...          # provider API key
+PYLON_EMAIL_FROM=noreply@yourdomain.com  # verified sender
+PYLON_EMAIL_HTTP_URL=...                 # only when PYLON_EMAIL_PROVIDER=webhook
+
+# File storage (defaults to local disk)
+PYLON_FILES_PROVIDER=stack0              # or local (default)
+PYLON_STACK0_API_KEY=sk_live_...         # required when provider=stack0
+PYLON_STACK0_FOLDER=uploads              # optional folder/prefix
+PYLON_FILES_DIR=/var/lib/pylon/uploads   # local provider only
+PYLON_FILES_URL_PREFIX=/api/files        # local provider only
 ```
 
 Security hard requirements that fail to start:

@@ -279,21 +279,28 @@ pub(crate) fn handle(
             _ => None,
         };
 
-        // For PATCH/DELETE, evaluate ownership rules against the
-        // EXISTING row, not the incoming patch — so a caller can't
-        // bypass `data.authorId == auth.userId` by omitting the
-        // ownership field from their PATCH body.
+        // Pre-fetch the row for GET/PATCH/DELETE-by-id so policies
+        // that reference `data.*` (ownership, tenant, etc.) actually
+        // see the row they're authorizing against. Skipping this on
+        // GET caused `auth.userId == data.id` to ALWAYS deny — the
+        // policy evaluator can't compare userId against an absent
+        // `data.id`. PATCH/DELETE already loaded the row to defend
+        // against bypass-via-omitted-fields; GET joins them.
         let existing_row_for_policy: Option<serde_json::Value> = match (method, entity_id) {
-            (HttpMethod::Patch, Some(id)) | (HttpMethod::Delete, Some(id)) => {
+            (HttpMethod::Get, Some(id))
+            | (HttpMethod::Patch, Some(id))
+            | (HttpMethod::Delete, Some(id)) => {
                 ctx.store.get_by_id(entity_name, id).ok().flatten()
             }
             _ => None,
         };
 
         let policy_check = match method {
-            HttpMethod::Get => ctx
-                .policy_engine
-                .check_entity_read(entity_name, ctx.auth_ctx, None),
+            HttpMethod::Get => ctx.policy_engine.check_entity_read(
+                entity_name,
+                ctx.auth_ctx,
+                existing_row_for_policy.as_ref(),
+            ),
             HttpMethod::Post => ctx.policy_engine.check_entity_insert(
                 entity_name,
                 ctx.auth_ctx,

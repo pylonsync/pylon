@@ -56,5 +56,5 @@ Recommended:
 
 - Run behind a reverse proxy that terminates TLS
 - Mount the data directory as a persistent volume
-- Enable `PYLON_EMAIL_PROVIDER=sendgrid` or `resend` for magic-code delivery
+- Enable `PYLON_EMAIL_PROVIDER=sendgrid`, `resend`, or `stack0` for magic-code delivery
 - Back up the database regularly (`pylon backup <dir>`)

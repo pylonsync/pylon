@@ -4,6 +4,7 @@
 //! for local disk, S3, R2, GCS, or any other storage backend.
 
 use serde::Serialize;
+use std::io::Read;
 
 // ---------------------------------------------------------------------------
 // File storage trait
@@ -172,6 +173,195 @@ impl S3Config {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stack0 CDN/storage implementation
+// ---------------------------------------------------------------------------
+
+/// File storage backed by Stack0's CDN.
+///
+/// Uploads use a 3-step flow: POST `/cdn/upload` to mint a presigned URL,
+/// PUT the bytes to that URL, then POST `/cdn/upload/{assetId}/confirm`.
+/// `store()` returns the public `cdnUrl` so clients can embed it directly
+/// without round-tripping through pylon.
+pub struct Stack0FileStorage {
+    api_key: String,
+    /// Base API URL — typically `https://api.stack0.dev`. Configurable so
+    /// tests can point at a local mock server.
+    base_url: String,
+    /// Optional folder/prefix for organizing uploads.
+    folder: Option<String>,
+}
+
+impl Stack0FileStorage {
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            base_url: "https://api.stack0.dev".into(),
+            folder: None,
+        }
+    }
+
+    pub fn with_folder(mut self, folder: impl Into<String>) -> Self {
+        self.folder = Some(folder.into());
+        self
+    }
+
+    /// Override the API base URL (useful for tests or self-hosted Stack0).
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    /// Construct from environment variables.
+    /// Reads: PYLON_STACK0_API_KEY (required), PYLON_STACK0_FOLDER (optional),
+    /// PYLON_STACK0_BASE_URL (optional override).
+    pub fn from_env() -> Option<Self> {
+        let api_key = std::env::var("PYLON_STACK0_API_KEY").ok()?;
+        let mut s = Self::new(api_key);
+        if let Ok(folder) = std::env::var("PYLON_STACK0_FOLDER") {
+            s = s.with_folder(folder);
+        }
+        if let Ok(base) = std::env::var("PYLON_STACK0_BASE_URL") {
+            s = s.with_base_url(base);
+        }
+        Some(s)
+    }
+
+    /// JSON body for the `/cdn/upload` init call. Pulled out so tests can
+    /// pin the wire shape without exercising the network.
+    pub fn build_upload_init_body(
+        &self,
+        filename: &str,
+        content_type: &str,
+        size: usize,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "filename": filename,
+            "mimeType": content_type,
+            "size": size,
+        });
+        if let Some(folder) = &self.folder {
+            body["folder"] = serde_json::Value::String(folder.clone());
+        }
+        body
+    }
+}
+
+fn stack0_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .timeout_write(std::time::Duration::from_secs(30))
+        .user_agent("pylon-storage/0.1")
+        .build()
+}
+
+fn stack0_err(code: &str, e: impl std::fmt::Display) -> FileStorageError {
+    FileStorageError {
+        code: code.into(),
+        message: e.to_string(),
+    }
+}
+
+impl FileStorage for Stack0FileStorage {
+    fn store(
+        &self,
+        name: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<StoredFile, FileStorageError> {
+        let agent = stack0_agent();
+        let init_body = self.build_upload_init_body(name, content_type, content.len());
+
+        // 1. Mint presigned upload URL.
+        let init_resp: serde_json::Value = agent
+            .post(&format!("{}/cdn/upload", self.base_url))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_string(&init_body.to_string())
+            .map_err(|e| stack0_err("STACK0_UPLOAD_INIT_FAILED", e))?
+            .into_json()
+            .map_err(|e| stack0_err("STACK0_UPLOAD_INIT_PARSE", e))?;
+
+        let upload_url = init_resp["uploadUrl"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing uploadUrl"))?;
+        let asset_id = init_resp["assetId"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing assetId"))?
+            .to_string();
+        let cdn_url = init_resp["cdnUrl"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing cdnUrl"))?
+            .to_string();
+
+        // 2. PUT bytes to presigned URL. The presigned URL carries its own
+        // signature, so we don't reattach the API key here.
+        agent
+            .put(upload_url)
+            .set("Content-Type", content_type)
+            .send_bytes(content)
+            .map_err(|e| stack0_err("STACK0_UPLOAD_PUT_FAILED", e))?;
+
+        // 3. Confirm upload so Stack0 marks the asset as ready.
+        agent
+            .post(&format!("{}/cdn/upload/{}/confirm", self.base_url, asset_id))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .call()
+            .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_FAILED", e))?;
+
+        Ok(StoredFile {
+            id: asset_id,
+            url: cdn_url,
+            size: content.len(),
+        })
+    }
+
+    fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError> {
+        // Two-step recovery path: look up the asset's cdnUrl, then fetch bytes.
+        // Most callers should embed the cdnUrl returned from `store()` directly
+        // and never hit this method.
+        let agent = stack0_agent();
+        let meta: serde_json::Value = agent
+            .get(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .call()
+            .map_err(|e| match &e {
+                ureq::Error::Status(404, _) => stack0_err("NOT_FOUND", "Asset not found"),
+                _ => stack0_err("STACK0_GET_FAILED", e),
+            })?
+            .into_json()
+            .map_err(|e| stack0_err("STACK0_GET_PARSE", e))?;
+
+        let cdn_url = meta["cdnUrl"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_GET_BAD_RESPONSE", "missing cdnUrl"))?;
+
+        let mut buf = Vec::new();
+        agent
+            .get(cdn_url)
+            .call()
+            .map_err(|e| stack0_err("STACK0_FETCH_FAILED", e))?
+            .into_reader()
+            .read_to_end(&mut buf)
+            .map_err(|e| stack0_err("STACK0_FETCH_READ", e))?;
+        Ok(buf)
+    }
+
+    fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
+        let agent = stack0_agent();
+        match agent
+            .delete(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .call()
+        {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(404, _)) => Ok(false),
+            Err(e) => Err(stack0_err("STACK0_DELETE_FAILED", e)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +398,34 @@ mod tests {
         assert!(storage.delete("../etc/passwd").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stack0_upload_init_body_shape() {
+        let storage = Stack0FileStorage::new("sk_test_123");
+        let body = storage.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
+        assert_eq!(body["filename"], "photo.jpg");
+        assert_eq!(body["mimeType"], "image/jpeg");
+        assert_eq!(body["size"], 4096);
+        assert!(body.get("folder").is_none());
+    }
+
+    #[test]
+    fn stack0_upload_init_body_includes_folder() {
+        let storage = Stack0FileStorage::new("sk_test_123").with_folder("avatars");
+        let body = storage.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
+        assert_eq!(body["folder"], "avatars");
+    }
+
+    #[test]
+    fn stack0_default_base_url() {
+        let storage = Stack0FileStorage::new("sk_test_123");
+        assert_eq!(storage.base_url, "https://api.stack0.dev");
+    }
+
+    #[test]
+    fn stack0_with_base_url_override() {
+        let storage = Stack0FileStorage::new("sk_test_123").with_base_url("http://localhost:9999");
+        assert_eq!(storage.base_url, "http://localhost:9999");
     }
 }

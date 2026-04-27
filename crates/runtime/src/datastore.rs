@@ -710,7 +710,7 @@ impl pylon_router::WorkflowOps for WorkflowEngine {
 // Adapter: FileStorage trait → FileOps
 // ---------------------------------------------------------------------------
 
-use pylon_storage::files::{FileStorage, LocalFileStorage};
+use pylon_storage::files::{FileStorage, LocalFileStorage, Stack0FileStorage};
 
 /// Adapter that exposes a [`FileStorage`] backend through the router's [`FileOps`].
 pub struct FileOpsAdapter {
@@ -719,8 +719,30 @@ pub struct FileOpsAdapter {
 
 impl FileOpsAdapter {
     /// Create from environment variables.
-    /// Defaults to local filesystem storage at `./uploads`.
+    ///
+    /// Selects backend via `PYLON_FILES_PROVIDER`:
+    /// - `local` (default) — files saved under `PYLON_FILES_DIR` and served
+    ///   via `PYLON_FILES_URL_PREFIX`.
+    /// - `stack0` — uploads go to Stack0's CDN. Requires `PYLON_STACK0_API_KEY`.
     pub fn from_env() -> Self {
+        let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
+        match provider.as_str() {
+            "stack0" => match Stack0FileStorage::from_env() {
+                Some(s) => Self {
+                    storage: Arc::new(s),
+                },
+                None => {
+                    tracing::warn!(
+                        "PYLON_FILES_PROVIDER=stack0 but PYLON_STACK0_API_KEY is not set; falling back to local storage"
+                    );
+                    Self::local_from_env()
+                }
+            },
+            _ => Self::local_from_env(),
+        }
+    }
+
+    fn local_from_env() -> Self {
         let dir = std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into());
         let url_prefix =
             std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into());

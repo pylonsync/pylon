@@ -5,6 +5,7 @@ use pylon_kernel::{Diagnostic, ExitCode, Severity};
 use crate::client_codegen::generate_client_ts;
 use crate::manifest::load_manifest;
 use crate::output::{print_diagnostics, print_json};
+use crate::swift_codegen::generate_client_swift;
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let out_path = args
@@ -12,10 +13,20 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .find(|w| w[0] == "--out")
         .map(|w| w[1].as_str());
 
+    let target = args
+        .windows(2)
+        .find(|w| w[0] == "--target")
+        .map(|w| w[1].as_str())
+        .unwrap_or("ts");
+
     let positional: Vec<&str> = args
         .iter()
         .filter(|a| {
-            !a.starts_with('-') && *a != "codegen" && *a != "client" && Some(a.as_str()) != out_path
+            !a.starts_with('-')
+                && *a != "codegen"
+                && *a != "client"
+                && Some(a.as_str()) != out_path
+                && Some(a.as_str()) != Some(target)
         })
         .map(|s| s.as_str())
         .collect();
@@ -29,7 +40,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     code: "CODEGEN_CLIENT_NO_MANIFEST".into(),
                     message: "No manifest path provided".into(),
                     span: None,
-                    hint: Some("Usage: pylon codegen client <manifest> --out <path>".into()),
+                    hint: Some(
+                        "Usage: pylon codegen client <manifest> [--target ts|swift] --out <path>"
+                            .into(),
+                    ),
                 }],
                 json_mode,
             );
@@ -45,7 +59,23 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    let ts_content = generate_client_ts(&manifest);
+    let ts_content = match target {
+        "ts" | "typescript" => generate_client_ts(&manifest),
+        "swift" => generate_client_swift(&manifest),
+        other => {
+            print_diagnostics(
+                &[Diagnostic {
+                    severity: Severity::Error,
+                    code: "CODEGEN_CLIENT_BAD_TARGET".into(),
+                    message: format!("Unknown codegen target: {other}"),
+                    span: None,
+                    hint: Some("Valid targets: ts, swift".into()),
+                }],
+                json_mode,
+            );
+            return ExitCode::Usage;
+        }
+    };
 
     match out_path {
         Some(path) => {

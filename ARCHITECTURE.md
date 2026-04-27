@@ -116,6 +116,11 @@ adapters.
   not CRDT-backed, not local-first in the Ink & Switch sense; see
   [docs/SYNC.md](docs/SYNC.md) for what convergence guarantees this provides.
 - **`packages/react-native`** — RN hooks + Expo SQLite-backed replica.
+- **`packages/swift`** — native Swift SDK (iOS, macOS, Linux). `PylonClient`,
+  `PylonSync` (LocalStore + MutationQueue + WebSocket + SQLite persistence),
+  `PylonRealtime` (shard client), `PylonSwiftUI` (`@ObservableObject`
+  helpers). Wire shapes pinned to TS; CRDT decoding via `loro-swift`
+  (same Rust core as the JS Loro).
 - **`packages/workflows`** — durable workflow runner (sidecar process).
 
 ## Request lifecycle (self-hosted)

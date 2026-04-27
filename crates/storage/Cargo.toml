@@ -22,6 +22,7 @@ rusqlite = { workspace = true }
 postgres = { workspace = true, optional = true }
 tracing = { workspace = true }
 roaring = { workspace = true }
+ureq = { workspace = true }
 
 [features]
 default = []

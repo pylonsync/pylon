@@ -181,6 +181,7 @@ pylon/
     ├── react/           React hooks + typed client
     ├── react-native/    RN hooks + offline storage
     ├── next/            Next.js integration
+    ├── swift/           Swift SDK (iOS, macOS, Linux) — sync, realtime, SwiftUI
     ├── functions/       Function definitions + Bun runtime
     ├── sync/            Sync engine (optimistic + offline-capable)
     ├── workflows/       Durable workflow runner

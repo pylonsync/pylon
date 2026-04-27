@@ -6,7 +6,7 @@
 
 /// Pluggable email delivery backend.
 ///
-/// Implemented for SMTP, SendGrid, SES, Resend, etc.
+/// Implemented for SMTP, SendGrid, SES, Resend, Stack0, etc.
 /// The `ConsoleTransport` prints to stderr for local development.
 pub trait EmailTransport: Send + Sync {
     fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError>;
@@ -43,10 +43,10 @@ impl EmailTransport for ConsoleTransport {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP transport (SendGrid, Resend, generic webhook)
+// HTTP transport (SendGrid, Resend, Stack0, generic webhook)
 // ---------------------------------------------------------------------------
 
-/// Email delivery via HTTP POST (SendGrid, Resend, or any HTTP endpoint).
+/// Email delivery via HTTP POST (SendGrid, Resend, Stack0, or any HTTP endpoint).
 pub struct HttpEmailTransport {
     pub endpoint: String,
     pub api_key: String,
@@ -58,19 +58,21 @@ pub struct HttpEmailTransport {
 pub enum HttpEmailProvider {
     SendGrid,
     Resend,
+    Stack0,
     Webhook,
 }
 
 impl HttpEmailTransport {
     /// Create from environment variables.
     ///
-    /// Reads: PYLON_EMAIL_PROVIDER (sendgrid|resend|webhook),
+    /// Reads: PYLON_EMAIL_PROVIDER (sendgrid|resend|stack0|webhook),
     /// PYLON_EMAIL_API_KEY, PYLON_EMAIL_FROM, PYLON_EMAIL_ENDPOINT
     pub fn from_env() -> Option<Self> {
         let provider_str = std::env::var("PYLON_EMAIL_PROVIDER").ok()?;
         let provider = match provider_str.as_str() {
             "sendgrid" => HttpEmailProvider::SendGrid,
             "resend" => HttpEmailProvider::Resend,
+            "stack0" => HttpEmailProvider::Stack0,
             "webhook" => HttpEmailProvider::Webhook,
             _ => return None,
         };
@@ -78,6 +80,7 @@ impl HttpEmailTransport {
         let endpoint = match provider {
             HttpEmailProvider::SendGrid => "https://api.sendgrid.com/v3/mail/send".to_string(),
             HttpEmailProvider::Resend => "https://api.resend.com/emails".to_string(),
+            HttpEmailProvider::Stack0 => "https://api.stack0.dev/mail/send".to_string(),
             HttpEmailProvider::Webhook => std::env::var("PYLON_EMAIL_ENDPOINT").ok()?,
         };
 
@@ -101,6 +104,13 @@ impl HttpEmailTransport {
             })
             .to_string(),
             HttpEmailProvider::Resend => serde_json::json!({
+                "from": self.from,
+                "to": [to],
+                "subject": subject,
+                "text": body
+            })
+            .to_string(),
+            HttpEmailProvider::Stack0 => serde_json::json!({
                 "from": self.from,
                 "to": [to],
                 "subject": subject,
@@ -187,4 +197,54 @@ mod tests {
         assert!(parsed["to"][0] == "user@test.com");
         assert!(parsed["text"] == "123456");
     }
+
+    #[test]
+    fn stack0_body_format() {
+        let t = HttpEmailTransport {
+            endpoint: "https://api.stack0.dev/mail/send".into(),
+            api_key: "key".into(),
+            from: "noreply@test.com".into(),
+            provider: HttpEmailProvider::Stack0,
+        };
+        let body = t.build_body("user@test.com", "Your code", "123456");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["from"], "noreply@test.com");
+        assert_eq!(parsed["to"][0], "user@test.com");
+        assert_eq!(parsed["subject"], "Your code");
+        assert_eq!(parsed["text"], "123456");
+    }
+
+    #[test]
+    fn stack0_from_env_picks_correct_endpoint() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Snapshot + clear env vars we touch so this test is hermetic.
+        let prev_provider = std::env::var("PYLON_EMAIL_PROVIDER").ok();
+        let prev_key = std::env::var("PYLON_EMAIL_API_KEY").ok();
+        let prev_from = std::env::var("PYLON_EMAIL_FROM").ok();
+
+        std::env::set_var("PYLON_EMAIL_PROVIDER", "stack0");
+        std::env::set_var("PYLON_EMAIL_API_KEY", "sk_test_abc");
+        std::env::set_var("PYLON_EMAIL_FROM", "noreply@example.com");
+
+        let t = HttpEmailTransport::from_env().expect("should construct");
+        assert_eq!(t.endpoint, "https://api.stack0.dev/mail/send");
+        assert_eq!(t.from, "noreply@example.com");
+        assert!(matches!(t.provider, HttpEmailProvider::Stack0));
+
+        // Restore.
+        match prev_provider {
+            Some(v) => std::env::set_var("PYLON_EMAIL_PROVIDER", v),
+            None => std::env::remove_var("PYLON_EMAIL_PROVIDER"),
+        }
+        match prev_key {
+            Some(v) => std::env::set_var("PYLON_EMAIL_API_KEY", v),
+            None => std::env::remove_var("PYLON_EMAIL_API_KEY"),
+        }
+        match prev_from {
+            Some(v) => std::env::set_var("PYLON_EMAIL_FROM", v),
+            None => std::env::remove_var("PYLON_EMAIL_FROM"),
+        }
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

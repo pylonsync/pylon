@@ -24,6 +24,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ts: ${{ steps.filter.outputs.ts }}
+      swift: ${{ steps.filter.outputs.swift }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -42,6 +43,10 @@ jobs:
               - 'package.json'
               - 'bun.lockb'
               - 'bun.lock'
+              - '.github/workflows/ci.yml'
+            swift:
+              - 'packages/swift/**'
+              - 'crates/cli/src/swift_codegen.rs'
               - '.github/workflows/ci.yml'
 
   fmt:
@@ -145,9 +150,36 @@ jobs:
   #
   # Set this as the one required check in the branch protection rule.
   # -----------------------------------------------------------------
+  swift:
+    name: swift build & test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.swift == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: packages/swift
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Swift toolchain (Linux only)
+        if: runner.os == 'Linux'
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '5.10'
+      - name: Install sqlite3 dev headers (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: swift build
+        run: swift build
+      - name: swift test
+        run: swift test --parallel
+
   ci-passed:
     name: CI passed
-    needs: [changes, fmt, clippy, test, build, typescript, audit]
+    needs: [changes, fmt, clippy, test, build, typescript, audit, swift]
     if: always()
     runs-on: ubuntu-latest
     steps:
