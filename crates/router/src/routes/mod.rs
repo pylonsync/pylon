@@ -8,4 +8,19 @@
 //! reviewer can audit one file instead of scrolling through 6000+
 //! lines of unrelated handlers.
 
+pub mod actions;
+pub mod admin_data;
+pub mod ai;
 pub mod auth;
+pub mod crdt;
+pub mod entities;
+pub mod files;
+pub mod functions;
+pub mod infra;
+pub mod links;
+pub mod queries;
+pub mod rooms;
+pub mod search;
+pub mod shards;
+pub mod sync;
+pub mod workflows;
