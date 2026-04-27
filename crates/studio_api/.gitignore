@@ -1,0 +1,6 @@
+# Studio web bundle artifacts. We commit `web/dist/` because it's
+# embedded into the Rust crate via include_str! — without it cargo
+# build fails. Operators iterating on Studio rebuild via:
+#   (cd crates/studio_api/web && bun run build)
+web/node_modules/
+web/.vite/

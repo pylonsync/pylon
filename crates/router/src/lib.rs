@@ -867,11 +867,20 @@ fn route_inner(
     }
 
     // GET /api/auth/me
+    //
+    // Returns the resolved AuthContext the runtime computed for this
+    // request, NOT a fresh `session_store.resolve(token)` lookup. The
+    // distinction matters: PYLON_ADMIN_TOKEN bearer auth is resolved
+    // by the runtime (server.rs) before route() is called, and the
+    // result lives in `ctx.auth_ctx`. Calling session_store.resolve
+    // here would skip the admin-token branch entirely and report
+    // every admin caller as anonymous — which Studio relied on to
+    // decide whether to surface admin tabs and which the dashboard
+    // layout used to gate `/dashboard`. Trust the runtime's resolution.
     if url == "/api/auth/me" && method == HttpMethod::Get {
-        let resolved = ctx.session_store.resolve(auth_token);
         return (
             200,
-            serde_json::to_string(&resolved).unwrap_or_else(|_| "{}".into()),
+            serde_json::to_string(ctx.auth_ctx).unwrap_or_else(|_| "{}".into()),
         );
     }
 

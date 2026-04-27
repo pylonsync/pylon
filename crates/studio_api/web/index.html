@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" class="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>__PYLON_NAME__ — Pylon Studio</title>
+		<script>
+			// Injected by the Rust handler. The escape helpers in
+			// crates/studio_api/src/lib.rs make these XSS-safe inside this
+			// <script> block — see the security tests in that file.
+			window.__PYLON_API__ = "__PYLON_API_BASE__";
+			window.__PYLON_MANIFEST__ = __PYLON_MANIFEST_JSON__;
+		</script>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
+</html>
