@@ -331,11 +331,36 @@ impl OAuthConfig {
         }
     }
 
-    /// Exchange an authorization code for an access token.
-    ///
-    /// Uses the system `curl` binary so the auth crate stays free of HTTP
-    /// client dependencies. Returns the provider-specific access token string
-    /// (extracted from the JSON response).
+    /// Exchange an authorization code for the full token set
+    /// (`access_token`, optional `refresh_token`, optional `id_token`,
+    /// `expires_in`, `scope`). The longer struct is what the
+    /// account-store needs to persist; the legacy
+    /// [`OAuthConfig::exchange_code`] returns just the access token for
+    /// callers that don't care.
+    pub fn exchange_code_full(&self, code: &str) -> Result<TokenSet, String> {
+        let body = match self.provider.as_str() {
+            "google" => format!(
+                "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
+                url_encode(&self.client_id),
+                url_encode(&self.client_secret),
+                url_encode(&self.redirect_uri)
+            ),
+            "github" => format!(
+                "code={code}&client_id={}&client_secret={}&redirect_uri={}",
+                url_encode(&self.client_id),
+                url_encode(&self.client_secret),
+                url_encode(&self.redirect_uri)
+            ),
+            _ => return Err(format!("unknown OAuth provider: {}", self.provider)),
+        };
+
+        let out = http_post_form(self.token_url(), &body, self.provider.as_str() == "github")?;
+        parse_token_response(&out)
+    }
+
+    /// Exchange an authorization code for an access token. Thin wrapper
+    /// around [`OAuthConfig::exchange_code_full`] for callers that only
+    /// need the access token (existing pre-account-store call sites).
     pub fn exchange_code(&self, code: &str) -> Result<String, String> {
         let body = match self.provider.as_str() {
             "google" => format!(
@@ -358,8 +383,21 @@ impl OAuthConfig {
     }
 
     /// Fetch the authenticated user's email + display name using an access token.
-    /// Returns `(email, display_name)`.
+    /// Returns `(email, display_name)`. Use [`OAuthConfig::fetch_userinfo_full`]
+    /// when you also need the provider-stable account ID for account
+    /// linking — the (`provider`, `provider_account_id`) pair is what
+    /// keeps a renamed-email user matched to the same row.
     pub fn fetch_userinfo(&self, access_token: &str) -> Result<(String, Option<String>), String> {
+        let info = self.fetch_userinfo_full(access_token)?;
+        Ok((info.email, info.name))
+    }
+
+    /// Fetch the authenticated user's full identity info — email + name +
+    /// the provider-stable account ID (Google's `sub`, GitHub's `id`).
+    /// `provider_account_id` is what the account-store keys on, NOT the
+    /// email; otherwise a user changing their Google address would orphan
+    /// their existing pylon account.
+    pub fn fetch_userinfo_full(&self, access_token: &str) -> Result<UserInfo, String> {
         let out = http_get_bearer(self.userinfo_url(), access_token)?;
         let parsed: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| format!("userinfo not valid JSON: {e}"))?;
@@ -374,7 +412,17 @@ impl OAuthConfig {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                Ok((email, name))
+                let provider_account_id = parsed
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .ok_or("no sub in userinfo")?
+                    .to_string();
+                Ok(UserInfo {
+                    provider: self.provider.clone(),
+                    provider_account_id,
+                    email,
+                    name,
+                })
             }
             "github" => {
                 let name = parsed
@@ -391,11 +439,99 @@ impl OAuthConfig {
                 let email = email
                     .or_else(|| fetch_github_primary_email(access_token).ok())
                     .ok_or("no accessible email on GitHub account")?;
-                Ok((email, name))
+                // GitHub's `id` field is a numeric user ID — the stable
+                // account identifier even if the user renames themselves.
+                let provider_account_id = parsed
+                    .get("id")
+                    .map(|v| {
+                        v.as_i64()
+                            .map(|n| n.to_string())
+                            .or_else(|| v.as_str().map(String::from))
+                            .unwrap_or_default()
+                    })
+                    .filter(|s| !s.is_empty())
+                    .ok_or("no id in userinfo")?;
+                Ok(UserInfo {
+                    provider: self.provider.clone(),
+                    provider_account_id,
+                    email,
+                    name,
+                })
             }
             _ => Err(format!("unknown provider: {}", self.provider)),
         }
     }
+}
+
+/// Resolved identity returned by [`OAuthConfig::fetch_userinfo_full`].
+/// `provider_account_id` is the provider-stable subject id (Google `sub`,
+/// GitHub numeric `id`) — what the account store keys on so a renamed
+/// email doesn't orphan the pylon account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserInfo {
+    pub provider: String,
+    pub provider_account_id: String,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+/// Token bundle returned by [`OAuthConfig::exchange_code_full`]. Stored
+/// on the matching `Account` row so `refresh_token` is available for
+/// silent re-auth and `expires_at` is checked before each provider call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenSet {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    /// Unix epoch seconds at which the access token expires. `None` when
+    /// the provider didn't return `expires_in` (GitHub's classic OAuth
+    /// app tokens are non-expiring).
+    pub expires_at: Option<u64>,
+    pub scope: Option<String>,
+}
+
+fn parse_token_response(body: &str) -> Result<TokenSet, String> {
+    // Most providers return JSON; GitHub Classic apps return form-urlencoded
+    // unless you ask with Accept: application/json (which we do).
+    let json: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|_| {
+        // Fall back to form-urlencoded: access_token=...&scope=...&token_type=...
+        let mut map = serde_json::Map::new();
+        for pair in body.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+        }
+        serde_json::Value::Object(map)
+    });
+
+    let access_token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("no access_token in token response: {body}"))?
+        .to_string();
+    let refresh_token = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let id_token = json
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_at = json
+        .get("expires_in")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .map(|secs| now_secs().saturating_add(secs));
+    let scope = json.get("scope").and_then(|v| v.as_str()).map(String::from);
+    Ok(TokenSet {
+        access_token,
+        refresh_token,
+        id_token,
+        expires_at,
+        scope,
+    })
 }
 
 fn url_encode(s: &str) -> String {
@@ -673,9 +809,81 @@ impl OAuthStateStore {
 // Magic code auth — email verification codes
 // ---------------------------------------------------------------------------
 
-/// An in-memory magic code store for development.
-pub struct MagicCodeStore {
+/// Pluggable storage for magic-code records. In-memory is the default
+/// (fine for dev); persistent backends (SQLite, Postgres) live in
+/// `pylon-runtime` so a server restart between "send code" and "verify
+/// code" doesn't invalidate the user's pending login.
+///
+/// All methods are infallible from the caller's perspective — durability
+/// is best-effort. A backend that fails to write should log; the
+/// in-memory cache remains authoritative for the current process.
+pub trait MagicCodeBackend: Send + Sync {
+    /// Replace any existing code for `email` with `code`.
+    fn put(&self, email: &str, code: &MagicCode);
+    /// Look up the current code for `email`. Returns `None` if absent.
+    fn get(&self, email: &str) -> Option<MagicCode>;
+    /// Remove the code for `email` (called on successful verify or
+    /// expiry). Idempotent — missing key is not an error.
+    fn remove(&self, email: &str);
+    /// Persist an attempts++ on the existing record without touching
+    /// other fields. Used by the verify-failed path to enforce
+    /// `MAX_ATTEMPTS` across restarts.
+    fn bump_attempts(&self, email: &str);
+    /// Load all live records on construction. Lets `MagicCodeStore::with_backend`
+    /// hydrate the in-memory cache from durable storage on startup.
+    fn load_all(&self) -> Vec<MagicCode>;
+}
+
+/// In-memory backend for magic codes. The default — also used as the
+/// authoritative cache by `MagicCodeStore`.
+pub struct InMemoryMagicCodeBackend {
     codes: Mutex<HashMap<String, MagicCode>>,
+}
+
+impl InMemoryMagicCodeBackend {
+    pub fn new() -> Self {
+        Self {
+            codes: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryMagicCodeBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MagicCodeBackend for InMemoryMagicCodeBackend {
+    fn put(&self, email: &str, code: &MagicCode) {
+        self.codes
+            .lock()
+            .unwrap()
+            .insert(email.to_string(), code.clone());
+    }
+    fn get(&self, email: &str) -> Option<MagicCode> {
+        self.codes.lock().unwrap().get(email).cloned()
+    }
+    fn remove(&self, email: &str) {
+        self.codes.lock().unwrap().remove(email);
+    }
+    fn bump_attempts(&self, email: &str) {
+        if let Some(c) = self.codes.lock().unwrap().get_mut(email) {
+            c.attempts = c.attempts.saturating_add(1);
+        }
+    }
+    fn load_all(&self) -> Vec<MagicCode> {
+        self.codes.lock().unwrap().values().cloned().collect()
+    }
+}
+
+/// A magic-code store. Wraps a `MagicCodeBackend` (in-memory by default)
+/// and applies the verify/cooldown semantics. Hydrates the in-memory
+/// cache from the backend on construction so durable backends survive
+/// restart without losing in-flight codes.
+pub struct MagicCodeStore {
+    cache: Mutex<HashMap<String, MagicCode>>,
+    backend: Box<dyn MagicCodeBackend>,
 }
 
 #[derive(Debug, Clone)]
@@ -719,8 +927,24 @@ impl Default for MagicCodeStore {
 
 impl MagicCodeStore {
     pub fn new() -> Self {
+        Self::with_backend(Box::new(InMemoryMagicCodeBackend::new()))
+    }
+
+    /// Build a magic-code store backed by a persistent backend. Existing
+    /// live codes are hydrated into the in-memory cache on construction
+    /// so a server restart between "send" and "verify" doesn't kill the
+    /// user's pending login.
+    pub fn with_backend(backend: Box<dyn MagicCodeBackend>) -> Self {
+        let now = now_secs();
+        let mut cache = HashMap::new();
+        for c in backend.load_all() {
+            if c.expires_at > now {
+                cache.insert(c.email.clone(), c);
+            }
+        }
         Self {
-            codes: Mutex::new(HashMap::new()),
+            cache: Mutex::new(cache),
+            backend,
         }
     }
 
@@ -737,7 +961,7 @@ impl MagicCodeStore {
     pub fn try_create(&self, email: &str) -> Result<String, MagicCodeError> {
         let now = now_secs();
 
-        let mut codes = self.codes.lock().unwrap();
+        let mut codes = self.cache.lock().unwrap();
 
         // Cooldown check: if a live code exists and was created less than
         // CREATE_COOLDOWN_SECS ago, throttle. The age-of-code is
@@ -761,7 +985,11 @@ impl MagicCodeStore {
             expires_at: now + 600, // 10 minutes
             attempts: 0,
         };
-        codes.insert(email.to_string(), mc);
+        codes.insert(email.to_string(), mc.clone());
+        // Persist after the cache mutation lands. Backend write is
+        // best-effort — if it fails the code still works for this
+        // process; only a restart in the next 10 minutes would lose it.
+        self.backend.put(email, &mc);
         Ok(code)
     }
 
@@ -777,7 +1005,7 @@ impl MagicCodeStore {
     /// correct subsequent attempts return `TooManyAttempts`.
     pub fn try_verify(&self, email: &str, code: &str) -> Result<(), MagicCodeError> {
         let now = now_secs();
-        let mut codes = self.codes.lock().unwrap();
+        let mut codes = self.cache.lock().unwrap();
 
         let mc = match codes.get_mut(email) {
             Some(m) => m,
@@ -789,12 +1017,14 @@ impl MagicCodeStore {
         }
         if mc.expires_at <= now {
             codes.remove(email);
+            self.backend.remove(email);
             return Err(MagicCodeError::Expired);
         }
 
         let ok = constant_time_eq(mc.code.as_bytes(), code.as_bytes());
         if !ok {
             mc.attempts += 1;
+            self.backend.bump_attempts(email);
             // Burn the code at MAX_ATTEMPTS so retries can't hit max.
             if mc.attempts >= MAX_ATTEMPTS {
                 return Err(MagicCodeError::TooManyAttempts);
@@ -804,6 +1034,7 @@ impl MagicCodeStore {
 
         // Correct code — consume it.
         codes.remove(email);
+        self.backend.remove(email);
         Ok(())
     }
 }
@@ -1067,6 +1298,205 @@ impl SessionStore {
             }
         }
         removed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OAuth account links — better-auth's `account` table equivalent
+// ---------------------------------------------------------------------------
+
+/// A persisted account link. Schema-aligned with better-auth's `account`
+/// table (verified against https://www.better-auth.com/docs/concepts/database
+/// at the time of writing) so users migrating from better-auth see the
+/// same field names + meanings:
+///
+/// - `provider_id` — the provider's name (`"google"`, `"github"`, plus
+///   `"credential"` once email/password auth lands). Matches
+///   better-auth's `providerId`.
+/// - `account_id` — the PROVIDER'S ID for the user (Google `sub`,
+///   GitHub numeric `id`, or for email/password the user's own id).
+///   Matches better-auth's `accountId`. NOT the row PK.
+/// - `id` — the row PK, generated. Lets the row be referenced
+///   independently of the (provider_id, account_id) natural key.
+/// - `password` — bcrypt/argon2 hash for `provider_id="credential"`
+///   rows; `None` for OAuth links. Reserves the column so adding
+///   email/password auth doesn't need a schema migration.
+///
+/// Account vs. user: a single User row can have many Account rows
+/// (Google + GitHub + a password — all linked to one pylon user).
+/// Provider lookup is by `(provider_id, account_id)` — NOT email — so
+/// a user changing their Google address keeps the same pylon account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub user_id: String,
+    /// Provider name — `"google"`, `"github"`, `"credential"`, etc.
+    /// (better-auth: `providerId`)
+    pub provider_id: String,
+    /// Provider's id for the user — Google `sub`, GitHub numeric `id`,
+    /// or for `provider_id="credential"` the user's own id. (better-auth: `accountId`)
+    pub account_id: String,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    /// Unix epoch seconds at which `access_token` expires. `None` for
+    /// non-expiring tokens (GitHub Classic apps) or for password rows.
+    pub access_token_expires_at: Option<u64>,
+    /// Unix epoch seconds at which `refresh_token` expires. `None` when
+    /// the provider doesn't expire refresh tokens (most don't, but
+    /// Microsoft Identity Platform does after 90 days of inactivity).
+    pub refresh_token_expires_at: Option<u64>,
+    pub scope: Option<String>,
+    /// Bcrypt/argon2 hash for email/password rows. `None` for OAuth.
+    /// Always `None` today — present so adding password auth later
+    /// doesn't require a schema migration.
+    pub password: Option<String>,
+    /// Unix epoch seconds when this account was first linked.
+    pub created_at: u64,
+    /// Unix epoch seconds when the token bundle was last refreshed.
+    pub updated_at: u64,
+}
+
+impl Account {
+    /// Build a new account link from a freshly-completed OAuth handshake.
+    /// Generates a fresh row id; the `(provider_id, account_id)` pair is
+    /// what later lookups key on.
+    pub fn new(user_id: String, info: &UserInfo, tokens: &TokenSet) -> Self {
+        let now = now_secs();
+        Self {
+            id: generate_token(),
+            user_id,
+            provider_id: info.provider.clone(),
+            account_id: info.provider_account_id.clone(),
+            access_token: Some(tokens.access_token.clone()),
+            refresh_token: tokens.refresh_token.clone(),
+            id_token: tokens.id_token.clone(),
+            access_token_expires_at: tokens.expires_at,
+            refresh_token_expires_at: None,
+            scope: tokens.scope.clone(),
+            password: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// True if `access_token_expires_at` is set and has passed.
+    /// Non-expiring tokens (GitHub Classic) report `false` — caller
+    /// should treat them as "valid until proven otherwise" and refresh
+    /// on 401.
+    pub fn access_token_expired(&self) -> bool {
+        match self.access_token_expires_at {
+            Some(ts) => now_secs() >= ts,
+            None => false,
+        }
+    }
+}
+
+/// Pluggable storage for account links. In-memory default ships with
+/// the crate; SQLite + Postgres impls live in `pylon-runtime`.
+pub trait AccountBackend: Send + Sync {
+    /// Insert or refresh an account link. The `(provider_id, account_id)`
+    /// pair is the natural key — repeated calls for the same pair
+    /// update the token bundle and `updated_at` on the existing row.
+    fn upsert(&self, account: &Account);
+    /// Find an account by provider identity. Returns `None` if the user
+    /// hasn't linked this provider yet.
+    fn find_by_provider(&self, provider_id: &str, account_id: &str) -> Option<Account>;
+    /// Every account linked to a user. The `/api/auth/me` endpoint uses
+    /// this to render "you're connected via Google + GitHub" in the UI
+    /// and to gate "unlink" affordances behind "user has another way to
+    /// sign in" checks.
+    fn find_for_user(&self, user_id: &str) -> Vec<Account>;
+    /// Remove a single provider link. Returns `true` if a row was removed.
+    fn unlink(&self, provider_id: &str, account_id: &str) -> bool;
+}
+
+/// In-memory account backend (default). Lost on restart — production
+/// deployments should swap in a persistent backend so refresh tokens
+/// survive a redeploy.
+pub struct InMemoryAccountBackend {
+    /// Keyed by `(provider_id, account_id)`. A separate map keyed on
+    /// user_id would speed up `find_for_user` but at framework scale
+    /// the linear scan of (typically ≤ 5) accounts per user is fine.
+    accounts: Mutex<HashMap<(String, String), Account>>,
+}
+
+impl InMemoryAccountBackend {
+    pub fn new() -> Self {
+        Self {
+            accounts: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryAccountBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccountBackend for InMemoryAccountBackend {
+    fn upsert(&self, account: &Account) {
+        let key = (account.provider_id.clone(), account.account_id.clone());
+        self.accounts.lock().unwrap().insert(key, account.clone());
+    }
+    fn find_by_provider(&self, provider_id: &str, account_id: &str) -> Option<Account> {
+        self.accounts
+            .lock()
+            .unwrap()
+            .get(&(provider_id.to_string(), account_id.to_string()))
+            .cloned()
+    }
+    fn find_for_user(&self, user_id: &str) -> Vec<Account> {
+        self.accounts
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|a| a.user_id == user_id)
+            .cloned()
+            .collect()
+    }
+    fn unlink(&self, provider_id: &str, account_id: &str) -> bool {
+        self.accounts
+            .lock()
+            .unwrap()
+            .remove(&(provider_id.to_string(), account_id.to_string()))
+            .is_some()
+    }
+}
+
+/// Account store. Wraps an `AccountBackend` and provides the methods the
+/// OAuth callback / API endpoints actually call.
+pub struct AccountStore {
+    backend: Box<dyn AccountBackend>,
+}
+
+impl Default for AccountStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccountStore {
+    pub fn new() -> Self {
+        Self {
+            backend: Box::new(InMemoryAccountBackend::new()),
+        }
+    }
+    pub fn with_backend(backend: Box<dyn AccountBackend>) -> Self {
+        Self { backend }
+    }
+    pub fn upsert(&self, account: &Account) {
+        self.backend.upsert(account);
+    }
+    pub fn find_by_provider(&self, provider_id: &str, account_id: &str) -> Option<Account> {
+        self.backend.find_by_provider(provider_id, account_id)
+    }
+    pub fn find_for_user(&self, user_id: &str) -> Vec<Account> {
+        self.backend.find_for_user(user_id)
+    }
+    pub fn unlink(&self, provider_id: &str, account_id: &str) -> bool {
+        self.backend.unlink(provider_id, account_id)
     }
 }
 

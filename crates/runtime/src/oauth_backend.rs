@@ -90,6 +90,84 @@ impl OAuthStateBackend for SqliteOAuthBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Postgres backend
+// ---------------------------------------------------------------------------
+
+pub use pg::PostgresOAuthBackend;
+
+mod pg {
+    use super::*;
+    use postgres::Client;
+    use std::sync::Mutex;
+
+    const PG_TABLE: &str = "_pylon_oauth_state";
+
+    pub struct PostgresOAuthBackend {
+        client: Mutex<Client>,
+    }
+
+    impl PostgresOAuthBackend {
+        pub fn connect(url: &str) -> Result<Self, String> {
+            let mut client =
+                Client::connect(url, postgres::NoTls).map_err(|e| format!("PG connect: {e}"))?;
+            client
+                .batch_execute(&format!(
+                    "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
+                        token TEXT PRIMARY KEY,
+                        provider TEXT NOT NULL,
+                        expires_at BIGINT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
+                ))
+                .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self {
+                client: Mutex::new(client),
+            })
+        }
+    }
+
+    impl OAuthStateBackend for PostgresOAuthBackend {
+        fn put(&self, token: &str, provider: &str, expires_at: u64) {
+            if let Ok(mut c) = self.client.lock() {
+                let _ = c.execute(
+                    &format!(
+                        "INSERT INTO {PG_TABLE} (token, provider, expires_at) VALUES ($1, $2, $3)
+                         ON CONFLICT (token) DO UPDATE SET
+                           provider = EXCLUDED.provider,
+                           expires_at = EXCLUDED.expires_at"
+                    ),
+                    &[&token, &provider, &(expires_at as i64)],
+                );
+            }
+        }
+
+        fn take(&self, token: &str, now_unix_secs: u64) -> Option<String> {
+            // Single round-trip with `RETURNING` is atomic enough — the
+            // DELETE removes the row whether it's expired or not (single-use),
+            // and we filter the returned provider by expires_at after.
+            // Concurrent callbacks for the same token can't both succeed
+            // because only one DELETE will return a row.
+            let mut c = self.client.lock().ok()?;
+            let row = c
+                .query_opt(
+                    &format!(
+                        "DELETE FROM {PG_TABLE} WHERE token = $1
+                         RETURNING provider, expires_at"
+                    ),
+                    &[&token],
+                )
+                .ok()??;
+            let provider: String = row.get(0);
+            let expires_at: i64 = row.get(1);
+            if (expires_at as u64) <= now_unix_secs {
+                return None;
+            }
+            Some(provider)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

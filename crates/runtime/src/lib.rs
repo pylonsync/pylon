@@ -1,3 +1,4 @@
+pub mod account_backend;
 pub mod cache_handlers;
 pub mod cache_server;
 pub mod config;
@@ -8,6 +9,7 @@ pub mod job_store;
 pub mod jobs;
 pub mod log;
 pub mod loro_store;
+pub mod magic_code_backend;
 pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;

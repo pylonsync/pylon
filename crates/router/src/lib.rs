@@ -471,6 +471,11 @@ pub struct RouterContext<'a> {
     pub session_store: &'a SessionStore,
     pub magic_codes: &'a MagicCodeStore,
     pub oauth_state: &'a OAuthStateStore,
+    /// Persistent OAuth account links — better-auth's `account` table
+    /// equivalent. Used by the OAuth callback to look up + upsert the
+    /// `(provider, provider_account_id) → user_id` mapping plus the
+    /// access/refresh token bundle.
+    pub account_store: &'a pylon_auth::AccountStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -578,40 +583,56 @@ pub(crate) fn complete_oauth_login(
         });
     }
 
-    // Resolve (email, name): real OAuth code, or dev-mode email shortcut.
-    // The dev shortcut exists so integration tests don't need to spin up
-    // a real provider — gated on PYLON_DEV_MODE so prod can never mint
-    // a session from a caller-supplied email.
-    let (email, name) = if let Some(code) = code {
+    // Resolve (UserInfo, TokenSet): real OAuth code, or dev-mode shortcut.
+    // The dev shortcut exists so integration tests don't need to spin up a
+    // real provider — gated on PYLON_DEV_MODE so prod can never mint a
+    // session from a caller-supplied email. Dev mode synthesizes a
+    // provider_account_id from the email so account-store lookups still
+    // round-trip.
+    let (userinfo, tokens) = if let Some(code) = code {
         let registry = pylon_auth::OAuthRegistry::from_env();
         let config = registry.get(provider).cloned().ok_or_else(|| OAuthError {
             status: 404,
             code: "PROVIDER_NOT_FOUND",
             message: format!("OAuth provider \"{provider}\" not configured"),
         })?;
-        let access_token = config.exchange_code(code).map_err(|err| OAuthError {
+        let tokens = config.exchange_code_full(code).map_err(|err| OAuthError {
             status: 502,
             code: "OAUTH_TOKEN_EXCHANGE_FAILED",
             message: format!("token exchange failed: {err}"),
         })?;
-        config
-            .fetch_userinfo(&access_token)
+        let info = config
+            .fetch_userinfo_full(&tokens.access_token)
             .map_err(|err| OAuthError {
                 status: 502,
                 code: "OAUTH_TOKEN_EXCHANGE_FAILED",
                 message: format!("userinfo fetch failed: {err}"),
-            })?
+            })?;
+        (info, tokens)
     } else if ctx.is_dev {
-        match dev_email {
-            Some(e) => (e.to_string(), dev_name.map(String::from)),
-            None => {
-                return Err(OAuthError {
-                    status: 400,
-                    code: "MISSING_FIELD",
-                    message: "OAuth callback requires `code` (or `email` in dev mode)".into(),
-                })
-            }
-        }
+        let email = dev_email.ok_or_else(|| OAuthError {
+            status: 400,
+            code: "MISSING_FIELD",
+            message: "OAuth callback requires `code` (or `email` in dev mode)".into(),
+        })?;
+        // Dev path needs a stable provider_account_id so repeat
+        // sign-ins land on the same Account row. Use the email itself
+        // — predictable for tests, and a real provider would never
+        // reuse an email as a sub.
+        let info = pylon_auth::UserInfo {
+            provider: provider.to_string(),
+            provider_account_id: format!("dev:{email}"),
+            email: email.to_string(),
+            name: dev_name.map(String::from),
+        };
+        let tokens = pylon_auth::TokenSet {
+            access_token: "dev_access_token".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        (info, tokens)
     } else {
         return Err(OAuthError {
             status: 400,
@@ -627,33 +648,85 @@ pub(crate) fn complete_oauth_login(
             .unwrap_or_default()
             .as_secs()
     );
-    let user_id = match ctx.store.lookup("User", "email", &email) {
-        Ok(Some(row)) => {
-            let id = row["id"].as_str().unwrap_or("").to_string();
-            // Returning OAuth user: opportunistically stamp emailVerified
-            // since the provider just vouched for the address. Best-effort
-            // — schemas without the field silently drop it.
-            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                let _ = ctx
-                    .store
-                    .update("User", &id, &serde_json::json!({ "emailVerified": now }));
-            }
-            id
+
+    // Resolve user_id in priority order:
+    //   1. Existing account link by (provider, provider_account_id) — the
+    //      stable identity. Survives email changes on the provider side.
+    //   2. Existing User row by email — account-linking-by-email. The
+    //      classic "you signed up with email/password and now you're
+    //      adding Google" flow.
+    //   3. Create a new User.
+    //
+    // Crucially: every step that can fail (store.insert, store.update)
+    // returns its error rather than silently using the email as user_id.
+    // That swallow caused the "session for nonexistent user" bug — the
+    // OAuth flow looked successful but the User row was never created
+    // and /api/auth/me would resolve to a phantom identity.
+    let user_id = if let Some(existing) = ctx
+        .account_store
+        .find_by_provider(provider, &userinfo.provider_account_id)
+    {
+        // Returning user via the same provider — refresh the token
+        // bundle and reuse the linked user_id.
+        let mut refreshed = pylon_auth::Account::new(existing.user_id.clone(), &userinfo, &tokens);
+        refreshed.created_at = existing.created_at;
+        ctx.account_store.upsert(&refreshed);
+        existing.user_id
+    } else if let Ok(Some(row)) = ctx.store.lookup("User", "email", &userinfo.email) {
+        // First-time link of this provider to an existing user (matched
+        // by email). Stamp emailVerified opportunistically since the
+        // provider just vouched for the address.
+        let id = row["id"].as_str().unwrap_or("").to_string();
+        if id.is_empty() {
+            return Err(OAuthError {
+                status: 500,
+                code: "USER_LOOKUP_INVALID",
+                message: "User row matched by email but had no id field".into(),
+            });
         }
-        _ => {
-            let display_name = name.as_deref().unwrap_or(&email);
-            ctx.store
-                .insert(
-                    "User",
-                    &serde_json::json!({
-                        "email": email,
-                        "displayName": display_name,
-                        "emailVerified": now,
-                        "createdAt": now,
-                    }),
-                )
-                .unwrap_or_else(|_| email.clone())
+        if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+            // Best-effort — schemas without the field silently drop the
+            // update. We do NOT bail on this error since the user
+            // already existed and OAuth still succeeded.
+            let _ = ctx
+                .store
+                .update("User", &id, &serde_json::json!({ "emailVerified": now }));
         }
+        ctx.account_store
+            .upsert(&pylon_auth::Account::new(id.clone(), &userinfo, &tokens));
+        id
+    } else {
+        // Brand-new user. Create the User row + the Account link. Both
+        // fail loudly — a silent failure here is what produced the
+        // "session for nonexistent user" bug.
+        let display_name = userinfo.name.as_deref().unwrap_or(&userinfo.email);
+        let id = ctx
+            .store
+            .insert(
+                "User",
+                &serde_json::json!({
+                    "email": userinfo.email,
+                    "displayName": display_name,
+                    "emailVerified": now,
+                    "createdAt": now,
+                }),
+            )
+            .map_err(|e| OAuthError {
+                status: 500,
+                code: "USER_CREATE_FAILED",
+                // Preserve the full upstream code/message — a failed insert
+                // is almost always "the User entity in your manifest has
+                // a field this OAuth handler doesn't set" (NOT NULL
+                // violation), and the operator needs to see exactly which
+                // column.
+                message: format!(
+                    "failed to create User row for OAuth signup ({}): {}",
+                    e.code, e.message
+                ),
+            })?;
+        ctx.account_store
+            .upsert(&pylon_auth::Account::new(id.clone(), &userinfo, &tokens));
+        id
     };
     let session = ctx.session_store.create(user_id.clone());
     Ok((user_id, session))
@@ -1696,6 +1769,7 @@ mod auth_gate_tests {
         let session_store = SessionStore::new();
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1715,6 +1789,7 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            account_store: &account_store,
             policy_engine: &policy_engine,
             change_log: &change_log,
             notifier: &notifier,
@@ -2127,6 +2202,7 @@ mod auth_gate_tests {
         let session_store = SessionStore::new();
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2149,6 +2225,7 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            account_store: &account_store,
             policy_engine: &policy_engine,
             change_log: &change_log,
             notifier: &notifier,
@@ -2653,6 +2730,7 @@ mod auth_gate_tests {
         let session_store = SessionStore::new();
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2677,6 +2755,7 @@ mod auth_gate_tests {
                 session_store: &session_store,
                 magic_codes: &magic_codes,
                 oauth_state: &oauth_state,
+                account_store: &account_store,
                 policy_engine: &policy_engine,
                 change_log: &change_log,
                 notifier: &notifier,

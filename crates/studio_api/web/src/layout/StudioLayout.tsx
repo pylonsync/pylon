@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/auth/AuthContext";
 import { SignInDialog } from "@/auth/SignInDialog";
+import { LockedPage } from "@/pages/Locked";
 import { MANIFEST } from "@/lib/pylon";
 
 export type StudioPage =
@@ -94,9 +95,18 @@ export function StudioLayout({
 	onPageChange: (next: StudioPage) => void;
 	children: React.ReactNode;
 }) {
-	const { me, hasToken, signOut } = useAuth();
+	const { me, hasToken, loading, signOut } = useAuth();
 	const [signInOpen, setSignInOpen] = useState(false);
 	const isAdmin = !!me?.is_admin;
+	// Block the main content area for unauthenticated callers. The sidebar
+	// stays visible because entity names + nav structure come from the
+	// bundled manifest (public surface — same names appear in API URLs and
+	// in the openapi.json). What needs gating is the data view itself:
+	// previously /studio rendered the Entities table to anyone, called
+	// /api/entities/User, got back 401, set rows=[], and showed
+	// "No rows in User yet" — which misleadingly implied the table was
+	// empty rather than "you can't see this until you sign in."
+	const requireAuth = !loading && !hasToken;
 
 	return (
 		<SidebarProvider>
@@ -213,7 +223,16 @@ export function StudioLayout({
 						)}
 					</div>
 				</header>
-				<div className="p-6">{children}</div>
+				<div className="p-6">
+					{requireAuth ? (
+						<LockedPage
+							title="Sign in to Pylon Studio"
+							description="Studio surfaces your live data, schema, and operations. Sign in with PYLON_ADMIN_TOKEN (or your user token) to continue."
+						/>
+					) : (
+						children
+					)}
+				</div>
 			</SidebarInset>
 			<SignInDialog open={signInOpen} onOpenChange={setSignInOpen} />
 		</SidebarProvider>

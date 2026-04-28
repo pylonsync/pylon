@@ -248,23 +248,11 @@ fn start_server(
     // Stash a handle so `request_shutdown()` can unblock the loop.
     let _ = SERVER_HANDLE.set(Arc::clone(&server));
 
-    let session_store = Arc::new(build_session_store(runtime.db_path().as_deref()));
-    let magic_codes = Arc::new(pylon_auth::MagicCodeStore::new());
-    // Persist OAuth state if a session DB is configured. Reuse the same path
-    // (sessions and OAuth state are both small auth artifacts that should
-    // outlive a restart). Falls back to in-memory if no DB path is set.
-    let oauth_state = Arc::new(match std::env::var("PYLON_SESSION_DB").ok() {
-        Some(path) => match crate::oauth_backend::SqliteOAuthBackend::open(&path) {
-            Ok(backend) => pylon_auth::OAuthStateStore::with_backend(Box::new(backend)),
-            Err(e) => {
-                tracing::warn!(
-                    "[auth] OAuth state SQLite backend unavailable: {e} — falling back to in-memory"
-                );
-                pylon_auth::OAuthStateStore::new()
-            }
-        },
-        None => pylon_auth::OAuthStateStore::new(),
-    });
+    let auth_stores = build_auth_stores(runtime.db_path().as_deref());
+    let session_store = auth_stores.session_store;
+    let magic_codes = auth_stores.magic_codes;
+    let oauth_state = auth_stores.oauth_state;
+    let account_store = auth_stores.account_store;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -693,6 +681,7 @@ fn start_server(
         let rm = Arc::clone(&room_mgr);
         let mt = Arc::clone(&metrics);
         let os = Arc::clone(&oauth_state);
+        let acc = Arc::clone(&account_store);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
         let jq = Arc::clone(&job_queue);
@@ -1892,6 +1881,7 @@ fn start_server(
                     session_store: &ss,
                     magic_codes: &mc,
                     oauth_state: &os,
+                    account_store: &acc,
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2052,6 +2042,147 @@ fn json_error(code: &str, message: &str) -> String {
     pylon_router::json_error(code, message)
 }
 
+/// Bundle of the four auth-state stores. Built in one place so backend
+/// selection (Postgres vs. SQLite) is consistent across them — there's
+/// no scenario where sessions live in PG but accounts live in a sibling
+/// SQLite file. Selection rules, in priority:
+///
+/// 1. `DATABASE_URL=postgres://…` → all four stores point at PG.
+/// 2. `PYLON_SESSION_DB=path/to/file.db` → SQLite, explicit path.
+/// 3. `<app_db_path>.sessions.db` → SQLite alongside the app DB.
+/// 4. `PYLON_SESSION_IN_MEMORY=1` or no app DB → in-memory.
+struct AuthStores {
+    session_store: Arc<SessionStore>,
+    magic_codes: Arc<pylon_auth::MagicCodeStore>,
+    oauth_state: Arc<pylon_auth::OAuthStateStore>,
+    account_store: Arc<pylon_auth::AccountStore>,
+}
+
+fn build_auth_stores(app_db_path: Option<&str>) -> AuthStores {
+    // Forced in-memory escape hatch — used by integration tests that
+    // never want to touch disk.
+    let force_in_memory = std::env::var("PYLON_SESSION_IN_MEMORY")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
+    // Postgres path — wins over PYLON_SESSION_DB when both are set so the
+    // multi-replica deploy doesn't silently fall back to per-replica SQLite.
+    let pg_url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"));
+
+    if let Some(url) = pg_url {
+        if force_in_memory {
+            // Tests that explicitly opt out of persistence shouldn't be
+            // overridden by an ambient DATABASE_URL in CI.
+            return in_memory_auth_stores();
+        }
+        return build_pg_auth_stores(&url);
+    }
+
+    let sqlite_path = std::env::var("PYLON_SESSION_DB")
+        .ok()
+        .or_else(|| app_db_path.map(|p| format!("{p}.sessions.db")));
+
+    match (force_in_memory, sqlite_path) {
+        (true, _) | (_, None) => in_memory_auth_stores(),
+        (false, Some(path)) => build_sqlite_auth_stores(&path),
+    }
+}
+
+fn in_memory_auth_stores() -> AuthStores {
+    AuthStores {
+        session_store: Arc::new(SessionStore::new()),
+        magic_codes: Arc::new(pylon_auth::MagicCodeStore::new()),
+        oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
+        account_store: Arc::new(pylon_auth::AccountStore::new()),
+    }
+}
+
+fn build_sqlite_auth_stores(path: &str) -> AuthStores {
+    let session_store = match crate::session_backend::SqliteSessionBackend::open(path) {
+        Ok(b) => {
+            tracing::info!("[pylon] Auth state (SQLite): {path}");
+            SessionStore::with_backend(Box::new(b))
+        }
+        Err(e) => {
+            tracing::warn!("[pylon] could not open session DB {path}: {e}. In-memory fallback.");
+            SessionStore::new()
+        }
+    };
+    let magic_codes = match crate::magic_code_backend::SqliteMagicCodeBackend::open(path) {
+        Ok(b) => pylon_auth::MagicCodeStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] magic-code SQLite backend unavailable: {e}");
+            pylon_auth::MagicCodeStore::new()
+        }
+    };
+    let oauth_state = match crate::oauth_backend::SqliteOAuthBackend::open(path) {
+        Ok(b) => pylon_auth::OAuthStateStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] OAuth state SQLite backend unavailable: {e}");
+            pylon_auth::OAuthStateStore::new()
+        }
+    };
+    let account_store = match crate::account_backend::SqliteAccountBackend::open(path) {
+        Ok(b) => pylon_auth::AccountStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] account-link SQLite backend unavailable: {e}");
+            pylon_auth::AccountStore::new()
+        }
+    };
+    AuthStores {
+        session_store: Arc::new(session_store),
+        magic_codes: Arc::new(magic_codes),
+        oauth_state: Arc::new(oauth_state),
+        account_store: Arc::new(account_store),
+    }
+}
+
+fn build_pg_auth_stores(url: &str) -> AuthStores {
+    // Each backend opens its own connection. Sessions/oauth-state/magic-codes/
+    // accounts are low-frequency relative to entity CRUD — keeping them on
+    // separate connections avoids a "oauth lookup blocks an entity write"
+    // false-sharing scenario at the cost of a few idle PG connections.
+    let session_store = match crate::session_backend::PostgresSessionBackend::connect(url) {
+        Ok(b) => {
+            tracing::info!("[pylon] Auth state (Postgres): {url}");
+            SessionStore::with_backend(Box::new(b))
+        }
+        Err(e) => {
+            tracing::warn!("[pylon] PG session backend unavailable: {e}. In-memory fallback.");
+            SessionStore::new()
+        }
+    };
+    let magic_codes = match crate::magic_code_backend::PostgresMagicCodeBackend::connect(url) {
+        Ok(b) => pylon_auth::MagicCodeStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG magic-code backend unavailable: {e}");
+            pylon_auth::MagicCodeStore::new()
+        }
+    };
+    let oauth_state = match crate::oauth_backend::PostgresOAuthBackend::connect(url) {
+        Ok(b) => pylon_auth::OAuthStateStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG OAuth state backend unavailable: {e}");
+            pylon_auth::OAuthStateStore::new()
+        }
+    };
+    let account_store = match crate::account_backend::PostgresAccountBackend::connect(url) {
+        Ok(b) => pylon_auth::AccountStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG account-link backend unavailable: {e}");
+            pylon_auth::AccountStore::new()
+        }
+    };
+    AuthStores {
+        session_store: Arc::new(session_store),
+        magic_codes: Arc::new(magic_codes),
+        oauth_state: Arc::new(oauth_state),
+        account_store: Arc::new(account_store),
+    }
+}
+
 /// Build the session store. Persists by default for file-backed runtimes —
 /// sessions live in a sibling `<db>.sessions.db` file next to the app DB
 /// unless `PYLON_SESSION_DB` overrides the path or
@@ -2061,6 +2192,7 @@ fn json_error(code: &str, message: &str) -> String {
 /// This used to be opt-in, which silently broke every app after a server
 /// restart: tokens in browser localStorage resolved to anonymous, pulls
 /// came back empty under policy, and mutations 400'd with UNAUTHENTICATED.
+#[allow(dead_code)]
 fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
     if std::env::var("PYLON_SESSION_IN_MEMORY")
         .map(|v| v == "1" || v == "true")

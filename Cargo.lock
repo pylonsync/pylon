@@ -1817,6 +1817,7 @@ dependencies = [
 name = "pylon-runtime"
 version = "0.2.16"
 dependencies = [
+ "postgres",
  "pylon-auth",
  "pylon-crdt",
  "pylon-functions",
