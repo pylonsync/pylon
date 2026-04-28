@@ -1,9 +1,0 @@
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift
-/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift

@@ -1,3 +1,0 @@
-module PylonSync {
-    header "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/include/PylonSync-Swift.h"
-}

@@ -1,3 +1,0 @@
-module PylonClient {
-    header "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonClient.build/include/PylonClient-Swift.h"
-}
