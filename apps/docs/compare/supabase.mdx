@@ -61,7 +61,7 @@ Both ship:
 | Type sharing with client | After codegen | Manual or via `supabase gen types` |
 | DB access | Direct (`ctx.db`) | Via Supabase JS client over HTTP |
 | Atomic with caller transaction | ✅ | ❌ (separate processes) |
-| Latency | <1ms (same process) | 50–200ms (Edge → Postgres round-trip) |
+| Latency | `<1ms` (same process) | 50–200ms (Edge → Postgres round-trip) |
 
 Pylon's "function = transaction" model is a meaningful difference. Throw inside a `mutation` and everything rolls back. Supabase Edge Functions can do this with explicit `BEGIN`/`COMMIT`, but it's not the default shape.
 

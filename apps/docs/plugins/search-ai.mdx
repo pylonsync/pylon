@@ -116,7 +116,7 @@ Use cases:
 
 ### Scaling notes
 
-- Search complexity is O(n × d) per query. 10k rows × 1536-dim vectors ≈ 10M float ops ≈ <10ms on commodity hardware.
+- Search complexity is O(n × d) per query. 10k rows × 1536-dim vectors ≈ 10M float ops ≈ `<10ms` on commodity hardware.
 - Above ~100k rows, switch to a dedicated vector store (`pgvector`, `Qdrant`, `Turso libsql`).
 - Persistence is snapshot-on-write — if you have millions of writes per minute, the snapshot becomes a bottleneck. Pair with a more sophisticated index in that range.
 

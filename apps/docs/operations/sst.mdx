@@ -311,7 +311,7 @@ loadBalancer: {
 }
 ```
 
-**Cold start takes 10+ minutes the first time** — Aurora Serverless v2's first cold start provisions storage. Subsequent deploys are <2 min.
+**Cold start takes 10+ minutes the first time** — Aurora Serverless v2's first cold start provisions storage. Subsequent deploys are `<2 min`.
 
 **EFS mount permissions errors** — Pylon runs as a non-root user; grant write on the mount point in your Dockerfile or set `volumes[0].uid: "1000"`.
 
