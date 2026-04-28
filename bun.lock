@@ -387,6 +387,35 @@
         "vite": "^8.0.0",
       },
     },
+    "packages/cli": {
+      "name": "@pylonsync/cli",
+      "version": "0.3.3",
+      "bin": {
+        "pylon": "./bin/pylon.js",
+      },
+      "optionalDependencies": {
+        "@pylonsync/cli-darwin-arm64": "0.3.3",
+        "@pylonsync/cli-darwin-x64": "0.3.3",
+        "@pylonsync/cli-linux-arm64": "0.3.3",
+        "@pylonsync/cli-linux-x64": "0.3.3",
+      },
+    },
+    "packages/cli-darwin-arm64": {
+      "name": "@pylonsync/cli-darwin-arm64",
+      "version": "0.3.3",
+    },
+    "packages/cli-darwin-x64": {
+      "name": "@pylonsync/cli-darwin-x64",
+      "version": "0.3.3",
+    },
+    "packages/cli-linux-arm64": {
+      "name": "@pylonsync/cli-linux-arm64",
+      "version": "0.3.3",
+    },
+    "packages/cli-linux-x64": {
+      "name": "@pylonsync/cli-linux-x64",
+      "version": "0.3.3",
+    },
     "packages/create-pylon": {
       "name": "create-pylon",
       "version": "0.1.0",
@@ -399,7 +428,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -431,7 +460,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -447,7 +476,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -479,11 +508,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.2",
+      "version": "0.3.3",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.2",
+      "version": "0.3.3",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -637,6 +666,16 @@
     "@next/swc-win32-x64-msvc": ["@next/swc-win32-x64-msvc@16.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-kMVGgsqhO5YTYODD9IPGGhA6iprWidQckK3LmPeW08PIFENRmgfb4MjXHO+p//d+ts2rpjvK5gXWzXSMrPl9cw=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.127.0", "", {}, "sha512-aIYXQBo4lCbO4z0R3FHeucQHpF46l2LbMdxRvqvuRuW2OxdnSkcng5B8+K12spgLDj93rtN3+J2Vac/TIO+ciQ=="],
+
+    "@pylonsync/cli": ["@pylonsync/cli@workspace:packages/cli"],
+
+    "@pylonsync/cli-darwin-arm64": ["@pylonsync/cli-darwin-arm64@workspace:packages/cli-darwin-arm64"],
+
+    "@pylonsync/cli-darwin-x64": ["@pylonsync/cli-darwin-x64@workspace:packages/cli-darwin-x64"],
+
+    "@pylonsync/cli-linux-arm64": ["@pylonsync/cli-linux-arm64@workspace:packages/cli-linux-arm64"],
+
+    "@pylonsync/cli-linux-x64": ["@pylonsync/cli-linux-x64@workspace:packages/cli-linux-x64"],
 
     "@pylonsync/example-erp": ["@pylonsync/example-erp@workspace:examples/erp"],
 
