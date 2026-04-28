@@ -147,14 +147,40 @@ impl<'a> std::ops::Deref for ReadConnGuard<'a> {
 // Runtime — the core execution engine
 // ---------------------------------------------------------------------------
 
-/// A minimal runtime that executes CRUD operations against a SQLite database
-/// based on a manifest contract.
+/// A manifest-driven runtime that executes CRUD operations against an
+/// underlying data store. Two backends are supported:
 ///
-/// In WAL mode SQLite allows one writer and multiple concurrent readers.
-/// This struct exploits that by keeping a single write connection behind a
-/// mutex and a pool of read-only connections that can be acquired in
-/// parallel, so read operations never block on (or are blocked by) writes.
+/// - **SQLite** (default): single-process, file-or-memory, with a write
+///   mutex + read pool, FTS5 search, and per-row LoroDoc CRDT snapshots.
+/// - **Postgres**: live cluster, suitable for multi-replica deployments.
+///   Routes entity CRUD through [`pylon_storage::pg_datastore::PostgresDataStore`].
+///   CRDT mode and FTS5-shaped search are SQLite-only at this layer; the
+///   Postgres backend returns `NOT_SUPPORTED` for those paths and the router
+///   degrades to JSON change events (no binary CRDT broadcasts).
+///
+/// Pick a backend by passing a `postgres://` URL to [`Runtime::open`]; any
+/// other string is treated as a SQLite filesystem path.
 pub struct Runtime {
+    backend: RuntimeBackend,
+    manifest: AppManifest,
+    entities: HashMap<String, ManifestEntity>,
+    /// True only for the SQLite in-memory variant. Postgres mode reports false.
+    /// Gates the test-reset endpoint — a false positive here would let
+    /// `/api/__test__/reset` truncate real tables.
+    is_in_memory: bool,
+}
+
+/// Backend storage for entity CRUD. SQLite variant owns the connection
+/// pool and CRDT cache; Postgres variant wraps a `PostgresDataStore`.
+enum RuntimeBackend {
+    Sqlite(SqliteBackend),
+    Postgres(PgBackend),
+}
+
+/// SQLite-backed entity store. WAL mode allows one writer and multiple
+/// concurrent readers — the struct exploits this with a single write
+/// connection behind a mutex plus a pool of read-only connections.
+struct SqliteBackend {
     /// Write connection — single mutex, serializes writes.
     write_conn: Mutex<Connection>,
     /// Read connections — pool of connections for concurrent reads.
@@ -162,11 +188,6 @@ pub struct Runtime {
     read_pool: Vec<Mutex<Connection>>,
     /// Counter for round-robin read pool selection.
     read_counter: AtomicUsize,
-    manifest: AppManifest,
-    entities: HashMap<String, ManifestEntity>,
-    /// Set by the constructor — NOT derived from `conn.path()` (that path
-    /// conflates "no filename" with "in-memory"; see `is_in_memory` doc).
-    is_in_memory: bool,
     /// Per-row LoroDoc cache + sidecar persistence. Used for entities with
     /// `crdt: true` (the default). Reads still hit SQLite directly via the
     /// read pool — the LoroDoc just produces the projected JSON that gets
@@ -174,17 +195,76 @@ pub struct Runtime {
     crdt: crate::loro_store::LoroStore,
 }
 
+/// Postgres-backed entity store. Wraps `PostgresDataStore` from
+/// pylon-storage and delegates the `DataStore` surface directly.
+struct PgBackend {
+    store: pylon_storage::pg_datastore::PostgresDataStore,
+}
+
 /// Number of read-only connections to open in the pool.
 const READ_POOL_SIZE: usize = 4;
 
+/// True iff `url` is a Postgres connection string. Treats `postgres://`,
+/// `postgresql://`, and the ambient-credentials forms as PG; everything
+/// else is interpreted as a SQLite filesystem path.
+fn is_postgres_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("postgres://") || lower.starts_with("postgresql://")
+}
+
+/// Convert a `pylon_http::DataError` (returned by `PostgresDataStore`)
+/// into the runtime's error type. The codes round-trip; only the type
+/// changes.
+fn data_err_to_runtime(e: pylon_http::DataError) -> RuntimeError {
+    RuntimeError {
+        code: e.code,
+        message: e.message,
+    }
+}
+
 impl Runtime {
-    /// Open a runtime against an existing SQLite database.
-    pub fn open(db_path: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
-        let conn = Connection::open(db_path).map_err(|e| RuntimeError {
-            code: "RUNTIME_OPEN_FAILED".into(),
-            message: format!("Failed to open database: {e}"),
-        })?;
-        Self::from_connection(conn, manifest, false)
+    /// Open a runtime against either a SQLite file path or a Postgres URL.
+    ///
+    /// Backend selection is by URL prefix:
+    /// - `postgres://...` or `postgresql://...` → Postgres (requires the
+    ///   `postgres-live` feature on `pylon-storage`, enabled by default).
+    /// - Anything else → SQLite, treating the string as a filesystem path
+    ///   (`":memory:"` works via `Runtime::in_memory` instead).
+    pub fn open(url: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
+        if is_postgres_url(url) {
+            Self::open_postgres(url, manifest)
+        } else {
+            let conn = Connection::open(url).map_err(|e| RuntimeError {
+                code: "RUNTIME_OPEN_FAILED".into(),
+                message: format!("Failed to open database: {e}"),
+            })?;
+            Self::from_connection(conn, manifest, false)
+        }
+    }
+
+    /// Open a runtime backed by a live Postgres cluster.
+    ///
+    /// Schema must be applied separately via `pylon migrate` / the
+    /// storage adapter's plan apply path — Runtime does not auto-create
+    /// tables on Postgres (in contrast to SQLite, where `from_connection`
+    /// runs CREATE TABLE IF NOT EXISTS on every open). This matches how
+    /// production Postgres deployments are typically managed: schema is
+    /// migrated via a controlled, observable step, not as a side effect
+    /// of the server starting up.
+    pub fn open_postgres(url: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
+        let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
+            .map_err(data_err_to_runtime)?;
+        let entities: HashMap<String, ManifestEntity> = manifest
+            .entities
+            .iter()
+            .map(|e| (e.name.clone(), e.clone()))
+            .collect();
+        Ok(Self {
+            backend: RuntimeBackend::Postgres(PgBackend { store }),
+            manifest,
+            entities,
+            is_in_memory: false,
+        })
     }
 
     /// Returns true if this runtime is backed by an in-memory SQLite DB.
@@ -202,14 +282,19 @@ impl Runtime {
     }
 
     /// Filesystem path to the SQLite database, if this runtime is file-backed.
-    /// Returns `None` for in-memory runtimes. Used by the server bootstrap to
-    /// derive companion paths (session store, change log persistence) without
-    /// requiring the caller to pass them in.
+    /// Returns `None` for in-memory runtimes AND Postgres runtimes (no local
+    /// file). Used by the server bootstrap to derive companion paths
+    /// (session store, change log persistence) without requiring the caller
+    /// to pass them in.
     pub fn db_path(&self) -> Option<String> {
         if self.is_in_memory {
             return None;
         }
-        let conn = self.write_conn.lock().ok()?;
+        let sb = match &self.backend {
+            RuntimeBackend::Sqlite(sb) => sb,
+            RuntimeBackend::Postgres(_) => return None,
+        };
+        let conn = sb.write_conn.lock().ok()?;
         conn.path().filter(|p| !p.is_empty()).map(String::from)
     }
 
@@ -238,7 +323,9 @@ impl Runtime {
         Ok(())
     }
 
-    /// Create an in-memory runtime (useful for tests and benchmarks).
+    /// Create an in-memory SQLite-backed runtime (useful for tests and
+    /// benchmarks). For Postgres-backed equivalents, use `open_postgres`
+    /// with a test-cluster URL.
     pub fn in_memory(manifest: AppManifest) -> Result<Self, RuntimeError> {
         let conn = Connection::open_in_memory().map_err(|e| RuntimeError {
             code: "RUNTIME_OPEN_FAILED".into(),
@@ -428,13 +515,15 @@ impl Runtime {
         })?;
 
         Ok(Self {
-            write_conn: Mutex::new(conn),
-            read_pool,
-            read_counter: AtomicUsize::new(0),
+            backend: RuntimeBackend::Sqlite(SqliteBackend {
+                write_conn: Mutex::new(conn),
+                read_pool,
+                read_counter: AtomicUsize::new(0),
+                crdt: crate::loro_store::LoroStore::new(),
+            }),
             manifest,
             entities,
             is_in_memory,
-            crdt: crate::loro_store::LoroStore::new(),
         })
     }
 
@@ -449,6 +538,12 @@ impl Runtime {
     /// and benchmarks that build a `Runtime::in_memory(...)` directly
     /// without going through the schema-plan pipeline.
     pub fn ensure_search_indexes(&self) -> Result<(), RuntimeError> {
+        // Postgres: schema (FTS, facets) is owned by the storage adapter's
+        // migration plan. Tests / benchmarks against Postgres must apply
+        // the plan separately; this fast-path is a SQLite-only convenience.
+        if matches!(self.backend, RuntimeBackend::Postgres(_)) {
+            return Ok(());
+        }
         let conn = self.lock_write_conn()?;
         conn.execute(pylon_storage::search::create_facet_table_sql(), [])
             .map_err(|e| RuntimeError {
@@ -484,13 +579,29 @@ impl Runtime {
     }
 
     /// Expose the write connection mutex for transactional operations.
+    /// SQLite-only — Postgres mode returns `NOT_SQLITE_BACKEND`. Callers
+    /// that need a transaction on Postgres should use [`Runtime::transact_ops`]
+    /// (via the `DataStore` trait), which routes to a real Postgres
+    /// transaction inside `PostgresDataStore`.
     pub fn lock_conn_pub(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
         self.lock_write_conn()
     }
 
-    /// Return the number of read connections in the pool (0 for in-memory DBs).
+    /// Return the number of read connections in the pool. Always 0 for
+    /// in-memory SQLite (pool is empty by design) and for Postgres mode
+    /// (the pool concept doesn't apply — `PostgresDataStore` manages its
+    /// own connection internally).
     pub fn read_pool_size(&self) -> usize {
-        self.read_pool.len()
+        match &self.backend {
+            RuntimeBackend::Sqlite(sb) => sb.read_pool.len(),
+            RuntimeBackend::Postgres(_) => 0,
+        }
+    }
+
+    /// Return true if this runtime is backed by Postgres. Useful for
+    /// SQLite-only fast-paths to early-exit cleanly.
+    pub fn is_postgres(&self) -> bool {
+        matches!(self.backend, RuntimeBackend::Postgres(_))
     }
 
     // -----------------------------------------------------------------------
@@ -527,10 +638,20 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Borrow the CRDT store. Tests use this to inspect cache state and
-    /// the WS handler will use it to fetch snapshots on subscribe.
+    /// Borrow the CRDT store. SQLite-only — Postgres mode does not yet
+    /// support per-row CRDT snapshots at the runtime layer (CRDT
+    /// broadcasts degrade to JSON change events).
+    ///
+    /// # Panics
+    /// Panics on Postgres backend. Call sites that may run under either
+    /// backend should branch on `is_postgres()` first.
     pub fn crdt_store(&self) -> &crate::loro_store::LoroStore {
-        &self.crdt
+        match &self.backend {
+            RuntimeBackend::Sqlite(sb) => &sb.crdt,
+            RuntimeBackend::Postgres(_) => {
+                panic!("crdt_store() called on Postgres-backed Runtime")
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -546,6 +667,10 @@ impl Runtime {
     /// (legacy LWW path). Both produce the same on-disk row shape, so
     /// reads, indexes, FTS, and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::insert(&pg.store, entity, data)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
@@ -564,13 +689,19 @@ impl Runtime {
             }
         }
 
+        // SQLite-only path past this point — Postgres dispatch happened
+        // at the top of `insert()`. Hoist the backend handle here so we
+        // can reach the LoroStore from inside the tx closure without
+        // a second runtime branch on every iteration.
+        let sb = self.sqlite_backend()?;
+
         // Atomic block — CRDT sidecar snapshot + materialized SQL row +
         // search-index maintenance all land together or none does. SQLite's
         // rollback journal makes this crash-safe end-to-end.
         with_write_tx(&conn, || {
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
-                self.crdt
+                sb.crdt
                     .apply_patch(&conn, entity, &id, &crdt_fields, data)
                     .map_err(|e| RuntimeError {
                         code: "CRDT_APPLY_FAILED".into(),
@@ -632,6 +763,10 @@ impl Runtime {
         entity: &str,
         id: &str,
     ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::get_by_id(&pg.store, entity, id)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
@@ -652,6 +787,9 @@ impl Runtime {
 
     /// List all rows for an entity.
     pub fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::list(&pg.store, entity).map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
@@ -686,6 +824,10 @@ impl Runtime {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
@@ -741,6 +883,10 @@ impl Runtime {
         id: &str,
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::update(&pg.store, entity, id, data)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
@@ -760,12 +906,15 @@ impl Runtime {
             return Ok(false);
         }
 
+        // SQLite-only path past this point — see note in `insert()`.
+        let sb = self.sqlite_backend()?;
+
         // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
         // and FTS maintenance all commit together.
         let affected = with_write_tx(&conn, || -> Result<i64, RuntimeError> {
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
-                self.crdt
+                sb.crdt
                     .apply_patch(&conn, entity, id, &crdt_fields, data)
                     .map_err(|e| RuntimeError {
                         code: "CRDT_APPLY_FAILED".into(),
@@ -827,6 +976,10 @@ impl Runtime {
 
     /// Delete a row by ID. Returns true if a row was actually deleted.
     pub fn delete(&self, entity: &str, id: &str) -> Result<bool, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::delete(&pg.store, entity, id)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
@@ -864,6 +1017,10 @@ impl Runtime {
         field: &str,
         value: &str,
     ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::lookup(&pg.store, entity, field, value)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         validate_column_name(field, ent)?;
         let conn = self.lock_read_conn()?;
@@ -932,6 +1089,10 @@ impl Runtime {
         entity: &str,
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::query_filtered(&pg.store, entity, filter)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
@@ -1692,6 +1853,10 @@ impl Runtime {
         entity: &str,
         spec: &serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            return pylon_http::DataStore::aggregate(&pg.store, entity, spec)
+                .map_err(data_err_to_runtime);
+        }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
         let obj = spec.as_object().ok_or_else(|| RuntimeError {
@@ -1916,8 +2081,13 @@ impl Runtime {
     }
 
     /// Acquire the write connection. Used for INSERT, UPDATE, DELETE.
+    /// SQLite-only — Postgres callers should never reach this (each
+    /// public CRUD method branches at the top and dispatches to
+    /// `PostgresDataStore` first). Returns `NOT_SQLITE_BACKEND` if
+    /// invoked on a Postgres runtime, which indicates a missing dispatch.
     fn lock_write_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RuntimeError> {
-        self.write_conn.lock().map_err(|e| RuntimeError {
+        let sb = self.sqlite_backend()?;
+        sb.write_conn.lock().map_err(|e| RuntimeError {
             code: "LOCK_FAILED".into(),
             message: format!("Failed to acquire write connection lock: {e}"),
         })
@@ -1925,23 +2095,55 @@ impl Runtime {
 
     /// Acquire a read connection. Uses the read pool if available (file-backed
     /// databases), otherwise falls back to the write connection (in-memory).
-    /// Connections are selected round-robin to spread load evenly.
+    /// Connections are selected round-robin to spread load evenly. SQLite-only.
     fn lock_read_conn(&self) -> Result<ReadConnGuard<'_>, RuntimeError> {
-        if !self.read_pool.is_empty() {
-            let idx = self.read_counter.fetch_add(1, Ordering::Relaxed) % self.read_pool.len();
-            let guard = self.read_pool[idx].lock().map_err(|e| RuntimeError {
+        let sb = self.sqlite_backend()?;
+        if !sb.read_pool.is_empty() {
+            let idx = sb.read_counter.fetch_add(1, Ordering::Relaxed) % sb.read_pool.len();
+            let guard = sb.read_pool[idx].lock().map_err(|e| RuntimeError {
                 code: "LOCK_FAILED".into(),
                 message: format!("Failed to acquire read connection: {e}"),
             })?;
             Ok(ReadConnGuard::Pooled(guard))
         } else {
             // Fall back to write connection for in-memory DBs.
-            let guard = self.write_conn.lock().map_err(|e| RuntimeError {
+            let guard = sb.write_conn.lock().map_err(|e| RuntimeError {
                 code: "LOCK_FAILED".into(),
                 message: format!("Failed to acquire connection: {e}"),
             })?;
             Ok(ReadConnGuard::Write(guard))
         }
+    }
+
+    /// Borrow the SQLite backend, or fail with `NOT_SQLITE_BACKEND` if
+    /// this runtime is Postgres-backed. Used by every SQLite-specific
+    /// helper as a single point of dispatch.
+    fn sqlite_backend(&self) -> Result<&SqliteBackend, RuntimeError> {
+        match &self.backend {
+            RuntimeBackend::Sqlite(sb) => Ok(sb),
+            RuntimeBackend::Postgres(_) => Err(RuntimeError {
+                code: "NOT_SQLITE_BACKEND".into(),
+                message: "this operation requires a SQLite-backed Runtime".into(),
+            }),
+        }
+    }
+
+    /// Borrow the Postgres backend, or `None` for SQLite. Used by the
+    /// per-method dispatch at the top of each entity-CRUD function.
+    fn pg_backend(&self) -> Option<&PgBackend> {
+        match &self.backend {
+            RuntimeBackend::Sqlite(_) => None,
+            RuntimeBackend::Postgres(pg) => Some(pg),
+        }
+    }
+
+    /// Borrow the underlying Postgres `DataStore` if this runtime is
+    /// Postgres-backed. Used by the `DataStore` adapter in `datastore.rs`
+    /// to delegate `transact`/`search` etc. without re-implementing them.
+    pub(crate) fn pg_data_store(
+        &self,
+    ) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {
+        self.pg_backend().map(|pg| &pg.store)
     }
 }
 

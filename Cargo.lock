@@ -1860,6 +1860,7 @@ dependencies = [
 name = "pylon-storage"
 version = "0.2.15"
 dependencies = [
+ "bytes",
  "postgres",
  "pylon-http",
  "pylon-kernel",

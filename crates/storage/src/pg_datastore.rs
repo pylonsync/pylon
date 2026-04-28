@@ -193,6 +193,31 @@ impl DataStore for PostgresDataStore {
         self.update(entity, id, &data)
     }
 
+    fn aggregate(
+        &self,
+        entity: &str,
+        spec: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        let ent = self
+            .manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: \"{entity}\""),
+            })?;
+        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+
+        let mut guard = self.inner.lock().map_err(|_| DataError {
+            code: "LOCK_POISONED".into(),
+            message: "connection mutex poisoned".into(),
+        })?;
+        guard
+            .aggregate(entity, spec, &columns)
+            .map_err(Self::map_err)
+    }
+
     fn query_filtered(
         &self,
         entity: &str,

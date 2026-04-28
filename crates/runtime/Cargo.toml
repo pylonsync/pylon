@@ -22,7 +22,7 @@ pylon-policy = { path = "../policy", version = "0.2.11" }
 pylon-plugin = { path = "../plugin", version = "0.2.11" }
 pylon-sync = { path = "../sync", version = "0.2.11" }
 pylon-studio-api = { path = "../studio_api", version = "0.2.11" }
-pylon-storage = { path = "../storage", version = "0.2.11" }
+pylon-storage = { path = "../storage", version = "0.2.11", features = ["postgres-live"] }
 pylon-crdt = { path = "../crdt", version = "0.2.11" }
 pylon-functions = { path = "../functions", version = "0.2.11" }
 pylon-migrate = { path = "../migrate", version = "0.2.11" }

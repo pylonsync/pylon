@@ -93,6 +93,12 @@ impl DataStore for Runtime {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        // Postgres mode delegates to the underlying store, which runs a real
+        // PG transaction with automatic ROLLBACK on Drop. The legacy SQLite
+        // path below is unmanaged BEGIN/COMMIT against the held connection.
+        if let Some(pg) = self.pg_data_store() {
+            return pg.transact(ops);
+        }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         let _ = conn.execute("BEGIN", []);
         let mut results: Vec<serde_json::Value> = Vec::new();
@@ -169,6 +175,22 @@ impl DataStore for Runtime {
         entity: &str,
         query: &serde_json::Value,
     ) -> Result<serde_json::Value, DataError> {
+        // Postgres: full-text search on the runtime layer is SQLite-FTS5
+        // shaped (rank/MATCH). There is no portable equivalent in
+        // Postgres without an explicit tsvector column + GIN index in
+        // the manifest, which the storage adapter doesn't auto-generate
+        // yet. Return NOT_SUPPORTED with an honest message rather than
+        // silently returning empty results.
+        if self.is_postgres() {
+            return Err(DataError {
+                code: "NOT_SUPPORTED".into(),
+                message:
+                    "search() (FTS5) is SQLite-only; on Postgres add a tsvector column + GIN index \
+                     and query it via the storage adapter directly. Tracked in the Postgres-FTS \
+                     follow-up issue."
+                        .into(),
+            });
+        }
         let ent = self
             .manifest()
             .entities
@@ -206,6 +228,13 @@ impl DataStore for Runtime {
     /// that to decide whether to ship a binary update over WebSocket
     /// after the write.
     fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
+        // Postgres: per-row Loro snapshots aren't stored alongside
+        // entity rows yet. Return Ok(None) — same shape as a non-CRDT
+        // entity. The router treats both identically (skip binary
+        // broadcast, rely on JSON change events).
+        if self.is_postgres() {
+            return Ok(None);
+        }
         let ent = self
             .manifest()
             .entities
@@ -244,6 +273,16 @@ impl DataStore for Runtime {
         row_id: &str,
         update: &[u8],
     ) -> Result<Vec<u8>, DataError> {
+        // Postgres: client-pushed Loro updates aren't supported on the
+        // PG backend yet. Return NOT_SUPPORTED with a clear message so
+        // SDKs can degrade to JSON CRUD instead of the binary CRDT path.
+        if self.is_postgres() {
+            return Err(DataError {
+                code: "NOT_SUPPORTED".into(),
+                message: "CRDT mode is SQLite-only at this layer; Postgres clients should use JSON CRUD"
+                    .into(),
+            });
+        }
         // Find the entity so we can build the projection field list +
         // confirm CRDT mode is on. Cheap manifest scan; counts are tiny.
         let ent = self
@@ -1172,6 +1211,22 @@ impl pylon_router::FnOps for FnOpsImpl {
 
         match def.fn_type {
             FnType::Mutation => {
+                // Postgres backend: TS-function transactional `ctx.db`
+                // mutations aren't wired through to a real PG transaction
+                // yet — `TxStore` was designed around a held SQLite
+                // connection. Fail fast with a clear error rather than
+                // silently doing non-transactional writes (which would
+                // leave partial state on a handler error).
+                if self.runtime.is_postgres() {
+                    return Err(FnCallError {
+                        code: "NOT_SUPPORTED".into(),
+                        message: format!(
+                            "Mutation handler \"{fn_name}\" requires the SQLite backend; \
+                             Postgres-backed Pylon does not yet support TS function ctx.db transactions. \
+                             Use ctx.db.transact() from a query/action, or run mutations via the HTTP /api/entities path."
+                        ),
+                    });
+                }
                 // Hold the write connection for the entire handler duration.
                 // This keeps the BEGIN/COMMIT span free of interleaving from
                 // other writers (who would otherwise become part of the

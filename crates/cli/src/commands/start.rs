@@ -98,21 +98,47 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return ExitCode::Error;
     }
 
-    // Database path. Operator-driven in prod — default falls back to the
-    // dev path so local `pylon start` against an existing `pylon dev`
-    // workspace "just works," but the Docker image and any real deploy
-    // should set PYLON_DB_PATH explicitly.
-    let db_path = std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| ".pylon/dev.db".to_string());
-    if let Some(parent) = Path::new(&db_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(parent);
+    // Database target — Postgres takes precedence when DATABASE_URL is set
+    // so multi-replica deployments (pylon-cloud, k8s, Fly clusters) only
+    // need that one env var. Falls back to PYLON_DB_PATH (SQLite path),
+    // then `.pylon/dev.db` so a local `pylon start` against an existing
+    // `pylon dev` workspace still "just works."
+    let db_target = std::env::var("DATABASE_URL")
+        .ok()
+        .or_else(|| std::env::var("PYLON_DB_PATH").ok())
+        .unwrap_or_else(|| ".pylon/dev.db".to_string());
+    let is_pg = db_target.starts_with("postgres://") || db_target.starts_with("postgresql://");
+
+    if !is_pg {
+        // SQLite path: ensure parent dir exists.
+        if let Some(parent) = Path::new(&db_target).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
         }
     }
 
     // Apply schema diff. In prod we only expand-compatible; destructive
     // migrations are the operator's explicit responsibility via
-    // `pylon migrate`.
-    if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_path) {
+    // `pylon migrate`. Postgres apply uses `LivePostgresAdapter`.
+    if is_pg {
+        match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_target) {
+            Ok(mut adapter) => {
+                if let Ok(plan) = adapter.plan_from_live(&manifest) {
+                    if let Err(e) = adapter.apply_plan(&plan) {
+                        if !json_mode {
+                            eprintln!("[start] Postgres schema apply failed: {e}");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if !json_mode {
+                    eprintln!("[start] Could not connect to Postgres for schema apply: {e}");
+                }
+            }
+        }
+    } else if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_target) {
         if let Ok(plan) = adapter.plan_from_live(&manifest) {
             let meta = pylon_storage::sqlite::PushMetadata {
                 manifest_version: manifest.manifest_version,
@@ -123,7 +149,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
-    let runtime = match pylon_runtime::Runtime::open(&db_path, manifest.clone()) {
+    let runtime = match pylon_runtime::Runtime::open(&db_target, manifest.clone()) {
         Ok(rt) => Arc::new(rt),
         Err(e) => {
             if !json_mode {
@@ -133,6 +159,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
+    let backend_label = if is_pg { "postgres" } else { "sqlite" };
     if json_mode {
         print_json(&serde_json::json!({
             "code": "START_OK",
@@ -140,13 +167,15 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             "version": manifest.version,
             "entry": entry_file,
             "port": port,
-            "db_path": db_path,
+            "db_path": db_target,
+            "backend": backend_label,
         }));
     } else {
         println!("pylon start");
         println!("  App:      {} v{}", manifest.name, manifest.version);
         println!("  Server:   http://0.0.0.0:{port}");
-        println!("  Database: {db_path}");
+        println!("  Backend:  {backend_label}");
+        println!("  Database: {db_target}");
         println!();
     }
 

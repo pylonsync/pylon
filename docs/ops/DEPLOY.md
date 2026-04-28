@@ -7,9 +7,10 @@ experimental Workers path.
 ## Required environment
 
 ```sh
-# Core
+# Core — pick ONE of DATABASE_URL or PYLON_DB_PATH:
 PYLON_PORT=4321
-PYLON_DB_PATH=/var/lib/pylon/pylon.db
+DATABASE_URL=postgres://user:pass@host:5432/dbname   # multi-replica / managed
+# PYLON_DB_PATH=/var/lib/pylon/pylon.db              # single-VPS / SQLite
 PYLON_FILES_DIR=/var/lib/pylon/uploads
 PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 
@@ -95,8 +96,44 @@ Test restore quarterly per the test at `crates/runtime/tests/backup_restore.rs`.
 
 Minimum bill: ~$25/mo for a production deployment.
 
-Compiled with `--features postgres-live` and
-`DATABASE_URL=postgres://...`.
+`DATABASE_URL=postgres://...` is all the binary needs — `postgres-live`
+is on by default for the runtime's storage dep, so no special build
+flags. Apply schema before first start with `pylon migrate` (or let the
+server auto-apply on boot, same as the SQLite path).
+
+### Backend selection
+
+The runtime picks its backend from the URL prefix:
+- `postgres://` or `postgresql://` → live Postgres cluster
+- anything else → SQLite filesystem path
+
+`DATABASE_URL` takes precedence over `PYLON_DB_PATH` when both are set.
+
+### Postgres caveats (current)
+
+What works on Postgres today:
+- Entity CRUD (`/api/entities/*`) — insert / get / update / delete /
+  list / list_after / lookup / link / unlink
+- Filtered queries, graph queries, aggregations
+- `/api/transact` — real PG transactions with auto-rollback on Drop
+- Multi-replica horizontal scaling for the data plane
+
+What still uses local SQLite even with `DATABASE_URL` set:
+- Sessions (`PYLON_SESSION_DB`) — local per-replica today; multi-replica
+  deploys should put the cookie behind a sticky-session LB until the
+  Postgres session backend lands. Tracking issue: PG aux stores.
+- Job queue (`PYLON_JOBS_DB`) — local per-replica, same caveat. A job
+  enqueued on replica A is only run by replica A.
+- Workflow engine — same shape as jobs, local per-replica.
+- OAuth state — local per-replica; OAuth flows must complete on the same
+  replica that started them (sticky-session covers this too).
+- CRDT mode + FTS5 search — SQLite-only at the runtime layer. CRDT
+  broadcasts degrade to JSON change events on Postgres; FTS goes through
+  the storage adapter's tsvector path under `query_filtered($search)`.
+
+For a single-replica Postgres deploy (one ECS task, one Fly machine)
+none of these caveats apply — sticky sessions are trivially satisfied
+when there's only one replica. Multi-replica is when they bite.
 
 ## Shape 3: Cloudflare Workers (edge, experimental)
 

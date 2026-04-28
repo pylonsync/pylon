@@ -261,6 +261,13 @@ pub fn generate_id() -> String {
 }
 
 /// Convert a JSON value to its string representation for use as a SQL parameter.
+///
+/// Kept for back-compat with callers that need a textual fallback (e.g.
+/// human-readable logs). New code should bind through [`JsonParam`] so
+/// integers/booleans/nulls reach Postgres in their typed form instead of
+/// collapsing to TEXT, which the driver can't coerce into INTEGER /
+/// BOOLEAN / TIMESTAMPTZ columns and which silently turns JSON `null`
+/// into an empty string for FK columns.
 pub fn json_value_to_string(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::String(s) => s.clone(),
@@ -271,12 +278,141 @@ pub fn json_value_to_string(val: &serde_json::Value) -> String {
     }
 }
 
-/// Build an INSERT SQL statement and collect string parameter values.
-/// Returns `(sql, values)` where `values[0]` is the generated ID.
+/// A typed wrapper around a JSON scalar that implements
+/// [`postgres::types::ToSql`] for INSERT/UPDATE parameters.
+///
+/// The previous implementation passed every value as `String`, which broke
+/// non-text columns (the postgres driver can't bind a string literal into
+/// an INTEGER / BOOLEAN / TIMESTAMPTZ slot) and silently turned JSON
+/// `null` into the empty string for nullable FKs (so `unlink` left
+/// dangling `""` references instead of NULL). `JsonParam` carries the
+/// JSON variant tag through to `to_sql` so the driver can pick the
+/// correct binary representation per column type.
+///
+/// JSON arrays/objects collapse to their JSON-string form (TEXT) — the
+/// runtime layer doesn't currently model array/object columns at the
+/// manifest level on Postgres, so anything that lands here came from
+/// caller-supplied prose that's expected to fit into a TEXT column.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonParam {
+    Null,
+    Text(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl JsonParam {
+    /// Lift a `serde_json::Value` into the typed parameter form. Numbers
+    /// that fit `i64` go through as Int; everything else goes through as
+    /// Float to preserve fractional / large-magnitude values.
+    pub fn from_json(val: &serde_json::Value) -> Self {
+        match val {
+            serde_json::Value::Null => JsonParam::Null,
+            serde_json::Value::String(s) => JsonParam::Text(s.clone()),
+            serde_json::Value::Bool(b) => JsonParam::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    JsonParam::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    JsonParam::Float(f)
+                } else {
+                    JsonParam::Text(n.to_string())
+                }
+            }
+            other => JsonParam::Text(other.to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "postgres-live")]
+impl postgres::types::ToSql for JsonParam {
+    fn to_sql(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        use postgres::types::Type;
+
+        // Null binds as SQL NULL regardless of the column's declared
+        // type — the postgres driver treats `IsNull::Yes` as a null
+        // value of the requested type.
+        if matches!(self, JsonParam::Null) {
+            return Ok(postgres::types::IsNull::Yes);
+        }
+
+        // Match each JsonParam variant against the COLUMN's declared
+        // type so the binary encoding actually fits the target slot.
+        // Postgres rejects "binary data of wrong size" if you bind an
+        // `i64` (BIGINT, 8 bytes) into an INTEGER (4 bytes) — which is
+        // exactly what the previous "everything is a String" path did
+        // on every non-TEXT column.
+        match (self, ty) {
+            (JsonParam::Bool(b), &Type::BOOL) => b.to_sql(ty, out),
+
+            (JsonParam::Int(n), &Type::INT2) => (*n as i16).to_sql(ty, out),
+            (JsonParam::Int(n), &Type::INT4) => (*n as i32).to_sql(ty, out),
+            (JsonParam::Int(n), &Type::INT8) => n.to_sql(ty, out),
+            (JsonParam::Int(n), &Type::FLOAT4) => (*n as f32).to_sql(ty, out),
+            (JsonParam::Int(n), &Type::FLOAT8) => (*n as f64).to_sql(ty, out),
+
+            (JsonParam::Float(f), &Type::FLOAT4) => (*f as f32).to_sql(ty, out),
+            (JsonParam::Float(f), &Type::FLOAT8) => f.to_sql(ty, out),
+            (JsonParam::Float(f), &Type::INT4) => (*f as i32).to_sql(ty, out),
+            (JsonParam::Float(f), &Type::INT8) => (*f as i64).to_sql(ty, out),
+
+            (JsonParam::Text(s), &Type::TEXT)
+            | (JsonParam::Text(s), &Type::VARCHAR)
+            | (JsonParam::Text(s), &Type::BPCHAR)
+            | (JsonParam::Text(s), &Type::NAME) => s.to_sql(ty, out),
+            (JsonParam::Text(s), &Type::TIMESTAMPTZ)
+            | (JsonParam::Text(s), &Type::TIMESTAMP) => {
+                // The runtime currently models datetimes as ISO 8601
+                // strings end-to-end. Bind via the &str impl with the
+                // target type so postgres parses through its TEXT input
+                // function for that type. Cheaper than introducing
+                // chrono just for date binding.
+                s.as_str().to_sql(ty, out)
+            }
+
+            // Cross-type fallback: render as text and bind into a TEXT
+            // slot, OR error if the target column doesn't accept text.
+            // Catches "manifest says INT but caller sent a stringified
+            // number" — better to fail loudly than silently coerce.
+            (other, _) => {
+                let s = match other {
+                    JsonParam::Bool(b) => b.to_string(),
+                    JsonParam::Int(n) => n.to_string(),
+                    JsonParam::Float(f) => f.to_string(),
+                    JsonParam::Text(s) => s.clone(),
+                    JsonParam::Null => unreachable!(),
+                };
+                s.to_sql(ty, out)
+            }
+        }
+    }
+
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        // Defer per-variant acceptance to to_sql_checked, which dispatches
+        // to the inner type's ToSql impl. Returning `true` here matches
+        // the postgres crate's recommended pattern for sum-type wrappers.
+        true
+    }
+
+    postgres::types::to_sql_checked!();
+}
+
+/// Build an INSERT SQL statement and collect typed parameter values.
+/// Returns `(sql, params)` where `params[0]` is the generated ID
+/// (always `JsonParam::Text`). Subsequent params carry the JSON-typed
+/// value so the postgres driver can bind them to typed columns
+/// (INTEGER / BOOLEAN / TIMESTAMPTZ / TEXT) and so JSON `null` reaches
+/// the database as SQL NULL — the previous string-collapsing path stored
+/// `""` for nullable FKs and broke any non-text column.
 pub fn build_insert_sql(
     entity: &str,
     data: &serde_json::Value,
-) -> Result<(String, Vec<String>), StorageError> {
+) -> Result<(String, Vec<JsonParam>), StorageError> {
     let id = generate_id();
     let obj = data.as_object().ok_or_else(|| StorageError {
         code: "PG_INVALID_DATA".into(),
@@ -285,12 +421,12 @@ pub fn build_insert_sql(
 
     let mut col_names = vec!["id".to_string()];
     let mut placeholders = vec!["$1".to_string()];
-    let mut values: Vec<String> = vec![id];
+    let mut values: Vec<JsonParam> = vec![JsonParam::Text(id)];
 
     for (i, (key, val)) in obj.iter().enumerate() {
         col_names.push(quote_ident(key));
         placeholders.push(format!("${}", i + 2));
-        values.push(json_value_to_string(val));
+        values.push(JsonParam::from_json(val));
     }
 
     let sql = format!(
@@ -303,13 +439,13 @@ pub fn build_insert_sql(
     Ok((sql, values))
 }
 
-/// Build an UPDATE SQL statement and collect string parameter values.
-/// Returns `(sql, values)` where `values[0]` is the row ID.
+/// Build an UPDATE SQL statement and collect typed parameter values.
+/// Returns `(sql, params)` where `params[0]` is the row ID.
 pub fn build_update_sql(
     entity: &str,
     id: &str,
     data: &serde_json::Value,
-) -> Result<(String, Vec<String>), StorageError> {
+) -> Result<(String, Vec<JsonParam>), StorageError> {
     let obj = data.as_object().ok_or_else(|| StorageError {
         code: "PG_INVALID_DATA".into(),
         message: "Update data must be a JSON object".into(),
@@ -323,11 +459,11 @@ pub fn build_update_sql(
     }
 
     let mut set_clauses = Vec::new();
-    let mut values: Vec<String> = vec![id.to_string()];
+    let mut values: Vec<JsonParam> = vec![JsonParam::Text(id.to_string())];
 
     for (i, (key, val)) in obj.iter().enumerate() {
         set_clauses.push(format!("{} = ${}", quote_ident(key), i + 2));
-        values.push(json_value_to_string(val));
+        values.push(JsonParam::from_json(val));
     }
 
     let sql = format!(
@@ -337,6 +473,17 @@ pub fn build_update_sql(
     );
 
     Ok((sql, values))
+}
+
+/// Helper for the existing `Vec<JsonParam>` → `&[&dyn ToSql + Sync]` lift
+/// at insert/update/transact call sites. The postgres driver wants a
+/// slice of trait objects; this avoids repeating the same map at each site.
+#[cfg(feature = "postgres-live")]
+fn as_pg_params(values: &[JsonParam]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
+    values
+        .iter()
+        .map(|v| v as &(dyn postgres::types::ToSql + Sync))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +610,15 @@ pub mod live {
             Ok(())
         }
 
+        /// Execute a raw SQL statement against the live database. Used by
+        /// integration tests for setup/teardown (DROP TABLE, TRUNCATE) —
+        /// production code should go through `apply_plan` so changes are
+        /// represented in the migration history. Returns the number of
+        /// rows affected.
+        pub fn exec_raw(&mut self, sql: &str) -> Result<u64, StorageError> {
+            self.client.execute(sql, &[]).map_err(pg_err)
+        }
+
         /// Insert a row. Returns the generated ID.
         pub fn insert(
             &mut self,
@@ -470,13 +626,18 @@ pub mod live {
             data: &serde_json::Value,
         ) -> Result<String, StorageError> {
             let (sql, values) = build_insert_sql(entity, data)?;
-            let id = values[0].clone();
-
-            let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
-                .iter()
-                .map(|v| v as &(dyn postgres::types::ToSql + Sync))
-                .collect();
-
+            // The first param is always the generated ID — extract it before
+            // we hand `values` off to the postgres driver as borrowed slices.
+            let id = match &values[0] {
+                JsonParam::Text(s) => s.clone(),
+                _ => {
+                    return Err(StorageError {
+                        code: "PG_INTERNAL".into(),
+                        message: "build_insert_sql produced non-text id param".into(),
+                    });
+                }
+            };
+            let params = as_pg_params(&values);
             self.client.execute(sql.as_str(), &params).map_err(pg_err)?;
             Ok(id)
         }
@@ -547,12 +708,7 @@ pub mod live {
             data: &serde_json::Value,
         ) -> Result<bool, StorageError> {
             let (sql, values) = build_update_sql(entity, id, data)?;
-
-            let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
-                .iter()
-                .map(|v| v as &(dyn postgres::types::ToSql + Sync))
-                .collect();
-
+            let params = as_pg_params(&values);
             let rows_affected = self.client.execute(sql.as_str(), &params).map_err(pg_err)?;
             Ok(rows_affected > 0)
         }
@@ -584,9 +740,22 @@ pub mod live {
 
         /// Push a `query_filtered` filter down to a real Postgres `WHERE`.
         ///
-        /// Supported operators: equality (`field: value`), `$gt`, `$gte`,
-        /// `$lt`, `$lte`, `$like`, `$in: [..]`, plus the meta operators
-        /// `$order: { field: "asc"|"desc" }`, `$limit`, `$offset`.
+        /// Supported operators (parity with the SQLite path):
+        /// - Equality (`field: value`)
+        /// - `$not`: emits `field != value`
+        /// - `$gt` / `$gte` / `$lt` / `$lte`
+        /// - `$like`: emits `field LIKE value` (use `%`/`_` wildcards in
+        ///   the value; case-sensitive — pass `$ilike` for case-insensitive
+        ///   if/when the SQLite side adds it)
+        /// - `$in: [..]`: emits `field IN ($1, $2, ...)`
+        ///
+        /// Top-level meta operators: `$order`, `$limit`, `$offset`.
+        ///
+        /// `$search` (FTS5 on SQLite) is NOT supported here — Postgres
+        /// would need a tsvector column or a generic ILIKE OR-fold across
+        /// every text field, neither of which is wired up yet. Returns
+        /// `SEARCH_NOT_SUPPORTED` so callers can branch instead of
+        /// receiving silently-broad results.
         ///
         /// Anything else is silently ignored (matches the in-memory fallback's
         /// permissive behavior). Field names are validated against `valid_columns`
@@ -616,11 +785,25 @@ pub mod live {
             let mut limit_clause = String::new();
             let mut offset_clause = String::new();
             // Collect (col, op, value) so placeholder numbers can be assigned
-            // in a single materialization pass after the parse loop.
-            let mut planned: Vec<(String, String, String)> = Vec::new();
+            // in a single materialization pass after the parse loop. Values
+            // are now JsonParam (typed) instead of String — see `value_to_pg`.
+            let mut planned: Vec<(String, String, JsonParam)> = Vec::new();
 
             for (key, val) in obj {
                 match key.as_str() {
+                    "$search" => {
+                        // FTS5 (SQLite) has no portable equivalent in
+                        // Postgres without an explicit tsvector column.
+                        // Return a clear error rather than silently
+                        // ignoring the operator — callers that hit this
+                        // need to either branch on backend or define a
+                        // tsvector + GIN index in their schema.
+                        return Err(StorageError {
+                            code: "SEARCH_NOT_SUPPORTED".into(),
+                            message: "$search is SQLite-FTS5-only; use a Postgres tsvector column with the storage adapter's full-text path"
+                                .into(),
+                        });
+                    }
                     "$order" => {
                         if let Some(ord) = val.as_object() {
                             let mut parts = Vec::new();
@@ -653,6 +836,11 @@ pub mod live {
                             serde_json::Value::Object(ops) => {
                                 for (op, v) in ops {
                                     match op.as_str() {
+                                        "$not" => planned.push((
+                                            field.into(),
+                                            "!=".into(),
+                                            value_to_pg(v),
+                                        )),
                                         "$gt" => {
                                             planned.push((field.into(), ">".into(), value_to_pg(v)))
                                         }
@@ -704,7 +892,7 @@ pub mod live {
             }
 
             // Materialize planned -> SQL + params.
-            let mut params: Vec<String> = Vec::with_capacity(planned.len());
+            let mut params: Vec<JsonParam> = Vec::with_capacity(planned.len());
             for (field, op, v) in &planned {
                 if op == "__INLINE__" {
                     // Already emitted via the IN-clause path; just push the value.
@@ -730,16 +918,231 @@ pub mod live {
                 offset_clause,
             );
 
-            let pg_params: Vec<&(dyn postgres::types::ToSql + Sync)> = params
-                .iter()
-                .map(|s| s as &(dyn postgres::types::ToSql + Sync))
-                .collect();
-
+            let pg_params = as_pg_params(&params);
             let rows = self
                 .client
                 .query(sql.as_str(), &pg_params)
                 .map_err(pg_err)?;
             Ok(rows.iter().map(row_to_json).collect())
+        }
+
+        /// Run a `DataStore::aggregate` spec against Postgres. Mirrors the
+        /// SQLite path in `pylon-runtime` — supports `count`, `sum`, `avg`,
+        /// `min`, `max`, `countDistinct`, `groupBy` (plain field names or
+        /// `{field, bucket: hour|day|week|month|year}` for date bucketing
+        /// via `date_trunc`), and a flat-equality `where` filter.
+        ///
+        /// Spec format (same JSON shape used by the SQLite path):
+        /// ```json
+        /// { "count": "*",
+        ///   "sum": ["amount"],
+        ///   "groupBy": [{"field": "createdAt", "bucket": "day"}],
+        ///   "where": {"status": "paid"} }
+        /// ```
+        ///
+        /// `valid_columns` is used to validate every field name before it's
+        /// quoted into SQL — same pattern as `query_filtered`. Caller (the
+        /// `DataStore` impl in this crate) supplies the entity's column set
+        /// from the manifest.
+        pub fn aggregate(
+            &mut self,
+            entity: &str,
+            spec: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<serde_json::Value, StorageError> {
+            let obj = spec.as_object().ok_or_else(|| StorageError {
+                code: "INVALID_QUERY".into(),
+                message: "aggregate spec must be a JSON object".into(),
+            })?;
+
+            let validate = |col: &str| -> Result<(), StorageError> {
+                if col == "id" || valid_columns.iter().any(|c| c == col) {
+                    Ok(())
+                } else {
+                    Err(StorageError {
+                        code: "UNKNOWN_COLUMN".into(),
+                        message: format!("Unknown column \"{col}\" on entity \"{entity}\""),
+                    })
+                }
+            };
+
+            let mut select_parts: Vec<String> = Vec::new();
+            let mut result_fields: Vec<String> = Vec::new();
+
+            if let Some(count) = obj.get("count") {
+                match count {
+                    serde_json::Value::String(s) if s == "*" => {
+                        select_parts.push("COUNT(*) AS count".into());
+                        result_fields.push("count".into());
+                    }
+                    serde_json::Value::String(field) => {
+                        validate(field)?;
+                        let alias = format!("count_{field}");
+                        select_parts.push(format!(
+                            "COUNT({}) AS {}",
+                            quote_ident(field),
+                            quote_ident(&alias),
+                        ));
+                        result_fields.push(alias);
+                    }
+                    _ => {}
+                }
+            }
+
+            for (fn_name, prefix) in [
+                ("sum", "sum_"),
+                ("avg", "avg_"),
+                ("min", "min_"),
+                ("max", "max_"),
+            ] {
+                if let Some(fields) = obj.get(fn_name).and_then(|v| v.as_array()) {
+                    for field in fields {
+                        if let Some(f) = field.as_str() {
+                            validate(f)?;
+                            let alias = format!("{prefix}{f}");
+                            let sql_fn = fn_name.to_uppercase();
+                            select_parts.push(format!(
+                                "{}({}) AS {}",
+                                sql_fn,
+                                quote_ident(f),
+                                quote_ident(&alias),
+                            ));
+                            result_fields.push(alias);
+                        }
+                    }
+                }
+            }
+
+            if let Some(fields) = obj.get("countDistinct").and_then(|v| v.as_array()) {
+                for field in fields {
+                    if let Some(f) = field.as_str() {
+                        validate(f)?;
+                        let alias = format!("count_distinct_{f}");
+                        select_parts.push(format!(
+                            "COUNT(DISTINCT {}) AS {}",
+                            quote_ident(f),
+                            quote_ident(&alias),
+                        ));
+                        result_fields.push(alias);
+                    }
+                }
+            }
+
+            // groupBy: column name or { field, bucket } — same vocabulary as
+            // the SQLite path. Buckets translate to Postgres `date_trunc`
+            // (SQLite uses `strftime`); both collapse rows to the bucket
+            // boundary identically.
+            let mut group_by: Vec<String> = Vec::new();
+            let mut group_select: Vec<String> = Vec::new();
+            let mut group_field_names: Vec<String> = Vec::new();
+            if let Some(groups) = obj.get("groupBy").and_then(|v| v.as_array()) {
+                for g in groups {
+                    if let Some(f) = g.as_str() {
+                        validate(f)?;
+                        let q = quote_ident(f);
+                        group_by.push(q.clone());
+                        group_select.push(q);
+                        group_field_names.push(f.to_string());
+                    } else if let Some(spec) = g.as_object() {
+                        let field =
+                            spec.get("field").and_then(|v| v.as_str()).ok_or_else(|| {
+                                StorageError {
+                                    code: "INVALID_QUERY".into(),
+                                    message: "groupBy object spec requires `field`".into(),
+                                }
+                            })?;
+                        validate(field)?;
+                        let bucket = spec.get("bucket").and_then(|v| v.as_str()).unwrap_or("day");
+                        let trunc_unit = match bucket {
+                            "hour" | "day" | "week" | "month" | "year" => bucket,
+                            _ => {
+                                return Err(StorageError {
+                                    code: "INVALID_QUERY".into(),
+                                    message: format!(
+                                        "bucket must be one of hour/day/week/month/year, got {bucket}"
+                                    ),
+                                });
+                            }
+                        };
+                        let alias = format!("{field}_{bucket}");
+                        let expr = format!(
+                            "date_trunc('{}', {})",
+                            trunc_unit,
+                            quote_ident(field),
+                        );
+                        group_by.push(expr.clone());
+                        group_select.push(format!("{} AS {}", expr, quote_ident(&alias)));
+                        group_field_names.push(alias);
+                    }
+                }
+            }
+
+            let mut full_select = group_select.clone();
+            full_select.extend(select_parts.iter().cloned());
+            if full_select.is_empty() {
+                return Err(StorageError {
+                    code: "INVALID_QUERY".into(),
+                    message: "aggregate spec must include count/sum/avg/min/max/groupBy".into(),
+                });
+            }
+
+            let mut where_clauses: Vec<String> = Vec::new();
+            let mut params: Vec<JsonParam> = Vec::new();
+            if let Some(w) = obj.get("where").and_then(|v| v.as_object()) {
+                for (k, v) in w {
+                    validate(k)?;
+                    let placeholder = format!("${}", params.len() + 1);
+                    where_clauses.push(format!("{} = {}", quote_ident(k), placeholder));
+                    params.push(value_to_pg(v));
+                }
+            }
+            let where_sql = if where_clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", where_clauses.join(" AND "))
+            };
+            let group_sql = if group_by.is_empty() {
+                String::new()
+            } else {
+                format!(" GROUP BY {}", group_by.join(", "))
+            };
+
+            let sql = format!(
+                "SELECT {} FROM {}{}{}",
+                full_select.join(", "),
+                quote_ident(entity),
+                where_sql,
+                group_sql,
+            );
+
+            let pg_params = as_pg_params(&params);
+            let rows = self
+                .client
+                .query(sql.as_str(), &pg_params)
+                .map_err(pg_err)?;
+
+            let column_names: Vec<String> = group_field_names
+                .iter()
+                .chain(result_fields.iter())
+                .cloned()
+                .collect();
+
+            let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let row_json = row_to_json(row);
+                if let serde_json::Value::Object(map) = &row_json {
+                    let mut filtered = serde_json::Map::new();
+                    for name in &column_names {
+                        if let Some(v) = map.get(name) {
+                            filtered.insert(name.clone(), v.clone());
+                        }
+                    }
+                    out.push(serde_json::Value::Object(filtered));
+                } else {
+                    out.push(row_json);
+                }
+            }
+            Ok(serde_json::json!({ "rows": out }))
         }
     }
 
@@ -781,20 +1184,22 @@ pub mod live {
                 match op {
                     TxOp::Insert { entity, data } => {
                         let (sql, values) = build_insert_sql(entity, data)?;
-                        let id = values[0].clone();
-                        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
-                            .iter()
-                            .map(|v| v as &(dyn postgres::types::ToSql + Sync))
-                            .collect();
+                        let id = match &values[0] {
+                            JsonParam::Text(s) => s.clone(),
+                            _ => {
+                                return Err(StorageError {
+                                    code: "PG_INTERNAL".into(),
+                                    message: "build_insert_sql produced non-text id param".into(),
+                                });
+                            }
+                        };
+                        let params = as_pg_params(&values);
                         tx.execute(sql.as_str(), &params).map_err(pg_err)?;
                         results.push(TxResult::Inserted(id));
                     }
                     TxOp::Update { entity, id, data } => {
                         let (sql, values) = build_update_sql(entity, id, data)?;
-                        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = values
-                            .iter()
-                            .map(|v| v as &(dyn postgres::types::ToSql + Sync))
-                            .collect();
+                        let params = as_pg_params(&values);
                         let n = tx.execute(sql.as_str(), &params).map_err(pg_err)?;
                         results.push(TxResult::Updated(n > 0));
                     }
@@ -811,14 +1216,13 @@ pub mod live {
         }
     }
 
-    fn value_to_pg(v: &serde_json::Value) -> String {
-        match v {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Null => String::new(),
-            other => other.to_string(),
-        }
+    /// Lift a JSON value into a typed Postgres parameter. The previous
+    /// implementation collapsed everything to `String`, which silently
+    /// stringified ints/bools and turned JSON `null` into `""` for
+    /// nullable columns. Forwarding through `JsonParam` keeps the column
+    /// type honest and lets callers `unlink` (set FK to NULL) cleanly.
+    fn value_to_pg(v: &serde_json::Value) -> JsonParam {
+        JsonParam::from_json(v)
     }
 
     fn row_to_json(row: &postgres::Row) -> serde_json::Value {
@@ -946,9 +1350,22 @@ pub mod live {
     }
 
     fn pg_err(e: postgres::Error) -> StorageError {
+        // postgres::Error's Display is intentionally short ("db error",
+        // "connection error" etc.) — the actual SQLSTATE / detail lives
+        // on the source chain. Walk the chain so the final message has
+        // enough signal to debug a failed insert/update without
+        // attaching a debugger.
+        use std::error::Error;
+        let mut detail = format!("{e}");
+        let mut src: Option<&dyn Error> = e.source();
+        while let Some(s) = src {
+            detail.push_str(": ");
+            detail.push_str(&format!("{s}"));
+            src = s.source();
+        }
         StorageError {
             code: "PG_QUERY_FAILED".into(),
-            message: format!("Postgres query failed: {e}"),
+            message: format!("Postgres query failed: {detail}"),
         }
     }
 }
@@ -1452,9 +1869,31 @@ mod tests {
         assert!(sql.contains("$1"));
         assert!(sql.contains("$2"));
         assert!(sql.contains("$3"));
-        // First value is the generated ID.
-        assert!(!values[0].is_empty());
+        // First value is the generated ID — JsonParam::Text variant.
+        match &values[0] {
+            JsonParam::Text(s) => assert!(!s.is_empty()),
+            other => panic!("expected Text id param, got {other:?}"),
+        }
         assert_eq!(values.len(), 3); // id + 2 fields
+    }
+
+    #[test]
+    fn build_insert_sql_preserves_json_types() {
+        let data = serde_json::json!({
+            "n": 42,
+            "f": 1.5,
+            "b": true,
+            "s": "hi",
+            "z": null,
+        });
+        let (_sql, values) = build_insert_sql("T", &data).unwrap();
+        // values[0] is the id; remaining are in BTreeMap order ("b","f","n","s","z").
+        let kinds: Vec<&JsonParam> = values.iter().skip(1).collect();
+        assert!(matches!(kinds[0], JsonParam::Bool(true)));
+        assert!(matches!(kinds[1], JsonParam::Float(_)));
+        assert!(matches!(kinds[2], JsonParam::Int(42)));
+        assert!(matches!(kinds[3], JsonParam::Text(_)));
+        assert!(matches!(kinds[4], JsonParam::Null));
     }
 
     #[test]
@@ -1485,7 +1924,10 @@ mod tests {
         assert!(sql.contains("WHERE id = $1"));
         assert!(sql.contains("$2"));
         assert!(sql.contains("$3"));
-        assert_eq!(values[0], "abc123");
+        match &values[0] {
+            JsonParam::Text(s) => assert_eq!(s, "abc123"),
+            other => panic!("expected Text id param, got {other:?}"),
+        }
         assert_eq!(values.len(), 3); // id + 2 fields
     }
 

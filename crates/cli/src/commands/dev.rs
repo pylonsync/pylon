@@ -239,8 +239,21 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
             return ExitCode::Error;
         }
-        let db_path = data_dir.join("dev.db");
-        let db_str = db_path.to_string_lossy().to_string();
+        // DATABASE_URL takes precedence — local dev against a real Postgres
+        // (e.g. `pylon dev` against the SST docker-compose stack) just sets
+        // DATABASE_URL=postgres://... and the runtime opens that instead of
+        // the hidden SQLite file.
+        let (db_str, is_pg) = match std::env::var("DATABASE_URL") {
+            Ok(url)
+                if url.starts_with("postgres://") || url.starts_with("postgresql://") =>
+            {
+                (url, true)
+            }
+            _ => {
+                let db_path = data_dir.join("dev.db");
+                (db_path.to_string_lossy().to_string(), false)
+            }
+        };
 
         // Default uploads into the hidden data dir too so `examples/*/uploads/`
         // stops littering project roots. Operators can still override via
@@ -276,8 +289,30 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         }
 
-        // Auto-push schema to the dev database.
-        if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_str) {
+        // Auto-push schema to the dev database. Postgres path uses
+        // `LivePostgresAdapter`; SQLite path keeps the existing
+        // history-tracked apply.
+        if is_pg {
+            match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_str) {
+                Ok(mut adapter) => {
+                    if let Ok(plan) = adapter.plan_from_live(&m) {
+                        if let Err(e) = adapter.apply_plan(&plan) {
+                            if !json_mode {
+                                eprintln!("[dev] Postgres schema apply failed: {e}");
+                            }
+                        } else if !json_mode && !plan.is_empty() {
+                            println!("  Database: {db_str} (postgres, schema synced)");
+                            println!();
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !json_mode {
+                        eprintln!("[dev] Could not connect to Postgres: {e}");
+                    }
+                }
+            }
+        } else if let Ok(adapter) = pylon_storage::sqlite::SqliteAdapter::open(&db_str) {
             if let Ok(plan) = adapter.plan_from_live(&m) {
                 let meta = pylon_storage::sqlite::PushMetadata {
                     manifest_version: m.manifest_version,
