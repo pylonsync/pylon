@@ -140,6 +140,17 @@ while IFS= read -r -d '' f; do
 	perl -pi -e "s/(\"version\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" "$f"
 done < <(find packages -maxdepth 2 -name package.json -print0)
 
+# 3b. @pylonsync/cli's optionalDependencies pin to exact-version
+# strings of the platform sub-packages. The dispatcher uses
+# require.resolve at runtime, so a range pin (`^x.y.z`) would let
+# install resolve to a future version that doesn't ship the binary
+# layout the dispatcher expects. Match `"@pylonsync/cli-*": "X.Y.Z"`
+# (no caret/tilde) and bump the X.Y.Z piece. Same regex shape as the
+# crates pin bump above.
+while IFS= read -r -d '' f; do
+	perl -pi -e "s/(\"\@pylonsync\/cli-[a-z0-9_-]+\":\s*\")[0-9]+\.[0-9]+\.[0-9]+(\")/\${1}$target\${2}/g" "$f"
+done < <(find packages/cli -maxdepth 2 -name package.json -print0)
+
 # 4. release-please manifest.
 perl -pi -e "s/(\"\.\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" .release-please-manifest.json
 

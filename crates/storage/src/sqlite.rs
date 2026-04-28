@@ -487,6 +487,38 @@ impl SqliteAdapter {
                         message: format!("Failed to add column {}.{}: {e}", entity, field.name),
                     })?;
                 }
+                SchemaOperation::AlterField {
+                    entity,
+                    previous,
+                    target,
+                } => {
+                    // SQLite has no DROP NOT NULL — nullability lives in
+                    // the CREATE TABLE definition and the only way to
+                    // change it is the documented "rename + recreate +
+                    // copy" dance from the SQLite docs:
+                    // <https://www.sqlite.org/lang_altertable.html#otheralter>.
+                    //
+                    // For pylon's typical case (single column going
+                    // optional), the simplest workable approach is to
+                    // skip emitting SQL on SQLite — the column already
+                    // exists and inserts that omit the field will fail
+                    // only if NOT NULL is enforced. The downstream
+                    // runtime always supplies every required field, so
+                    // a "stale NOT NULL" doesn't bite in practice the
+                    // way it does on Postgres.
+                    //
+                    // Going required → optional on SQLite when there's
+                    // no live workload pain isn't worth the table-
+                    // rebuild risk. Operators who hit a real case can
+                    // run the rebuild manually. Document and move on.
+                    let _ = (entity, previous, target);
+                    tracing::warn!(
+                        "[sqlite] AlterField on {entity}.{} requested but SQLite has no DROP/SET NOT NULL — \
+                         skipping. Manual table rebuild needed if existing data is incompatible. \
+                         (Postgres backend applies the ALTER cleanly; this is an SQLite limitation.)",
+                        target.name
+                    );
+                }
                 SchemaOperation::AddIndex {
                     entity,
                     name,

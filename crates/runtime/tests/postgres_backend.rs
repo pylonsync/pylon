@@ -250,7 +250,10 @@ fn typed_columns_roundtrip_correctly() {
     let id = rt
         .insert(
             "Typed",
-            &serde_json::json!({"count": 42, "active": true, "score": 3.14, "ownerId": "owner_a"}),
+            // Magic number unrelated to PI — clippy's approximate-PI lint
+            // false-positives on 3.14, but here it's just a representative
+            // float. Use a value that doesn't trip the heuristic.
+            &serde_json::json!({"count": 42, "active": true, "score": 2.5, "ownerId": "owner_a"}),
         )
         .expect("typed insert");
     let row = rt.get_by_id("Typed", &id).unwrap().unwrap();
@@ -258,7 +261,7 @@ fn typed_columns_roundtrip_correctly() {
     assert_eq!(row["count"], 42);
     assert_eq!(row["active"], true);
     // Float comparison via JSON: assert it's a number, value within epsilon.
-    assert!((row["score"].as_f64().unwrap() - 3.14).abs() < 1e-9);
+    assert!((row["score"].as_f64().unwrap() - 2.5).abs() < 1e-9);
     assert_eq!(row["ownerId"], "owner_a");
 
     // Now `unlink` the FK by setting it to null. The previous string-collapse
@@ -371,4 +374,156 @@ fn transact_uses_real_postgres_transaction() {
     assert_eq!(results.len(), 2);
     assert!(rt.lookup("User", "email", "tx1@x.com").unwrap().is_some());
     assert!(rt.lookup("User", "email", "tx2@x.com").unwrap().is_some());
+}
+
+#[test]
+fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
+    // Regression: pylon-cloud's User entity made `avatarColor` optional
+    // after the framework's OAuth handler started failing
+    // USER_CREATE_FAILED on a NOT NULL violation. Before AlterField,
+    // the manifest change was a no-op against the live PG schema —
+    // operators had to drop NOT NULL by hand. This test pushes the
+    // BEFORE schema, then re-plans against the AFTER manifest, and
+    // confirms the existing column is altered (no rebuild, no data loss).
+    let Some(url) = pg_url() else {
+        return;
+    };
+
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"AlterTest\" CASCADE");
+
+    let with_required = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "AlterTest".into(),
+            fields: vec![ManifestField {
+                name: "color".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+    let plan = adapter.plan_from_live(&with_required).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    // Insert a row that satisfies NOT NULL — proves the column starts
+    // out required, otherwise the assertion below is meaningless.
+    adapter
+        .exec_raw("INSERT INTO \"AlterTest\" (id, color) VALUES ('row1', 'red')")
+        .unwrap();
+
+    // Now flip the manifest: color is optional. Re-plan against the
+    // live schema and confirm the diff is one AlterField op.
+    let with_optional = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "AlterTest".into(),
+            fields: vec![ManifestField {
+                name: "color".into(),
+                field_type: "string".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+    let next_plan = adapter.plan_from_live(&with_optional).unwrap();
+    let alter_count = next_plan
+        .operations
+        .iter()
+        .filter(|op| matches!(op, pylon_storage::SchemaOperation::AlterField { .. }))
+        .count();
+    assert_eq!(
+        alter_count, 1,
+        "expected exactly one AlterField op, got plan: {:?}",
+        next_plan.operations
+    );
+    adapter.apply_plan(&next_plan).unwrap();
+
+    // The previously-required column should now accept NULL. The
+    // existing row stays intact (no table rebuild).
+    adapter
+        .exec_raw("INSERT INTO \"AlterTest\" (id, color) VALUES ('row2', NULL)")
+        .expect("INSERT NULL should now succeed against the optional column");
+    adapter
+        .exec_raw("UPDATE \"AlterTest\" SET color = NULL WHERE id = 'row1'")
+        .expect("UPDATE to NULL should succeed");
+}
+
+#[test]
+fn alter_field_set_not_null_succeeds_when_data_compatible() {
+    // The reverse direction: optional → required. Postgres only accepts
+    // SET NOT NULL when every row already has a non-null value, so we
+    // pre-populate, then re-plan, then apply. The framework's job is
+    // to emit the right SQL — operators are responsible for ensuring
+    // the data satisfies the new constraint before applying.
+    let Some(url) = pg_url() else {
+        return;
+    };
+
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"TightenTest\" CASCADE");
+
+    let optional = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "TightenTest".into(),
+            fields: vec![ManifestField {
+                name: "name".into(),
+                field_type: "string".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+    let initial_plan = adapter.plan_from_live(&optional).unwrap();
+    adapter.apply_plan(&initial_plan).unwrap();
+    adapter
+        .exec_raw("INSERT INTO \"TightenTest\" (id, name) VALUES ('a', 'something')")
+        .unwrap();
+
+    let required = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "TightenTest".into(),
+            fields: vec![ManifestField {
+                name: "name".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+    let plan = adapter.plan_from_live(&required).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    // INSERT NULL should now fail.
+    let err = adapter
+        .exec_raw("INSERT INTO \"TightenTest\" (id, name) VALUES ('b', NULL)")
+        .unwrap_err();
+    assert!(
+        err.message.to_lowercase().contains("null"),
+        "expected NOT NULL violation, got: {}",
+        err.message
+    );
 }

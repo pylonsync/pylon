@@ -19,6 +19,7 @@ pub mod files;
 pub mod functions;
 pub mod infra;
 pub mod links;
+pub mod ops_admin;
 pub mod queries;
 pub mod rooms;
 pub mod search;

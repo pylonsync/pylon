@@ -954,6 +954,9 @@ fn route_inner(
     if let Some(r) = routes::auth_admin::handle(ctx, method, url, body, auth_token) {
         return r;
     }
+    if let Some(r) = routes::ops_admin::handle(ctx, method, url, body, auth_token) {
+        return r;
+    }
     if let Some(r) = routes::search::handle(ctx, method, url, body, auth_token) {
         return r;
     }

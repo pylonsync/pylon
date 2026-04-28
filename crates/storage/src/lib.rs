@@ -59,6 +59,27 @@ pub enum SchemaOperation {
         entity: String,
         field_name: String,
     },
+    /// Change column shape on an existing field. Only nullable transitions
+    /// today (`required → optional`, `optional → required`); type changes
+    /// stay manual because they can fail on existing rows in ways the
+    /// planner can't reason about (e.g. `string → int` on a column with
+    /// non-numeric values).
+    ///
+    /// Real-world driver: pylon-cloud's User entity made `avatarColor`
+    /// optional after the framework's OAuth handler started failing
+    /// USER_CREATE_FAILED on a NOT NULL violation. Without AlterField
+    /// the manifest change was a no-op against the live PG schema
+    /// — operators had to drop NOT NULL by hand. Now the planner emits
+    /// the ALTER and `pylon dev` auto-applies it on the next reload.
+    ///
+    /// `previous` carries the old column shape so the SQL emitter can
+    /// decide whether to emit DROP NOT NULL, SET NOT NULL, both, or
+    /// neither. `target` is the desired final shape.
+    AlterField {
+        entity: String,
+        previous: FieldSpec,
+        target: FieldSpec,
+    },
     RemoveEntity {
         name: String,
     },
@@ -195,19 +216,51 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                 }
             }
             Some(table) => {
-                let existing_cols: HashSet<&str> =
-                    table.columns.iter().map(|c| c.name.as_str()).collect();
+                let cols_by_name: HashMap<&str, &ColumnSnapshot> =
+                    table.columns.iter().map(|c| (c.name.as_str(), c)).collect();
                 for field in &entity.fields {
-                    if !existing_cols.contains(field.name.as_str()) {
-                        operations.push(SchemaOperation::AddField {
-                            entity: entity.name.clone(),
-                            field: FieldSpec {
-                                name: field.name.clone(),
-                                field_type: field.field_type.clone(),
-                                optional: field.optional,
-                                unique: field.unique,
-                            },
-                        });
+                    match cols_by_name.get(field.name.as_str()) {
+                        None => {
+                            operations.push(SchemaOperation::AddField {
+                                entity: entity.name.clone(),
+                                field: FieldSpec {
+                                    name: field.name.clone(),
+                                    field_type: field.field_type.clone(),
+                                    optional: field.optional,
+                                    unique: field.unique,
+                                },
+                            });
+                        }
+                        Some(existing) => {
+                            // Detect nullable-shape drift between the live
+                            // column and the manifest. Existing column's
+                            // `notnull = true` ≡ manifest's `optional = false`.
+                            // We DON'T re-derive type/unique here — type
+                            // changes need a destructive plan we don't
+                            // attempt automatically, and unique-add lives in
+                            // the AddIndex path.
+                            let existing_optional = !existing.notnull;
+                            let target_optional = field.optional;
+                            if existing_optional != target_optional {
+                                let target_spec = FieldSpec {
+                                    name: field.name.clone(),
+                                    field_type: field.field_type.clone(),
+                                    optional: target_optional,
+                                    unique: field.unique,
+                                };
+                                let previous_spec = FieldSpec {
+                                    name: field.name.clone(),
+                                    field_type: existing.column_type.clone(),
+                                    optional: existing_optional,
+                                    unique: field.unique,
+                                };
+                                operations.push(SchemaOperation::AlterField {
+                                    entity: entity.name.clone(),
+                                    previous: previous_spec,
+                                    target: target_spec,
+                                });
+                            }
+                        }
                     }
                 }
                 // Index names in DB are prefixed: {entity}_{index_name}.

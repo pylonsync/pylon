@@ -346,6 +346,133 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             pylon-${{ github.ref_name }}-${{ matrix.target }}.*
+      # Stash the raw binary as a workflow artifact too so the
+      # `publish-cli-npm` job downstream can grab all four platform
+      # binaries without re-downloading from the GitHub release. Keyed
+      # by target so the assembly step can map to the right
+      # @pylonsync/cli-* package directly.
+      - name: Upload raw binary artifact
+        if: matrix.archive == 'tar.gz'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pylon-bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/pylon
+          retention-days: 1
+          if-no-files-found: error
+
+  publish-cli-npm:
+    name: Publish @pylonsync/cli + platform packages
+    needs: [binaries, verify]
+    runs-on: ubuntu-latest
+    # Same Production environment as the SDK npm publish — gives access
+    # to NPM_TOKEN. id-token write is for npm provenance, currently
+    # disabled (see NPM_CONFIG_PROVENANCE below).
+    environment: Production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Pull every binary artifact uploaded by the binaries matrix.
+      # Each lands at artifacts/<artifact-name>/pylon.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: pylon-bin-*
+      - name: Stage platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Map rust target → npm platform package directory. Windows
+          # + musl are intentionally skipped for now: the npm CLI focuses
+          # on the cases pylon-cloud + standard Mac/Linux dev shops hit.
+          # Anyone needing windows/musl can still grab the binary from
+          # the GitHub release.
+          declare -A TARGET_TO_PKG=(
+            [aarch64-apple-darwin]=cli-darwin-arm64
+            [x86_64-apple-darwin]=cli-darwin-x64
+            [aarch64-unknown-linux-gnu]=cli-linux-arm64
+            [x86_64-unknown-linux-gnu]=cli-linux-x64
+          )
+          for target in "${!TARGET_TO_PKG[@]}"; do
+            pkg="${TARGET_TO_PKG[$target]}"
+            src="artifacts/pylon-bin-${target}/pylon"
+            dest="packages/${pkg}/bin/pylon"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::Missing binary artifact for $target at $src" >&2
+              exit 1
+            fi
+            mkdir -p "$(dirname "$dest")"
+            cp "$src" "$dest"
+            chmod +x "$dest"
+            echo "✓ staged $target → $pkg/bin/pylon ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
+          done
+      - name: Auth + preflight
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '//registry.npmjs.org/:_authToken=%s\nregistry=https://registry.npmjs.org/\nalways-auth=true\n' "$NPM_TOKEN" > .npmrc
+          echo ".npmrc" >> .gitignore
+          npm whoami --registry=https://registry.npmjs.org
+
+          # Lockstep check: every CLI package must declare the SAME
+          # version, and the dispatcher's optionalDependencies must pin
+          # to that version exactly. Drift here is the same class of bug
+          # that broke @pylonsync/react@0.3.0 (workspace:* rewrite shipped
+          # mismatched deps) — catch it before publish.
+          CLI_PKGS=(packages/cli packages/cli-darwin-arm64 packages/cli-darwin-x64 packages/cli-linux-arm64 packages/cli-linux-x64)
+          REF=""
+          for pkg in "${CLI_PKGS[@]}"; do
+            v="$(node -p "require('./$pkg/package.json').version")"
+            if [[ -z "$REF" ]]; then REF="$v"; fi
+            if [[ "$v" != "$REF" ]]; then
+              echo "::error::Version mismatch in @pylonsync/cli-*: $pkg has $v, expected $REF. Run ./release.sh to bump in lockstep." >&2
+              exit 3
+            fi
+          done
+          # Confirm the dispatcher's optionalDependencies pin to the
+          # same version (NOT a range — exact match needed because the
+          # dispatcher uses require.resolve at runtime).
+          bad="$(node -e "
+            const p = require('./packages/cli/package.json');
+            for (const [k, v] of Object.entries(p.optionalDependencies || {})) {
+              if (v !== '$REF') console.log(\`\${k}=\${v}\`);
+            }
+          ")"
+          if [[ -n "$bad" ]]; then
+            echo "::error::@pylonsync/cli optionalDependencies don't match version $REF: $bad" >&2
+            exit 4
+          fi
+      - name: Publish platform packages then dispatcher
+        env:
+          NPM_CONFIG_PROVENANCE: "false"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Platform packages first — they have no @pylonsync/* deps,
+          # so they publish standalone. The dispatcher publishes last
+          # because its optionalDependencies must already exist on npm
+          # for the install-time `bun install --frozen-lockfile`
+          # postflight to resolve.
+          for pkg in cli-darwin-arm64 cli-darwin-x64 cli-linux-arm64 cli-linux-x64 cli; do
+            NAME="$(node -p "require('./packages/$pkg/package.json').name")"
+            VERSION="$(node -p "require('./packages/$pkg/package.json').version")"
+            if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+              echo "✓ $NAME@$VERSION already published — skipping"
+            else
+              echo "→ Publishing $NAME@$VERSION"
+              (cd "packages/$pkg" && bun publish --access public)
+            fi
+          done
 
   docker:
     runs-on: ubuntu-latest

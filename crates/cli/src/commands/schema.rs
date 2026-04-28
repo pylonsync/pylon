@@ -730,6 +730,23 @@ fn format_operation(op: &pylon_storage::SchemaOperation) -> String {
         RemoveField { entity, field_name } => {
             format!("REMOVE field {}.{}", entity, field_name)
         }
+        AlterField {
+            entity,
+            previous,
+            target,
+        } => {
+            // Most common case is a nullable transition; describe that
+            // specifically so `pylon migrate plan` output is human-readable.
+            let kind = match (previous.optional, target.optional) {
+                (false, true) => "DROP NOT NULL".to_string(),
+                (true, false) => "SET NOT NULL".to_string(),
+                _ => format!(
+                    "shape change ({} → {})",
+                    previous.field_type, target.field_type
+                ),
+            };
+            format!("ALTER field {}.{} ({kind})", entity, target.name)
+        }
         RemoveEntity { name } => {
             format!("REMOVE entity {}", name)
         }

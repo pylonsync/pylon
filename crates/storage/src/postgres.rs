@@ -162,6 +162,38 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
             SchemaOperation::AddField { entity, field } => {
                 statements.push(add_column_sql(entity, field));
             }
+            SchemaOperation::AlterField {
+                entity,
+                previous,
+                target,
+            } => {
+                // Only nullable transitions today. SET / DROP NOT NULL is
+                // safe on a populated table when going from required →
+                // optional (existing rows already satisfy NOT NULL); the
+                // reverse direction (optional → required) succeeds only
+                // if every row has a non-null value, which the planner
+                // has no way to know — Postgres will fail the migration
+                // if it can't and the operator gets a clear error from
+                // the apply step.
+                if previous.optional && !target.optional {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                        quote_ident(entity),
+                        quote_ident(&target.name)
+                    ));
+                } else if !previous.optional && target.optional {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+                        quote_ident(entity),
+                        quote_ident(&target.name)
+                    ));
+                }
+                // Nothing emitted when neither nullable nor type changed
+                // — falls through silently. AlterField with no actual
+                // shape change shouldn't happen in practice (the planner
+                // only emits it on real drift), but guard against
+                // emitting empty SQL just in case.
+            }
             SchemaOperation::AddIndex {
                 entity,
                 name,

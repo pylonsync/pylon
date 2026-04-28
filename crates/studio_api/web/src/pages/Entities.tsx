@@ -63,12 +63,31 @@ const AUTH_TABLES = [
 ] as const;
 const AUTH_TABLE_PREFIX = "auth:";
 
+/// Framework-internal operational tables. Same pattern as AUTH_TABLES
+/// — read-only views over the job queue, workflow engine, scheduler,
+/// and search-index registry. Surfaces in /api/admin/ops/<key>.
+const OPS_TABLES = [
+	{ key: "jobs", label: "Jobs" },
+	{ key: "workflows", label: "Workflows" },
+	{ key: "scheduler", label: "Scheduled tasks" },
+	{ key: "search_indexes", label: "Search indexes" },
+] as const;
+const OPS_TABLE_PREFIX = "ops:";
+
 function isAuthTable(selected: string): boolean {
 	return selected.startsWith(AUTH_TABLE_PREFIX);
 }
 
 function authTableKey(selected: string): string {
 	return selected.slice(AUTH_TABLE_PREFIX.length);
+}
+
+function isOpsTable(selected: string): boolean {
+	return selected.startsWith(OPS_TABLE_PREFIX);
+}
+
+function opsTableKey(selected: string): string {
+	return selected.slice(OPS_TABLE_PREFIX.length);
 }
 
 export function EntitiesPage() {
@@ -81,18 +100,28 @@ export function EntitiesPage() {
 	const [inspectRow, setInspectRow] = useState<Row | null>(null);
 
 	const isAuth = isAuthTable(selected);
+	const isOps = isOpsTable(selected);
+	const isFrameworkTable = isAuth || isOps;
 	const entity = useMemo<ManifestEntity | undefined>(
-		() => (isAuth ? undefined : entities.find((e) => e.name === selected)),
-		[entities, selected, isAuth],
+		() =>
+			isFrameworkTable
+				? undefined
+				: entities.find((e) => e.name === selected),
+		[entities, selected, isFrameworkTable],
 	);
 
 	const load = useCallback(async () => {
 		if (!selected) return;
 		setLoading(true);
 		try {
-			const path = isAuth
-				? `/api/admin/auth/${authTableKey(selected)}`
-				: `/api/entities/${selected}`;
+			let path: string;
+			if (isAuth) {
+				path = `/api/admin/auth/${authTableKey(selected)}`;
+			} else if (isOps) {
+				path = `/api/admin/ops/${opsTableKey(selected)}`;
+			} else {
+				path = `/api/entities/${selected}`;
+			}
 			const data = await api<Row[] | { data?: Row[] }>(path);
 			setRows(Array.isArray(data) ? data : data?.data ?? []);
 		} catch (err) {
@@ -105,7 +134,7 @@ export function EntitiesPage() {
 		} finally {
 			setLoading(false);
 		}
-	}, [selected, isAuth]);
+	}, [selected, isAuth, isOps]);
 
 	useEffect(() => {
 		void load();
@@ -169,7 +198,10 @@ export function EntitiesPage() {
 	const selectedLabel = isAuth
 		? AUTH_TABLES.find((t) => t.key === authTableKey(selected))?.label ??
 		  selected
-		: selected;
+		: isOps
+			? OPS_TABLES.find((t) => t.key === opsTableKey(selected))?.label ??
+			  selected
+			: selected;
 
 	if (entities.length === 0) {
 		return (
@@ -218,6 +250,20 @@ export function EntitiesPage() {
 								</SelectItem>
 							))}
 						</SelectGroup>
+						<SelectSeparator />
+						<SelectGroup>
+							<SelectLabel className="text-xs text-muted-foreground">
+								Operations (framework, read-only)
+							</SelectLabel>
+							{OPS_TABLES.map((t) => (
+								<SelectItem
+									key={t.key}
+									value={`${OPS_TABLE_PREFIX}${t.key}`}
+								>
+									{t.label}
+								</SelectItem>
+							))}
+						</SelectGroup>
 					</SelectContent>
 				</Select>
 				<Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -232,7 +278,7 @@ export function EntitiesPage() {
 					<span className="text-xs text-muted-foreground">
 						{rows.length} row{rows.length === 1 ? "" : "s"}
 					</span>
-					{!isAuth && (
+					{!isFrameworkTable && (
 						<Button
 							size="sm"
 							onClick={() => {
@@ -284,7 +330,7 @@ export function EntitiesPage() {
 											</TableCell>
 										))}
 										<TableCell className="text-right">
-											{!isAuth && (
+											{!isFrameworkTable && (
 												<Button
 													variant="ghost"
 													size="sm"
