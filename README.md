@@ -43,7 +43,7 @@ Visit `http://localhost:4321/studio` for the inspector.
 |  | pylon | Convex | Supabase | Firebase |
 |---|---|---|---|---|
 | Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
-| Deploy targets | self-host, AWS, Workers (experimental) | their cloud or self-host | their cloud, self-host, k8s | their cloud only |
+| Deploy targets | managed cloud, self-host, AWS, Workers (experimental) | their cloud or self-host | their cloud, self-host, k8s | their cloud only |
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
 | Game shards | ✅ tick-based | ❌ | ❌ | ❌ |
@@ -206,6 +206,7 @@ PYLON_DEV_MODE=false
 
 ## Deployment
 
+- **Managed cloud**: [cloud.pylonsync.com](https://cloud.pylonsync.com) — same binary, hosted; sign up and `pylon deploy`
 - **Self-host**: `curl … | bash` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
