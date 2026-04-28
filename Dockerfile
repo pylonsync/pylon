@@ -93,7 +93,15 @@ ENV PYLON_DEV_MODE=true
 
 USER pylon:pylon
 WORKDIR /app
-EXPOSE 4321
+# Pylon uses up to four adjacent ports:
+#   4321 — HTTP API
+#   4322 — WebSocket sync (PYLON_PORT + 1)
+#   4323 — SSE fallback /events (PYLON_PORT + 2)
+#   4324 — realtime shards (PYLON_PORT + 3)
+# Reverse proxies and load balancers (ALB, Caddy, nginx, Fly Machines)
+# need to forward all four for full functionality. Apps that only use
+# the HTTP API can publish only 4321.
+EXPOSE 4321 4322 4323 4324
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

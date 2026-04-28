@@ -83,6 +83,7 @@
             "group": "Operations",
             "pages": [
               "operations/deploy",
+              "operations/sst",
               "operations/sizing",
               "operations/token-rotation",
               "operations/incident",

@@ -120,7 +120,7 @@ your-app.com {
 }
 ```
 
-## Shape 2: AWS ECS + Aurora
+## Shape 2: AWS ECS + Aurora (Terraform)
 
 `deploy/terraform/modules/pylon/` provisions:
 
@@ -133,13 +133,23 @@ Minimum bill: ~$25/mo for a production deployment.
 
 Compiled with `--features postgres-live` and `DATABASE_URL=postgres://...`.
 
-## Shape 3: Cloudflare Workers (edge, experimental)
+## Shape 3: AWS via SST (TypeScript IaC)
+
+For TypeScript-first infrastructure, [SST v3](https://sst.dev) provisions the same AWS shape from a single `sst.config.ts`. Same components (Aurora, Fargate, ALB, EFS, CloudFront), one CLI for deploys + secrets + per-PR preview environments.
+
+```bash
+sst deploy --stage production
+```
+
+See **[Deploy with SST](/operations/sst)** for the full walkthrough — secrets, custom domains, multi-port load balancer config, EFS vs S3 storage, horizontal scaling.
+
+## Shape 4: Cloudflare Workers (edge, experimental)
 
 `crates/workers/` builds a WASM bundle (`worker-build --release`) that runs on Workers with a D1 binding. See `crates/workers/README.md` for current limitations. Scale-to-zero: idle apps cost $0. Cost rises with actual request volume. See [Workers costs](/operations/workers-costs).
 
 Realtime shards (tick-based sims) are not yet supported on Workers — they need persistent state that Workers-only can't hold efficiently. Use shape 1 or 2 for game shards.
 
-## Shape 4: Pylon Cloud
+## Shape 5: Pylon Cloud
 
 ```bash
 pylon login
@@ -148,7 +158,7 @@ pylon deploy --target cloud
 
 Done. See [Cloud](/cloud) for full details.
 
-## Shape 5: local dev
+## Shape 6: local dev
 
 ```sh
 pylon dev

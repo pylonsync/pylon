@@ -1,0 +1,341 @@
+---
+title: Deploy with SST
+description: "Ship Pylon to AWS as a Fargate container with managed Postgres, ALB, EFS, and a CDN — defined in one TypeScript file."
+---
+
+[SST](https://sst.dev) is a TypeScript framework for defining AWS (and other cloud) infrastructure. It's the cleanest way to deploy Pylon to AWS without writing Terraform — one `sst.config.ts` provisions Aurora Postgres, an ECS Fargate cluster, a load balancer with WebSocket + SSE + shard ports forwarded, optional EFS for persistent files, and a CloudFront CDN.
+
+A working reference config ships in [`deploy/sst/sst.config.ts`](https://github.com/pylonsync/pylon/blob/main/deploy/sst/sst.config.ts).
+
+## What you get
+
+- **Aurora Serverless v2 Postgres** (auto-scaling 0.5–2 ACU, ~$15/mo minimum)
+- **ECS Fargate** running the Pylon container (0.25 vCPU / 512 MB ~ $9/mo)
+- **Application Load Balancer** with WebSocket + SSE + shard port forwarding
+- **EFS** mounted for persistent file uploads (when not using S3 storage)
+- **AWS Secrets Manager** for the admin token + OAuth credentials
+- **CloudFront CDN** in front of the ALB
+- **Route 53 + ACM** for custom domains and TLS
+
+Total minimum bill: ~$25/mo for a production deployment.
+
+## Prerequisites
+
+```bash
+# 1. SST CLI (v3 / Ion)
+curl -fsSL https://ion.sst.dev/install | bash
+
+# 2. AWS CLI configured
+aws configure  # or AWS_PROFILE / SSO
+
+# 3. Pylon CLI for local dev
+curl -fsSL https://pylonsync.com/install.sh | bash
+```
+
+You'll need an AWS account with permissions to create VPCs, ECS services, RDS, ALB, ACM, Route 53, and Secrets Manager. SST's default IAM role assumes broad permissions; lock down per your org's standards.
+
+## Project layout
+
+```
+my-pylon-app/
+├── app.ts                     # Pylon schema + manifest entry
+├── pylon.manifest.json        # generated
+├── functions/                 # server functions
+├── Dockerfile                 # Pylon's published Dockerfile or your own
+├── sst.config.ts              # SST infrastructure definition
+└── package.json
+```
+
+## Minimal config
+
+```typescript
+/// <reference path="./.sst/platform/config.d.ts" />
+
+export default $config({
+  app(input) {
+    return {
+      name: "my-pylon-app",
+      removal: input?.stage === "production" ? "retain" : "remove",
+      home: "aws",
+      providers: { aws: { region: "us-east-1" } },
+    };
+  },
+  async run() {
+    // ── Secrets ──────────────────────────────────────────────────
+    const adminToken = new sst.Secret("PylonAdminToken");
+    const oauthGoogle = new sst.Secret("OAuthGoogleClientSecret");
+    const oauthGithub = new sst.Secret("OAuthGithubClientSecret");
+
+    // ── Database ─────────────────────────────────────────────────
+    // Aurora Serverless v2 — auto-scales 0.5–2 ACU.
+    const db = new sst.aws.Postgres("PylonDb", {
+      scaling: { min: "0.5 ACU", max: "2 ACU" },
+    });
+
+    // ── Optional: EFS for persistent file uploads ────────────────
+    // Skip this if you're using S3 storage (file_storage plugin).
+    const efs = new sst.aws.Efs("PylonEfs", { vpc: { id: db.nodes.vpc.id } });
+
+    // ── Cluster + service ────────────────────────────────────────
+    const cluster = new sst.aws.Cluster("PylonCluster", {
+      vpc: { id: db.nodes.vpc.id },
+    });
+
+    new sst.aws.Service("PylonService", {
+      cluster,
+      cpu: "0.25 vCPU",
+      memory: "512 MB",
+      image: { dockerfile: "./Dockerfile" },
+      health: { command: ["CMD-SHELL", "curl -fsS http://localhost:4321/health || exit 1"], interval: "30 seconds" },
+      volumes: [{ efs, path: "/var/lib/pylon" }],
+      environment: {
+        // Core
+        DATABASE_URL: db.url,
+        PYLON_PORT: "4321",
+        PYLON_DEV_MODE: "false",
+        // Auth (secrets)
+        PYLON_ADMIN_TOKEN: adminToken.value,
+        // Storage (using local EFS here; use file_storage plugin for S3)
+        PYLON_FILES_DIR: "/var/lib/pylon/uploads",
+        PYLON_DB_PATH: "/var/lib/pylon/pylon.db",
+        PYLON_SESSION_DB: "/var/lib/pylon/sessions.db",
+        // Client-facing
+        PYLON_CORS_ORIGIN: "https://your-app.com",
+        PYLON_CSRF_ORIGINS: "https://your-app.com",
+        // OAuth (optional)
+        PYLON_OAUTH_GOOGLE_CLIENT_ID: "your-google-client-id",
+        PYLON_OAUTH_GOOGLE_CLIENT_SECRET: oauthGoogle.value,
+        PYLON_OAUTH_GITHUB_CLIENT_ID: "your-github-client-id",
+        PYLON_OAUTH_GITHUB_CLIENT_SECRET: oauthGithub.value,
+      },
+      loadBalancer: {
+        // ALB rules forward all four Pylon ports:
+        //   4321 → HTTP API
+        //   4322 → WebSocket sync
+        //   4323 → SSE fallback (/events)
+        //   4324 → realtime shards
+        rules: [
+          { listen: "443/https", forward: "4321/http" },
+          { listen: "4322/tcp",  forward: "4322/tcp" },
+          { listen: "4323/tcp",  forward: "4323/tcp" },
+          { listen: "4324/tcp",  forward: "4324/tcp" },
+        ],
+        // ACM cert provisioned automatically when domain is set:
+        domain: { name: "api.your-app.com", dns: sst.aws.dns() },
+      },
+    });
+  },
+});
+```
+
+## Set secrets
+
+Before the first deploy, set the secret values via the SST CLI:
+
+```bash
+# Generate a random admin token (256 bits)
+openssl rand -hex 32 | xargs sst secret set PylonAdminToken
+
+# OAuth secrets from Google Cloud Console / GitHub OAuth Apps
+sst secret set OAuthGoogleClientSecret
+sst secret set OAuthGithubClientSecret
+```
+
+Secrets are stored in AWS Parameter Store, encrypted with a KMS key SST creates per-app.
+
+## Deploy
+
+```bash
+# First time — provisions everything (~10 minutes for Aurora cold start)
+sst deploy --stage production
+
+# Subsequent deploys (only the container changes) — ~2 minutes
+sst deploy --stage production
+```
+
+Once the deploy finishes, SST prints the ALB URL. Hit it:
+
+```bash
+curl https://api.your-app.com/health
+# → {"status":"ok","uptime_seconds":42}
+```
+
+## Custom domain
+
+The `domain` block under `loadBalancer` provisions an ACM certificate and points Route 53 at the ALB. If your DNS lives elsewhere, swap the `dns` provider:
+
+```typescript
+domain: {
+  name: "api.your-app.com",
+  dns: sst.cloudflare.dns(),  // or sst.vercel.dns()
+}
+```
+
+## Multiple environments
+
+```bash
+sst deploy --stage staging       # → staging.your-app.com
+sst deploy --stage production    # → api.your-app.com
+sst deploy --stage pr-42         # → pr-42.preview.your-app.com (per-PR previews)
+```
+
+Each stage gets its own VPC, database, and ALB. Use the `removal` config to make non-prod environments tear down cleanly:
+
+```typescript
+app(input) {
+  return {
+    removal: input?.stage === "production" ? "retain" : "remove",
+    // ...
+  };
+}
+```
+
+## Switching SQLite → S3-backed file storage
+
+The minimal config above mounts EFS for both the SQLite database AND file uploads. For larger deployments you'll want:
+
+- **Postgres** for the database (already configured above via `db.url` in `DATABASE_URL`)
+- **S3** for file uploads (via the `file_storage` plugin)
+
+In your `pylon.manifest.json`:
+
+```jsonc
+{
+  "plugins": [
+    {
+      "name": "file_storage",
+      "config": {
+        "backend": "s3",
+        "bucket": "${env.UPLOADS_BUCKET}",
+        "region": "us-east-1"
+      }
+    }
+  ]
+}
+```
+
+In `sst.config.ts`, add an S3 bucket and pass the name into the service:
+
+```typescript
+const uploadsBucket = new sst.aws.Bucket("Uploads");
+
+new sst.aws.Service("PylonService", {
+  // ...
+  link: [uploadsBucket],  // grants IAM permissions automatically
+  environment: {
+    // ...
+    UPLOADS_BUCKET: uploadsBucket.name,
+  },
+});
+```
+
+Now you can drop the EFS mount and the SQLite-related env vars — Postgres holds data, S3 holds files, the container is fully stateless and can horizontally scale.
+
+## CDN in front of the ALB
+
+For static-asset caching and global edge presence:
+
+```typescript
+const cdn = new sst.aws.Cdn("PylonCdn", {
+  origins: [{ domainName: service.url }],
+  domain: { name: "your-app.com", dns: sst.aws.dns() },
+});
+```
+
+CloudFront caches GET responses with appropriate `Cache-Control` headers. WebSocket and SSE traffic should bypass the CDN — point your sync engine's `wsUrl` directly at the ALB:
+
+```typescript
+createSyncEngine("https://your-app.com", {
+  wsUrl: "wss://api.your-app.com:4322",
+});
+```
+
+## Horizontal scale
+
+For multi-replica deployments (read-heavy apps):
+
+```typescript
+new sst.aws.Service("PylonService", {
+  // ...
+  scaling: {
+    min: 2,
+    max: 10,
+    cpuUtilization: 70,
+  },
+});
+```
+
+Requirements for safe scale-out:
+
+1. **Postgres backend** (not SQLite — multiple writers fight)
+2. **`cache_client` plugin** with managed Redis (otherwise per-replica caches diverge)
+3. **Sticky WebSocket sessions** at the ALB (so a reconnecting client lands on the same replica that holds its presence state). Set `loadBalancer.stickySessions: true`.
+
+For shard-based multiplayer, prefer dedicated single-replica services per region — shards don't horizontally scale within a region.
+
+## Observability
+
+```typescript
+new sst.aws.Service("PylonService", {
+  // ...
+  logging: {
+    retention: "30 days",
+  },
+});
+```
+
+Logs ship to CloudWatch automatically. For richer observability:
+
+- **Metrics**: Pylon exposes `/metrics` in Prometheus format. Scrape with [AWS Managed Prometheus](https://aws.amazon.com/prometheus/) or [Grafana Cloud](https://grafana.com/products/cloud/).
+- **Traces**: Add OpenTelemetry exporter env vars and SST will inject the right IAM permissions for X-Ray.
+
+## Compared to Pylon Cloud
+
+If you're not committed to AWS, [Pylon Cloud](/cloud) gives you the same managed Postgres + TLS + WebSocket-aware load balancing with one CLI command (`pylon deploy --target cloud`) and per-use pricing. SST is the right choice when:
+
+- You need to live in AWS (compliance, existing infra, RI commitments)
+- You want to compose Pylon with other AWS services (Bedrock, SageMaker, IoT Core, Kinesis)
+- You want full IaC control over networking, IAM, secrets
+
+Both are valid. Pylon's wire protocol is identical regardless of how you host it.
+
+## Troubleshooting
+
+**WebSocket connections fail with 504** — ALB idle timeout defaults to 60s. Bump it via the SST config:
+
+```typescript
+loadBalancer: {
+  // ...
+  idleTimeout: "3600 seconds",  // 1 hour
+}
+```
+
+**Cold start takes 10+ minutes the first time** — Aurora Serverless v2's first cold start provisions storage. Subsequent deploys are <2 min.
+
+**EFS mount permissions errors** — Pylon runs as a non-root user; grant write on the mount point in your Dockerfile or set `volumes[0].uid: "1000"`.
+
+**Secrets aren't visible in the container** — make sure you ran `sst secret set` in the same stage you're deploying to. Secrets are per-stage.
+
+## Cost optimization
+
+| Component | Default cost | Optimization |
+| --- | --- | --- |
+| Aurora Serverless v2 (0.5 ACU min) | ~$15/mo | Drop `min` to `0.5 ACU` and let it scale up only on load |
+| Fargate (0.25 vCPU / 512 MB) | ~$9/mo | Use Fargate Spot for non-prod |
+| ALB | ~$16/mo | Single ALB for all stages via shared listeners |
+| NAT Gateway | ~$32/mo | Skip the NAT (single AZ) for non-prod; use VPC endpoints in prod |
+| CloudWatch logs | ~$0.50/GB | Set `retention: "7 days"` for non-prod |
+| Secrets Manager | $0.40/secret/mo | Few secrets; minor cost |
+
+A bare-bones non-prod stack runs ~$30/mo; production with NAT + multi-AZ runs ~$80–150/mo depending on traffic. For low-traffic apps, [Pylon Cloud](/cloud) is often cheaper than the AWS minimums.
+
+## Reference config
+
+The full working config is at [`deploy/sst/sst.config.ts`](https://github.com/pylonsync/pylon/blob/main/deploy/sst/sst.config.ts). Clone it as a starting point:
+
+```bash
+cp deploy/sst/sst.config.ts your-app/sst.config.ts
+cd your-app
+sst secret set PylonAdminToken
+sst deploy --stage production
+```

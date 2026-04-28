@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.DS_Store
+
+# Package.resolved IS committed for executables (SPM convention) so dep
+# versions are reproducible across machines. Don't add it here.

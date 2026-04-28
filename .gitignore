@@ -6,6 +6,13 @@
 # Rust
 /target/
 
+# Swift / SPM — build artifacts and IDE state
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
 # JavaScript / Bun
 node_modules/
 dist/
