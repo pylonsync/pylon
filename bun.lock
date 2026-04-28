@@ -399,7 +399,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.2.14",
+      "version": "0.3.0",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -431,7 +431,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.2.14",
+      "version": "0.3.0",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -447,7 +447,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.2.14",
+      "version": "0.3.0",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -479,11 +479,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.2.14",
+      "version": "0.3.0",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.2.14",
+      "version": "0.3.0",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -890,7 +890,7 @@
 
     "base64-js": ["base64-js@1.5.1", "", {}, "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="],
 
-    "baseline-browser-mapping": ["baseline-browser-mapping@2.10.23", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-xwVXGqevyKPsiuQdLj+dZMVjidjJV508TBqexND5HrF89cGdCYCJFB3qhcxRHSeMctdCfbR1jrxBajhDy7o29g=="],
+    "baseline-browser-mapping": ["baseline-browser-mapping@2.10.24", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-I2NkZOOrj2XuguvWCK6OVh9GavsNjZjK908Rq3mIBK25+GD8vPX5w2WdxVqnQ7xx3SrZJiCiZFu+/Oz50oSYSA=="],
 
     "bench-example": ["bench-example@workspace:examples/bench"],
 

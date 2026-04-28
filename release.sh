@@ -170,11 +170,31 @@ echo "Updated to $target:"
 git diff --stat | sed 's/^/  /'
 
 # Refresh bun.lock so the version bumps make it into the lockfile.
-# CI's publish-npm step uses --frozen-lockfile, so any drift between
-# package.json and bun.lock fails the release. Skip silently if bun
-# isn't installed locally (CI verifies bun.lock is fresh anyway).
+#
+# We DELETE bun.lock first and reinstall from scratch, NOT just `bun install`.
+# Why: `bun install` against an existing lockfile preserves the workspace
+# packages' "version" entries from the lockfile, even after we've bumped
+# them in package.json. `bun publish` then consults the LOCKFILE — not
+# package.json — when rewriting `workspace:*` deps, so the published
+# package gets pinned to the stale lockfile version.
+#
+# Real-world bug we hit on v0.3.0: bun.lock had packages/sdk pinned at
+# 0.2.14 (a partial-publish from a prior failed run). After bumping
+# package.json to 0.3.0, `bun install` left the lockfile's "0.2.14"
+# alone, and `bun publish` of @pylonsync/react@0.3.0 emitted a tarball
+# with deps pointing to @pylonsync/sdk@0.2.14 — a version that doesn't
+# exist on npm. The graph was unsatisfiable end-to-end.
+#
+# Removing the lockfile before `bun install` forces a fresh resolution
+# that picks up the new workspace versions. The download cost is
+# negligible (workspaces are local, third-party deps come from bun's
+# global cache).
+#
+# Skip silently if bun isn't installed locally (CI verifies bun.lock
+# is fresh anyway via --frozen-lockfile).
 if command -v bun >/dev/null 2>&1; then
-	echo "Refreshing bun.lock…"
+	echo "Refreshing bun.lock (clean)…"
+	rm -f bun.lock
 	bun install --silent || {
 		echo "::warning::bun install failed — bun.lock may be out of date." >&2
 	}
