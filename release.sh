@@ -119,11 +119,20 @@ fi
 # 1. Workspace version (the line release-please owns).
 perl -pi -e "s/^version = \"\Q$current\E\"(\s*#\s*x-release-please-version)/version = \"$target\"\$1/" Cargo.toml
 
-# 2. Intra-workspace dep pins. Only touch lines that pin a `pylon-*`
-#    crate AT the current workspace version — that filter excludes
-#    any third-party dep that happens to be on the same number.
+# 2. Intra-workspace dep pins. Match ANY pylon-* version in the form
+#    `version = "X.Y.Z"`, not just the current workspace version —
+#    legacy pins (left over from a previous bump where this script's
+#    regex only caught the current value) would otherwise silently
+#    stay behind. Caused the v0.3.0 release to fail cargo check
+#    because pylon-action still had `pylon-kernel = "^0.2.11"` long
+#    after the workspace had moved to 0.2.16.
+#
+#    Restricted to `pylon-*` so a third-party dep that happens to
+#    share a version number is unaffected. Restricted to the
+#    `version = "X.Y.Z"` shape so it doesn't touch git/path-only
+#    deps without versions.
 while IFS= read -r -d '' f; do
-	perl -pi -e "s/^(\s*pylon-[a-z_-]+\s*=\s*\{[^}]*version\s*=\s*\")\Q$current\E(\"[^}]*\})/\${1}$target\${2}/" "$f"
+	perl -pi -e "s/^(\s*pylon-[a-z_-]+\s*=\s*\{[^}]*version\s*=\s*\")[0-9]+\.[0-9]+\.[0-9]+(\"[^}]*\})/\${1}$target\${2}/" "$f"
 done < <(find crates -maxdepth 2 -name Cargo.toml -print0)
 
 # 3. JS packages.
