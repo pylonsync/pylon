@@ -1,0 +1,107 @@
+---
+title: Pylon vs. Firebase
+description: "Firebase is the OG mobile-first BaaS. Pylon is what you'd build if you started from scratch in 2026."
+---
+
+[Firebase](https://firebase.google.com) is Google's managed BaaS — Firestore, Realtime Database, Auth, Cloud Functions, Storage, and a long tail of mobile-focused services. Pylon overlaps with Firestore + Functions + Auth + Storage; the rest of Firebase (FCM, Crashlytics, Analytics) is out of scope.
+
+## TL;DR
+
+- **Choose Firebase** if you're building a mobile app, you want Google's ecosystem (FCM push notifications, Crashlytics, GA4 integration), and you're OK with a closed-source backend.
+- **Choose Pylon** if you want self-host, no vendor lock-in, structured data, faceted search, or game shards.
+
+## Big picture differences
+
+| | Pylon | Firebase |
+| --- | --- | --- |
+| License | MIT / Apache 2.0 | Closed source |
+| Self-hostable | ✅ | ❌ Google-only |
+| Schema | ✅ declarative | ❌ Firestore is schemaless |
+| Realtime sync | ✅ | ✅ |
+| Functions | ✅ Bun, in-process | ✅ Cloud Functions (Node, separate) |
+| Auth | ✅ built-in | ✅ Firebase Auth |
+| File storage | ✅ + S3/Stack0 backends | ✅ Cloud Storage |
+| Push notifications | ❌ (use any provider) | ✅ FCM |
+| Analytics | ❌ (use any provider) | ✅ GA4 |
+| Crash reporting | ❌ (use Sentry/Crashlytics) | ✅ Crashlytics |
+| Game shards | ✅ | ❌ |
+| Faceted search | ✅ | ❌ requires Algolia |
+
+If you want everything Google ships — push notifications, analytics, A/B testing, remote config, predictions, in-app messaging — Firebase is a better fit. Pylon focuses on the backend; pair it with best-in-class single-purpose services.
+
+## Schema and data
+
+Firestore is schemaless: any document can have any shape. Rules act as a soft schema by validating fields. This is great for rapid prototyping and a constant problem at scale (typos become orphan rows; refactoring fields is a manual sweep).
+
+Pylon's schema is declarative TypeScript:
+
+```typescript
+const Todo = entity("Todo", {
+  title: string(),
+  done: bool(),
+  authorId: id("User"),
+});
+```
+
+You get types in your client (after codegen), automatic indexes, and a single source of truth.
+
+## Realtime model
+
+Both ship realtime sync. The mental model differs:
+
+- **Firestore listeners** are per-document or per-query. You attach a listener; it fires when the matching documents change. Listeners are stateful — you manage their lifecycle.
+- **Pylon's sync engine** maintains a local replica of every entity you've subscribed to. `useQuery("Todo")` returns the live array; the engine handles tombstones, optimistic mutations, and reconnection.
+
+Pylon's model is closer to Convex (replica + reactive queries); Firebase's is closer to RxJS (observable streams). Both work; the Pylon approach gives you more "the local state IS the truth" feel for offline-capable apps.
+
+## Search
+
+Firestore has no full-text search. The official recommendation is to mirror your data to Algolia and search there:
+
+> ["Cloud Firestore doesn't offer native indexing or search for text fields in documents. Additionally, downloading an entire collection to search for fields client-side isn't practical. To enable full-text search of your Cloud Firestore data, use a third-party search service like Algolia, Typesense, or Meilisearch."](https://firebase.google.com/docs/firestore/solutions/search)
+
+Pylon ships FTS5 + roaring-bitmap facets in the binary. No Algolia bill, no second system to keep in sync.
+
+## Functions
+
+| | Pylon | Firebase |
+| --- | --- | --- |
+| Runtime | Bun (in-process) | Node (separate Cloud Functions) |
+| Cold start | None | 1–10 seconds for cold containers |
+| DB access | Direct (`ctx.db`) | Via Admin SDK over network |
+| Atomicity | ✅ wrapped in transaction | ❌ separate process |
+| Type sharing | ✅ after codegen | Manual |
+| Pricing | Included in your binary | Per-invocation + per-GB-second |
+
+Firebase Cloud Functions cold-start is the single most-complained-about thing about Firebase. Pylon functions are in-process; latency is measured in microseconds, not seconds.
+
+## Push notifications
+
+Pylon doesn't ship a push provider. FCM is excellent and free up to enormous volumes — keep using it on top of any backend, including Pylon. Pattern: register the device token via a Pylon `action`, send via FCM from your function or a separate worker.
+
+## Pricing
+
+Firebase pricing is famously hard to reason about — Firestore reads, writes, deletes, network egress, function invocations, function GB-seconds, storage, downloads, all priced separately. The Blaze plan auto-scales, which is great until it isn't.
+
+Pylon Cloud is one number per dimension (requests, WS connection-minutes, storage, bandwidth). Self-hosted, you pay your VPS bill.
+
+## Migrating from Firebase
+
+This is the hardest migration of any of the comparisons. Firestore's schemaless documents typically denormalize aggressively (embed user info inside every post, etc.) — porting to Pylon's relational model means:
+
+1. **Identify entities** — what's a top-level row vs. nested data?
+2. **Normalize denormalized data** — extract `User`, `Org`, etc. into their own tables
+3. **Port security rules to policies** — Firestore rules use a custom DSL; Pylon policies are simpler boolean expressions
+4. **Re-shape clients** — `firestore.collection("todos").onSnapshot(...)` → `useQuery("Todo")`
+
+Auth migration is tractable: export Firebase Auth users, import as Pylon `User` rows with `emailVerified` set, ask users to sign in once via magic code (which auto-binds their existing email).
+
+## Honest weakness
+
+Firebase's mobile-first integrations (FCM, Crashlytics, A/B testing via Remote Config, in-app messaging) have no Pylon equivalent. If your app's most important behaviors are around push notifications and mobile experimentation, Firebase has more polish. Pylon assumes you'll bring your own analytics + crash reporting + push provider.
+
+Also: Firestore handles unlimited horizontal scale by design. Pylon's SQLite default tops out at ~70k writes/sec single-process; Postgres mode scales further but eventually hits its own limits. For Twitter-scale apps, both Pylon and SQLite are wrong; you want Spanner / Cassandra / DynamoDB.
+
+## Both / and
+
+Use Pylon for backend logic (data, sync, functions, auth) and FCM for push notifications. They don't conflict — push notifications are a lightweight integration, not a full-stack commitment. This combination gives you Firebase-quality push without locking the rest of your stack into Google.

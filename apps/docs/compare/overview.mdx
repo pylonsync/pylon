@@ -1,0 +1,75 @@
+---
+title: How Pylon compares
+description: "Honest comparisons against Convex, Supabase, Firebase, Colyseus, Playroom Kit, and Nakama."
+---
+
+Every backend is good at something. This section is the honest version of "should you use Pylon or X" — written so you can hand it to your tech-lead and they'll trust it. We don't sandbag competitors; we link to their docs and quote them where the comparison matters.
+
+## App backends
+
+| | Pylon | Convex | Supabase | Firebase |
+| --- | --- | --- | --- | --- |
+| **Best for** | Apps that need real-time + multiplayer in one process | TypeScript-first reactive apps | Postgres apps with managed auth/storage | Mobile apps with managed everything |
+| Single process / binary | ✅ | ❌ docker-compose | ❌ multi-service | n/a (managed only) |
+| Self-hostable | ✅ | ✅ | ✅ | ❌ |
+| Realtime sync | ✅ | ✅ | ✅ | ✅ |
+| TypeScript functions | ✅ in-repo | ✅ in-repo | ⚠️ Edge Functions (Deno, separate deploy) | ⚠️ Cloud Functions (separate deploy) |
+| Faceted search | ✅ FTS5 + roaring bitmaps | ❌ FTS only | ⚠️ Postgres `tsvector`, no native facets | ❌ requires Algolia |
+| Tick-based game shards | ✅ | ❌ | ❌ | ❌ |
+| Open source | ✅ MIT/Apache | ✅ FSL | ✅ Apache 2.0 | ❌ |
+| Pricing model | $0 self-host or per-use Cloud | Per-use only on Convex Cloud | Per-tier on Supabase Cloud | Per-use only on Firebase |
+
+Drill down: [Pylon vs. Convex](/compare/convex) · [Pylon vs. Supabase](/compare/supabase) · [Pylon vs. Firebase](/compare/firebase)
+
+## Game servers
+
+| | Pylon | Colyseus | Playroom Kit | Nakama |
+| --- | --- | --- | --- | --- |
+| **Best for** | Apps with real-time data + game shards in one stack | Standalone game server in Node | Quick web games with shared state | Production multiplayer with social features |
+| Tick-based authority | ✅ | ✅ | ⚠️ host-relay model | ✅ |
+| Area-of-interest | ✅ built-in | ⚠️ `@filter` decorators (manual) | ❌ | ⚠️ presence-based, manual |
+| Matchmaker | ✅ | ✅ | ✅ | ✅ |
+| Declarative app data | ✅ entities + policies | ❌ game state only | ❌ shared state only | ⚠️ Storage Engine (typed JSON) |
+| Live queries for UI | ✅ | ❌ | ❌ | ❌ |
+| Self-hosted as one binary | ✅ Rust | ⚠️ Node + your code | ❌ managed only | ✅ Go binary + Postgres |
+| Open source | ✅ MIT/Apache | ✅ MIT | ❌ proprietary | ✅ Apache 2.0 |
+
+Drill down: [Pylon vs. Colyseus](/compare/colyseus) · [Pylon vs. Playroom Kit](/compare/playroom) · [Pylon vs. Nakama](/compare/nakama)
+
+## How we keep these honest
+
+- **Linked sources for every claim.** If we say "Supabase doesn't have native faceted search", the linked Supabase doc is the receipt.
+- **No scoreboard inflation.** Where a competitor is genuinely better at something, we say so. (Supabase's Postgres-native data layer is more flexible than ours for analytics; Convex's pure-TS dev loop is genuinely tighter for greenfield TS apps.)
+- **Quarterly review.** This page is checked against current vendor docs every quarter. If you spot a stale claim, [open an issue](https://github.com/pylonsync/pylon/issues).
+
+## When we'd recommend NOT using Pylon
+
+Pylon is the right choice for ~80% of "I need a real-time backend" projects. It's the wrong choice when:
+
+- **You need full Postgres SQL surface.** Custom CTEs, window functions, recursive queries, materialized views, vector with pgvector — Supabase wins. Pylon supports Postgres but doesn't expose every feature.
+- **You're already deep in the GCP stack.** Firebase + GCP integrate cleanly with Cloud Run, BigQuery, Pub/Sub. Pylon doesn't.
+- **You need warehouse-scale analytics.** Move analytical workloads to ClickHouse, DuckDB, or BigQuery. Pylon is for transactional realtime app state.
+- **You want a full-stack framework.** Pylon is the backend. For an opinionated full-stack story, look at Redwood or Wasp; or pair Pylon with Next.js / Vite / Expo.
+
+## Switching costs
+
+If you're already on a competitor and considering a move:
+
+| From | Migration difficulty |
+| --- | --- |
+| **Convex** | Medium — port `defineSchema` to Pylon's schema DSL, port reactive queries to `useQuery`, port functions to `mutation`/`action` |
+| **Supabase** | Medium-high — port SQL schema to Pylon's manifest, port RLS to Pylon policies, replace Realtime subscriptions with `useQuery` |
+| **Firebase** | High — denormalized Firestore data needs reshaping; auth migration is tractable via the magic-code flow |
+| **Colyseus** | Medium — port Schema classes to Pylon's `SimState`, keep your tick logic |
+| **Playroom Kit** | Low — Playroom's small surface area maps cleanly |
+| **Nakama** | High — Lua/Go match handlers need rewriting in Rust |
+
+## Migrating *from* Pylon
+
+We treat lock-in as a bug. Every Pylon deployment can:
+
+- **Export to JSON or SQL** via `pylon export` / `pylon backup`
+- **Migrate from Cloud to self-hosted** in one command (`pylon backup --source cloud`)
+- **Self-host with the same binary** — no proprietary runtime, no vendor SDK that only talks to us
+
+Build with confidence that you can leave.

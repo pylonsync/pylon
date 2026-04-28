@@ -17,27 +17,54 @@ type GameRow = {
 };
 
 const APP_ROWS: AppRow[] = [
-  { feat: "Declarative schema", pylon: "yes", convex: "yes", supabase: "part", firebase: "part" },
-  { feat: "Live queries", pylon: "yes", convex: "yes", supabase: "part", firebase: "yes" },
+  // Convex and Supabase both ship declarative schemas. Convex's is TS
+  // (`defineSchema`); Supabase's is SQL migrations + RLS — fully declarative
+  // in the "single source of truth in your repo" sense. Firebase lacks a
+  // schema layer entirely (Firestore is schemaless) — flagged as "part"
+  // because rules act as a soft schema.
+  { feat: "Declarative schema", pylon: "yes", convex: "yes", supabase: "yes", firebase: "part" },
+  // All four ship realtime subscriptions; Supabase's are first-class via
+  // their Realtime service, not a partial.
+  { feat: "Live queries", pylon: "yes", convex: "yes", supabase: "yes", firebase: "yes" },
+  // Convex = pure TS in-repo. Supabase Edge Functions are TS/Deno but
+  // deployed separately and don't share the type graph with your client.
+  // Firebase Cloud Functions support TS but compile to JS and ship via
+  // gcloud — same "deployed separately" caveat.
   { feat: "TypeScript functions", pylon: "yes", convex: "yes", supabase: "part", firebase: "part" },
+  // Convex has FTS (no facets). Supabase has Postgres tsvector FTS (no
+  // native facets — you build them with GROUP BY queries). Firebase has
+  // no FTS at all (docs recommend Algolia).
   { feat: "Native faceted search", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
   // Convex and Supabase both have self-host paths (docker-compose stacks),
-  // so claiming they don't is both wrong and easily falsifiable — link in
-  // any HN thread about this. The honest differentiator is single-process:
-  // pylon is one binary, the others are multi-service docker-compose.
+  // so claiming they don't is both wrong and easily falsifiable. The
+  // honest differentiator is single-process below.
   { feat: "Self-hosted", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
   { feat: "Single process", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
   { feat: "Authoritative game loop", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
-  { feat: "No vendor lock-in", pylon: "yes", convex: "part", supabase: "yes", firebase: "no" },
+  { feat: "Open source", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
 ];
 
 const GAME_ROWS: GameRow[] = [
+  // Colyseus uses setSimulationInterval; Nakama match handlers run at a
+  // configurable tick rate. Playroom is closer to relayed state-sync with
+  // a "host" client than full server tick authority — flagged as "part".
   { feat: "Tick-based authority", pylon: "yes", colyseus: "yes", playroom: "part", nakama: "yes" },
+  // Colyseus offers @filter decorators for selective state sync (manual
+  // per-property filtering). Nakama supports selective broadcast via
+  // presence lists, not spatial AOI. Both = "part" because they require
+  // hand-rolled spatial logic on top.
   { feat: "Area-of-interest", pylon: "yes", colyseus: "part", playroom: "no", nakama: "part" },
-  { feat: "Matchmaker included", pylon: "yes", colyseus: "part", playroom: "yes", nakama: "yes" },
+  // Colyseus docs: "Built-in Matchmaking. Automatic room creation and
+  // player matching. Customizable filtering and sorting." Full feature.
+  { feat: "Matchmaker included", pylon: "yes", colyseus: "yes", playroom: "yes", nakama: "yes" },
+  // None of the game servers ship a declarative app-data layer. Nakama
+  // has a Storage Engine that's halfway there (typed JSON blobs).
   { feat: "Declarative app data", pylon: "yes", colyseus: "no", playroom: "no", nakama: "part" },
   { feat: "Live queries for UI", pylon: "yes", colyseus: "no", playroom: "no", nakama: "no" },
-  { feat: "Self-hosted, one binary", pylon: "yes", colyseus: "yes", playroom: "no", nakama: "yes" },
+  // Colyseus is "a standard Node.js application" — your code + Node, not
+  // a single binary. Nakama is a single Go binary + Postgres dependency.
+  // Marking Colyseus "part" to be honest about the deployment shape.
+  { feat: "Self-hosted, one binary", pylon: "yes", colyseus: "part", playroom: "no", nakama: "yes" },
 ];
 
 function Mark({ kind }: { kind: Kind }) {

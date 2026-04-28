@@ -1,0 +1,122 @@
+---
+title: Cloudflare Workers costs
+description: "When Workers' scale-to-zero bites: pricing model, runaway patterns, kill switches."
+---
+
+Workers deploys scale to zero — idle apps cost $0. That's the attractive case. This page is about the *un*attractive cases: when scale-to-zero bites, what runaway patterns look like, and how to cap your bill.
+
+## The pricing dimensions that matter
+
+As of 2026, the Workers Paid plan ($5/mo base) includes:
+
+- 10M requests/month, then $0.30 per million
+- 25B D1 reads/month, then $0.001 per million
+- 50M D1 writes/month, then $1.00 per million
+- 400k GB-s compute, then $0.02 per million
+- 1M Durable Object requests, then $0.15 per million
+
+**Things that cost nothing:**
+
+- Idle worker (no requests)
+- Cold starts
+- Reading env vars / bindings
+
+**Things that cost money and scale with volume:**
+
+- Every incoming HTTP request
+- Every D1 query (reads cheap, writes expensive)
+- Every DO invocation
+- WASM execution time (GB-seconds)
+
+## Patterns that blow up a free tier
+
+### Polling loops without backoff
+
+A client that polls `/api/sync/pull` every 500ms is 172,800 requests/day per client. 100 such clients = 17M/day → $5/day.
+
+**Fix**: use WebSocket push (Durable Objects on Workers), or widen the polling interval with jitter. Pylon's sync protocol supports cursor-based pulls — clients only pay for deltas, not a full list every tick.
+
+### Loops inside a worker handler
+
+Scheduled cron Worker triggers a function that writes to D1 in a loop, gets rate-limited, retries the whole batch, blows through D1 write quota.
+
+**Fix**: paginate writes; circuit-break on retry count; use `ctx.waitUntil` for fire-and-forget; measure before you ship.
+
+### Durable Object hot-spotting
+
+One room with 10k concurrent WS clients all pinned to one DO = 1M+ DO requests/hour per room.
+
+**Fix**: shard rooms; `pylon-workers`' `RoomDO` wraps `DynShardRegistry`, so you can trivially split a "global chat" room into 100 regional rooms.
+
+### Crawlers / bots
+
+A `/api/entities/Todo` that isn't gated hits 404 for bots forever but still costs a Worker request per hit.
+
+**Fix**: Cloudflare's bot-fight mode + WAF rules for unauthenticated traffic on admin paths. Pylon's router returns 401/403 quickly for unauthenticated non-public routes, but Cloudflare can block at the edge before the Worker even runs.
+
+### Errors in tight loops
+
+A TypeScript function throws, the client retries immediately without backoff, every retry costs a Worker + D1 round-trip.
+
+**Fix**: client-side exponential backoff; server-side circuit breaker for degraded paths; alert on 5xx rate rather than request rate.
+
+## Setting a budget cap
+
+Cloudflare supports per-worker budget alerts but **not** automatic cutoff. You have to write the cutoff yourself. Two patterns:
+
+### Soft cap (recommended): alert + throttle
+
+```
+Email alert at 50% of monthly budget → team investigates.
+Email alert at 80% → add WAF rule blocking anon traffic.
+Email alert at 95% → page oncall, manual mitigation.
+```
+
+This keeps users served while you react.
+
+### Hard cap: kill switch
+
+Bind a KV namespace `BUDGET` with a single key `enabled: "1"`. At the top of your `fetch` handler:
+
+```rust
+if env.kv("BUDGET")?.get("enabled").text().await? != Some("1".into()) {
+    return Response::error("budget cap active", 503);
+}
+```
+
+A GitHub Action watches billing and flips the flag. Users see 503 until you re-enable; your bill stops growing.
+
+## Monitoring
+
+Cloudflare's analytics dashboard shows:
+
+- Request rate
+- Error rate (4xx / 5xx)
+- Subrequest count (every D1 or DO call counts)
+- Wall-clock time
+
+Plug these into your own dashboard. For Pylon specifically, watch:
+
+- `/api/sync/pull` rate — anything > 10 req/sec/client is suspicious
+- `/api/entities/*` error rate — 403 spike = policy regression, 5xx = bug
+- WS connection count vs. rejection rate (IP cap) — rejections = attack
+- D1 write volume vs. change_log append rate — these should match
+
+## When NOT to use Workers
+
+Workers scale-to-zero doesn't help if:
+
+- You have steady ≥100 req/sec — a $25/mo AWS deploy will be cheaper
+- You need shards / long-lived game simulations — Durable Object hibernation costs add up fast
+- Your p99 matters and cold starts aren't acceptable — a warm VPS is more predictable
+- You need Postgres (`postgres-live` feature) — Workers is D1-only
+- You need large file uploads — Workers has 100 MB request cap
+
+For those cases, see [Deploy](/operations/deploy) shape 2 (AWS ECS + Aurora) or [Pylon Cloud](/cloud).
+
+## TL;DR
+
+1. Enable Cloudflare budget alerts the day you deploy.
+2. Add a kill switch KV before you care about users (easier to remove than add under pressure).
+3. Client-side: always backoff, always jitter, always cursor pagination.
+4. Server-side: gate anon traffic at the edge, not in the Worker.

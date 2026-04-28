@@ -88,6 +88,18 @@
               "operations/incident",
               "operations/workers-costs"
             ]
+          },
+          {
+            "group": "Compare",
+            "pages": [
+              "compare/overview",
+              "compare/convex",
+              "compare/supabase",
+              "compare/firebase",
+              "compare/colyseus",
+              "compare/playroom",
+              "compare/nakama"
+            ]
           }
         ]
       }
