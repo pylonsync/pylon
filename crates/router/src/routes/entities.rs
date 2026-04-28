@@ -289,9 +289,7 @@ pub(crate) fn handle(
         let existing_row_for_policy: Option<serde_json::Value> = match (method, entity_id) {
             (HttpMethod::Get, Some(id))
             | (HttpMethod::Patch, Some(id))
-            | (HttpMethod::Delete, Some(id)) => {
-                ctx.store.get_by_id(entity_name, id).ok().flatten()
-            }
+            | (HttpMethod::Delete, Some(id)) => ctx.store.get_by_id(entity_name, id).ok().flatten(),
             _ => None,
         };
 

@@ -205,7 +205,10 @@ pub fn generate_client_swift(manifest: &AppManifest) -> String {
             name = action.name,
             input_type = input_type
         ));
-        out.push_str(&format!("        try await callFn(\"{}\", args: input)\n", action.name));
+        out.push_str(&format!(
+            "        try await callFn(\"{}\", args: input)\n",
+            action.name
+        ));
         out.push_str("    }\n");
     }
     out.push_str("}\n\n");

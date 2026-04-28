@@ -133,12 +133,63 @@ jobs:
           # regenerate at npmjs.com.
           npm whoami --registry=https://registry.npmjs.org
 
+          # ---------------------------------------------------------------
+          # Preflight: ensure every package about to be published declares
+          # the SAME version. `bun publish` rewrites `workspace:*` deps to
+          # whatever the local workspace version is at publish time. If
+          # versions drift across packages (e.g. a half-finished release.sh
+          # run leaves react@0.2.13 with sdk still at 0.2.12), each
+          # publish ships internally-consistent metadata but the resulting
+          # graph on npm becomes unsatisfiable: react@0.2.13 will pin
+          # sdk@0.2.12 even though we're about to publish sdk@0.2.13.
+          # Real-world bug we hit: 0.2.12 react/next published with
+          # sdk/sync@0.2.7 deps that never existed on npm. This check
+          # catches that BEFORE any package gets published, so the release
+          # tag can be reverted and re-cut without leaving the registry
+          # in a broken half-published state.
+          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/next)
+          REFERENCE_VERSION=""
+          for pkg in "${PYLON_PKGS[@]}"; do
+            [[ -f "$pkg/package.json" ]] || continue
+            v="$(node -p "require('./$pkg/package.json').version")"
+            if [[ -z "$REFERENCE_VERSION" ]]; then
+              REFERENCE_VERSION="$v"
+              echo "→ reference version: $REFERENCE_VERSION (from $pkg)"
+            elif [[ "$v" != "$REFERENCE_VERSION" ]]; then
+              echo "::error::Version mismatch in @pylonsync/* workspace: $pkg has $v, expected $REFERENCE_VERSION (matches $(echo ${PYLON_PKGS[0]})). Run ./release.sh <version> to bump everything in lockstep, then re-tag." >&2
+              exit 3
+            fi
+          done
+
+          # Also assert each rewritten dep would be satisfiable. We do
+          # this by parsing the local package.json and confirming every
+          # `@pylonsync/*` dep uses `workspace:*` (which bun rewrites to
+          # REFERENCE_VERSION) — a literal version pin here would mean
+          # someone bypassed the workspace protocol and we can't promise
+          # the rewrite will land somewhere coherent.
+          for pkg in "${PYLON_PKGS[@]}"; do
+            [[ -f "$pkg/package.json" ]] || continue
+            bad="$(node -e "
+              const p = require('./$pkg/package.json');
+              const all = { ...(p.dependencies||{}), ...(p.peerDependencies||{}) };
+              for (const [k, v] of Object.entries(all)) {
+                if (k.startsWith('@pylonsync/') && v !== 'workspace:*') {
+                  console.log(\`\${k}=\${v}\`);
+                }
+              }
+            ")"
+            if [[ -n "$bad" ]]; then
+              echo "::error::$pkg has non-workspace @pylonsync/* dep(s): $bad. Use \"workspace:*\" so bun's publish-time rewrite pins to the right version." >&2
+              exit 4
+            fi
+          done
+
           # sync first: its siblings depend on it via workspace:*, so
           # the rewrite during their publish needs sync's published
           # version range to be queryable. (Bun rewrites to the local
           # workspace version regardless, but ordering by topology
           # keeps the registry consistent for anyone watching.)
-          for pkg in packages/sdk packages/sync packages/functions packages/react packages/next; do
+          for pkg in "${PYLON_PKGS[@]}"; do
             [[ -f "$pkg/package.json" ]] || continue
             NAME="$(node -p "require('./$pkg/package.json').name")"
             VERSION="$(node -p "require('./$pkg/package.json').version")"
@@ -149,6 +200,28 @@ jobs:
               (cd "$pkg" && bun publish --access public)
             fi
           done
+
+          # Postflight: dry-resolve the published graph by trying to install
+          # @pylonsync/react in a temp dir. If bun can't satisfy the deps,
+          # we just produced another broken release — fail loudly so the
+          # tag can be yanked before users hit it.
+          POSTFLIGHT_DIR="$(mktemp -d)"
+          (
+            cd "$POSTFLIGHT_DIR"
+            cat > package.json <<EOF
+          {
+            "name": "pylon-postflight-check",
+            "private": true,
+            "dependencies": { "@pylonsync/react": "$REFERENCE_VERSION" }
+          }
+          EOF
+            if ! bun install --no-save 2>&1 | tee install.log; then
+              echo "::error::Postflight: bun install of @pylonsync/react@$REFERENCE_VERSION FAILED. The graph published this run is unsatisfiable for end users. Investigate before announcing the release; consider yanking these versions." >&2
+              cat install.log >&2
+              exit 5
+            fi
+          )
+          rm -rf "$POSTFLIGHT_DIR"
 
           rm -f .npmrc
 

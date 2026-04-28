@@ -305,7 +305,10 @@ impl FileStorage for Stack0FileStorage {
 
         // 3. Confirm upload so Stack0 marks the asset as ready.
         agent
-            .post(&format!("{}/cdn/upload/{}/confirm", self.base_url, asset_id))
+            .post(&format!(
+                "{}/cdn/upload/{}/confirm",
+                self.base_url, asset_id
+            ))
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .call()
             .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_FAILED", e))?;
