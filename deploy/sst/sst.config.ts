@@ -3,13 +3,16 @@
 // Reference SST v3 config for deploying Pylon to AWS.
 // See https://docs.pylonsync.com/operations/sst for the walkthrough.
 //
-// Provisions:
-//   - Aurora Serverless v2 Postgres
-//   - ECS Fargate service running the Pylon container
+// Provisions (the production-ready default):
+//   - Aurora Serverless v2 Postgres for app data + sessions
+//   - S3 bucket for file uploads (linked to the service for IAM)
+//   - ECS Fargate service running the Pylon container (stateless)
 //   - ALB with HTTP + WebSocket + SSE + shard ports forwarded
-//   - EFS mount for SQLite + uploads (for stateful single-replica deploys)
 //   - Secrets via AWS Secrets Manager
 //   - CloudFront CDN in front of the ALB
+//
+// This shape is horizontally scalable: the container holds no state,
+// so you can bump `scaling.min/max` without losing data on replica churn.
 //
 // Before first deploy:
 //   openssl rand -hex 32 | xargs sst secret set PylonAdminToken
@@ -35,15 +38,19 @@ export default $config({
     const oauthGithub = new sst.Secret("OAuthGithubClientSecret");
 
     // ── Database ─────────────────────────────────────────────────────
-    // Aurora Serverless v2 — auto-scales 0.5 → 2 ACU.
+    // Aurora Serverless v2 — auto-scales 0.5 → 2 ACU. Holds app data
+    // AND sessions (Pylon's session store writes to the same Postgres
+    // when DATABASE_URL is set and PYLON_SESSION_DB is unset).
     const db = new sst.aws.Postgres("PylonDb", {
       scaling: { min: "0.5 ACU", max: "2 ACU" },
     });
 
-    // ── EFS for persistent file uploads + SQLite session DB ──────────
-    // Drop this in favor of S3 + Postgres-backed sessions when you need
-    // to horizontally scale the Pylon service.
-    const efs = new sst.aws.Efs("PylonEfs", { vpc: { id: db.nodes.vpc.id } });
+    // ── File storage (S3) ────────────────────────────────────────────
+    // The container is stateless; uploads land in S3 via the
+    // file_storage plugin. `link` grants the service IAM permissions
+    // (PutObject / GetObject / DeleteObject) on this bucket
+    // automatically — no manual policy attachment needed.
+    const uploads = new sst.aws.Bucket("PylonUploads");
 
     // ── Cluster + service ────────────────────────────────────────────
     const cluster = new sst.aws.Cluster("PylonCluster", {
@@ -62,17 +69,20 @@ export default $config({
         ],
         interval: "30 seconds",
       },
-      volumes: [{ efs, path: "/var/lib/pylon" }],
+      // Bump min/max to scale horizontally — safe because state lives
+      // in Postgres + S3, not on the container's filesystem.
+      scaling: { min: 1, max: 4, cpuUtilization: 70 },
+      link: [uploads],
       environment: {
         // Core
         DATABASE_URL: db.url,
         PYLON_PORT: "4321",
         PYLON_DEV_MODE: "false",
         PYLON_MANIFEST: "/app/pylon.manifest.json",
-        // Persistence (EFS-backed)
-        PYLON_DB_PATH: "/var/lib/pylon/pylon.db",
-        PYLON_SESSION_DB: "/var/lib/pylon/sessions.db",
-        PYLON_FILES_DIR: "/var/lib/pylon/uploads",
+        // File storage — read by the file_storage plugin in your manifest.
+        PYLON_FILES_PROVIDER: "s3",
+        PYLON_S3_BUCKET: uploads.name,
+        PYLON_S3_REGION: "us-east-1",
         // Auth (secrets)
         PYLON_ADMIN_TOKEN: adminToken.value,
         // Client-facing
@@ -102,6 +112,10 @@ export default $config({
         domain: { name: "api.your-app.com", dns: sst.aws.dns() },
         // Bump idle timeout for long-lived WebSocket connections.
         idleTimeout: "3600 seconds",
+        // Sticky sessions so a reconnecting WebSocket lands on the same
+        // replica that holds its presence state. Required when
+        // scaling.max > 1.
+        stickySessions: true,
       },
     });
 
@@ -116,6 +130,7 @@ export default $config({
       apiUrl: service.url,
       cdnUrl: cdn.url,
       dbHost: db.host,
+      uploadsBucket: uploads.name,
     };
   },
 });
