@@ -3,5 +3,5 @@
 // don't accidentally land in client bundles; client-only hooks
 // live at `@pylonsync/next/auth` for the same reason.
 
+export { ApiError } from "./errors";
 export type { OAuthProvider, Session } from "./auth";
-export { ApiError } from "./client";

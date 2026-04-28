@@ -1,19 +1,8 @@
 "use client";
 
-/**
- * Thrown by the API client on any non-2xx response. Carries the wire
- * `code` (e.g. `OAUTH_INVALID_STATE`) so UI can branch on specific
- * failures instead of string-matching the message.
- */
-export class ApiError extends Error {
-	constructor(
-		public status: number,
-		public code: string,
-		message: string,
-	) {
-		super(message);
-	}
-}
+import { ApiError } from "./errors";
+
+export { ApiError };
 
 /**
  * Options for {@link createPylonClient}.

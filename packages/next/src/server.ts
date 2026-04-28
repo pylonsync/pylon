@@ -1,22 +1,12 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type { OAuthProvider } from "./auth";
+import { ApiError } from "./errors";
 
 /**
- * Resolved Pylon session for a server-side request. Use `cookieHeader`
- * when forwarding the cookie to subsequent Pylon API calls (see
- * {@link pylonFetch}).
- */
-export type PylonSession = {
-	userId: string;
-	cookieHeader: string;
-};
-
-/**
- * Full auth shape from `/api/auth/me`. Superset of {@link PylonSession}
- * — adds the active tenant and admin flag. Use when the server-rendered
- * UI needs to branch on tenant or role (e.g. show org switcher only
- * when isAdmin, scope queries to tenantId).
+ * Full auth shape from `/api/auth/me`. Use when the server-rendered
+ * UI needs more than "is there any session" — branching on tenant or
+ * role, scoping a query to the active tenant, etc.
  */
 export type PylonAuth = {
 	userId: string;
@@ -26,20 +16,230 @@ export type PylonAuth = {
 };
 
 /**
- * Options for the server-side helpers. Both default to env vars:
- * `PYLON_COOKIE_NAME` (fallback `pylon_session`) and `PYLON_TARGET`
- * (fallback `http://localhost:4321` in dev only — required in prod).
+ * Configuration for {@link createPylonServer}.
+ *
+ * `cookieName` is REQUIRED — there's no safe default because Pylon's
+ * binary emits `${app_name}_session` (e.g. `pylon-cloud_session`) and
+ * the package can't know your app name. Passing it explicitly here
+ * also kills a class of bugs where a wrong env var silently breaks
+ * auth in production.
+ *
+ * `target` is the Pylon control-plane origin. Defaults to the
+ * `PYLON_TARGET` env var; throws in production if unset.
+ *
+ * `getMeFn` is the server function name used by {@link PylonServer.getMe}.
+ * Default `"getMe"` — most apps just declare a `functions/getMe.ts`
+ * that returns the current user's safe-to-display fields, see the
+ * Pylon Cloud reference for an example.
+ *
+ * `loginUrl` is where {@link PylonServer.requireAuth} / {@link
+ * PylonServer.requireMe} redirect when the session is missing.
  */
-export type SessionOptions = {
-	cookieName?: string;
+export type PylonServerConfig = {
+	cookieName: string;
 	target?: string;
+	getMeFn?: string;
+	loginUrl?: string;
 };
 
-function resolveOpts(opts: SessionOptions = {}) {
+/**
+ * Bound server helpers — built once per app via {@link createPylonServer}
+ * and used everywhere. Eliminates the per-call cookieName / target
+ * plumbing the standalone helpers required.
+ *
+ * ```ts
+ * // src/lib/pylon.ts
+ * export const pylon = createPylonServer({
+ *   cookieName: "myapp_session",
+ *   getMeFn: "getMe",
+ * });
+ *
+ * // src/app/dashboard/layout.tsx
+ * import { pylon } from "@/lib/pylon";
+ * const me = await pylon.requireMe<User>();
+ * const orgs = await pylon.json<Org[]>("/api/entities/Organization");
+ * ```
+ */
+export interface PylonServer {
+	/** Forwarded raw fetch — caller handles status + body parsing. */
+	fetch(path: string, init?: RequestInit): Promise<Response>;
+	/**
+	 * Fetch + parse + status check in one. Throws {@link ApiError} on
+	 * non-2xx so callers don't have to write the `if (!res.ok)` dance
+	 * before every `.json()`.
+	 */
+	json<T = unknown>(path: string, init?: RequestInit): Promise<T>;
+	/** Resolved auth + null on no session. */
+	getAuth(): Promise<PylonAuth | null>;
+	/** Resolved auth, or `redirect()` to `loginUrl`. */
+	requireAuth(): Promise<PylonAuth>;
+	/**
+	 * OAuth provider list, server-side. Eliminates the post-mount
+	 * flicker the client `useOAuthProviders` causes.
+	 */
+	getOAuthProviders(): Promise<OAuthProvider[]>;
+	/**
+	 * Current user (auth + the row your `getMe` function returns).
+	 * Calls `/api/fn/${getMeFn}` rather than the entity API — the
+	 * function bypasses entity policies and lets you control the
+	 * projection (typically: id, email, displayName; never
+	 * passwordHash).
+	 */
+	getMe<U = Record<string, unknown>>(): Promise<{
+		auth: PylonAuth;
+		user: U;
+	} | null>;
+	/** Like `getMe`, redirects to `loginUrl` on null. */
+	requireMe<U = Record<string, unknown>>(): Promise<{
+		auth: PylonAuth;
+		user: U;
+	}>;
+}
+
+/**
+ * Build a server-side Pylon helper, bound to one app's configuration.
+ * One factory call per app, no per-call boilerplate.
+ *
+ * See {@link PylonServerConfig} for the required options.
+ */
+export function createPylonServer(config: PylonServerConfig): PylonServer {
+	const cookieName = config.cookieName;
+	const targetOpt = config.target;
+	const getMeFn = config.getMeFn ?? "getMe";
+	const loginUrl = config.loginUrl ?? "/login";
+
+	const target = (): string => resolveTarget(targetOpt);
+
+	async function readSession(): Promise<{
+		header: string;
+		value: string;
+	} | null> {
+		const cookieStore = await cookies();
+		const c = cookieStore.get(cookieName);
+		if (!c) return null;
+		return { header: `${cookieName}=${c.value}`, value: c.value };
+	}
+
+	async function getAuth(): Promise<PylonAuth | null> {
+		const session = await readSession();
+		if (!session) return null;
+		const auth = await fetch(`${target()}/api/auth/me`, {
+			headers: { cookie: session.header },
+			cache: "no-store",
+		})
+			.then(
+				(r) =>
+					r.json() as Promise<{
+						user_id?: string;
+						tenant_id?: string | null;
+						is_admin?: boolean;
+					}>,
+			)
+			.catch(
+				() =>
+					({}) as {
+						user_id?: string;
+						tenant_id?: string | null;
+						is_admin?: boolean;
+					},
+			);
+		if (!auth.user_id) return null;
+		return {
+			userId: auth.user_id,
+			tenantId: auth.tenant_id ?? null,
+			isAdmin: auth.is_admin ?? false,
+			cookieHeader: session.header,
+		};
+	}
+
+	async function requireAuth(): Promise<PylonAuth> {
+		const a = await getAuth();
+		if (!a) redirect(loginUrl);
+		return a;
+	}
+
+	async function pylonFetchBound(
+		path: string,
+		init: RequestInit = {},
+	): Promise<Response> {
+		const session = await readSession();
+		const headers = new Headers(init.headers);
+		if (session) headers.set("cookie", session.header);
+		return fetch(`${target()}${path}`, {
+			cache: "no-store",
+			...init,
+			headers,
+		});
+	}
+
+	async function pylonJsonBound<T = unknown>(
+		path: string,
+		init: RequestInit = {},
+	): Promise<T> {
+		const res = await pylonFetchBound(path, init);
+		const text = await res.text();
+		const body = text ? JSON.parse(text) : null;
+		if (!res.ok) {
+			const code = body?.error?.code ?? body?.code ?? "UNKNOWN";
+			const msg = body?.error?.message ?? body?.message ?? res.statusText;
+			throw new ApiError(res.status, code, msg);
+		}
+		return body as T;
+	}
+
+	async function getOAuthProvidersBound(): Promise<OAuthProvider[]> {
+		// Providers are env-derived on the control plane; they don't
+		// change per-request but DO change across deploys. no-store is
+		// the safe default until a caller opts into caching.
+		try {
+			const res = await fetch(`${target()}/api/auth/providers`, {
+				cache: "no-store",
+			});
+			if (!res.ok) return [];
+			return (await res.json()) as OAuthProvider[];
+		} catch {
+			return [];
+		}
+	}
+
+	async function getMe<U = Record<string, unknown>>(): Promise<{
+		auth: PylonAuth;
+		user: U;
+	} | null> {
+		const auth = await getAuth();
+		if (!auth) return null;
+		try {
+			const user = await pylonJsonBound<U>(`/api/fn/${getMeFn}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: "{}",
+			});
+			if (user == null) return null;
+			return { auth, user };
+		} catch {
+			// Function may not be registered yet, or the row was
+			// deleted while logged in — treat as anonymous.
+			return null;
+		}
+	}
+
+	async function requireMe<U = Record<string, unknown>>(): Promise<{
+		auth: PylonAuth;
+		user: U;
+	}> {
+		const me = await getMe<U>();
+		if (!me) redirect(loginUrl);
+		return me;
+	}
+
 	return {
-		cookieName:
-			opts.cookieName ?? process.env.PYLON_COOKIE_NAME ?? "pylon_session",
-		target: opts.target ?? resolveTarget(),
+		fetch: pylonFetchBound,
+		json: pylonJsonBound,
+		getAuth,
+		requireAuth,
+		getOAuthProviders: getOAuthProvidersBound,
+		getMe,
+		requireMe,
 	};
 }
 
@@ -50,7 +250,8 @@ function resolveOpts(opts: SessionOptions = {}) {
  * on localhost:4321 (sidecar, debug shim, nothing). Throw loudly so
  * the misconfiguration surfaces immediately on the first request.
  */
-function resolveTarget(): string {
+function resolveTarget(target?: string): string {
+	if (target && target.length > 0) return target;
 	const env = process.env.PYLON_TARGET;
 	if (env && env.length > 0) return env;
 	if (process.env.NODE_ENV === "production") {
@@ -61,208 +262,76 @@ function resolveTarget(): string {
 	return "http://localhost:4321";
 }
 
-/**
- * Read the Pylon session cookie and validate it server-side via
- * `/api/auth/me`. Returns `null` if the cookie is missing or the
- * session has been revoked / expired. Suitable for layouts that want
- * to render different UI for anonymous vs. authenticated users.
- *
- * Use {@link requirePylonSession} if you'd rather just redirect.
- */
-export async function getPylonSession(
-	opts?: SessionOptions,
-): Promise<PylonSession | null> {
-	const { cookieName, target } = resolveOpts(opts);
-	const cookieStore = await cookies();
-	const session = cookieStore.get(cookieName);
-	if (!session) return null;
+// ---------------------------------------------------------------------------
+// Standalone helpers — for callers that want one-off invocations without
+// instantiating a {@link PylonServer}. Most apps should prefer
+// {@link createPylonServer}; these exist for tests, scripts, and
+// migrations.
+// ---------------------------------------------------------------------------
 
-	const cookieHeader = `${cookieName}=${session.value}`;
-	const auth = await fetch(`${target}/api/auth/me`, {
-		headers: { cookie: cookieHeader },
-		cache: "no-store",
-	})
-		.then((r) => r.json() as Promise<{ user_id?: string }>)
-		.catch(() => ({}) as { user_id?: string });
-	if (!auth.user_id) return null;
-	return { userId: auth.user_id, cookieHeader };
+/**
+ * One-shot version of {@link PylonServer.getAuth}. Pass the cookie
+ * name explicitly — the package no longer reads PYLON_COOKIE_NAME
+ * from env (silently-overridable env-driven config was a footgun in
+ * practice).
+ */
+export async function getAuth(opts: {
+	cookieName: string;
+	target?: string;
+}): Promise<PylonAuth | null> {
+	return createPylonServer({
+		cookieName: opts.cookieName,
+		target: opts.target,
+	}).getAuth();
 }
 
-/**
- * Like {@link getPylonSession} but redirects to `loginUrl` (default
- * `/login`) if the session is missing or invalid. Use in Server
- * Component layouts to gate a whole subtree without leaking protected
- * UI before the redirect.
- *
- * ```ts
- * export default async function DashboardLayout({ children }) {
- *   const { userId, cookieHeader } = await requirePylonSession();
- *   const me = await fetchMe(userId, cookieHeader);
- *   return <Chrome user={me}>{children}</Chrome>;
- * }
- * ```
- */
-export async function requirePylonSession(
-	opts?: SessionOptions & { loginUrl?: string },
-): Promise<PylonSession> {
-	const session = await getPylonSession(opts);
-	if (!session) redirect(opts?.loginUrl ?? "/login");
-	return session;
+/** One-shot version of {@link PylonServer.requireAuth}. */
+export async function requireAuth(opts: {
+	cookieName: string;
+	target?: string;
+	loginUrl?: string;
+}): Promise<PylonAuth> {
+	return createPylonServer(opts).requireAuth();
 }
 
-/**
- * Like {@link getPylonSession} but returns the full auth shape —
- * userId + tenantId + isAdmin. Use when the server-rendered UI
- * needs more than "is there any session" (e.g. scoping a query to
- * the active tenant, showing an admin-only menu).
- *
- * Returns `null` if no session cookie is present, or the cookie's
- * session has been revoked / expired.
- *
- * ```ts
- * const auth = await getAuth();
- * if (!auth) redirect("/login");
- * if (!auth.tenantId) redirect("/onboarding");
- * ```
- */
-export async function getAuth(
-	opts?: SessionOptions,
-): Promise<PylonAuth | null> {
-	const { cookieName, target } = resolveOpts(opts);
-	const cookieStore = await cookies();
-	const session = cookieStore.get(cookieName);
-	if (!session) return null;
-
-	const cookieHeader = `${cookieName}=${session.value}`;
-	const auth = await fetch(`${target}/api/auth/me`, {
-		headers: { cookie: cookieHeader },
-		cache: "no-store",
-	})
-		.then(
-			(r) =>
-				r.json() as Promise<{
-					user_id?: string;
-					tenant_id?: string | null;
-					is_admin?: boolean;
-				}>,
-		)
-		.catch(
-			() =>
-				({}) as {
-					user_id?: string;
-					tenant_id?: string | null;
-					is_admin?: boolean;
-				},
+/** One-shot version of {@link PylonServer.fetch}. */
+export async function pylonFetch(
+	path: string,
+	init?: RequestInit,
+	opts?: { cookieName: string; target?: string },
+): Promise<Response> {
+	if (!opts) {
+		throw new Error(
+			"pylonFetch requires an `opts` argument with `cookieName`. The package no longer reads PYLON_COOKIE_NAME from env to avoid silent breakage from misconfigured envs.",
 		);
-	if (!auth.user_id) return null;
-	return {
-		userId: auth.user_id,
-		tenantId: auth.tenant_id ?? null,
-		isAdmin: auth.is_admin ?? false,
-		cookieHeader,
-	};
+	}
+	return createPylonServer(opts).fetch(path, init);
+}
+
+/** One-shot version of {@link PylonServer.json}. */
+export async function pylonJson<T = unknown>(
+	path: string,
+	init?: RequestInit,
+	opts?: { cookieName: string; target?: string },
+): Promise<T> {
+	if (!opts) {
+		throw new Error(
+			"pylonJson requires an `opts` argument with `cookieName`.",
+		);
+	}
+	return createPylonServer(opts).json<T>(path, init);
 }
 
 /**
- * Like {@link getAuth} but redirects to `loginUrl` (default `/login`)
- * if no session. The non-null return type frees layouts from the
- * `if (!auth) redirect(...)` guard.
+ * One-shot OAuth provider list. Doesn't need a cookie (the endpoint
+ * is public), but does need a `target` resolution.
  */
-export async function requireAuth(
-	opts?: SessionOptions & { loginUrl?: string },
-): Promise<PylonAuth> {
-	const auth = await getAuth(opts);
-	if (!auth) redirect(opts?.loginUrl ?? "/login");
-	return auth;
-}
-
-/**
- * Fetch the authed user's row from the User entity in addition to
- * resolving auth. Eliminates the "header chrome renders empty for a
- * frame, then the username pops in" flicker on dashboard layouts.
- *
- * The User shape is app-defined (different Pylon apps add their own
- * fields beyond the base `email`/`displayName`). Pass your `User`
- * type as the generic so the return value is correctly shaped.
- *
- * ```ts
- * type User = { id: string; email: string; displayName: string };
- *
- * const me = await getCurrentUser<User>();
- * if (!me) redirect("/login");
- * return <Chrome user={me.user} />;
- * ```
- *
- * Returns `null` when there's no session OR the user row can't be
- * loaded (deleted account, transient API failure). Most layouts
- * should treat both cases as "redirect to login" — see
- * {@link requireCurrentUser}.
- */
-export async function getCurrentUser<U = Record<string, unknown>>(
-	opts?: SessionOptions,
-): Promise<{ auth: PylonAuth; user: U } | null> {
-	const auth = await getAuth(opts);
-	if (!auth) return null;
-	const { target } = resolveOpts(opts);
-	const res = await fetch(
-		`${target}/api/entities/User/${encodeURIComponent(auth.userId)}`,
-		{ headers: { cookie: auth.cookieHeader }, cache: "no-store" },
-	);
-	if (!res.ok) return null;
-	const user = (await res.json()) as U;
-	return { auth, user };
-}
-
-/**
- * Like {@link getCurrentUser} but redirects to `loginUrl` (default
- * `/login`) if the session or user can't be resolved.
- */
-export async function requireCurrentUser<U = Record<string, unknown>>(
-	opts?: SessionOptions & { loginUrl?: string },
-): Promise<{ auth: PylonAuth; user: U }> {
-	const me = await getCurrentUser<U>(opts);
-	if (!me) redirect(opts?.loginUrl ?? "/login");
-	return me;
-}
-
-/**
- * Server-side fetch of the enabled OAuth providers. Use in Server
- * Components for /login and /signup so the "Continue with Google"
- * row paints in the initial HTML — no post-mount flicker like the
- * client-side {@link useOAuthProviders} hook causes.
- *
- * Returns an empty array on any failure (control plane unreachable,
- * 5xx, etc.) so the page can fall back to rendering the password
- * form alone instead of crashing.
- *
- * ```tsx
- * // app/login/page.tsx
- * import { getOAuthProviders } from "@pylonsync/next/server";
- * import { LoginForm } from "./login-form"; // "use client"
- *
- * export default async function LoginPage() {
- *   const providers = await getOAuthProviders();
- *   return <LoginForm providers={providers} />;
- * }
- * ```
- *
- * Hits PYLON_TARGET directly rather than going through the Next
- * /api/* rewrite — the rewrite is a browser-side same-origin
- * optimization, irrelevant on the server, and skipping it avoids a
- * pointless localhost→localhost hop in dev + a real network round
- * trip to ourselves in prod.
- */
-export async function getOAuthProviders(
-	opts?: Pick<SessionOptions, "target">,
-): Promise<OAuthProvider[]> {
-	const { target } = resolveOpts(opts);
+export async function getOAuthProviders(opts: {
+	target?: string;
+} = {}): Promise<OAuthProvider[]> {
+	const target = resolveTarget(opts.target);
 	try {
 		const res = await fetch(`${target}/api/auth/providers`, {
-			// Providers are env-derived on the control plane (set when
-			// PYLON_OAUTH_*_CLIENT_ID is configured). They don't change
-			// per-request, but they DO change across deploys. no-store
-			// is the safest default until callers explicitly opt in to
-			// caching via revalidate.
 			cache: "no-store",
 		});
 		if (!res.ok) return [];
@@ -270,34 +339,4 @@ export async function getOAuthProviders(
 	} catch {
 		return [];
 	}
-}
-
-/**
- * Server-side fetch to the Pylon control plane that auto-forwards the
- * caller's session cookie. Use from Server Components, Route Handlers,
- * and Server Actions to call Pylon as the user.
- *
- * ```ts
- * const me: Me = await pylonFetch(`/api/entities/User/${userId}`)
- *   .then(r => r.json());
- * ```
- *
- * Defaults to `cache: "no-store"` because Pylon responses are
- * per-user; pass an explicit `cache` to override.
- */
-export async function pylonFetch(
-	path: string,
-	init: RequestInit = {},
-	opts?: SessionOptions,
-): Promise<Response> {
-	const { cookieName, target } = resolveOpts(opts);
-	const cookieStore = await cookies();
-	const session = cookieStore.get(cookieName);
-	const headers = new Headers(init.headers);
-	if (session) headers.set("cookie", `${cookieName}=${session.value}`);
-	return fetch(`${target}${path}`, {
-		cache: "no-store",
-		...init,
-		headers,
-	});
 }
