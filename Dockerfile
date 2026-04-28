@@ -26,6 +26,21 @@
 
 ARG RUST_VERSION=1.89
 
+# ---- Studio UI stage --------------------------------------------------------
+# `pylon-studio-api`'s build.rs hard-fails the cargo build if
+# `crates/studio_api/web/dist/index.html` is missing — and dist/ is
+# gitignored. Build it in a small, cacheable bun stage so cargo finds
+# the bundle when it gets there. Splitting this out (vs running bun
+# inside rust-builder) lets BuildKit cache the studio bundle independently
+# of the cargo build, so changes to Rust code don't redo the bun build
+# and vice versa.
+FROM oven/bun:1.2 AS studio-builder
+WORKDIR /studio
+COPY crates/studio_api/web/package.json crates/studio_api/web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY crates/studio_api/web ./
+RUN bun run build
+
 # ---- Rust build stage -------------------------------------------------------
 FROM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
 
@@ -35,6 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY . .
+# Pull the built Studio bundle out of the bun stage so build.rs is
+# satisfied. We only need dist/; node_modules is multi-hundred-MB and
+# would balloon the image with no runtime value.
+COPY --from=studio-builder /studio/dist ./crates/studio_api/web/dist
 # BuildKit cache mounts: persist cargo's registry + git index + the
 # target dir across builds so unchanged deps don't recompile. Pairs
 # with cache-to: type=gha,mode=max in the workflow — the underlying

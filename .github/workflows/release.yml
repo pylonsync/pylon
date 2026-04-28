@@ -238,6 +238,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
+      # exist (the Studio UI bundle). dist/ is gitignored, so CI must
+      # build it before any cargo step runs. Without this, the entire
+      # workspace fails to compile.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
       - uses: katyo/publish-crates@v2
         with:
           registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -285,6 +295,15 @@ jobs:
           [target.aarch64-unknown-linux-gnu]
           linker = "aarch64-linux-gnu-gcc"
           EOF
+      # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
+      # exist. Build the Studio UI bundle before cargo runs.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        shell: bash
+        run: bun install --frozen-lockfile && bun run build
       - name: Build
         run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
       # Artifact names must match what install.sh and Formula/pylon.rb

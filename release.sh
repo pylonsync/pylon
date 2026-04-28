@@ -160,13 +160,28 @@ echo
 echo "Updated to $target:"
 git diff --stat | sed 's/^/  /'
 
+# Refresh bun.lock so the version bumps make it into the lockfile.
+# CI's publish-npm step uses --frozen-lockfile, so any drift between
+# package.json and bun.lock fails the release. Skip silently if bun
+# isn't installed locally (CI verifies bun.lock is fresh anyway).
+if command -v bun >/dev/null 2>&1; then
+	echo "Refreshing bun.lock…"
+	bun install --silent || {
+		echo "::warning::bun install failed — bun.lock may be out of date." >&2
+	}
+fi
+
 if ! $tag; then
 	cat <<EOF
 
 Done — files updated, tree dirty. Review and commit when happy:
   git diff
   git add -A && git commit -m "chore: release $target"
-  git tag "v$target" && git push --follow-tags
+  git tag -a "v$target" -m "Release v$target" && git push --follow-tags
+
+Note: the -a flag makes the tag annotated. --follow-tags only pushes
+annotated tags — a lightweight tag won't make it to the remote and the
+release.yml workflow won't fire.
 EOF
 	exit 0
 fi
@@ -177,7 +192,12 @@ echo
 echo "Committing + tagging…"
 git add -A
 git commit -m "chore: release $target"
-git tag "v$target"
+# Annotated tag is required for `git push --follow-tags` to actually
+# push it. A lightweight tag (`git tag NAME` without -a) is created
+# locally but the next `git push --follow-tags` silently leaves it
+# behind, the Release workflow never fires, and you wonder why npm
+# still has the previous version. Bug we hit on v0.2.14.
+git tag -a "v$target" -m "Release v$target"
 git push --follow-tags
 
 cat <<EOF
