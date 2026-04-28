@@ -1,0 +1,166 @@
+---
+title: React Native SDK
+description: "@pylonsync/react-native — Expo SQLite-backed offline replica + AsyncStorage adapter."
+---
+
+`@pylonsync/react-native` brings the React hooks to mobile. Same API as `@pylonsync/react` plus:
+
+- **Expo SQLite-backed persistence** — the local replica survives app kills
+- **AsyncStorage bridge** — auth tokens persist correctly on iOS / Android
+- **`useNetworkStatus`** hook for offline-aware UI
+- **Foreground/background lifecycle handling** — sync pauses when backgrounded, catches up on resume
+
+## Install
+
+```bash
+bun add @pylonsync/sdk @pylonsync/react @pylonsync/react-native
+bun add @react-native-async-storage/async-storage expo-sqlite
+```
+
+For Expo projects you're done. For bare React Native, link the native modules per the AsyncStorage and expo-sqlite docs.
+
+## Configure
+
+```typescript
+import { configureClient } from "@pylonsync/react";
+import { createAsyncStorageBridge, OfflineStore } from "@pylonsync/react-native";
+
+const storage = await createAsyncStorageBridge();
+
+configureClient({
+  baseUrl: "https://your-app.com",
+  appName: "myapp",
+  storage,
+});
+```
+
+`createAsyncStorageBridge()` reads existing pylon keys (`pylon:client_id`, `pylon_token`, etc.) into an in-memory cache and writes through to AsyncStorage. The sync engine's storage interface is synchronous — the bridge keeps it that way without making your call sites async.
+
+## Use the React hooks
+
+Same as web:
+
+```tsx
+import { useQuery, useEntityMutation, useSession } from "@pylonsync/react";
+
+function TodoScreen() {
+  const session = useSession();
+  const { data: todos } = useQuery("Todo");
+  const { insert, update, remove } = useEntityMutation("Todo");
+
+  return (
+    <FlatList
+      data={todos}
+      keyExtractor={t => t.id}
+      renderItem={({ item }) => (
+        <TodoRow
+          todo={item}
+          onToggle={() => update(item.id, { done: !item.done })}
+          onDelete={() => remove(item.id)}
+        />
+      )}
+    />
+  );
+}
+```
+
+## Offline persistence
+
+The sync engine ships with `IndexedDBPersistence` for browsers; on RN you swap in the SQLite-backed equivalent:
+
+```typescript
+import { createSyncEngine } from "@pylonsync/sync";
+import { ExpoSQLitePersistence } from "@pylonsync/react-native";
+
+const persistence = await ExpoSQLitePersistence.open("pylon.db");
+
+const engine = createSyncEngine("https://your-app.com", {
+  storage,
+  persistence,
+});
+```
+
+Now:
+
+- Every sync change is written to SQLite before the cursor advances (durable)
+- The mutation queue is persisted (offline writes survive app kill)
+- App startup hydrates from SQLite first, then catches up via pull
+
+The SQLite path mirrors the IndexedDB schema used by the web client — same columns, same merge semantics, same crash safety.
+
+## Network status
+
+```tsx
+import { useNetworkStatus } from "@pylonsync/react-native";
+
+function Header() {
+  const { online, type } = useNetworkStatus();
+  if (!online) return <OfflineBanner />;
+  if (type === "cellular") return <SlowConnectionBanner />;
+  return null;
+}
+```
+
+The sync engine continues to work offline — mutations queue locally and ship when the network returns. `useNetworkStatus` is for UI affordances.
+
+## Foreground / background
+
+The engine listens for `AppState` changes:
+
+- **Background** → pause WebSocket; mutations still queue locally
+- **Foreground** → reconnect, pull missed changes, drain the queue
+
+Subscriptions to multiplayer shards close on background and re-subscribe on foreground (with the `crdt-subscribe` re-send the engine does on every reconnect, so binary CRDT frames keep arriving).
+
+For long-lived background sync (e.g. push-notification-triggered fetch), use the standalone `engine.pull()` from your background task handler.
+
+## Higher-level offline store
+
+For cases where you want a manual cache outside the sync engine (e.g. cache derived data, store user preferences):
+
+```typescript
+import { OfflineStore } from "@pylonsync/react-native";
+
+const store = new OfflineStore();
+
+await store.saveEntities("FavoriteRecipes", recipes);
+const cached = await store.loadEntities("FavoriteRecipes");
+```
+
+Backed by AsyncStorage with `pylon:` prefix.
+
+## Performance
+
+- **Use `FlatList`/`SectionList`** with `useQuery` results — they re-render fully on every store change, so list virtualization matters.
+- **Memoize derived data** with `useMemo` to avoid re-computing on every store notify.
+- **Limit `useQuery` results** — for large entities, use `useInfiniteQuery` instead so the screen doesn't render thousands of rows.
+- **Backgrounded sync** uses zero CPU — the engine pauses cleanly.
+
+## Push notifications
+
+Pylon doesn't ship a push provider — use Expo Push, Firebase, OneSignal, or APNs/FCM directly. Pattern:
+
+1. On sign-in, register the device token with your Pylon backend (`POST /api/fn/registerPushToken`).
+2. In your function/cron, push when something interesting happens.
+3. On notification tap, foreground the app — the sync engine catches up automatically.
+
+## Tested combinations
+
+- Expo SDK 50+
+- React Native 0.73+
+- New Architecture (Fabric / TurboModules) — works
+- Hermes JS engine — works (no Loro CRDT WASM dependency in this package)
+- Bare React Native — works after manual native module linking
+
+## Differences from web React
+
+| Feature | Web | RN |
+| --- | --- | --- |
+| Storage | `localStorage` | AsyncStorage bridge |
+| Persistence | IndexedDB | Expo SQLite |
+| Transport | WebSocket | WebSocket (polyfilled by RN) |
+| Network status | `navigator.onLine` | `useNetworkStatus` |
+| File upload | `Blob` / `File` | `FormData` with file URI |
+| Download | `Blob` URL | `expo-file-system` to local file |
+
+The hooks and call signatures are identical.

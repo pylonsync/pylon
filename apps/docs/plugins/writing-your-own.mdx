@@ -1,0 +1,327 @@
+---
+title: Writing your own plugin
+description: "Build a Pylon plugin in Rust — the trait, the registry, and the lifecycle."
+---
+
+Pylon's plugin system is intentionally narrow: a `Plugin` trait with hooks for the events you care about, registered at startup. Most plugins are 50–150 lines of Rust. This page walks through writing one end-to-end.
+
+## When to write a plugin
+
+| Need | Plugin? |
+| --- | --- |
+| One-off business logic | No — write a function |
+| Field-level computed values via TS | No — use the `computed` plugin |
+| Custom validation rule | No — use the `validation` plugin's `custom` rule type |
+| Webhook delivery | No — use the `webhooks` plugin |
+| Cross-cutting behavior on every write | **Yes** — write a plugin |
+| Replace a built-in subsystem (storage, email, cache) | **Yes** — write a plugin |
+| Add new HTTP routes | **Yes** — write a plugin |
+
+Examples of legitimate custom plugins:
+
+- Sync entity changes to an external CRM in real time
+- Apply company-specific validation rules across many entities
+- Add Slack notifications on any audit-log entry
+- Implement a custom auth provider (Apple, Microsoft, Discord)
+
+## The `Plugin` trait
+
+```rust
+use pylon_plugin::{Plugin, PluginError, RequestMeta};
+use pylon_auth::AuthContext;
+use serde_json::Value;
+
+pub trait Plugin: Send + Sync {
+    /// Stable identifier — must match the plugin name in the manifest.
+    fn name(&self) -> &str;
+
+    /// Called once at startup with the deserialized `config` from the
+    /// manifest. Default impl is a no-op.
+    fn init(&self, _config: &Value) -> Result<(), PluginError> { Ok(()) }
+
+    /// Called before every HTTP request. Return `Err` to short-circuit
+    /// with a status + body. Default: pass through.
+    fn before_request(
+        &self,
+        _meta: &RequestMeta,
+        _auth: &AuthContext,
+    ) -> Result<(), PluginError> { Ok(()) }
+
+    /// Called before every entity write. Mutate `data` in place to
+    /// inject fields (timestamps, slugs, computed). Return `Err` to
+    /// reject the write.
+    fn before_write(
+        &self,
+        _entity: &str,
+        _operation: WriteOp,
+        _data: &mut Value,
+        _auth: &AuthContext,
+    ) -> Result<(), PluginError> { Ok(()) }
+
+    /// Called after every entity write. Pylon ignores errors here —
+    /// after-write side effects must never fail a successful write.
+    fn after_write(
+        &self,
+        _entity: &str,
+        _operation: WriteOp,
+        _row: &Value,
+        _auth: &AuthContext,
+    ) {}
+
+    /// Add HTTP routes. Return `(method, path)` pairs you want the
+    /// router to dispatch to your `handle_route` impl.
+    fn routes(&self) -> Vec<(HttpMethod, String)> { Vec::new() }
+
+    fn handle_route(
+        &self,
+        _method: HttpMethod,
+        _url: &str,
+        _body: &str,
+        _auth: &AuthContext,
+    ) -> Option<(u16, String)> { None }
+}
+```
+
+Override only the hooks you need. The default impls do nothing.
+
+## Example: a Slack-notifier plugin
+
+We want every new sign-up to ping a Slack channel. Built-in `webhooks` could do this, but suppose we want richer formatting and the Slack message format isn't a stable webhook URL we control.
+
+```rust
+// crates/my_plugins/src/slack.rs
+use pylon_plugin::{Plugin, PluginError, WriteOp};
+use pylon_auth::AuthContext;
+use serde_json::Value;
+
+pub struct SlackSignupNotifier {
+    webhook_url: String,
+    entity: String,
+}
+
+impl SlackSignupNotifier {
+    pub fn new(webhook_url: String, entity: String) -> Self {
+        Self { webhook_url, entity }
+    }
+}
+
+impl Plugin for SlackSignupNotifier {
+    fn name(&self) -> &str { "slack_signup_notifier" }
+
+    fn after_write(
+        &self,
+        entity: &str,
+        op: WriteOp,
+        row: &Value,
+        _auth: &AuthContext,
+    ) {
+        if entity != self.entity || op != WriteOp::Insert { return; }
+
+        let email = row.get("email").and_then(|v| v.as_str()).unwrap_or("?");
+        let display = row.get("displayName").and_then(|v| v.as_str()).unwrap_or(email);
+
+        let payload = serde_json::json!({
+            "text": format!(":wave: New sign-up: *{display}* ({email})"),
+        });
+
+        // Fire-and-forget; never block a write on an external service.
+        let url = self.webhook_url.clone();
+        std::thread::spawn(move || {
+            let _ = ureq::post(&url).send_json(payload);
+        });
+    }
+}
+```
+
+Register it at runtime startup:
+
+```rust
+// In your runtime build script or main.rs
+use pylon_runtime::Runtime;
+
+let mut runtime = Runtime::new(/* ... */);
+runtime.register_plugin(Box::new(
+    SlackSignupNotifier::new(
+        std::env::var("SLACK_WEBHOOK_URL").expect("SLACK_WEBHOOK_URL"),
+        "User".into(),
+    )
+));
+```
+
+Now every new `User` insert pings Slack. Total: ~30 lines.
+
+## The `WriteOp` enum
+
+```rust
+pub enum WriteOp {
+    Insert,
+    Update,
+    Delete,
+}
+```
+
+`before_write` and `after_write` get the operation so you can target specific events.
+
+## Adding HTTP routes
+
+For plugins that expose new endpoints (Stripe webhook receiver, OAuth callback for a custom provider, internal health check):
+
+```rust
+impl Plugin for StripeWebhookReceiver {
+    fn name(&self) -> &str { "stripe_webhook" }
+
+    fn routes(&self) -> Vec<(HttpMethod, String)> {
+        vec![(HttpMethod::Post, "/api/webhooks/stripe".into())]
+    }
+
+    fn handle_route(
+        &self,
+        method: HttpMethod,
+        url: &str,
+        body: &str,
+        _auth: &AuthContext,
+    ) -> Option<(u16, String)> {
+        if method != HttpMethod::Post || url != "/api/webhooks/stripe" {
+            return None;
+        }
+        // verify signature, parse event, dispatch...
+        Some((200, "{}".into()))
+    }
+}
+```
+
+The router checks plugin routes after its built-in routes, in plugin registration order.
+
+## Hooking the data layer
+
+`before_write` lets you mutate `data` before it lands. Used by `timestamps`, `slugify`, `computed`, `tenant_scope`:
+
+```rust
+impl Plugin for TimestampPlugin {
+    fn name(&self) -> &str { "timestamps" }
+
+    fn before_write(
+        &self,
+        _entity: &str,
+        op: WriteOp,
+        data: &mut Value,
+        _auth: &AuthContext,
+    ) -> Result<(), PluginError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Some(obj) = data.as_object_mut() {
+            if op == WriteOp::Insert && !obj.contains_key("createdAt") {
+                obj.insert("createdAt".into(), Value::String(now.clone()));
+            }
+            obj.insert("updatedAt".into(), Value::String(now));
+        }
+        Ok(())
+    }
+}
+```
+
+`Err(PluginError::ValidationFailed { code, message })` rejects the write with a 400 response.
+
+## Per-request hooks
+
+`before_request` runs before route dispatch. Used by `rate_limit`, `cors`, `csrf`:
+
+```rust
+impl Plugin for RateLimitPlugin {
+    fn name(&self) -> &str { "rate_limit" }
+
+    fn before_request(
+        &self,
+        meta: &RequestMeta,
+        auth: &AuthContext,
+    ) -> Result<(), PluginError> {
+        let key = match auth.user_id.as_ref() {
+            Some(uid) => format!("user:{uid}"),
+            None => format!("ip:{}", meta.client_ip),
+        };
+        self.check(&key)  // Err if over budget
+    }
+}
+```
+
+`PluginError::RateLimited { retry_after_secs }` produces a 429 response with the right header.
+
+## Registering with the runtime
+
+The runtime reads `manifest.plugins` at boot and matches each entry's `name` against built-in names. To add your own:
+
+```rust
+// In your custom runtime build or main.rs:
+use pylon_runtime::{Runtime, RuntimeConfig};
+use my_plugins::slack::SlackSignupNotifier;
+
+let mut runtime = Runtime::from_env();
+runtime.register_plugin(Box::new(SlackSignupNotifier::new(...)));
+runtime.serve();
+```
+
+Or, more idiomatic for a published plugin: register a constructor function the manifest can name:
+
+```rust
+pylon_plugin::register_builtin("slack_signup_notifier", |config: &Value| {
+    let url = config.get("webhook_url").and_then(|v| v.as_str()).unwrap_or("").into();
+    let entity = config.get("entity").and_then(|v| v.as_str()).unwrap_or("User").into();
+    Box::new(SlackSignupNotifier::new(url, entity))
+});
+```
+
+Then users enable your plugin via manifest:
+
+```jsonc
+{
+  "name": "slack_signup_notifier",
+  "config": { "webhook_url": "https://hooks.slack.com/...", "entity": "User" }
+}
+```
+
+## Performance guidance
+
+- **Hot-path plugins must be fast.** `before_request` runs on every HTTP request — if it allocates or locks, it shows up at p99.
+- **`after_write` should defer expensive work.** Spawn a thread or push to a queue rather than blocking the response.
+- **Use `Mutex` sparingly.** For high-throughput counters, prefer `AtomicU64` or sharded state.
+- **Don't call `.unwrap()`** in hooks. A panic in a plugin can crash the runtime thread; return errors instead.
+
+## Testing
+
+```rust
+#[test]
+fn timestamps_stamps_on_insert() {
+    let plugin = TimestampPlugin::new();
+    let mut data = serde_json::json!({ "title": "x" });
+    plugin.before_write(
+        "Post",
+        WriteOp::Insert,
+        &mut data,
+        &AuthContext::anonymous(),
+    ).unwrap();
+    assert!(data["createdAt"].is_string());
+    assert!(data["updatedAt"].is_string());
+}
+```
+
+The trait is plain Rust — no special test harness needed.
+
+## Distributing
+
+For internal use, ship plugins in your own runtime build (a fork of `crates/runtime` with `register_plugin` calls in `main.rs`).
+
+For public plugins, publish a crate that exposes a `register(runtime: &mut Runtime)` function — users add it to their build's dependencies and one-line-call it.
+
+The community plugin registry is on the roadmap; until then, GitHub stars and word of mouth.
+
+## Reference: built-in plugins as examples
+
+The `crates/plugin/src/builtin/` directory has 30+ plugins across every shape — read them as reference:
+
+- **Simple after-write hook**: `audit_log.rs`, `webhooks.rs`
+- **Before-write data mutation**: `timestamps.rs`, `slugify.rs`, `computed.rs`
+- **Per-request gate**: `rate_limit.rs`, `cors.rs`, `csrf.rs`
+- **HTTP routes**: `api_keys.rs`, `totp.rs`, `stripe.rs`
+- **Subsystem replacement**: `file_storage.rs`, `cache_client.rs`, `email.rs`
+- **External-service integration**: `vector_search.rs`, `ai_proxy.rs`, `mcp.rs`
+
+Pick the closest match, copy, adapt.

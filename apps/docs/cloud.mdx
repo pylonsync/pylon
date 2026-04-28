@@ -1,0 +1,148 @@
+---
+title: Pylon Cloud
+description: "Hosted Pylon at cloud.pylonsync.com. Same binary, same APIs, no infrastructure to run."
+---
+
+Pylon is fully self-hostable, but if you'd rather not run it yourself, **Pylon Cloud** at [cloud.pylonsync.com](https://cloud.pylonsync.com) hosts the same binary you'd run on a VPS — same routes, same wire formats, same client SDKs. Sign up, point `pylon deploy` at it, and your app is live.
+
+## When to use it
+
+| You should use Cloud if... | You should self-host if... |
+| --- | --- |
+| You want to ship today, not learn ops | You have strict data residency / on-prem requirements |
+| You don't want to manage Postgres backups, TLS, scaling | You already operate Kubernetes / Nomad / your own VPS fleet |
+| You'd rather pay per request than per server | Your workload spikes hard enough that reserved capacity is cheaper |
+| You want managed magic-link email + OAuth credentials out of the box | You need to run an air-gapped deployment |
+
+Both targets run the same binary. You can start on Cloud and migrate to self-hosted (or back) without touching client code — only the `baseUrl` changes.
+
+## Sign up
+
+1. Visit [cloud.pylonsync.com](https://cloud.pylonsync.com) and create an account.
+2. Create a workspace. Each workspace gets a stable URL like `https://your-app.pylon.app` and an API key.
+3. Add a payment method (free tier covers small projects; see pricing below).
+
+## Deploy from the CLI
+
+```bash
+# One-time: log in
+pylon login
+
+# From a Pylon project directory
+pylon deploy --target cloud
+```
+
+`pylon deploy --target cloud` does:
+
+1. Builds your TypeScript functions with Bun
+2. Validates `pylon.manifest.json`
+3. Uploads the bundle + manifest to your workspace
+4. Runs migrations
+5. Cuts over traffic atomically (zero-downtime — old version drains)
+
+You'll get back a URL like `https://your-app.pylon.app` that your clients connect to. Subsequent deploys are incremental.
+
+### Custom domains
+
+```bash
+pylon domain add app.example.com
+```
+
+Cloud provisions a TLS certificate (Let's Encrypt) automatically. Add the displayed `CNAME` record to your DNS, wait a minute, and you're live on the custom domain. Both the apex Cloud URL and your custom domain stay valid.
+
+### Environment variables
+
+Set per-workspace secrets without committing them to git:
+
+```bash
+pylon env set STRIPE_SECRET_KEY=sk_live_...
+pylon env set OPENAI_API_KEY=sk-...
+pylon env list
+pylon env unset STRIPE_SECRET_KEY
+```
+
+These show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`. They're encrypted at rest and never appear in logs.
+
+## What's included
+
+- **Postgres** — managed, with daily backups and point-in-time recovery up to 7 days
+- **TLS** — automatic Let's Encrypt certificates on `*.pylon.app` and your custom domains
+- **Magic-link email** — managed transactional sender; no SendGrid/Resend account required
+- **OAuth** — bring your own Google/GitHub OAuth credentials, or use Cloud's shared dev credentials in non-prod workspaces
+- **WebSocket + SSE + shard ports** — exposed automatically; clients connect to the public URL
+- **File storage** — S3-backed, included up to 10 GB on the free tier
+- **Studio** — every workspace has the inspector available at `https://your-app.pylon.app/studio`
+- **Logs + metrics** — request logs, function traces, and basic latency/error charts in the dashboard
+- **Versioned deploys** — `pylon deploy --rollback` reverts to the previous version
+
+## Scaling
+
+Cloud autoscales the HTTP, WebSocket, and shard tiers separately based on load. The usage-based pricing model means you don't pre-provision — you pay for what you use.
+
+For multiplayer apps with sticky shard connections, set the **shard region** when creating the workspace so latency to your players is minimized:
+
+| Region | Code |
+| --- | --- |
+| US East (Ashburn) | `iad` |
+| US West (San Jose) | `sjc` |
+| EU (Frankfurt) | `fra` |
+| Asia (Singapore) | `sin` |
+
+Multi-region replication is on the roadmap; for now each workspace lives in one region.
+
+## Pricing
+
+Usage-based, no monthly minimums:
+
+| Resource | Free tier | Beyond free |
+| --- | --- | --- |
+| HTTP requests | 1M / month | $0.50 / 1M |
+| WebSocket connection-minutes | 100K / month | $0.10 / 100K |
+| Postgres storage | 1 GB | $0.20 / GB / month |
+| File storage | 10 GB | $0.02 / GB / month |
+| Bandwidth (egress) | 100 GB | $0.05 / GB |
+| Magic-link emails | 1K / month | $1.00 / 1K |
+
+Live pricing on the [pricing page](https://cloud.pylonsync.com/pricing).
+
+## Migrating from self-hosted
+
+```bash
+# 1. Snapshot your data
+pylon backup ./snapshot/
+
+# 2. Create the workspace (or use an existing empty one)
+pylon login
+pylon workspace create my-app
+
+# 3. Restore into Cloud
+pylon restore ./snapshot/ --target cloud
+```
+
+Then point your clients at the new `baseUrl`. Sessions are preserved (the session store is part of the snapshot), so users stay signed in.
+
+## Migrating to self-hosted
+
+```bash
+# 1. Snapshot from Cloud
+pylon backup ./snapshot/ --source cloud
+
+# 2. Restore into your own deployment
+pylon restore ./snapshot/
+```
+
+No lock-in. The binary is the same; the data format is the same.
+
+## Troubleshooting
+
+**`pylon deploy` says "not authenticated"** — run `pylon login` again. Tokens expire after 90 days.
+
+**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show your `*.pylon.app` target.
+
+**Magic-link emails not arriving** — check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in `Settings → Email` to authenticate with SPF/DKIM/DMARC under your domain.
+
+**WebSocket disconnects** — Cloud's load balancer holds connections for up to 4 hours; the sync engine handles reconnects automatically with full-jitter backoff. If you see frequent drops, check `connection state` in the dashboard.
+
+## Status
+
+[status.pylonsync.com](https://status.pylonsync.com) shows live region health and incident history.

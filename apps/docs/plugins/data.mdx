@@ -1,0 +1,297 @@
+---
+title: Data hygiene plugins
+description: "Validation, computed fields, timestamps, slugs, soft delete, cascade, versioning, multi-tenancy."
+---
+
+Data hygiene plugins keep your rows clean — automatic timestamps, derived fields, validation, soft delete. Each one removes a class of "I have to remember to do this everywhere" and makes the rule explicit in the manifest.
+
+## `timestamps`
+
+Automatically stamps `createdAt` and `updatedAt` on every insert/update.
+
+```jsonc
+{
+  "name": "timestamps",
+  "config": {
+    "entities": "*",
+    "created_field": "createdAt",
+    "updated_field": "updatedAt"
+  }
+}
+```
+
+| Config | Default |
+| --- | --- |
+| `entities` | `*` (all) — or a list `["Post", "Comment"]` |
+| `created_field` | `createdAt` |
+| `updated_field` | `updatedAt` |
+| `format` | ISO 8601 datetime string |
+
+Skip per-row by passing the field explicitly — your value wins.
+
+The fields must exist on the entity (declare as `datetime`). If they don't, the plugin warns at boot and skips that entity.
+
+## `validation`
+
+Field-level constraints checked before write. Returns `400 VALIDATION_FAILED` with details.
+
+```typescript
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("validation", {
+  rules: {
+    "User.email":      [{ type: "email" }, { type: "max_length", value: 254 }],
+    "User.displayName":[{ type: "min_length", value: 1 }, { type: "max_length", value: 100 }],
+    "Post.title":      [{ type: "min_length", value: 1 }, { type: "max_length", value: 200 }],
+    "Post.body":       [{ type: "max_length", value: 100000 }],
+    "Order.total":     [{ type: "min", value: 0 }, { type: "max", value: 1000000 }],
+  },
+});
+```
+
+Built-in rule types:
+
+| Type | Args | Applies to |
+| --- | --- | --- |
+| `min_length` | `value: number` | string |
+| `max_length` | `value: number` | string |
+| `pattern` | `value: regex string` | string |
+| `email` | — | string |
+| `min` | `value: number` | int, float |
+| `max` | `value: number` | int, float |
+| `not_empty` | — | string |
+| `custom` | `name: string, fn: (val) => string \| null` | any |
+
+Custom rules let you check anything:
+
+```typescript
+definePlugin("validation", {
+  rules: {
+    "Project.name": [
+      { type: "custom", name: "no-reserved", fn: (v) => {
+        return ["new", "settings", "billing"].includes(v) ? "name is reserved" : null;
+      }},
+    ],
+  },
+});
+```
+
+## `slugify`
+
+Auto-generates URL-safe slugs from a source field.
+
+```jsonc
+{
+  "name": "slugify",
+  "config": {
+    "rules": [
+      { "entity": "Post",     "from": "title",     "to": "slug" },
+      { "entity": "Project",  "from": "name",      "to": "slug" }
+    ],
+    "unique": true
+  }
+}
+```
+
+`unique: true` appends `-2`, `-3`, ... if a collision exists. The slug field must already be declared on the entity.
+
+Strips diacritics, lowercases, replaces non-alphanumerics with hyphens, collapses runs:
+
+```
+"Hello, World!"        → "hello-world"
+"Café — résumé"        → "cafe-resume"
+"  multiple   spaces  "→ "multiple-spaces"
+```
+
+## `computed`
+
+Derived fields that recompute on every write. The function runs server-side; the result is persisted.
+
+```typescript
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("computed", {
+  fields: {
+    "Order.subtotal": (row) => row.items.reduce((sum, i) => sum + i.price * i.qty, 0),
+    "Order.tax":      (row) => row.subtotal * row.taxRate,
+    "Order.total":    (row) => row.subtotal + row.tax + row.shipping,
+    "User.fullName":  (row) => `${row.firstName} ${row.lastName}`.trim(),
+  },
+});
+```
+
+Functions receive the row pre-merge with the patch applied; return value is written back into the row before policies run. Order matters — `subtotal` is computed before `tax` is computed, before `total` is computed (the plugin tops-sorts by reference).
+
+For computations that touch other entities, use a function instead of a computed field.
+
+## `cascade`
+
+Cascade-delete child rows when a parent is deleted.
+
+```jsonc
+{
+  "name": "cascade",
+  "config": {
+    "rules": [
+      { "parent": "Post",    "child": "Comment", "foreign_key": "postId"    },
+      { "parent": "Project", "child": "Task",    "foreign_key": "projectId" },
+      { "parent": "User",    "child": "Session", "foreign_key": "userId"    }
+    ]
+  }
+}
+```
+
+Deletes happen **transactionally** with the parent — either everything goes or nothing does.
+
+For one-step-removed cascades (Project → Task → Subtask), declare both rules. The plugin runs them depth-first.
+
+To cascade *update* (e.g. nullify FK instead of delete), pair with `soft_delete` and a custom mutation.
+
+## `soft_delete`
+
+Sets a `deletedAt` field instead of physically removing rows. Listings filter deleted rows out by default.
+
+```jsonc
+{
+  "name": "soft_delete",
+  "config": {
+    "entities": ["Post", "Comment", "User"],
+    "field": "deletedAt"
+  }
+}
+```
+
+After the plugin is enabled:
+
+- `DELETE /api/entities/Post/123` sets `deletedAt = <now>`, returns `{ deleted: true }`
+- `GET /api/entities/Post` excludes rows with `deletedAt != null`
+- `GET /api/entities/Post?include_deleted=true` returns everything (admin only)
+- `POST /api/entities/Post/123/restore` clears `deletedAt`
+
+Pair with `cascade` to soft-delete children too.
+
+## `versioning`
+
+Snapshots every change to a row into a `<Entity>Version` table.
+
+```jsonc
+{
+  "name": "versioning",
+  "config": {
+    "entities": ["Post", "Document"],
+    "max_versions": 50
+  }
+}
+```
+
+Auto-provisions `PostVersion`, `DocumentVersion` etc. with:
+
+```jsonc
+{
+  "name": "PostVersion",
+  "fields": [
+    { "name": "rowId",     "type": "id(Post)", "optional": false },
+    { "name": "version",   "type": "int",      "optional": false },
+    { "name": "data",      "type": "string",   "optional": false },
+    { "name": "actorId",   "type": "id(User)", "optional": true  },
+    { "name": "createdAt", "type": "datetime", "optional": false }
+  ]
+}
+```
+
+Adds endpoints:
+
+- `GET /api/entities/Post/123/versions` — list versions
+- `GET /api/entities/Post/123/versions/5` — fetch specific version
+- `POST /api/entities/Post/123/versions/5/restore` — replace current row with version 5
+
+`max_versions` trims older snapshots; `null` keeps all.
+
+## `tenant_scope`
+
+Auto-injects `orgId == auth.tenantId` into every entity query in multi-tenant apps. Without it, you'd write the same `where` clause everywhere.
+
+```jsonc
+{
+  "name": "tenant_scope",
+  "config": {
+    "entities": "*",
+    "tenant_field": "orgId",
+    "exempt": ["User", "Org", "OrgMember"]
+  }
+}
+```
+
+Once enabled:
+
+- Queries on `Project` automatically filter to `orgId = auth.tenantId`
+- Inserts auto-fill `orgId = auth.tenantId` if not provided
+- Updates/deletes refuse to touch rows belonging to other tenants
+
+`exempt` lists entities that don't have an `orgId` (typically `User`, `Org`, the join tables). Admin contexts bypass scoping.
+
+## `organizations`
+
+Adds the standard `Org` + `OrgMember` entities and the bookkeeping endpoints for managing membership.
+
+```jsonc
+{ "name": "organizations" }
+```
+
+Provisions:
+
+```jsonc
+{
+  "name": "Org",
+  "fields": [
+    { "name": "name",      "type": "string", "optional": false },
+    { "name": "slug",      "type": "string", "unique": true },
+    { "name": "createdAt", "type": "datetime", "optional": false }
+  ]
+}
+{
+  "name": "OrgMember",
+  "fields": [
+    { "name": "userId", "type": "id(User)", "optional": false },
+    { "name": "orgId",  "type": "id(Org)",  "optional": false },
+    { "name": "role",   "type": "string",   "optional": false }
+  ],
+  "indexes": [
+    { "name": "by_user_org", "fields": ["userId", "orgId"], "unique": true }
+  ]
+}
+```
+
+Endpoints:
+
+- `POST /api/orgs` — create an org (caller becomes owner)
+- `GET /api/orgs` — list orgs the current user belongs to
+- `POST /api/orgs/:id/invite` — invite a user by email (sends magic-code-style email)
+- `POST /api/orgs/:id/members/:userId/role` — change a member's role (owner only)
+- `DELETE /api/orgs/:id/members/:userId` — remove a member
+
+Pair with `tenant_scope` for full multi-tenancy.
+
+## Recommended for typical apps
+
+```jsonc
+{
+  "plugins": [
+    { "name": "timestamps" },
+    { "name": "soft_delete",  "config": { "entities": ["Post", "Comment", "User"] } },
+    { "name": "cascade",      "config": { "rules": [
+      { "parent": "Post", "child": "Comment", "foreign_key": "postId" },
+      { "parent": "User", "child": "Post",    "foreign_key": "authorId" }
+    ]}},
+    { "name": "slugify",      "config": { "rules": [
+      { "entity": "Post", "from": "title", "to": "slug" }
+    ]}}
+  ]
+}
+```
+
+For multi-tenant SaaS, add `organizations` + `tenant_scope`.
+
+## What about full-text and vector search?
+
+Those have their own group — see [Search & AI](/plugins/search-ai). The `search` plugin is FTS5-backed; `vector_search` is for semantic similarity over embeddings.

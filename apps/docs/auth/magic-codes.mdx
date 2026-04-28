@@ -1,0 +1,165 @@
+---
+title: Magic codes
+description: "Email a 6-digit code, exchange it for a session. Pylon's recommended sign-in flow."
+---
+
+Magic codes are the simplest sign-in flow Pylon ships. The user types an email, gets a 6-digit code, types it back, and they're in. No passwords to remember, no OAuth credentials to obtain. Most apps should start here.
+
+## How it works
+
+```
+client            POST /api/auth/magic/send  { email }
+   ←  { sent: true }
+                  → user receives email with 6-digit code
+client            POST /api/auth/magic/verify { email, code }
+   ←  { token, user_id, expires_at }
+```
+
+If the user doesn't exist when the code is verified, Pylon **auto-creates** a `User` row with that email and stamps `emailVerified` — typing the code proves control of the address.
+
+## Send a code
+
+```bash
+curl -X POST https://your-app/api/auth/magic/send \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "alice@example.com"}'
+```
+
+Response:
+
+```json
+{ "sent": true, "email": "alice@example.com" }
+```
+
+In **dev mode** (`PYLON_DEV_MODE=true`) the response also includes `dev_code` so you can sign in without configuring an email provider:
+
+```json
+{ "sent": true, "email": "alice@example.com", "dev_code": "428193" }
+```
+
+## Verify a code
+
+```bash
+curl -X POST https://your-app/api/auth/magic/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "alice@example.com", "code": "428193"}'
+```
+
+Response:
+
+```json
+{
+  "token": "pylon_a1b2c3...",
+  "user_id": "usr_xyz",
+  "expires_at": 1735689600
+}
+```
+
+Store the `token` and pass it as `Authorization: Bearer pylon_a1b2c3...` on subsequent requests.
+
+## From the SDKs
+
+<CodeGroup>
+```typescript TypeScript
+import { configureClient, startMagicLink, verifyMagicLink } from "@pylonsync/react";
+
+configureClient({ baseUrl: "https://your-app" });
+
+await startMagicLink("alice@example.com");
+// ... user types the code ...
+const session = await verifyMagicLink("alice@example.com", code);
+// session.token is now stored automatically
+```
+
+```swift Swift
+import PylonClient
+
+let client = PylonClient(baseURL: URL(string: "https://your-app")!)
+try await client.startMagicCode(email: "alice@example.com")
+// ... user types the code ...
+let session = try await client.verifyMagicCode(
+    email: "alice@example.com",
+    code: code
+)
+// token is persisted to UserDefaults automatically
+```
+</CodeGroup>
+
+## Built-in security
+
+- **Constant-time code comparison** — no timing leak.
+- **5-attempt cap per code** — burned after 5 wrong tries; even a correct subsequent attempt returns `RATE_LIMITED`.
+- **10-minute expiry** — codes are short-lived.
+- **60-second send cooldown per email** — clients can't flood a user with codes. Returns `429 RATE_LIMITED` with `retry_after_secs`.
+- **Single-use** — verifying a code consumes it.
+- **CSPRNG-generated** — codes are uniform random in `0..1_000_000`.
+
+## Configuring email delivery
+
+Magic codes need an email provider configured, otherwise they only work in dev mode. Pylon supports:
+
+```bash
+PYLON_EMAIL_PROVIDER=stack0      # or sendgrid | resend | webhook
+PYLON_EMAIL_API_KEY=sk_live_...
+PYLON_EMAIL_FROM=noreply@yourdomain.com
+```
+
+If you're on **Pylon Cloud**, magic-link email is included — no provider config needed for the included sender. Configure your own domain in `Settings → Email` for production use to keep deliverability high.
+
+If you set `PYLON_EMAIL_PROVIDER=webhook`, also set `PYLON_EMAIL_ENDPOINT` to your custom URL — Pylon POSTs `{ to, from, subject, body }` to it.
+
+See [Stack0](https://www.stack0.dev), [Resend](https://resend.com), [SendGrid](https://sendgrid.com) for transactional sending services.
+
+## Customizing the email
+
+The default subject is "Your sign-in code" and the body is plain text:
+
+```
+Your sign-in code is: 428193
+
+This code will expire in 10 minutes.
+```
+
+To customize, intercept the send by writing your own action that calls `magic/send` server-side and ships your own templated email instead. The plugin system also supports replacing the email transport — see [Plugins → Integrations](/plugins/integrations).
+
+## Error responses
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `MISSING_EMAIL` | 400 | No `email` in body |
+| `MISSING_CODE` | 400 | No `code` in body (verify only) |
+| `RATE_LIMITED` | 429 | Cooldown on send, or too many bad verifies |
+| `INVALID_CODE` | 401 | Wrong code, expired, or already used |
+| `EMAIL_SEND_FAILED` | 500 | Provider rejected the send |
+
+## Testing
+
+In dev mode, skip the email entirely:
+
+```typescript
+const send = await fetch("/api/auth/magic/send", {
+  method: "POST",
+  body: JSON.stringify({ email: "test@example.com" }),
+}).then(r => r.json());
+
+const verify = await fetch("/api/auth/magic/verify", {
+  method: "POST",
+  body: JSON.stringify({ email: "test@example.com", code: send.dev_code }),
+}).then(r => r.json());
+
+// verify.token is now valid
+```
+
+For integration tests, this is the fastest sign-in path — no SMTP mock needed.
+
+## When to choose magic codes vs alternatives
+
+| Magic codes | Password | OAuth |
+| --- | --- | --- |
+| ✅ Zero memory load on user | ❌ Users forget passwords | ✅ Familiar to users |
+| ✅ Email is verified by construction | ❌ Email verification is a separate step | ✅ No credentials your service stores |
+| ✅ No password reset flow needed | ❌ Need reset flow | ✅ Provider handles 2FA |
+| ❌ Email deliverability matters | ✅ Works without email | ❌ Requires app registration with provider |
+| ❌ Slower than typing a password | ✅ Fast for repeat users | ✅ One click after first use |
+
+Most apps should ship magic codes first, then add OAuth for one-click sign-in once they have users. Password is the third option, useful when email isn't an option (e.g. shared device with no email access).

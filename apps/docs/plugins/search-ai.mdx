@@ -1,0 +1,237 @@
+---
+title: Search & AI plugins
+description: "Full-text search (FTS5), vector similarity, AI provider proxy, MCP server."
+---
+
+Search and AI plugins turn Pylon into the substrate for AI-native apps — keyword search, semantic similarity, LLM API proxying, and MCP server exposure. Use them together: text-index your entities, vector-index the same content, expose both as MCP tools an LLM agent can call.
+
+## `search`
+
+Full-text search backed by SQLite's FTS5 extension (or Postgres `tsvector` when on Postgres). Maintained automatically — every insert/update/delete to indexed entities updates the index.
+
+Configure in your manifest at the entity level (not as a plugin entry — search is a property of the entity):
+
+```jsonc
+{
+  "name": "Post",
+  "fields": [
+    { "name": "title", "type": "string" },
+    { "name": "body",  "type": "richtext" },
+    { "name": "tags",  "type": "string" },
+    { "name": "authorId", "type": "id(User)" }
+  ],
+  "search": {
+    "text_fields": ["title", "body"],
+    "facets":      ["authorId", "tags"],
+    "sortable":    ["createdAt", "viewCount"]
+  }
+}
+```
+
+| Field | Purpose |
+| --- | --- |
+| `text_fields` | Tokenized into the FTS5 index for keyword matching |
+| `facets` | Materialized as roaring bitmaps for instant `groupBy`-style counts |
+| `sortable` | Indexed so result sets paginate stably |
+
+Query via `POST /api/search/<entity>`:
+
+```typescript
+const results = await client.search("Post", {
+  query: "rust async runtime",
+  filters: { authorId: "u_123", tags: "performance" },
+  facets: ["tags", "authorId"],
+  sort: { createdAt: "desc" },
+  page: 0,
+  pageSize: 20,
+});
+// → { hits, facetCounts, total, tookMs }
+```
+
+Or the React hook:
+
+```tsx
+const { hits, facetCounts, loading } = useSearch("Post", {
+  query: input,
+  facets: ["tags"],
+});
+```
+
+`facetCounts` is the live count per facet value over the current filtered hit set — perfect for building Algolia-style faceted UIs without Algolia.
+
+## `vector_search`
+
+Nearest-neighbor search over embeddings. Cosine similarity, in-memory index, snapshot-on-write to disk for restart durability.
+
+Pylon doesn't compute embeddings — pass them in from your favorite model.
+
+```jsonc
+{
+  "name": "vector_search",
+  "config": {
+    "entity": "Post",
+    "field": "embedding",
+    "dimensions": 1536,
+    "persist_path": "/var/lib/pylon/post-embeddings.json"
+  }
+}
+```
+
+Index a row's embedding:
+
+```typescript
+import { vectorIndex } from "@pylonsync/sdk";
+
+const embedding = await openai.embeddings.create({
+  model: "text-embedding-3-small",
+  input: post.body,
+});
+
+await vectorIndex("Post", post.id, embedding.data[0].embedding);
+```
+
+Query:
+
+```typescript
+import { vectorSearch } from "@pylonsync/sdk";
+
+const queryEmbedding = await openai.embeddings.create({
+  model: "text-embedding-3-small",
+  input: "how do I deploy a Rust service?",
+});
+
+const hits = await vectorSearch("Post", queryEmbedding.data[0].embedding, {
+  k: 10,
+  threshold: 0.7,
+});
+// → [{ rowId, score, row }, ...]
+```
+
+Use cases:
+
+- **Semantic search** — "posts that *mean* what I asked", not just "posts containing my words"
+- **Related content** — vector-search by an existing row's embedding to find similar items
+- **Retrieval-augmented generation (RAG)** — pull the top-k relevant chunks into an LLM's context window
+
+### Scaling notes
+
+- Search complexity is O(n × d) per query. 10k rows × 1536-dim vectors ≈ 10M float ops ≈ <10ms on commodity hardware.
+- Above ~100k rows, switch to a dedicated vector store (`pgvector`, `Qdrant`, `Turso libsql`).
+- Persistence is snapshot-on-write — if you have millions of writes per minute, the snapshot becomes a bottleneck. Pair with a more sophisticated index in that range.
+
+## `ai_proxy`
+
+Pass-through proxy to LLM providers (OpenAI, Anthropic, Google, etc.) with token counting, rate limiting, cost tracking, and per-user budgets — all the things you'd otherwise rebuild for every AI feature.
+
+```jsonc
+{
+  "name": "ai_proxy",
+  "config": {
+    "providers": {
+      "openai":    { "api_key_env": "OPENAI_API_KEY",    "base_url": "https://api.openai.com/v1" },
+      "anthropic": { "api_key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com/v1" }
+    },
+    "rate_limits": {
+      "user": { "requests_per_minute": 30, "tokens_per_day": 100000 }
+    },
+    "log_to_entity": "AiCall"
+  }
+}
+```
+
+Endpoints:
+
+- `POST /api/ai/openai/v1/chat/completions` — proxies to `https://api.openai.com/v1/chat/completions`
+- `POST /api/ai/anthropic/v1/messages` — proxies to `https://api.anthropic.com/v1/messages`
+- Same shape for any provider you configure
+
+Why proxy:
+
+1. **API keys stay server-side.** Browser/native clients never see your `OPENAI_API_KEY`.
+2. **Per-user rate limits.** Cap free tier at N requests/day; bump for paid users.
+3. **Cost tracking per user.** Every request logged with token counts.
+4. **One set of credentials.** Rotate the provider key in one place.
+
+When `log_to_entity` is set, every call writes a row:
+
+```jsonc
+{
+  "name": "AiCall",
+  "fields": [
+    { "name": "userId",      "type": "id(User)" },
+    { "name": "provider",    "type": "string" },
+    { "name": "model",       "type": "string" },
+    { "name": "input_tokens","type": "int" },
+    { "name": "output_tokens","type": "int" },
+    { "name": "cost_cents",  "type": "int" },
+    { "name": "createdAt",   "type": "datetime" }
+  ]
+}
+```
+
+Then you can query "how much did Alice spend this month?" with a regular Pylon aggregate.
+
+## `mcp`
+
+Exposes your Pylon entities and functions as [Model Context Protocol](https://modelcontextprotocol.io) tools — LLM agents (Claude, ChatGPT desktop, Cursor, Continue) can call into your app.
+
+```jsonc
+{
+  "name": "mcp",
+  "config": {
+    "entities": ["Todo", "Note"],
+    "functions": ["createTodo", "completeTodo", "searchNotes"],
+    "auth_required": true
+  }
+}
+```
+
+Endpoints (per the MCP spec):
+
+- `GET /mcp/sse` — Server-Sent Events stream for the MCP transport
+- `POST /mcp/messages` — JSON-RPC message endpoint
+
+Auto-generated tools:
+
+| Tool | What it does |
+| --- | --- |
+| `pylon_list_<entity>` | List rows of an exposed entity |
+| `pylon_get_<entity>` | Fetch a row by id |
+| `pylon_create_<entity>` | Create a row (subject to policies) |
+| `pylon_call_<fn>` | Invoke an exposed function |
+| `pylon_search_<entity>` | Full-text search if the entity has search config |
+
+LLM clients connect by pointing at `https://your-app/mcp/sse` with their API key as `Authorization: Bearer pk_...` (use an [API key](/auth/api-keys), not a session).
+
+Now you can ask Claude:
+
+> "Create a todo titled 'review PR #42' for me, and list any other open PR-related todos."
+
+And the model will call `pylon_create_Todo` and `pylon_search_Todo` against your live app, scoped to whatever the API key's owner can access.
+
+## Recommended pairings
+
+**Knowledge base / docs site**:
+
+```jsonc
+[
+  { "name": "search" },          // configured per-entity
+  { "name": "vector_search", "config": { "entity": "Doc", "field": "embedding", "dimensions": 1536 } },
+  { "name": "ai_proxy",      "config": { "providers": { "openai": { "api_key_env": "OPENAI_API_KEY" } } } },
+  { "name": "mcp",           "config": { "entities": ["Doc"], "functions": ["semanticSearch"] } }
+]
+```
+
+Now: keyword search via `useSearch`, semantic search via vector_search, LLM-powered Q&A via ai_proxy, and an MCP server for direct LLM integration.
+
+**Customer support tool**:
+
+```jsonc
+[
+  { "name": "search" },          // tickets full-text search
+  { "name": "ai_proxy",      "config": { "rate_limits": { "user": { "requests_per_minute": 60 } } } },
+  { "name": "mcp",           "config": { "entities": ["Ticket", "Customer"] } }
+]
+```
+
+Support agents can ask the AI sidecar to summarize tickets, draft replies, or pull customer history — all via MCP without leaving their existing tooling.

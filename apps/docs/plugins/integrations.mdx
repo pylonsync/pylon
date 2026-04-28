@@ -1,0 +1,321 @@
+---
+title: Integration plugins
+description: "File storage, cache, email, webhooks, Stripe, feature flags, audit log."
+---
+
+Integration plugins connect Pylon to the rest of your stack — S3-compatible storage, Redis-style caching, transactional email providers, Stripe billing, audit logging.
+
+## `file_storage`
+
+Replaces the default local-disk file backend with S3, R2, GCS, MinIO, or any S3-compatible store. Pylon also ships a [Stack0 backend](https://www.stack0.dev) selected via env vars without a plugin entry.
+
+```jsonc
+{
+  "name": "file_storage",
+  "config": {
+    "backend": "s3",
+    "bucket": "your-app-uploads",
+    "region": "us-east-1",
+    "endpoint": null,
+    "access_key_env": "S3_ACCESS_KEY",
+    "secret_key_env": "S3_SECRET_KEY",
+    "public_url_prefix": "https://cdn.your-app.com"
+  }
+}
+```
+
+For R2, MinIO, or other S3-compatible services, set `endpoint` to the service URL.
+
+Or via env (no plugin entry needed):
+
+```bash
+PYLON_FILES_PROVIDER=stack0           # or local (default)
+PYLON_STACK0_API_KEY=sk_live_...
+PYLON_STACK0_FOLDER=uploads           # optional prefix
+```
+
+The plugin is the right choice when you need backend-specific config that doesn't map cleanly to env vars; the env path is the right choice for typical cases.
+
+Once configured, `POST /api/files/upload` stores to the chosen backend and returns the public URL. The path is the same regardless of backend — your client code doesn't change.
+
+## `cache`
+
+In-process key-value cache for expensive computations. TTL'd, size-bounded, LRU-evicting.
+
+```jsonc
+{
+  "name": "cache",
+  "config": {
+    "max_entries": 10000,
+    "default_ttl_secs": 300
+  }
+}
+```
+
+Use from a function:
+
+```typescript
+import { mutation, v } from "@pylonsync/functions";
+import { cache } from "@pylonsync/sdk";
+
+export default mutation({
+  args: { url: v.string() },
+  async handler(ctx, args) {
+    const cached = cache.get(`fetch:${args.url}`);
+    if (cached) return cached;
+
+    const result = await fetch(args.url).then(r => r.json());
+    cache.set(`fetch:${args.url}`, result, { ttl_secs: 600 });
+    return result;
+  },
+});
+```
+
+`cache.invalidate(prefix)` blasts every key starting with the prefix — handy when an entity changes:
+
+```typescript
+// In an after-write hook
+await ctx.db.update("Post", id, patch);
+cache.invalidate(`post:${id}`);
+```
+
+## `cache_client`
+
+Same API as `cache`, but backed by an external Redis/Memcached instance for multi-replica deployments.
+
+```jsonc
+{
+  "name": "cache_client",
+  "config": {
+    "backend": "redis",
+    "url_env": "REDIS_URL",
+    "default_ttl_secs": 300
+  }
+}
+```
+
+Use this when you scale beyond one replica — in-process cache fragments across replicas, while Redis-backed cache stays consistent.
+
+On **Pylon Cloud**, multi-replica deployments use `cache_client` automatically with a managed Redis instance.
+
+## `email`
+
+Replaces the default email transport. Pylon already supports SendGrid / Resend / Stack0 / webhook via env vars (`PYLON_EMAIL_PROVIDER=...`); use this plugin when you need richer config or per-template behavior.
+
+```jsonc
+{
+  "name": "email",
+  "config": {
+    "provider": "sendgrid",
+    "api_key_env": "SENDGRID_API_KEY",
+    "from_default": "noreply@your-app.com",
+    "templates": {
+      "magic_code": {
+        "subject": "Your sign-in code",
+        "html": "<p>Your code: <strong>{code}</strong></p><p>Expires in 10 minutes.</p>"
+      },
+      "welcome": {
+        "subject": "Welcome to {appName}",
+        "html": "..."
+      }
+    }
+  }
+}
+```
+
+When a template name matches a built-in event (`magic_code`, `email_verification`, `org_invite`, etc.), the plugin's template overrides the default. Templates support `{var}` substitution from the event payload.
+
+Programmatic send from a function:
+
+```typescript
+import { sendEmail } from "@pylonsync/sdk";
+
+await sendEmail({
+  to: user.email,
+  template: "welcome",
+  vars: { appName: "Acme" },
+});
+```
+
+## `webhooks`
+
+Fire HTTP POST hooks after entity writes — perfect for syncing to data warehouses, notifying Slack, kicking off async work in another service.
+
+```typescript
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("webhooks", {
+  hooks: [
+    {
+      entity: "Order",
+      events: ["insert", "update"],
+      url: "https://hooks.your-app.com/order-changed",
+      secret_env: "WEBHOOK_SECRET",
+      retry: { max_attempts: 5, backoff_secs: 30 }
+    },
+    {
+      entity: "User",
+      events: ["insert"],
+      url: "https://api.intercom.io/contacts",
+      headers: { "Authorization": "Bearer ${INTERCOM_KEY}" }
+    }
+  ]
+});
+```
+
+Each hook ships JSON:
+
+```json
+{
+  "event": "insert",
+  "entity": "Order",
+  "row_id": "ord_xyz",
+  "data": { "id": "ord_xyz", "total": 12345, ... },
+  "timestamp": "2026-04-28T10:32:00Z",
+  "delivery_id": "wh_abc"
+}
+```
+
+With `secret_env` set, requests carry an `X-Pylon-Signature` header containing `sha256=<hex hmac>` — verify on the receiving side to confirm the webhook came from your Pylon instance.
+
+Failed deliveries retry per the `retry` config with exponential backoff. Permanently-failed deliveries land in a `WebhookDelivery` table for manual inspection.
+
+**SSRF defense**: webhooks are subject to `net_guard` if enabled — blocks delivery to private IP ranges. Allowlist specific internal hosts via `net_guard.allow_hosts`.
+
+## `stripe`
+
+Stripe-specific webhook handling, signature verification, and convenience helpers for subscriptions / invoices / customers.
+
+```jsonc
+{
+  "name": "stripe",
+  "config": {
+    "webhook_secret_env": "STRIPE_WEBHOOK_SECRET",
+    "api_key_env": "STRIPE_SECRET_KEY",
+    "sync_to_entity": {
+      "Customer":     "User",
+      "Subscription": "Subscription",
+      "Invoice":      "Invoice"
+    }
+  }
+}
+```
+
+Adds endpoint: `POST /api/webhooks/stripe` — verifies the Stripe signature header, parses the event, fires the corresponding hook.
+
+Auto-syncs Stripe objects to your entities when `sync_to_entity` is set:
+
+- `customer.created` → upsert `User` row keyed by `stripeCustomerId`
+- `customer.subscription.created/updated/deleted` → upsert `Subscription` row
+- `invoice.payment_succeeded/failed` → upsert `Invoice` row
+
+So your app can query `Subscription.status == 'active'` directly without round-tripping to Stripe.
+
+For custom event handling:
+
+```typescript
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("stripe", {
+  on: {
+    "checkout.session.completed": async (ctx, event) => {
+      const userId = event.data.object.client_reference_id;
+      await ctx.db.update("User", userId, { plan: "pro" });
+    },
+  },
+});
+```
+
+## `feature_flags`
+
+Runtime feature flags with per-user, per-tenant, or percentage-based rollout.
+
+```jsonc
+{
+  "name": "feature_flags",
+  "config": {
+    "flags": {
+      "new-onboarding":     { "enabled": true,  "rollout": 100 },
+      "ai-suggestions":     { "enabled": true,  "rollout": 25 },
+      "experimental-graph": { "enabled": true,  "users": ["u_123", "u_456"] },
+      "premium-widgets":    { "enabled": true,  "tenants": ["org_acme"] }
+    }
+  }
+}
+```
+
+Check from a function:
+
+```typescript
+import { isFeatureEnabled } from "@pylonsync/sdk";
+
+if (await isFeatureEnabled("new-onboarding", ctx.auth)) {
+  // ship the new flow
+}
+```
+
+Or expose to the client:
+
+```typescript
+const flags = await fetch("/api/flags", {
+  headers: { Authorization: `Bearer ${token}` },
+}).then(r => r.json());
+// → { "new-onboarding": true, "ai-suggestions": false, ... }
+```
+
+`rollout: 25` means deterministic 25% rollout — same user always gets the same answer, based on a hash of `user_id + flag_name`. Useful for A/B tests.
+
+## `audit_log`
+
+Records every write (insert / update / delete) to specified entities, with the actor, the before/after values, and the timestamp. Tamper-evident if you opt into the integrity-check signing mode.
+
+```jsonc
+{
+  "name": "audit_log",
+  "config": {
+    "entities": ["User", "Subscription", "ApiKey", "OrgMember"],
+    "include_fields": "*",
+    "exclude_fields": ["passwordHash", "totpSecret"],
+    "sign_entries": true,
+    "signing_key_env": "AUDIT_SIGNING_KEY"
+  }
+}
+```
+
+Provisions:
+
+```jsonc
+{
+  "name": "AuditLog",
+  "fields": [
+    { "name": "actorId",   "type": "id(User)", "optional": true  },
+    { "name": "entity",    "type": "string",   "optional": false },
+    { "name": "rowId",     "type": "string",   "optional": false },
+    { "name": "operation", "type": "string",   "optional": false },
+    { "name": "before",    "type": "string",   "optional": true  },
+    { "name": "after",     "type": "string",   "optional": true  },
+    { "name": "signature", "type": "string",   "optional": true  },
+    { "name": "createdAt", "type": "datetime", "optional": false }
+  ]
+}
+```
+
+`exclude_fields` ensures secrets never land in the audit table. `sign_entries: true` HMACs each row so a malicious admin can't tamper with history without leaving evidence.
+
+For compliance-heavy environments (HIPAA, SOC2, ISO 27001), enable signing and ship the audit table to immutable cold storage on a schedule.
+
+## Recommended for production
+
+```jsonc
+{
+  "plugins": [
+    { "name": "file_storage", "config": { "backend": "s3", "bucket": "uploads", ... } },
+    { "name": "email",        "config": { "provider": "stack0" } },
+    { "name": "audit_log",    "config": { "entities": ["User", "Subscription", "ApiKey"], "exclude_fields": ["passwordHash", "totpSecret"] } },
+    { "name": "stripe",       "config": { "webhook_secret_env": "STRIPE_WEBHOOK_SECRET", "sync_to_entity": { "Customer": "User", "Subscription": "Subscription" } } },
+    { "name": "webhooks",     "config": { "hooks": [...] } }
+  ]
+}
+```
+
+Plus the [security plugins](/plugins/security) and [data hygiene plugins](/plugins/data) for a complete production setup.

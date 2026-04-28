@@ -1,0 +1,247 @@
+---
+title: Next.js SDK
+description: "@pylonsync/next — Server Actions, RSC data fetching, middleware-friendly auth for Next.js App Router."
+---
+
+`@pylonsync/next` is the Next.js-specific layer on top of `@pylonsync/react`. It adds:
+
+- **Server Actions** — call Pylon functions from `'use server'` with the user's session
+- **RSC data fetching** — load entities in React Server Components without round-tripping through the browser
+- **Middleware helpers** — gate routes on auth in `middleware.ts`
+- **Cookie auth** — `HttpOnly` session cookies that work with both server-rendered and client-rendered routes
+
+Works with App Router (Next.js 13.4+); Pages Router users can still use `@pylonsync/react` directly.
+
+## Install
+
+```bash
+bun add @pylonsync/sdk @pylonsync/react @pylonsync/next
+```
+
+## Configure
+
+In `app/providers.tsx`:
+
+```tsx
+"use client";
+
+import { PylonProvider } from "@pylonsync/next/client";
+
+export function Providers({ children, hydration }) {
+  return (
+    <PylonProvider
+      baseUrl={process.env.NEXT_PUBLIC_PYLON_URL!}
+      hydration={hydration}
+    >
+      {children}
+    </PylonProvider>
+  );
+}
+```
+
+In `app/layout.tsx`:
+
+```tsx
+import { getServerData } from "@pylonsync/next/server";
+import { cookies } from "next/headers";
+import { Providers } from "./providers";
+
+export default async function RootLayout({ children }) {
+  const token = cookies().get("pylon_session")?.value;
+  const hydration = await getServerData(["Todo", "User"], { token });
+  return (
+    <html>
+      <body>
+        <Providers hydration={hydration}>{children}</Providers>
+      </body>
+    </html>
+  );
+}
+```
+
+The first paint contains real data (server-rendered); the client takes over for live updates without a redundant initial pull.
+
+## Server Components
+
+```tsx
+// app/todos/page.tsx
+import { fetchListServer } from "@pylonsync/next/server";
+import { cookies } from "next/headers";
+
+export default async function TodosPage() {
+  const token = cookies().get("pylon_session")?.value;
+  const todos = await fetchListServer("Todo", { token });
+  return (
+    <ul>
+      {todos.map(t => <li key={t.id}>{t.title}</li>)}
+    </ul>
+  );
+}
+```
+
+Or render server-side and let the client take over for mutations:
+
+```tsx
+// app/todos/page.tsx (server component)
+import { fetchListServer } from "@pylonsync/next/server";
+import { TodoListClient } from "./TodoListClient";
+
+export default async function TodosPage() {
+  const todos = await fetchListServer("Todo");
+  return <TodoListClient initialTodos={todos} />;
+}
+
+// TodoListClient.tsx (client component)
+"use client";
+import { useQuery, useEntityMutation } from "@pylonsync/react";
+
+export function TodoListClient({ initialTodos }) {
+  const { data: todos } = useQuery("Todo", { initialData: initialTodos });
+  const { update } = useEntityMutation("Todo");
+  return (
+    <ul>
+      {todos.map(t => (
+        <li key={t.id} onClick={() => update(t.id, { done: !t.done })}>{t.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+## Server Actions
+
+Call Pylon functions from `'use server'` actions. The session cookie is read automatically.
+
+```tsx
+// app/todos/actions.ts
+"use server";
+
+import { callFnServer } from "@pylonsync/next/server";
+import { revalidatePath } from "next/cache";
+
+export async function createTodo(formData: FormData) {
+  await callFnServer("createTodo", {
+    title: formData.get("title") as string,
+  });
+  revalidatePath("/todos");
+}
+```
+
+```tsx
+// app/todos/AddForm.tsx
+import { createTodo } from "./actions";
+
+export function AddForm() {
+  return (
+    <form action={createTodo}>
+      <input name="title" />
+      <button type="submit">Add</button>
+    </form>
+  );
+}
+```
+
+Auth, CSRF protection (via Next's built-in form action checks), and error handling all flow naturally.
+
+## Middleware
+
+Gate routes on auth without a round-trip to a client component:
+
+```typescript
+// middleware.ts
+import { NextResponse } from "next/server";
+import { resolveSession } from "@pylonsync/next/middleware";
+
+export async function middleware(req) {
+  const session = await resolveSession(req);
+  if (!session.userId && req.nextUrl.pathname.startsWith("/dashboard")) {
+    return NextResponse.redirect(new URL("/sign-in", req.url));
+  }
+}
+
+export const config = {
+  matcher: ["/dashboard/:path*", "/settings/:path*"],
+};
+```
+
+`resolveSession` reads the `pylon_session` cookie (or `Authorization` header) and hits `/api/auth/me` once per request. Cache it on `req.locals` if you call it from multiple places.
+
+## Auth flows
+
+For SSR-friendly sign-in, use the cookie-based flow. Set up Pylon with cookie auth enabled (see [Sessions](/auth/sessions)):
+
+```bash
+PYLON_COOKIE_DOMAIN=.your-app.com
+PYLON_COOKIE_SAMESITE=lax
+PYLON_COOKIE_SECURE=true
+```
+
+Then a server action:
+
+```typescript
+// app/sign-in/actions.ts
+"use server";
+
+import { signInServer } from "@pylonsync/next/server";
+import { redirect } from "next/navigation";
+
+export async function signIn(formData: FormData) {
+  const email = formData.get("email") as string;
+  const code  = formData.get("code") as string;
+  const session = await signInServer({ method: "magic", email, code });
+  // Cookie is set automatically via Next's response headers
+  redirect("/dashboard");
+}
+```
+
+OAuth follows the same pattern — `signInServer({ method: "oauth-callback", provider: "google", code, state })`.
+
+## Streaming Server Components with `streamFn`
+
+For AI-style streamed responses inside RSC:
+
+```tsx
+// app/chat/page.tsx
+import { streamFnServer } from "@pylonsync/next/server";
+import { Suspense } from "react";
+
+export default async function ChatPage({ searchParams }) {
+  const prompt = searchParams.q;
+  return (
+    <Suspense fallback={<div>Thinking...</div>}>
+      <ChatStream prompt={prompt} />
+    </Suspense>
+  );
+}
+
+async function ChatStream({ prompt }) {
+  const stream = await streamFnServer("chat", { prompt });
+  // ... render the stream
+}
+```
+
+## Configuration
+
+| Env | Purpose |
+| --- | --- |
+| `NEXT_PUBLIC_PYLON_URL` | Public base URL the browser hits |
+| `PYLON_URL` | Server-side base URL — defaults to `NEXT_PUBLIC_PYLON_URL` |
+
+For mixed dev setups (Pylon on `localhost:4321`, Next on `localhost:3000`), Cloud users typically use the same URL for both.
+
+## Edge runtime
+
+Most `@pylonsync/next/server` helpers work in the Edge runtime. Exceptions:
+
+- `streamFnServer` requires the Node.js runtime (uses `URLSession.bytes`-equivalent streaming)
+- `getServerData` works on Edge
+- `fetchListServer` / `callFnServer` work on Edge
+- `signInServer` works on Edge
+
+When you need Node-only behavior, set `export const runtime = "nodejs"` on the route segment.
+
+## Common pitfalls
+
+- **Don't call client hooks in Server Components** — `useQuery` is browser-only. For SSR, use `fetchListServer` and pass the result down as props.
+- **Don't mix server and client `configureClient`** — the server reads `PYLON_URL`, the client reads `NEXT_PUBLIC_PYLON_URL`. Set both.
+- **Server Actions auto-revalidate** — call `revalidatePath` or `revalidateTag` after mutations so RSC components re-render with fresh data.

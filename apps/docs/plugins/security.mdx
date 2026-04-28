@@ -1,0 +1,231 @@
+---
+title: Security plugins
+description: "Rate limiting, CSRF, CORS, SSRF defense, JWT validation, TOTP, API keys, session expiry."
+---
+
+Security plugins are the defenses you turn on before going to production. None of them are mandatory — Pylon's defaults are safe — but each closes a specific class of attack or compliance requirement.
+
+## `rate_limit`
+
+Per-IP and per-user request budgets in a sliding window. Returns `429 RATE_LIMITED` when the budget is exhausted.
+
+```jsonc
+{
+  "name": "rate_limit",
+  "config": {
+    "max_requests": 100,
+    "window_secs": 60,
+    "scope": "ip"
+  }
+}
+```
+
+| Config | Default | Notes |
+| --- | --- | --- |
+| `max_requests` | 60 | Per window |
+| `window_secs` | 60 | Sliding window length |
+| `scope` | `ip` | `ip`, `user`, or `ip+user` |
+| `exempt_admins` | `true` | Admin token bypasses |
+
+For per-route or per-function granularity, layer multiple instances:
+
+```jsonc
+[
+  { "name": "rate_limit", "config": { "max_requests": 100, "window_secs": 60 } },
+  { "name": "rate_limit", "config": { "max_requests": 5, "window_secs": 60, "route": "/api/auth/magic/send" } }
+]
+```
+
+**On Pylon Cloud**, per-IP rate limiting is applied at the edge automatically. Use this plugin for app-specific budgets on top.
+
+## `cors`
+
+Cross-Origin Resource Sharing headers for browser clients. Without this plugin, browsers block cross-origin XHR/fetch from your client to your Pylon server.
+
+```jsonc
+{
+  "name": "cors",
+  "config": {
+    "allowed_origins": ["https://your-app.com", "https://staging.your-app.com"],
+    "allowed_methods": ["GET", "POST", "PATCH", "DELETE"],
+    "allowed_headers": ["Authorization", "Content-Type"],
+    "max_age_secs": 86400,
+    "allow_credentials": true
+  }
+}
+```
+
+`PYLON_CORS_ORIGIN=*` is **refused in non-dev mode** for safety. Always enumerate origins explicitly in production.
+
+## `csrf`
+
+Origin/Referer header check on state-changing requests when the auth token rides in a cookie. SPAs and native clients that use bearer tokens don't need this.
+
+```jsonc
+{
+  "name": "csrf",
+  "config": {
+    "trusted_origins": ["https://your-app.com"],
+    "exempt_paths": ["/api/webhooks/stripe"]
+  }
+}
+```
+
+Reads `PYLON_CSRF_ORIGINS` as the source of truth if set; the plugin config is the override.
+
+## `net_guard`
+
+SSRF defense. Blocks server-side HTTP requests (from your TS functions, the email plugin, the webhooks plugin, OAuth callbacks) to private IP ranges so a malicious user can't trick your server into hitting `169.254.169.254` (AWS metadata) or `127.0.0.1` (internal services).
+
+```jsonc
+{ "name": "net_guard" }
+```
+
+No config — turn it on. Blocked ranges:
+
+- `127.0.0.0/8` (loopback)
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918)
+- `169.254.0.0/16` (link-local + cloud metadata)
+- `::1/128`, `fc00::/7`, `fe80::/10` (IPv6 equivalents)
+
+Whitelist specific hosts via `allow_hosts: ["webhook.internal.com"]` if you need them.
+
+**Strongly recommended for any deployment that runs user-controlled functions.**
+
+## `password_auth`
+
+The user-facing implementation behind `/api/auth/password/register` and `/login`. Already covered in [Auth → Password](/auth/password); the plugin name lets you tune Argon2 parameters:
+
+```jsonc
+{
+  "name": "password_auth",
+  "config": {
+    "memory_cost_kib": 19456,
+    "time_cost": 2,
+    "parallelism": 1,
+    "min_length": 8,
+    "require_email_verified": false
+  }
+}
+```
+
+Set `require_email_verified: true` to refuse logins until the user verifies their email — they'll get a session but can't do anything until they confirm.
+
+## `totp`
+
+Time-based one-time passwords (RFC 6238) — the standard for 2FA via Google Authenticator, 1Password, Authy.
+
+```jsonc
+{
+  "name": "totp",
+  "config": {
+    "issuer": "Pylon Demo",
+    "algorithm": "SHA1",
+    "digits": 6,
+    "period_secs": 30,
+    "window": 1
+  }
+}
+```
+
+Adds endpoints:
+
+- `POST /api/auth/totp/setup` — returns a `secret` and `otpauth://` URL for QR code rendering
+- `POST /api/auth/totp/verify` — confirms the user can compute the current code (enables 2FA)
+- `POST /api/auth/totp/login` — second factor on sign-in (call after password/magic verify)
+- `POST /api/auth/totp/disable` — removes the TOTP secret
+
+Stores `User.totpSecret` (encrypted with `PYLON_ADMIN_TOKEN`-derived key) and `User.totpEnabled`.
+
+## `api_keys`
+
+Long-lived bearer tokens for server-to-server auth. Full reference at [Auth → API keys](/auth/api-keys).
+
+```jsonc
+{
+  "name": "api_keys",
+  "config": {
+    "entity": "ApiKey",
+    "default_lifetime_days": 90
+  }
+}
+```
+
+## `jwt`
+
+Validates JWTs minted elsewhere (Auth0, Cognito, Clerk, Firebase Auth) so existing-auth apps can stand up Pylon without rewriting their sign-in. The plugin doesn't *mint* JWTs — Pylon's session model is intentionally opaque-token — but it **accepts** them as alternative bearer tokens.
+
+```jsonc
+{
+  "name": "jwt",
+  "config": {
+    "issuer": "https://your-tenant.auth0.com/",
+    "audience": "https://api.your-app.com",
+    "jwks_url": "https://your-tenant.auth0.com/.well-known/jwks.json",
+    "user_id_claim": "sub",
+    "roles_claim": "https://your-app.com/roles"
+  }
+}
+```
+
+When a request arrives with `Authorization: Bearer eyJhbGc...`, the plugin verifies the signature against the cached JWKS, parses claims, and constructs an `AuthContext` from `user_id_claim` + `roles_claim`. JWKS is refreshed every hour.
+
+Mix freely with native sessions — both work, requests pick whichever bearer token they carry.
+
+## `session_expiry`
+
+Tighter session lifetime than the default 30 days. Useful for sensitive apps (banking, healthcare).
+
+```jsonc
+{
+  "name": "session_expiry",
+  "config": {
+    "max_age_secs": 3600,
+    "idle_timeout_secs": 900,
+    "refresh_on_use": true
+  }
+}
+```
+
+| Config | Default | Meaning |
+| --- | --- | --- |
+| `max_age_secs` | none | Hard cutoff regardless of activity |
+| `idle_timeout_secs` | none | Expire after this long without a request |
+| `refresh_on_use` | `false` | Slide the expiry forward on every authenticated request |
+
+## Recommended defaults
+
+For a production deployment:
+
+```jsonc
+{
+  "plugins": [
+    { "name": "rate_limit",   "config": { "max_requests": 100, "window_secs": 60 } },
+    { "name": "rate_limit",   "config": { "max_requests": 5,   "window_secs": 60, "route": "/api/auth/magic/send" } },
+    { "name": "rate_limit",   "config": { "max_requests": 10,  "window_secs": 60, "route": "/api/auth/password/login" } },
+    { "name": "cors",         "config": { "allowed_origins": ["https://your-app.com"] } },
+    { "name": "csrf",         "config": { "trusted_origins": ["https://your-app.com"] } },
+    { "name": "net_guard" },
+    { "name": "audit_log",    "config": { "entities": ["User", "Subscription", "ApiKey"] } }
+  ]
+}
+```
+
+That gives you:
+
+- Per-IP request budget
+- Tighter limits on auth endpoints (brute force protection)
+- CORS for your browser app
+- CSRF for cookie auth
+- SSRF defense for any function that does outbound HTTP
+- Audit trail on the entities you'd want to investigate
+
+## Defense-in-depth pairings
+
+| Risk | Plugins |
+| --- | --- |
+| Brute force on login | `rate_limit` per-route + `password_auth` (Argon2 makes brute slow) + `totp` (second factor) |
+| Compromised session token | `session_expiry` (idle timeout) + `audit_log` (forensics) |
+| SSRF via user-controlled function | `net_guard` (blocks private IPs) + `validation` (URL allowlist) |
+| Session fixation | `csrf` (origin check) + `session_expiry` (refresh_on_use) |
+| Mass scraping | `rate_limit` per-IP (block bots) + per-user (block authenticated abuse) |

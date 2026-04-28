@@ -29,7 +29,8 @@
             "pages": [
               "introduction",
               "quickstart",
-              "installation"
+              "installation",
+              "cloud"
             ]
           },
           {
@@ -41,12 +42,63 @@
               "concepts/live-queries",
               "concepts/search"
             ]
+          },
+          {
+            "group": "Auth",
+            "pages": [
+              "auth/overview",
+              "auth/magic-codes",
+              "auth/password",
+              "auth/oauth",
+              "auth/sessions",
+              "auth/rbac",
+              "auth/api-keys"
+            ]
+          },
+          {
+            "group": "Plugins",
+            "pages": [
+              "plugins/overview",
+              "plugins/security",
+              "plugins/data",
+              "plugins/search-ai",
+              "plugins/integrations",
+              "plugins/writing-your-own"
+            ]
+          },
+          {
+            "group": "Clients",
+            "pages": [
+              "clients/overview",
+              "clients/typescript",
+              "clients/react",
+              "clients/react-native",
+              "clients/next",
+              "clients/swift",
+              "clients/sync",
+              "clients/loro"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/deploy",
+              "operations/sizing",
+              "operations/token-rotation",
+              "operations/incident",
+              "operations/workers-costs"
+            ]
           }
         ]
       }
     ],
     "global": {
       "anchors": [
+        {
+          "anchor": "Examples",
+          "href": "https://github.com/pylonsync/pylon/tree/main/examples",
+          "icon": "code"
+        },
         {
           "anchor": "GitHub",
           "href": "https://github.com/pylonsync/pylon",
@@ -65,6 +117,10 @@
       {
         "label": "GitHub",
         "href": "https://github.com/pylonsync/pylon"
+      },
+      {
+        "label": "Cloud",
+        "href": "https://cloud.pylonsync.com"
       }
     ],
     "primary": {

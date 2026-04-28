@@ -1,0 +1,100 @@
+---
+title: Clients overview
+description: "Pick the right SDK for your platform — TS, React, React Native, Next, Swift, sync engine, Loro."
+---
+
+Pylon's wire format is plain HTTP + WebSocket + JSON. You can talk to it with `fetch` and a WebSocket from any language. But Pylon ships first-party SDKs that handle the bookkeeping — auth tokens, optimistic mutations, reconnection, CRDT decoding, typed entities — so you don't reinvent them.
+
+## Available SDKs
+
+| Package | Use it for |
+| --- | --- |
+| **[`@pylonsync/sdk`](/clients/typescript)** | Schema DSL + manifest builder. Required for codegen. |
+| **[`@pylonsync/react`](/clients/react)** | React hooks: `useQuery`, `useMutation`, `useShard`, `useSession`, `useSearch`, `useAggregate`, `useInfiniteQuery` |
+| **[`@pylonsync/react-native`](/clients/react-native)** | React Native + Expo: SQLite-backed offline replica, AsyncStorage adapter |
+| **[`@pylonsync/next`](/clients/next)** | Next.js App Router: Server Actions, RSC data fetching, middleware-friendly auth |
+| **[Swift SDK](/clients/swift)** | iOS / macOS / tvOS / watchOS / Linux native — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI` |
+| **[`@pylonsync/sync`](/clients/sync)** | The sync engine — local store, mutation queue, WebSocket/SSE/poll transports. Used by every JS SDK; can be used standalone in non-React apps. |
+| **[`@pylonsync/loro`](/clients/loro)** | Loro CRDT integration — collaborative text/lists/maps/trees that converge across clients |
+
+## Picking the right combination
+
+| App type | Use |
+| --- | --- |
+| Web SPA (React) | `@pylonsync/sdk` + `@pylonsync/react` |
+| Server-rendered web (Next.js) | `@pylonsync/sdk` + `@pylonsync/react` + `@pylonsync/next` |
+| iOS / macOS native | Swift SDK |
+| iOS + Android (cross-platform) | `@pylonsync/sdk` + `@pylonsync/react-native` |
+| Vite SPA, Vue, Svelte, Solid | `@pylonsync/sdk` + `@pylonsync/sync` (call directly, no React) |
+| CLI / server-to-server | `@pylonsync/sdk` (HTTP only) |
+| Real-time multiplayer | Same as above + `@pylonsync/react`'s `useShard` (or `PylonRealtime` on Swift) |
+| Collaborative editor | Add `@pylonsync/loro` (or `PylonSync` Loro bridge on Swift) |
+
+The SDKs share the same wire formats; you can use `@pylonsync/react` on the web, the Swift SDK on iOS, and `@pylonsync/react-native` on Android — they all agree about what a `ChangeEvent` looks like, and CRDT bytes are identical across platforms because they wrap the same Loro Rust core.
+
+## Common quickstart
+
+Every SDK shares the same shape. The TypeScript flow:
+
+```typescript
+import { configureClient } from "@pylonsync/react";
+
+configureClient({ baseUrl: "https://your-app.com" });
+
+// Sign in
+await startMagicLink("alice@example.com");
+const session = await verifyMagicLink("alice@example.com", code);
+
+// Use entities
+const todos = await fetchList("Todo");
+
+// Or via sync engine for live updates + optimistic writes
+import { createSyncEngine } from "@pylonsync/sync";
+const engine = createSyncEngine("https://your-app.com");
+await engine.start();
+await engine.insert("Todo", { title: "ship it", done: false });
+```
+
+The Swift flow (mirror image):
+
+```swift
+import PylonClient
+import PylonSync
+
+let client = PylonClient(baseURL: URL(string: "https://your-app.com")!)
+try await client.startMagicCode(email: "alice@example.com")
+_ = try await client.verifyMagicCode(email: "alice@example.com", code: code)
+
+let cfg = SyncEngineConfig(baseURL: URL(string: "https://your-app.com")!)
+let engine = await SyncEngine(config: cfg, client: client)
+await engine.start()
+_ = await engine.insert("Todo", ["title": "ship it", "done": false])
+```
+
+## Codegen
+
+Every SDK supports typed access via `pylon codegen`:
+
+```bash
+# TypeScript (default)
+pylon codegen client pylon.manifest.json --out client.ts
+
+# Swift
+pylon codegen client pylon.manifest.json --target swift --out PylonGenerated.swift
+```
+
+Generated files emit:
+
+- **Entity types** — Codable structs (Swift), `interface` declarations (TS) per entity
+- **Function signatures** — typed args and results
+- **Typed client extensions** — `client.listTodos()`, `client.createTodo(NewTodo(...))` instead of stringly-typed APIs
+
+Run codegen on every manifest change. Add it to your build script.
+
+## Wire compatibility guarantees
+
+Pylon treats wire format as a stability contract — never break it without a major version bump. The SDKs evolve independently of the binary; a v0.2.x client works against a v0.3.x server within the same minor.
+
+## Where to next
+
+Pick your platform and dive in: [TypeScript](/clients/typescript), [React](/clients/react), [React Native](/clients/react-native), [Next.js](/clients/next), [Swift](/clients/swift), [sync engine](/clients/sync), or [Loro CRDTs](/clients/loro).

@@ -1,0 +1,143 @@
+---
+title: Plugins overview
+description: "32 built-in plugins for security, data hygiene, search/AI, and integrations. How they work, how to enable them."
+---
+
+Plugins are how you compose Pylon. Each one is a focused capability — rate limiting, audit logging, soft delete, vector search — that you turn on by adding it to your manifest. Most apps use 4–8 plugins. None are required; the binary works without any.
+
+## What's built in
+
+| Group | Plugins |
+| --- | --- |
+| **[Security](/plugins/security)** | `password_auth`, `totp`, `api_keys`, `jwt`, `session_expiry`, `csrf`, `cors`, `net_guard`, `rate_limit` |
+| **[Data hygiene](/plugins/data)** | `validation`, `slugify`, `timestamps`, `computed`, `cascade`, `versioning`, `soft_delete`, `tenant_scope`, `organizations` |
+| **[Search & AI](/plugins/search-ai)** | `search`, `vector_search`, `ai_proxy`, `mcp` |
+| **[Integrations](/plugins/integrations)** | `file_storage`, `cache`, `cache_client`, `email`, `webhooks`, `stripe`, `feature_flags`, `audit_log` |
+
+Drill into each group's page for full plugin reference. This page covers the lifecycle and how plugins fit into the request path.
+
+## How plugins fit in
+
+Plugins hook into the runtime at well-defined points:
+
+```
+HTTP request
+     │
+     ▼
+   route() ──── plugin: rate_limit (reject if over budget)
+     │   ───── plugin: cors (preflight handling)
+     │   ───── plugin: csrf (origin check)
+     │
+     ▼
+   datastore op (insert/update/delete/query)
+     │   ───── plugin: validation (reject bad data)
+     │   ───── plugin: timestamps (stamp createdAt/updatedAt)
+     │   ───── plugin: slugify (auto-fill slug field)
+     │   ───── plugin: tenant_scope (inject orgId filter)
+     │   ───── plugin: cascade (queue child deletes)
+     │   ───── plugin: soft_delete (set deletedAt instead of removing)
+     │   ───── plugin: audit_log (record what changed)
+     │
+     ▼
+   response ─── plugin: webhooks (fire after-write hooks)
+```
+
+A plugin can:
+
+- **Inspect or modify a request** before the handler runs (rate limit, CORS, CSRF, tenant_scope)
+- **Inspect or modify data** before write (validation, slugify, timestamps, computed)
+- **React to a write** after it lands (webhooks, audit_log, cascade)
+- **Add new HTTP routes** (api_keys, totp, stripe webhooks)
+- **Replace a built-in subsystem** (file_storage swaps the storage backend, email swaps the sender)
+
+## Enabling a plugin
+
+In `pylon.manifest.json`:
+
+```jsonc
+{
+  "plugins": [
+    {
+      "name": "rate_limit",
+      "config": { "max_requests": 100, "window_secs": 60 }
+    },
+    {
+      "name": "soft_delete",
+      "config": { "entities": ["Post", "Comment"] }
+    },
+    {
+      "name": "audit_log",
+      "config": { "entities": ["User", "Subscription"] }
+    }
+  ]
+}
+```
+
+The plugin name maps to a built-in registered in `crates/plugin/src/builtin/`. Configuration shape varies per plugin — see each plugin page. Plugins missing config use sensible defaults.
+
+## TypeScript-side configuration
+
+Some plugins are easier to configure from TS than from JSON — they accept callbacks (`computed` field functions, custom `validation` rules, webhook handlers). Configure those in your app entry file:
+
+```typescript
+// app.ts
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("validation", {
+  rules: {
+    "User.email": [{ type: "email" }, { type: "max_length", value: 254 }],
+    "Post.title": [{ type: "min_length", value: 1 }, { type: "max_length", value: 200 }],
+  },
+});
+
+definePlugin("computed", {
+  fields: {
+    "Order.total": (row) => row.subtotal + row.tax + row.shipping,
+  },
+});
+
+definePlugin("webhooks", {
+  hooks: [
+    { entity: "Order", event: "insert", url: "https://hooks.example.com/order-created" },
+  ],
+});
+```
+
+`pylon codegen` picks these up and merges into the manifest before the runtime boots.
+
+## Plugin order
+
+When multiple plugins observe the same event, they run in **manifest declaration order**. Most plugins commute (rate limiting first, then validation, then write — order doesn't change the result). Two cases where order matters:
+
+1. **`tenant_scope` should come before any plugin that filters rows.** It injects `orgId == auth.tenantId` into queries; running it after another filter could narrow the wrong set.
+2. **`audit_log` should come last.** You want to record what *actually* landed, not what was proposed pre-validation.
+
+The plugin registry warns at boot if a known anti-pattern is detected.
+
+## Performance
+
+Plugins run in-process. There's no IPC, no per-request allocation overhead beyond what each plugin's logic does. The hot-path plugins (rate_limit, validation, timestamps) are written to be ~microseconds per call. Audit log and webhooks defer work to a background queue so they don't block the response.
+
+## Writing your own
+
+If a built-in doesn't fit, write a plugin in Rust (~50 lines for a typical shape). See [Writing your own plugin](/plugins/writing-your-own).
+
+For TypeScript-only logic — custom validation, custom computed fields, custom webhook handlers — you don't need a Rust plugin. Use the `validation`, `computed`, `webhooks`, or `cascade` plugins with TS-side configuration.
+
+## Plugins vs functions
+
+| Plugins | Functions |
+| --- | --- |
+| Implicit — fire on every relevant op | Explicit — called by name |
+| Configured in manifest | Defined in TS files |
+| Can mutate data in-flight | Run inside a transaction; return a result |
+| Cross-cutting concerns (audit, rate limit, validation) | Business logic |
+| Compiled into the binary (built-ins) or loaded at boot | Hot-reloaded by the dev server |
+
+Use a plugin when the behavior should apply to **every** call. Use a function when you want callers to opt in by name.
+
+## Disabling a plugin
+
+Remove the entry from `manifest.plugins`. Hot-reload picks it up on the next request — no restart needed. The plugin's tables (e.g. `AuditLog`) are not deleted; data persists in case you re-enable.
+
+To purge tables created by a plugin, drop them via `pylon migrate apply` after editing the manifest.

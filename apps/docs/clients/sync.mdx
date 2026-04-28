@@ -1,0 +1,279 @@
+---
+title: Sync engine
+description: "@pylonsync/sync — local replica, optimistic mutations, WebSocket/SSE/poll transports, offline write queue."
+---
+
+`@pylonsync/sync` is the engine the React, React Native, and Next.js clients all wrap. You can use it standalone in any JavaScript host — Vue, Svelte, Solid, vanilla JS, Node, Bun, Tauri, Electron, Cloudflare Workers.
+
+This page covers the engine's mental model, configuration, and direct API. For React-specific hooks see [React](/clients/react).
+
+## Mental model
+
+The sync engine maintains an **in-memory replica** of the rows the server has shown you. That replica is:
+
+- **Server-authoritative** — every change has a `seq` number from the server's append-only change log
+- **Tombstone-aware** — deletes can't be resurrected by an out-of-order replay
+- **Optimistic** — local mutations update the replica immediately; a background queue ships them to the server with idempotency tokens
+- **Identity-flip-safe** — when the auth token or active tenant changes, the replica resets so you don't see stale rows from the previous identity
+- **Crash-safe** — the persistence layer (IndexedDB on web, SQLite on native) writes through every change before advancing the cursor, so a crash mid-pull can never leave the cursor ahead of the durable replica
+
+The engine subscribes to the server via one of three transports — **WebSocket** (primary), **SSE** (fallback), or **polling** (last resort) — all with full-jitter exponential reconnect.
+
+## Install
+
+```bash
+bun add @pylonsync/sync
+```
+
+`@pylonsync/react` already includes it; install directly only when you're using the engine without React.
+
+## Construct an engine
+
+```typescript
+import { createSyncEngine } from "@pylonsync/sync";
+
+const engine = createSyncEngine("https://your-app.com", {
+  transport: "websocket",   // or "sse" or "poll"
+  appName:   "default",
+  persist:   true,          // enables IndexedDB persistence
+});
+
+await engine.start();
+```
+
+`start()`:
+
+1. Loads cached entities + cursor from IndexedDB
+2. Hydrates the mutation queue (offline writes survive restart)
+3. Resolves the current session via `/api/auth/me`
+4. Pulls changes since the last cursor
+5. Connects the chosen real-time transport
+
+## Read the local store
+
+```typescript
+const todos = engine.store.list("Todo");
+const todo  = engine.store.get("Todo", "t_123");
+
+// Subscribe — fires on every store change (server push, optimistic mutation, identity flip)
+const unsubscribe = engine.store.subscribe(() => {
+  console.log("rows updated:", engine.store.list("Todo").length);
+});
+// later: unsubscribe();
+```
+
+The `store` always reflects the **post-merged state** — server pushes and optimistic mutations are both applied before listeners fire.
+
+## Optimistic mutations
+
+```typescript
+// Insert — returns a temporary id; server replaces with the real id on push
+const tempId = await engine.insert("Todo", { title: "x", done: false });
+
+// Update — applies locally, queues the change
+await engine.update("Todo", id, { done: true });
+
+// Delete — applies locally, queues the change
+await engine.delete("Todo", id);
+```
+
+If the server rejects the mutation, the engine marks it `failed` in the queue. Subscribe to `engine.mutations` to surface failures to the UI:
+
+```typescript
+import { mutationQueueListener } from "@pylonsync/sync";
+
+mutationQueueListener(engine.mutations, ({ status, change, error }) => {
+  if (status === "failed") {
+    toast.error(`failed to ${change.kind} ${change.entity}: ${error}`);
+  }
+});
+```
+
+Failed mutations stay in the queue until you call `engine.mutations.remove(id)`. This lets you show "retry" affordances without losing the user's intent.
+
+## Pagination
+
+```typescript
+const query = engine.createInfiniteQuery("Post", { pageSize: 20 });
+await query.loadMore();
+console.log(query.data); // first 20 rows
+await query.loadMore();
+console.log(query.data); // first 40
+
+query.subscribe(() => render());
+query.reset(); // start over
+```
+
+## Hydration
+
+```typescript
+import { getServerData } from "@pylonsync/sync";
+
+// On the server (e.g. Next.js loader, Astro page):
+const hydration = await getServerData("https://your-app.com", ["Todo", "User"], {
+  token: req.cookies.pylon_token,
+});
+
+// On the client:
+engine.hydrate(hydration);
+await engine.start();
+```
+
+`hydrate(...)` seeds the local store and the cursor before `start()` runs, so the first paint is server-rendered and the engine doesn't waste an initial pull.
+
+## Auth integration
+
+The engine reads the bearer token from the storage adapter on every request. To set one:
+
+```typescript
+import { defaultStorage } from "@pylonsync/sync";
+
+const storage = defaultStorage();  // localStorage on web, in-memory elsewhere
+storage.set("pylon_token", "pylon_a1b2c3...");
+```
+
+Or inject a custom adapter (RN's AsyncStorage bridge, a Tauri-store wrapper):
+
+```typescript
+import { createWriteThroughStorage, createSyncEngine } from "@pylonsync/sync";
+
+const storage = createWriteThroughStorage(seed, async (key, value) => {
+  if (value === null) await asyncBackend.remove(key);
+  else                await asyncBackend.set(key, value);
+});
+
+const engine = createSyncEngine("https://your-app.com", { storage });
+```
+
+When the token changes (sign-in, sign-out, switch user), call `engine.notifySessionChanged()` so the engine refreshes `/api/auth/me` and resets the replica if the visible set changed.
+
+## Multi-tenant: switching active org
+
+After calling `/api/auth/select-org`:
+
+```typescript
+await fetch("/api/auth/select-org", {
+  method: "POST",
+  headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ orgId: "org_xyz" }),
+});
+
+await engine.notifySessionChanged();
+// engine.resolvedSession() now reflects the new tenantId
+// the local replica is reset because the visible set changed
+```
+
+## Real-time transport details
+
+### WebSocket (primary)
+
+URL is derived from `baseUrl` — defaults to `ws://host:port+1` for `pylon dev` (port + 1 is the WS port). Override via `wsUrl`:
+
+```typescript
+createSyncEngine("https://your-app.com", {
+  wsUrl: "wss://ws.your-app.com",  // when WS is on a separate hostname
+});
+```
+
+The engine sends the auth token via the `bearer.<percent-encoded-token>` Sec-WebSocket-Protocol subprotocol because browser WebSocket has no header API.
+
+Each text frame is a JSON `ChangeEvent`; binary frames go to whichever consumer registered via `engine.onBinaryFrame(handler)`. The Loro CRDT integration uses this for binary CRDT updates.
+
+Reconnect uses **full-jitter exponential backoff** — `random(0, base * 2^attempts)`, capped at 30s. The backoff counter resets only after a connection has been stable for 5s, so an auth-failure-then-disconnect loop can't tight-loop reconnect.
+
+### SSE (fallback)
+
+`transport: "sse"` — connects to `http://host:port+2/events` (port + 2). Server emits one JSON `ChangeEvent` per `data:` line.
+
+Use SSE when:
+
+- The deployment blocks WebSocket (rare, but some corporate proxies do)
+- You only need one-way server→client (no presence, no shard inputs)
+
+The reconnect backoff matches the WebSocket path.
+
+### Polling (last resort)
+
+`transport: "poll"` — calls `/api/sync/pull` every `pollInterval` ms. Use only when SSE and WebSocket are both unavailable.
+
+## CRDT subscriptions
+
+For collaborative rows backed by Loro CRDTs:
+
+```typescript
+engine.subscribeCrdt("Document", "doc_42");
+
+const unregister = engine.onBinaryFrame((bytes) => {
+  // route to your Loro decoder — see @pylonsync/loro
+});
+
+// later
+engine.unsubscribeCrdt("Document", "doc_42");
+unregister();
+```
+
+Subscriptions are **refcounted** — two `useLoroDoc` callers on the same row don't unsubscribe each other when one unmounts. The engine re-sends active subscriptions on every reconnect so binary frames keep arriving on a fresh socket.
+
+See [Loro](/clients/loro) for the higher-level integration.
+
+## Presence + topics
+
+```typescript
+// Broadcast presence (typically cursor position, "typing" status)
+engine.setPresence({ x: 100, y: 200, label: "Alice" });
+
+// Publish to a topic
+engine.publishTopic("chat:room_42", { from: "alice", text: "hi" });
+```
+
+Both ride the same WebSocket. Subscribers see updates via the store notifier (presence) or by registering their own handler (topics).
+
+## Persistence
+
+The engine writes through to IndexedDB by default in browsers. The schema:
+
+- `entities` store — keyed `entity:row_id`, value `{ entity, id, data }`
+- `cursors` store — keyed `cursor`, value `{ last_seq }`
+- `pendingMutations` store — keyed `id`, value `{ id, change, status, error? }`
+
+On startup, the engine loads every entity row and the cursor, then catches up via pull. Mutations queued offline are hydrated and pushed on the next `push()` tick.
+
+For non-browser hosts (RN, Tauri, Electron, native Swift), pass a different persistence backend — `@pylonsync/react-native` ships an Expo SQLite implementation; the Swift SDK has its own.
+
+## Resetting
+
+```typescript
+// Drop everything — useful for sign-out flows
+await engine.resetReplica();
+// then re-pull or re-start
+```
+
+`resetReplica()` clears the in-memory store, sets the cursor to 0, and persists both. Doesn't trigger a pull — the caller decides when.
+
+## Configuration reference
+
+```typescript
+type SyncEngineConfig = {
+  baseUrl: string;
+  transport?: "websocket" | "sse" | "poll";  // default "websocket"
+  wsUrl?: string;                             // override WS URL
+  pollInterval?: number;                      // default 1000ms (poll mode)
+  reconnectDelay?: number;                    // default 1000ms (backoff base)
+  token?: string;                             // overrides storage
+  persist?: boolean;                          // default true in browser
+  appName?: string;                           // default "default"
+  storage?: Storage;                          // sync key-value adapter
+};
+```
+
+## Direct calls (skip the engine)
+
+For one-off operations that don't need the local store:
+
+```typescript
+import { fetchList, fetchById, insert, update, remove, callFn } from "@pylonsync/sync";
+
+const todos = await fetchList("https://your-app.com", "Todo", { token });
+```
+
+These hit the same endpoints but don't update the engine's local store. Use for server-side scripts or operations the user shouldn't see in the UI.

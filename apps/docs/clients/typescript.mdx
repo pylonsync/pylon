@@ -1,0 +1,297 @@
+---
+title: TypeScript SDK
+description: "@pylonsync/sdk — schema DSL, manifest builder, codegen target."
+---
+
+`@pylonsync/sdk` is the foundation every other JS package depends on. It's two things in one package:
+
+1. **A schema DSL** for declaring entities, queries, actions, policies in TypeScript instead of editing `pylon.manifest.json` by hand.
+2. **The codegen runtime** that compiles your TS schema into the manifest the Pylon server reads.
+
+There's no HTTP client in this package — for that, use `@pylonsync/react` (browser) or `@pylonsync/sync` (any JS host).
+
+## Install
+
+<CodeGroup>
+```bash bun
+bun add @pylonsync/sdk
+```
+
+```bash npm
+npm install @pylonsync/sdk
+```
+
+```bash pnpm
+pnpm add @pylonsync/sdk
+```
+</CodeGroup>
+
+## Defining your schema
+
+Create `app.ts`:
+
+```typescript
+import {
+  buildManifest,
+  entity,
+  string,
+  int,
+  bool,
+  datetime,
+  id,
+  relation,
+  query,
+  action,
+  policy,
+} from "@pylonsync/sdk";
+
+const User = entity("User", {
+  email:        string({ unique: true }),
+  displayName:  string(),
+  passwordHash: string({ optional: true }),
+  createdAt:    datetime(),
+});
+
+const Todo = entity("Todo", {
+  title:    string(),
+  done:     bool({ default: false }),
+  authorId: id("User"),
+  createdAt:datetime(),
+}, {
+  indexes: [{ name: "by_author", fields: ["authorId"] }],
+});
+
+const todosByAuthor = query("todosByAuthor", { authorId: id("User") });
+
+const createTodo = action("createTodo", {
+  title:    string(),
+  authorId: id("User"),
+});
+
+const todoPolicy = policy({
+  match: "Todo",
+  read:  "auth.userId != null && data.authorId == auth.userId",
+  write: "auth.userId == data.authorId",
+});
+
+export default buildManifest({
+  name: "todo-app",
+  version: "0.1.0",
+  entities:  [User, Todo],
+  queries:   [todosByAuthor],
+  actions:   [createTodo],
+  policies:  [todoPolicy],
+});
+```
+
+Then run codegen to materialize the manifest:
+
+```bash
+pylon codegen app.ts --out pylon.manifest.json
+```
+
+`pylon dev` does this automatically on file change.
+
+## Field types
+
+| DSL | Wire type | Notes |
+| --- | --- | --- |
+| `string()` | `string` | UTF-8 text |
+| `int()` | `number` | 64-bit signed |
+| `float()` | `number` | 64-bit float |
+| `bool()` | `boolean` | |
+| `datetime()` | `string` | ISO 8601 |
+| `richtext()` | `string` | Rendered as rich text in Studio |
+| `id("User")` | `string` | Reference to another entity |
+
+Modifiers (chained):
+
+```typescript
+string({ unique: true, optional: false, default: "" })
+int({ min: 0, max: 100 })
+datetime({ default: "now()" })
+```
+
+For CRDT-backed fields:
+
+```typescript
+text()       // LoroText — collaborative rich text
+counter()    // LoroCounter — multi-writer increments
+list()       // LoroList — append/insert/move
+movableList()// LoroMovableList — with stable ids
+tree()       // LoroTree — hierarchical
+```
+
+CRDT-backed fields don't go through normal LWW merge; they sync via the binary CRDT broadcast channel. See [Loro](/clients/loro) for the full picture.
+
+## Indexes
+
+```typescript
+entity("Todo", {
+  authorId: id("User"),
+  status:   string(),
+  createdAt:datetime(),
+}, {
+  indexes: [
+    { name: "by_author",        fields: ["authorId"] },
+    { name: "by_status_date",   fields: ["status", "createdAt"] },
+    { name: "unique_slug",      fields: ["slug"], unique: true },
+  ],
+});
+```
+
+The first matching prefix on a multi-column index wins for query planning. Pylon translates these to native SQLite/Postgres indexes.
+
+## Search config
+
+```typescript
+entity("Post", {
+  title:    string(),
+  body:     richtext(),
+  tags:     string(),
+  authorId: id("User"),
+}, {
+  search: {
+    text_fields: ["title", "body"],
+    facets:      ["authorId", "tags"],
+    sortable:    ["createdAt", "viewCount"],
+  },
+});
+```
+
+This wires the entity into the [`search` plugin](/plugins/search-ai). Once enabled, the entity is queryable via `POST /api/search/Post`.
+
+## Relations
+
+```typescript
+const Post = entity("Post", {
+  title:    string(),
+  authorId: id("User"),
+});
+
+const Comment = entity("Comment", {
+  postId: id("Post"),
+  body:   string(),
+});
+
+const PostWithComments = relation("Post.comments", {
+  from: "Post",
+  to:   "Comment",
+  via:  "postId",
+  type: "one-to-many",
+});
+```
+
+Relations enable `include` joins on queries:
+
+```typescript
+const post = await fetchById("Post", id, { include: ["comments"] });
+// post.comments is a Comment[]
+```
+
+## Queries
+
+Named, typed query inputs. Resolve to `/api/query/<name>`:
+
+```typescript
+const recentTodos = query("recentTodos", {
+  limit: int({ default: 10 }),
+});
+
+const todosByAuthor = query("todosByAuthor", {
+  authorId: id("User"),
+});
+```
+
+Queries are pure-data filters; for computed results, use an `action` instead.
+
+## Actions
+
+Server-side functions with typed args. Resolve to `/api/fn/<name>`:
+
+```typescript
+const completeTodo = action("completeTodo", {
+  todoId: id("Todo"),
+});
+```
+
+The action's *handler* lives in a separate file (`functions/completeTodo.ts`) and the function runtime wires it up:
+
+```typescript
+// functions/completeTodo.ts
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: { todoId: v.string() },
+  async handler(ctx, args) {
+    if (!ctx.auth.userId) throw new Error("sign in required");
+    const todo = await ctx.db.get("Todo", args.todoId);
+    if (!todo || todo.authorId !== ctx.auth.userId) throw new Error("forbidden");
+    await ctx.db.update("Todo", args.todoId, { done: true });
+  },
+});
+```
+
+See [Functions](/concepts/functions) for the full handler API.
+
+## Policies
+
+```typescript
+policy({
+  match:  "Todo",
+  read:   "auth.userId != null && data.authorId == auth.userId",
+  write:  "data.authorId == auth.userId",
+  delete: "data.authorId == auth.userId || auth.hasRole('admin')",
+})
+```
+
+Expression syntax in [RBAC](/auth/rbac).
+
+## Plugins from TS
+
+Plugins that take callbacks (custom validation, computed fields, webhook handlers) configure cleanly from TS:
+
+```typescript
+import { definePlugin } from "@pylonsync/sdk";
+
+definePlugin("validation", {
+  rules: { "User.email": [{ type: "email" }] },
+});
+
+definePlugin("computed", {
+  fields: { "Order.total": (row) => row.subtotal + row.tax },
+});
+
+definePlugin("webhooks", {
+  hooks: [{ entity: "Order", events: ["insert"], url: "https://hooks.example.com/order-created" }],
+});
+```
+
+`pylon codegen` merges these into `manifest.plugins` automatically.
+
+## Manifest output
+
+`buildManifest({...})` returns a `Manifest` object. The codegen step writes it to JSON:
+
+```jsonc
+// pylon.manifest.json (generated)
+{
+  "manifest_version": 1,
+  "name": "todo-app",
+  "version": "0.1.0",
+  "entities":  [...],
+  "queries":   [...],
+  "actions":   [...],
+  "policies":  [...],
+  "plugins":   [...]
+}
+```
+
+The Pylon server reads only the JSON — your TS source isn't needed at runtime. This is what lets the same backend serve clients in any language.
+
+## Where to next
+
+- **Browser clients** → [`@pylonsync/react`](/clients/react)
+- **Mobile** → [`@pylonsync/react-native`](/clients/react-native) or [Swift](/clients/swift)
+- **Server-rendered** → [`@pylonsync/next`](/clients/next)
+- **Sync engine on its own** → [`@pylonsync/sync`](/clients/sync)

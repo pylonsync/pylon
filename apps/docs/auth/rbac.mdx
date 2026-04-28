@@ -1,0 +1,254 @@
+---
+title: Roles & multi-tenancy (RBAC)
+description: "Roles, the active tenant, and writing row-scoped policies that compose with both."
+---
+
+Pylon's RBAC layer is intentionally minimal: every `AuthContext` carries a `roles: string[]` array and (optionally) a `tenant_id`. Policies reference both via `auth.hasRole(...)` and `auth.tenantId`. There's no role hierarchy, no permission grids, no `@CanRead("Todo")` decorators — just expressions over the auth context and the row.
+
+This page covers the data model, the policy syntax, and the patterns for typical multi-tenant apps.
+
+## Roles
+
+`AuthContext.roles` is a string array. You decide the role names. Common choices:
+
+```typescript
+type Role = "admin" | "owner" | "editor" | "viewer" | "billing";
+```
+
+Roles are typically stored on a per-user, per-tenant join table:
+
+```jsonc
+{
+  "name": "OrgMember",
+  "fields": [
+    { "name": "userId", "type": "id(User)",  "optional": false },
+    { "name": "orgId",  "type": "id(Org)",   "optional": false },
+    { "name": "role",   "type": "string",    "optional": false }
+  ],
+  "indexes": [
+    { "name": "by_user_org", "fields": ["userId", "orgId"], "unique": true }
+  ]
+}
+```
+
+When the user calls `/api/auth/select-org`, the runtime hydrates `auth.roles` with the matching `OrgMember.role` so policies see them on every request.
+
+## Special roles
+
+| Name | What it does |
+| --- | --- |
+| `admin` | Bypasses every policy — `auth.hasRole('x')` returns true for any `x` |
+
+That's it. No other role has built-in meaning. `admin` is granted automatically when a request authenticates with `PYLON_ADMIN_TOKEN`; it's not something you give to user accounts.
+
+## Policy syntax
+
+Policies live in `pylon.manifest.json` under `policies`:
+
+```jsonc
+{
+  "policies": [
+    {
+      "match": "Todo",
+      "read":  "auth.userId != null",
+      "write": "auth.userId == data.authorId || auth.hasRole('admin')",
+      "delete":"auth.hasRole('admin')"
+    }
+  ]
+}
+```
+
+`match` is the entity name. The other fields are boolean expressions over `auth` and `data`:
+
+| Identifier | Type | Meaning |
+| --- | --- | --- |
+| `auth.userId` | string \| null | Current user id, null if anonymous |
+| `auth.isAdmin` | bool | True for admin contexts |
+| `auth.tenantId` | string \| null | Active org id |
+| `auth.hasRole('x')` | fn → bool | Role check (admin returns true for any role) |
+| `auth.hasAnyRole('a','b')` | fn → bool | Match any of the roles |
+| `data.<field>` | varies | Row column value |
+
+Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parentheses.
+
+## Common patterns
+
+### Row-scoped to author
+
+Only the author can read or write their row:
+
+```jsonc
+{
+  "match": "Note",
+  "read":  "data.authorId == auth.userId",
+  "write": "data.authorId == auth.userId"
+}
+```
+
+### Row-scoped to tenant
+
+Multi-tenant apps where rows belong to an org and members of that org can access them:
+
+```jsonc
+{
+  "match": "Project",
+  "read":  "data.orgId == auth.tenantId",
+  "write": "data.orgId == auth.tenantId && auth.hasAnyRole('editor', 'admin')"
+}
+```
+
+The `tenant_id` flows in via the session — see [Sessions → Multi-tenant](/auth/sessions#multi-tenant-switching-organizations).
+
+### Role-gated mutation
+
+Read is open to all members; write requires elevation:
+
+```jsonc
+{
+  "match": "OrgSettings",
+  "read":  "data.orgId == auth.tenantId",
+  "write": "data.orgId == auth.tenantId && auth.hasRole('owner')"
+}
+```
+
+### Public read, owner write
+
+Common for blog posts / public profiles:
+
+```jsonc
+{
+  "match": "Post",
+  "read":  "true",
+  "write": "data.authorId == auth.userId"
+}
+```
+
+### Soft "no one but admin"
+
+Most internal/system tables:
+
+```jsonc
+{
+  "match": "AuditLog",
+  "read":  "auth.hasRole('admin')",
+  "write": "auth.hasRole('admin')",
+  "delete":"false"
+}
+```
+
+`"delete": "false"` blocks delete entirely — admins can read/write but never remove.
+
+## Where policies run
+
+Policies enforce on **every entity-level operation**: CRUD via `/api/entities/*`, sync push, query reads. They do **not** run inside server functions — once you're in a `mutation` or `action` handler, you have direct DB access via `ctx.db`. Functions are the right place for "policy too complex to express as an expression" cases.
+
+```typescript
+// Function-level enforcement (when policies aren't enough)
+import { mutation } from "@pylonsync/functions";
+
+export default mutation({
+  args: { todoId: v.string() },
+  async handler(ctx, args) {
+    const todo = await ctx.db.get("Todo", args.todoId);
+    if (!todo) throw new Error("not found");
+
+    // Custom policy: only authors can mark done after a deadline
+    const isAuthor = todo.authorId === ctx.auth.userId;
+    const isPastDeadline = Date.now() > new Date(todo.deadline).getTime();
+    if (isPastDeadline && !isAuthor) throw new Error("only the author can edit overdue todos");
+
+    await ctx.db.update("Todo", args.todoId, { done: true });
+  },
+});
+```
+
+## Reading roles in functions
+
+Inside a `mutation` / `query` / `action`, `ctx.auth` mirrors `AuthContext`:
+
+```typescript
+ctx.auth.userId        // string | null
+ctx.auth.isAdmin       // bool
+ctx.auth.isGuest       // bool
+ctx.auth.tenantId      // string | null
+ctx.auth.roles         // string[]
+ctx.auth.hasRole('x')  // bool
+```
+
+## Granting roles
+
+Roles aren't first-class data — they're just strings on whatever join table you use. Typical "promote to admin" mutation:
+
+```typescript
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: { targetUserId: v.string(), role: v.string() },
+  async handler(ctx, args) {
+    if (!ctx.auth.tenantId) throw new Error("must select an org first");
+    if (!ctx.auth.hasRole("owner")) throw new Error("only owners can grant roles");
+
+    const existing = await ctx.db.query("OrgMember", {
+      where: { userId: args.targetUserId, orgId: ctx.auth.tenantId },
+    });
+    if (existing.length === 0) throw new Error("not a member of this org");
+
+    await ctx.db.update("OrgMember", existing[0].id, { role: args.role });
+  },
+});
+```
+
+## Why no permission grid?
+
+Pylon ships role-based access control, not attribute-based or capability-based. You **could** build a permission table and check it in policies (`data.id in auth.permittedTodoIds`), but for 90% of apps "owner can write, member can read, admin bypasses" is enough — and policies stay readable.
+
+If you outgrow it, the policy expression language is intentionally narrow so you can move complex logic into a function without losing security guarantees.
+
+## Admin token
+
+`PYLON_ADMIN_TOKEN` is set in the environment. Requests that pass it as `Authorization: Bearer <token>` resolve to `AuthContext::admin()` — `isAdmin: true`, every `hasRole(...)` returns true, every policy is bypassed.
+
+This is for:
+
+- Migrations / backfills (`pylon migrate apply`)
+- Studio (the inspector)
+- CLI commands (`pylon export`, `pylon backup`)
+- Server-to-server calls between trusted services
+
+**Treat the admin token like a root password.** Rotate it quarterly — see [Token rotation](/operations/token-rotation).
+
+## Testing policies
+
+Pylon runs policies in the same evaluator your tests can use:
+
+```typescript
+import { evalPolicy } from "@pylonsync/sdk/test";
+
+const allowed = evalPolicy(
+  "auth.userId == data.authorId",
+  { auth: { userId: "u1", isAdmin: false, roles: [] }, data: { authorId: "u1" } }
+);
+// → true
+```
+
+Or assert via the HTTP layer in integration tests:
+
+```typescript
+test("non-author can't edit", async () => {
+  const session = await signInAs("u2");
+  const res = await fetch(`/api/entities/Todo/${todoId}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ title: "hacked" }),
+  });
+  expect(res.status).toBe(403);
+});
+```
+
+## Recipes
+
+- **Personal apps** — single-user, no roles, no policies. Just `auth.userId != null`.
+- **SaaS** — tenant_id everywhere, roles on `OrgMember`, policies match `data.orgId == auth.tenantId`.
+- **Forum / community** — `auth.hasRole('moderator')` for soft-delete and ban actions.
+- **Marketplaces** — separate `Buyer` and `Seller` roles, policies check both.
+- **Internal tools** — single `admin` role, broad gates, audit log via the `audit_log` plugin.

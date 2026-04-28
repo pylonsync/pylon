@@ -1,0 +1,384 @@
+---
+title: Swift SDK
+description: "Native Swift for iOS, macOS, tvOS, watchOS, and Linux. PylonClient, PylonSync, PylonRealtime, PylonSwiftUI."
+---
+
+The Swift SDK gives you full TypeScript-equivalent functionality on Apple platforms (and Linux for server-side Swift). Auth, entity CRUD, optimistic mutations, real-time sync with offline replay, multiplayer shards, Loro CRDTs, SwiftUI hooks — all native, no JavaScript bridge.
+
+## Modules
+
+| Module | What's in it |
+| --- | --- |
+| `PylonClient` | HTTP client. Auth, entities, fns, files, search, aggregate, streaming. `actor`-isolated, swappable transport. |
+| `PylonSync` | Sync engine, `LocalStore`, `MutationQueue`, WebSocket / SSE / poll transports, SQLite persistence, `InfiniteQuery`, Loro CRDT bridge. |
+| `PylonRealtime` | `ShardClient<State, Input>` for tick-driven multiplayer shards. |
+| `PylonSwiftUI` | `PylonQuery`, `PylonMutation`, `PylonSession`, `PylonInfiniteQuery`, `PylonAggregate`, `PylonSearch` — `ObservableObject` wrappers. |
+
+## Platforms
+
+| Target | Min version |
+| --- | --- |
+| iOS | 16 |
+| macOS | 13 |
+| tvOS | 16 |
+| watchOS | 9 |
+| Linux | Swift 5.9+ (uses `FoundationNetworking`; needs `libsqlite3-dev`) |
+
+## Install
+
+In `Package.swift`:
+
+```swift
+.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0"),
+```
+
+Per target:
+
+```swift
+.target(name: "MyApp", dependencies: [
+    .product(name: "PylonClient",   package: "pylon-swift"),
+    .product(name: "PylonSync",     package: "pylon-swift"),
+    .product(name: "PylonRealtime", package: "pylon-swift"),  // optional
+    .product(name: "PylonSwiftUI",  package: "pylon-swift"),  // optional
+])
+```
+
+Linux: `apt-get install libsqlite3-dev` for the SQLite-backed offline replica.
+
+## Quickstart
+
+```swift
+import PylonClient
+import PylonSync
+
+// 1. HTTP client — handles auth, entity CRUD, function calls
+let client = PylonClient(baseURL: URL(string: "https://your-app.com")!)
+try await client.startMagicCode(email: "alice@example.com")
+let session = try await client.verifyMagicCode(email: "alice@example.com", code: "123456")
+// session.token is persisted to UserDefaults automatically
+
+// 2. Sync engine — pulls + pushes + WebSocket/SSE reconnect with backoff
+let cfg = SyncEngineConfig(
+    baseURL: URL(string: "https://your-app.com")!,
+    transport: .websocket  // or .sse / .poll
+)
+let persistence = try SQLitePersistence(
+    path: NSHomeDirectory() + "/Documents/pylon.db"
+)
+let engine = await SyncEngine(config: cfg, client: client, persistence: persistence)
+await engine.start()
+
+// 3. Optimistic mutations — local store updates immediately, syncs in background
+_ = await engine.insert("Todo", ["title": "ship it", "done": false])
+
+// 4. React to local-store changes
+let store = await engine.store
+_ = store.subscribe {
+    let todos = store.list("Todo")
+    print("now have \(todos.count) todos")
+}
+```
+
+## SwiftUI
+
+```swift
+import SwiftUI
+import PylonSync
+import PylonSwiftUI
+
+struct Todo: Codable, Identifiable {
+    let id: String
+    let title: String
+    let done: Bool
+}
+
+struct TodoListView: View {
+    @StateObject var todos: PylonQuery<Todo>
+    @StateObject var session: PylonSession
+    @StateObject var addTodo: PylonMutation<NewTodo, Todo>
+
+    init(engine: SyncEngine, client: PylonClient) {
+        _todos    = StateObject(wrappedValue: PylonQuery(engine: engine, entity: "Todo"))
+        _session  = StateObject(wrappedValue: PylonSession(engine: engine))
+        _addTodo  = StateObject(wrappedValue: PylonMutation(client: client, name: "createTodo"))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(todos.rows) { todo in
+                Text(todo.title)
+            }
+            .toolbar {
+                Button("Add") {
+                    Task {
+                        try await addTodo.run(NewTodo(title: "new", done: false))
+                    }
+                }
+            }
+            .navigationTitle("Hello, \(session.session.userId ?? "guest")")
+        }
+    }
+}
+```
+
+## Auth
+
+```swift
+// Magic code
+try await client.startMagicCode(email: "alice@example.com")
+let session = try await client.verifyMagicCode(email: "alice@example.com", code: "123456")
+
+// Password
+let session = try await client.signInWithPassword(email: ..., password: ...)
+
+// OAuth (use ASWebAuthenticationSession to capture the callback URL)
+let session = try await client.signInWithGoogle(idToken: idTokenFromGoogleSignIn)
+let session = try await client.signInWithGitHub(code: codeFromCallback)
+
+// Resolve current session
+let me = try await client.me()
+// me.userId, me.tenantId, me.isAdmin, me.roles
+
+// Sign out
+try await client.logout()
+
+// Long-lived auto-refresh
+let handle = await client.startSessionAutoRefresh(intervalSeconds: 300)
+// later: handle.cancel()
+```
+
+## Entity CRUD
+
+```swift
+// Generic — pass any Decodable type
+let todos: [Todo] = try await client.list("Todo")
+let todo:  Todo   = try await client.get("Todo", id: "t1")
+
+struct NewTodo: Encodable { let title: String; let done: Bool }
+let created: Todo = try await client.create("Todo", NewTodo(title: "x", done: false))
+
+let updated: Todo = try await client.update("Todo", id: "t1", ["done": true])
+try await client.delete("Todo", id: "t1")
+
+// Cursor pagination
+let page: CursorPage<Todo> = try await client.listCursor("Todo", after: nil, limit: 50)
+```
+
+After codegen, the typed wrappers replace the stringly-typed APIs:
+
+```swift
+let todos = try await client.listTodos()
+let created = try await client.createTodo(NewTodo(title: "x", done: false))
+try await client.deleteTodo(id: created.id)
+```
+
+## Streaming functions
+
+```swift
+// Line-by-line — for NDJSON / SSE-flavored output
+for try await line in await client.streamFn("chat", args: ChatArgs(prompt: "tell me a joke")) {
+    print(line)
+}
+
+// Raw bytes — for binary streams
+for try await chunk in await client.streamFnBytes("audio", args: AudioArgs(...)) {
+    speaker.feed(chunk)
+}
+```
+
+## Sync engine
+
+```swift
+// Pull on demand
+await engine.pull()
+
+// Push pending mutations
+await engine.push()
+
+// Optimistic mutations
+let id = await engine.insert("Todo", ["title": "x"])
+await engine.update("Todo", id: id, ["done": true])
+await engine.delete("Todo", id: id)
+
+// Subscribe to local-store changes
+let store = await engine.store
+let unsubscribe = store.subscribe {
+    // React to changes
+}
+defer { unsubscribe() }
+
+// Identity flips (sign-in, tenant switch) reset the replica automatically
+await engine.notifySessionChanged()
+```
+
+### Transports
+
+```swift
+// WebSocket (default) — primary, with bearer.<token> subprotocol
+.transport: .websocket
+
+// SSE fallback — for environments that block WebSocket
+.transport: .sse
+
+// Polling — last resort (disconnected clients, debugging)
+.transport: .poll
+```
+
+All three support full-jitter exponential backoff for reconnects.
+
+### Pagination
+
+```swift
+let query: InfiniteQuery<Todo> = engine.createInfiniteQuery("Todo", pageSize: 25)
+
+let firstPage = try await query.loadMore()
+let secondPage = try await query.loadMore()
+
+let allRows = await query.data()
+let hasMore = await query.hasMorePages()
+```
+
+## Files
+
+```swift
+// Upload — multipart/form-data with single `file` part
+let resp = try await client.uploadFile(
+    data: Data("hello".utf8),
+    filename: "greeting.txt",
+    contentType: "text/plain"
+)
+// resp.id, resp.url
+
+// Download
+let bytes = try await client.downloadFile(id: "file_xyz")
+```
+
+## Multiplayer shards
+
+```swift
+import PylonRealtime
+
+struct GameState: Decodable, Sendable { let players: [Player] }
+struct Input:      Encodable, Sendable { let action: String; let x: Double; let y: Double }
+
+let cfg = ShardClientConfig(
+    baseURL: URL(string: "https://your-app.com")!,
+    subscriberId: userId,
+    token: try await client.currentToken()
+)
+let shard = ShardClient<GameState, Input>(shardId: "match_42", config: cfg)
+await shard.connect()
+
+for await snap in await shard.snapshots() {
+    print("tick \(snap.tick): \(snap.state.players.count) players")
+}
+
+try await shard.send(Input(action: "move", x: 10, y: 20))
+```
+
+## Loro CRDTs
+
+For collaborative text/lists/maps/trees, the SDK bridges to [`loro-swift`](https://github.com/loro-dev/loro-swift) (the official Swift binding for Loro):
+
+```swift
+import PylonSync
+import Loro
+
+let crdtDoc = PylonLoroDoc(entity: "Document", rowId: "doc_42")
+await crdtDoc.attach(to: engine)
+
+let textContainer = crdtDoc.doc.getText(id: "body")
+try textContainer.insert(pos: 0, s: "Hello, world!")
+
+// Local edits sync to other clients automatically via the binary CRDT channel.
+```
+
+The CRDT logic isn't reimplemented in Swift — `loro-swift` wraps the same Rust core as the JS `loro-crdt` package, so convergence is identical across platforms by construction.
+
+## Codegen
+
+Generate typed structs from your manifest:
+
+```bash
+pylon codegen client pylon.manifest.json --target swift --out Sources/MyApp/PylonGenerated.swift
+```
+
+Produces:
+
+- `struct Todo: Codable, Identifiable, Equatable, Hashable { ... }` per entity
+- `struct NewTodo: Encodable { ... }` for create payloads (id-less variant)
+- `struct CreateTodoInput: Encodable { ... }` per action input
+- A `PylonClient` extension with typed `listTodos`, `createTodo`, `deleteTodo`, etc.
+- `enum PylonEntities { static let Todo = "Todo"; static let all: [String] = [...] }`
+
+Run on every manifest change. Add to your build script.
+
+## Persistence
+
+`SQLitePersistence` mirrors the IndexedDB schema used by the web client:
+
+- `rows(entity, row_id, data)` — entity rows
+- `cursors(key, last_seq)` — sync cursor
+- `mutations(id, payload)` — offline write queue
+
+WAL mode for concurrent reads while writes happen. All access serialized through a `DispatchQueue` so async callers don't hold a sync lock across `await`.
+
+## Background sessions
+
+For long-running uploads / downloads, use a background `URLSessionConfiguration`:
+
+```swift
+let cfg = URLSessionConfiguration.background(withIdentifier: "com.your-app.uploads")
+let session = URLSession(configuration: cfg)
+let transport = URLSessionTransport(session: session)
+let client = PylonClient(
+    config: PylonClientConfig(baseURL: URL(string: "https://your-app.com")!),
+    transport: transport
+)
+```
+
+Use for large file uploads that should continue even when the app is backgrounded.
+
+## Storage adapters
+
+Bearer tokens persist via `PylonStorage`. Default is `UserDefaults` on Apple platforms, in-memory on Linux. For Keychain-backed token storage:
+
+```swift
+import Security
+
+let storage = WriteThroughStorage(seed: loadFromKeychain()) { key, value in
+    if let value { saveToKeychain(key: key, value: value) }
+    else         { deleteFromKeychain(key: key) }
+}
+let client = PylonClient(
+    config: PylonClientConfig(baseURL: ...),
+    storage: storage
+)
+```
+
+## Differences from the React/JS clients
+
+- **Actor isolation** — `PylonClient` and `SyncEngine` are `actor`s, so calls into them require `await`
+- **Codable everywhere** — entities are decoded into your Swift structs at the boundary; no JSON-as-`Any` floating around
+- **Background sessions** — Apple's `URLSession.background` works seamlessly
+- **No bundler** — Swift Package Manager handles versioning, no webpack/esbuild
+- **Linux-compatible** — server-side Swift apps can use the same SDK
+
+## Tests
+
+```bash
+cd packages/swift
+swift test
+```
+
+The package includes 43+ tests covering HTTP, sync engine, mutation queue, SQLite persistence, SSE parser, infinite query, streaming, and Loro frame decoding.
+
+## Sample app
+
+[`examples/swift-todo`](https://github.com/pylonsync/pylon/tree/main/examples/swift-todo) — minimal SwiftUI iOS app consuming the `examples/todo-app` manifest. Sign-in, optimistic insert/delete, live updates over WebSocket.
+
+## Where to next
+
+- **[Sync engine](/clients/sync)** — wire format, transport details
+- **[Loro CRDTs](/clients/loro)** — collaborative text/lists
+- **[Auth](/auth/overview)** — endpoint reference

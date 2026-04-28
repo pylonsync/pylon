@@ -1,0 +1,162 @@
+---
+title: Auth overview
+description: "Sessions, magic codes, password, OAuth, RBAC, API keys — what Pylon ships out of the box."
+---
+
+Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk, or NextAuth — sign-in flows, sessions, RBAC, and OAuth callbacks are all native HTTP endpoints. This page is the map; the rest of this section drills into each method.
+
+## What's included
+
+| Feature | How |
+| --- | --- |
+| Magic-code sign-in | 6-digit code emailed to the user; verify via `/api/auth/magic/verify` |
+| Email + password | Argon2-hashed; `/api/auth/password/register` + `/login` |
+| OAuth | Google + GitHub built in; CSRF-protected via state tokens |
+| Sessions | Opaque 256-bit tokens, 30-day default expiry, refresh + revoke |
+| Multi-tenant | Active org per session; row-scoped policies via `auth.tenantId` |
+| Roles (RBAC) | `auth.hasRole('admin')` in policies; multi-role aware |
+| API keys | First-class via the `api_keys` plugin — see [API keys](/auth/api-keys) |
+| TOTP / 2FA | Via the `totp` plugin |
+| JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
+| Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
+| Email verification | `/api/auth/email/send-verification` + `/api/auth/email/verify` |
+
+## The shape of every auth flow
+
+Every sign-in method ends with the same pair: **the server mints a `Session`, returns a token, the client stores it.** Every authenticated request then carries `Authorization: Bearer <token>`.
+
+```
+client → POST /api/auth/<method>     →  { token, user_id, expires_at }
+client → request with Authorization  →  server resolves session → AuthContext
+```
+
+The `AuthContext` is what flows into your policies, your TypeScript functions (as `ctx.auth`), and `/api/auth/me`.
+
+## Endpoints
+
+All under `/api/auth/`:
+
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/me` | GET | Resolve the current session — returns `AuthContext` |
+| `/magic/send` | POST | Email a 6-digit code |
+| `/magic/verify` | POST | Trade code for session token |
+| `/password/register` | POST | Create user + sign in |
+| `/password/login` | POST | Sign in with email + password |
+| `/email/send-verification` | POST | Email a code to the current user |
+| `/email/verify` | POST | Verify the user's email address |
+| `/providers` | GET | List configured OAuth providers |
+| `/login/:provider` | GET | Begin OAuth (returns redirect URL or 302) |
+| `/callback/:provider` | GET, POST | Complete OAuth |
+| `/refresh` | POST | Rotate the session token |
+| `/sessions` | GET | List all sessions for the current user |
+| `/sessions` | DELETE | Revoke all sessions for the current user |
+| `/session` | DELETE | Revoke the current session (sign out) |
+| `/select-org` | POST | Switch active tenant |
+| `/guest` | POST | Mint a guest session with a stable anonymous id |
+| `/upgrade` | POST | Convert a guest session to a real user (admin / dev only) |
+
+## Sessions vs cookies vs bearer tokens
+
+Pylon supports both:
+
+- **Bearer tokens** — pass via `Authorization: Bearer <token>` header. Used by every SDK, native clients, and curl. Tokens are 256-bit opaque strings prefixed `pylon_`.
+- **Cookies** — when configured (see [Sessions](/auth/sessions)), the same token can ride in an `HttpOnly` cookie for browser apps. Set automatically on successful sign-in.
+
+Both resolve to the same `Session` server-side. No JWT, no signing key to rotate, no refresh-token dance — opaque tokens you can revoke.
+
+## Auth context
+
+What every authenticated request gets:
+
+```typescript
+type AuthContext = {
+  userId: string | null;       // null = anonymous
+  isAdmin: boolean;            // bypasses every policy
+  isGuest: boolean;            // stable anonymous id (cart/preferences)
+  roles: string[];             // ["admin", "owner", ...]
+  tenantId: string | null;     // active organization
+}
+```
+
+In a function:
+
+```typescript
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: { title: v.string() },
+  async handler(ctx, args) {
+    if (!ctx.auth.userId) throw new Error("sign in required");
+    if (!ctx.auth.hasRole("editor")) throw new Error("forbidden");
+    // ...
+  },
+});
+```
+
+In a policy:
+
+```jsonc
+{
+  "match": "Todo",
+  "read": "auth.userId != null && data.authorId == auth.userId",
+  "write": "auth.userId == data.authorId || auth.hasRole('admin')"
+}
+```
+
+## Security guarantees
+
+- **Tokens are CSPRNG-generated** with 256 bits of entropy, prefixed `pylon_`. No JWT signing key to rotate.
+- **Magic codes** are 6-digit numeric, expire after 10 minutes, burn after 5 wrong attempts, and use constant-time comparison.
+- **Magic-code create** is throttled to 1 per email per minute.
+- **Passwords** are hashed with Argon2id (the OWASP-recommended default).
+- **OAuth state** is CSRF-protected via single-use tokens (10-minute expiry).
+- **Failed password logins** run a dummy hash so timing doesn't leak whether the email exists.
+- **Sessions can be persisted** to SQLite so they survive restart (see [Sessions](/auth/sessions)).
+- **`/api/auth/session` POST is admin-gated** in production — clients can't forge sessions.
+
+## Configuration
+
+Minimal env (most apps):
+
+```bash
+PYLON_ADMIN_TOKEN=<64+ random hex>     # required for admin endpoints
+PYLON_SESSION_DB=/var/lib/pylon/sessions.db  # persistent sessions
+```
+
+OAuth (optional):
+
+```bash
+PYLON_OAUTH_GOOGLE_CLIENT_ID=...
+PYLON_OAUTH_GOOGLE_CLIENT_SECRET=...
+PYLON_OAUTH_GOOGLE_REDIRECT=https://yourapp.com/api/auth/callback/google
+
+PYLON_OAUTH_GITHUB_CLIENT_ID=...
+PYLON_OAUTH_GITHUB_CLIENT_SECRET=...
+PYLON_OAUTH_GITHUB_REDIRECT=https://yourapp.com/api/auth/callback/github
+```
+
+Email (for magic codes — picks up from environment):
+
+```bash
+PYLON_EMAIL_PROVIDER=stack0      # or sendgrid | resend | webhook
+PYLON_EMAIL_API_KEY=sk_live_...
+PYLON_EMAIL_FROM=noreply@yourdomain.com
+```
+
+Cookie auth (browser apps):
+
+```bash
+PYLON_COOKIE_DOMAIN=.yourdomain.com
+PYLON_COOKIE_SAMESITE=lax        # lax | strict | none
+PYLON_COOKIE_SECURE=true         # forces HTTPS-only cookies
+```
+
+## Where to go next
+
+- **[Magic codes](/auth/magic-codes)** — the simplest sign-in flow; what most apps should use first
+- **[Password](/auth/password)** — email + password with Argon2 hashing
+- **[OAuth](/auth/oauth)** — Google + GitHub
+- **[Sessions](/auth/sessions)** — token lifetime, refresh, revoke, persistent storage, cookies
+- **[RBAC](/auth/rbac)** — roles, the active tenant, multi-org apps
+- **[API keys](/auth/api-keys)** — long-lived keys for server-to-server calls

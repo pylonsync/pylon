@@ -1,0 +1,225 @@
+---
+title: OAuth (Google + GitHub)
+description: "Built-in Google and GitHub sign-in with CSRF-protected state tokens."
+---
+
+Pylon ships native OAuth for Google and GitHub. Users click sign in, get redirected to the provider, come back with a session token. CSRF-protected via single-use state tokens that survive a server restart mid-handshake.
+
+## Set up credentials
+
+Register your app with the provider:
+
+- **Google** — [Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client IDs](https://console.cloud.google.com/apis/credentials). Authorized redirect URI: `https://your-app.com/api/auth/callback/google`.
+- **GitHub** — [GitHub Settings → Developer settings → OAuth Apps](https://github.com/settings/developers). Authorization callback URL: `https://your-app.com/api/auth/callback/github`.
+
+Set the env vars:
+
+```bash
+PYLON_OAUTH_GOOGLE_CLIENT_ID=...
+PYLON_OAUTH_GOOGLE_CLIENT_SECRET=...
+PYLON_OAUTH_GOOGLE_REDIRECT=https://your-app.com/api/auth/callback/google
+
+PYLON_OAUTH_GITHUB_CLIENT_ID=...
+PYLON_OAUTH_GITHUB_CLIENT_SECRET=...
+PYLON_OAUTH_GITHUB_REDIRECT=https://your-app.com/api/auth/callback/github
+```
+
+If a provider's `CLIENT_ID` or `CLIENT_SECRET` is unset, that provider is silently disabled — `/api/auth/providers` won't list it.
+
+On **Pylon Cloud**, set these in `Settings → Environment` per workspace. Cloud also offers shared dev credentials in non-prod workspaces so you can prototype before registering your own.
+
+## How it works
+
+```
+                        ┌──────────────────────────────────────┐
+client  →  GET /api/auth/login/google                          │
+   ←  { redirect: "https://accounts.google.com/o/oauth2/...", state: "xyz" }
+                                                               │
+client  →  redirects user to Google                            │
+   ←  user grants access, Google redirects to                  │
+       /api/auth/callback/google?code=...&state=xyz            │
+                                                               │
+server  →  validates state (CSRF check)                        │
+        →  exchanges code for access_token                     │
+        →  fetches userinfo from Google                        │
+        →  upserts User row                                    │
+        →  mints Session                                       │
+   ←  302 redirect to PYLON_DASHBOARD_URL with cookie set      │
+       (or JSON { token, user_id, expires_at } if POSTed)      │
+                        └──────────────────────────────────────┘
+```
+
+## Two ways to invoke
+
+### Browser flow (302 redirect)
+
+`GET /api/auth/login/google?redirect=1` returns a 302 directly to the provider. The callback handler sets a cookie and redirects to `PYLON_DASHBOARD_URL`. This is the simplest integration for a typical web app:
+
+```html
+<a href="/api/auth/login/google?redirect=1">Sign in with Google</a>
+```
+
+Set `PYLON_DASHBOARD_URL=https://your-app.com` so the callback knows where to send the user after sign-in.
+
+### JSON flow (manual)
+
+For SPAs or native apps that want to control the redirect themselves:
+
+```bash
+curl https://your-app/api/auth/login/google
+# → { "redirect": "https://accounts.google.com/...", "state": "xyz" }
+```
+
+You navigate the browser to `redirect`, the user comes back to your app's `?code=...&state=xyz` URL, and you POST it to the callback:
+
+```bash
+curl -X POST https://your-app/api/auth/callback/google \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "4/0Ad...", "state": "xyz"}'
+```
+
+Response:
+
+```json
+{
+  "token": "pylon_...",
+  "user_id": "usr_xyz",
+  "provider": "google",
+  "expires_at": 1735689600
+}
+```
+
+## From the SDKs
+
+<CodeGroup>
+```typescript TypeScript (manual flow)
+// 1. Get the redirect URL
+const { redirect, state } = await fetch("/api/auth/login/google").then(r => r.json());
+sessionStorage.setItem("oauth_state", state);
+window.location.href = redirect;
+
+// 2. Back from Google: extract code/state from URL
+const params = new URLSearchParams(window.location.search);
+const session = await fetch("/api/auth/callback/google", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    code: params.get("code"),
+    state: params.get("state"),
+  }),
+}).then(r => r.json());
+```
+
+```swift Swift
+import PylonClient
+import AuthenticationServices
+
+// Use ASWebAuthenticationSession for native OAuth
+let url = URL(string: "https://your-app/api/auth/login/google?redirect=1")!
+let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "yourapp") { callback, _ in
+    guard let callback else { return }
+    // Extract ?code= and ?state= from callback
+    let code = URLComponents(url: callback, resolvingAgainstBaseURL: false)?
+        .queryItems?.first { $0.name == "code" }?.value ?? ""
+    Task {
+        let resp = try await client.signInWithGoogle(idToken: code)
+        // session token is now stored
+    }
+}
+session.presentationContextProvider = self
+session.start()
+```
+</CodeGroup>
+
+## CSRF protection
+
+Every OAuth start mints a random state token (256 bits, prefixed `pylon_`) that expires after 10 minutes and is single-use. The callback rejects the request if:
+
+- The state is missing
+- The state has expired
+- The state was already used (replay)
+- The state was minted for a different provider (e.g. Google state on a GitHub callback)
+
+State storage defaults to in-memory but the runtime swaps in a SQLite-backed `OAuthStateBackend` so a server restart mid-handshake doesn't break in-flight sign-ins.
+
+## What gets created
+
+On first OAuth sign-in for a given email, Pylon creates a `User` row:
+
+```jsonc
+{
+  "id": "auto-generated",
+  "email": "alice@example.com",
+  "displayName": "Alice (from Google)",
+  "emailVerified": "<now>",
+  "createdAt": "<now>"
+}
+```
+
+On subsequent sign-ins, Pylon looks up the user by email and mints a fresh session.
+
+**Email verification is implicit** — the OAuth provider already verified the email, so Pylon stamps `emailVerified` immediately. Your `User` entity should have:
+
+```jsonc
+{ "name": "email",         "type": "string",  "unique": true },
+{ "name": "displayName",   "type": "string" },
+{ "name": "emailVerified", "type": "datetime", "optional": true },
+{ "name": "createdAt",     "type": "datetime" }
+```
+
+## Discovering configured providers
+
+```bash
+curl https://your-app/api/auth/providers
+```
+
+```json
+[
+  { "provider": "google", "auth_url": "https://accounts.google.com/o/oauth2/..." },
+  { "provider": "github", "auth_url": "https://github.com/login/oauth/authorize?..." }
+]
+```
+
+Use this in your sign-in UI to render only the buttons you've configured.
+
+## Provider-specific notes
+
+### Google
+
+- Scopes requested: `openid email profile`
+- Userinfo endpoint: `https://www.googleapis.com/oauth2/v3/userinfo`
+- Display name comes from `name` field
+
+### GitHub
+
+- Scopes requested: `user:email`
+- Userinfo endpoint: `https://api.github.com/user`
+- Display name comes from `name`, falls back to `login`
+- If the user's primary email is private, Pylon hits `/user/emails` to find a verified primary
+
+## Adding a new provider
+
+The two built-in providers cover most cases. To add another (Apple, Microsoft, Discord, etc.) you have two paths:
+
+**1. As a plugin** — register a custom OAuth handler in your app code (recommended for Cloud users):
+
+```typescript
+import { registerOAuthProvider } from "@pylonsync/sdk";
+
+registerOAuthProvider("apple", {
+  authUrl: "https://appleid.apple.com/auth/authorize",
+  tokenUrl: "https://appleid.apple.com/auth/token",
+  userinfoFn: async (token) => ({ email, name }),
+});
+```
+
+**2. Patch the Rust core** — extend `OAuthConfig` in `crates/auth/src/lib.rs` with the provider's URL constants. Ships with your binary; great if you're self-hosting.
+
+## Error responses
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `PROVIDER_NOT_FOUND` | 404 | `PYLON_OAUTH_<PROVIDER>_*` env vars not set |
+| `OAUTH_BAD_STATE` | 400 | State missing, expired, or replayed |
+| `OAUTH_PROVIDER_REJECTED` | 400 | Provider returned an error during code exchange |
+| `OAUTH_DASHBOARD_URL_MISSING` | 500 | `PYLON_DASHBOARD_URL` not set for the GET callback redirect |

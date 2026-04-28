@@ -1,0 +1,297 @@
+---
+title: Loro CRDTs
+description: "@pylonsync/loro — collaborative text, lists, maps, trees that converge across clients."
+---
+
+For collaborative-editor-style features (Google Docs, Figma, Linear-style multiplayer), Pylon integrates with [Loro](https://loro.dev) — a fast, well-tested CRDT library with bindings for JavaScript and Swift.
+
+CRDT-backed fields don't go through normal LWW merge. They sync via a dedicated binary channel on the WebSocket: every CRDT-mode write ships as `[type | entity_len | entity | row_id_len | row_id | payload]`, and the receiving side feeds the payload to a per-row `LoroDoc` that converges automatically.
+
+## What you get
+
+- **Collaborative text** — multiple cursors, conflict-free inserts/deletes, undo/redo
+- **Collaborative lists** — append, insert, move, delete with stable item ids
+- **Collaborative maps** — key-value with last-writer-wins per key
+- **Collaborative trees** — hierarchical structures (outlines, file trees)
+- **Counter** — multi-writer increment/decrement that always converges
+- **Cursor positions** — anchor a cursor to a position that survives concurrent edits
+
+All four CRDTs share the same wire format and the same convergence guarantees.
+
+## Install
+
+```bash
+bun add @pylonsync/loro
+```
+
+The Swift SDK ships Loro bridging in `PylonSync` — no separate install.
+
+## Declare CRDT-backed fields
+
+In your schema:
+
+```typescript
+import { entity, text, list, counter, tree } from "@pylonsync/sdk";
+
+const Document = entity("Document", {
+  title:  string(),                   // normal LWW field
+  body:   text(),                     // LoroText
+  outline:tree(),                     // LoroTree
+  views:  counter(),                  // LoroCounter
+  tags:   list(),                     // LoroList
+  authorId: id("User"),
+});
+```
+
+The Pylon server stores CRDT fields as opaque bytes — it doesn't interpret them. Clients decode the bytes into Loro containers and edit them locally; updates broadcast to other subscribers via the binary WebSocket channel.
+
+## Subscribe and edit
+
+```typescript
+import { useLoroDoc } from "@pylonsync/loro";
+import { LoroDoc } from "loro-crdt";
+
+function DocumentEditor({ docId }: { docId: string }) {
+  const doc = useLoroDoc("Document", docId);
+
+  if (!doc) return <Loading />;
+
+  const text = doc.getText("body");
+
+  return (
+    <textarea
+      value={text.toString()}
+      onChange={(e) => {
+        text.delete(0, text.length);
+        text.insert(0, e.target.value);
+      }}
+    />
+  );
+}
+```
+
+`useLoroDoc` subscribes the engine to binary updates for `(entity, rowId)`, decodes incoming frames, and returns the live `LoroDoc`. Edits to the doc dispatch through Loro's local state; the hook ships the resulting binary update back over the WebSocket.
+
+Multiple `useLoroDoc` callers on the same row share one subscription (refcounted) — opening the same document in two tabs doesn't double-subscribe.
+
+## Container types
+
+### Text — collaborative rich text
+
+```typescript
+const text = doc.getText("body");
+
+text.insert(0, "Hello, ");
+text.insert(7, "world!");
+text.delete(0, 5); // remove "Hello"
+text.toString();   // "world!"
+```
+
+For rich text with marks (bold, italic, links):
+
+```typescript
+text.mark({ start: 0, end: 5 }, "bold", true);
+text.unmark({ start: 0, end: 5 }, "bold");
+```
+
+### List — append / insert / move
+
+```typescript
+const list = doc.getList("tags");
+
+list.push("urgent");
+list.insert(0, "draft");
+list.delete(1, 1);
+
+list.toArray(); // ["draft"]
+```
+
+For lists where items keep stable ids across moves:
+
+```typescript
+const list = doc.getMovableList("items");
+const id = list.push({ name: "First" });
+list.move(id, 5); // move to position 5
+```
+
+### Map — key-value
+
+```typescript
+const map = doc.getMap("metadata");
+
+map.set("status", "draft");
+map.set("priority", 3);
+map.get("status");  // "draft"
+map.delete("priority");
+```
+
+### Counter — multi-writer increment
+
+```typescript
+const counter = doc.getCounter("views");
+
+counter.increment(1);
+counter.decrement(2);
+counter.value;  // -1
+```
+
+Multiple clients incrementing concurrently are summed correctly — no last-writer-wins data loss.
+
+### Tree — hierarchical
+
+```typescript
+const tree = doc.getTree("outline");
+
+const root = tree.createNode();
+root.data.set("text", "Top-level");
+
+const child = root.createNode();
+child.data.set("text", "Nested");
+child.move(root, 0); // make child the first child of root
+```
+
+Useful for outlines, file trees, organizational charts, mind maps.
+
+## Cursors
+
+For "show where each user is editing":
+
+```typescript
+import { Cursor } from "loro-crdt";
+
+const text = doc.getText("body");
+const myCursor = text.getCursor(42); // anchor at position 42
+
+// Other clients can read the cursor's current resolved position
+// even after concurrent edits shift everything around:
+const resolved = doc.getCursorPos(myCursor);
+// → { offset, side, origin, ... }
+```
+
+Combined with `engine.setPresence({ cursor: myCursor })`, you get the multiplayer-cursor effect.
+
+## Awareness / presence
+
+For lightweight ephemeral state (who's editing, where their cursor is, what they're typing) that doesn't need to be persisted:
+
+```typescript
+engine.setPresence({
+  userId: currentUser.id,
+  color: "#ff7700",
+  cursor: text.getCursor(currentPosition),
+});
+
+// Subscribe to other users' presence
+engine.onPresenceChange((peers) => {
+  for (const peer of peers) {
+    renderRemoteCursor(peer.color, peer.cursor);
+  }
+});
+```
+
+Presence rides the same WebSocket as CRDT updates but doesn't go into the CRDT itself — it's transient.
+
+## Saving and loading
+
+The engine handles persistence transparently — every CRDT update is broadcast and the server holds the canonical state. To get the current snapshot for a one-off use (export, share, backup):
+
+```typescript
+const snapshot = doc.export({ mode: "snapshot" });
+// snapshot is a Uint8Array — store it, ship it elsewhere
+
+// Restore on another client
+const newDoc = new LoroDoc();
+newDoc.import(snapshot);
+```
+
+For incremental updates (smaller bytes, useful for over-the-wire sync):
+
+```typescript
+const update = doc.export({ mode: "update", from: previousVersion });
+otherDoc.import(update);
+```
+
+## Undo / redo
+
+Loro has built-in version vectors that make undo/redo work correctly even with concurrent edits:
+
+```typescript
+import { UndoManager } from "loro-crdt";
+
+const undo = new UndoManager(doc, {
+  mergeInterval: 1000, // group edits within 1s as one undoable step
+});
+
+undo.undo();
+undo.redo();
+undo.canUndo();
+undo.canRedo();
+```
+
+## Performance
+
+- **Local edits are O(log n)** in the size of the document — fast even for large texts.
+- **Binary frames are tiny** — typical updates are a few dozen bytes; snapshots are larger but only sent on subscribe.
+- **CRDT logic is Rust** — both `loro-crdt` (JS) and `loro-swift` wrap the same Rust core, so convergence is identical and performance is consistent.
+- **No conflict markers ever surface** — concurrent edits always merge cleanly.
+
+## Wire format
+
+Frame layout (matches `crates/router/src/lib.rs::encode_crdt_frame` and `packages/loro/src/wire.ts`):
+
+```
+[type: u8] [entity_len: u16 BE] [entity utf8]
+[row_id_len: u16 BE] [row_id utf8] [payload bytes]
+```
+
+Type bytes: `0x10` = full snapshot, `0x11` = incremental update.
+
+The engine doesn't care what's inside `payload` — that's Loro's binary format. To peek/decode for debugging:
+
+```typescript
+import { decodeCrdtFrame } from "@pylonsync/loro/wire";
+
+engine.onBinaryFrame((bytes) => {
+  const frame = decodeCrdtFrame(bytes);
+  console.log(`${frame.type === 0x10 ? "snapshot" : "update"} for ${frame.entity}/${frame.rowId}: ${frame.payload.length} bytes`);
+});
+```
+
+## Swift
+
+Same model. The Swift bridge:
+
+```swift
+import PylonSync
+import Loro
+
+let crdtDoc = PylonLoroDoc(entity: "Document", rowId: "doc_42")
+await crdtDoc.attach(to: engine)
+
+let text = crdtDoc.doc.getText(id: "body")
+try text.insert(pos: 0, s: "Hello, world!")
+```
+
+`PylonLoroDoc.attach(to:)` registers the binary handler with the engine and sends the `crdt-subscribe` message. Detach (or let the doc go out of scope) to unsubscribe.
+
+## When NOT to use CRDTs
+
+CRDTs are great for **collaborative state** where two users might edit at the same time. They're overkill for:
+
+- **Single-user data** — use a normal entity field
+- **Server-authoritative state** — orders, payments, anything where the server is the source of truth and last-write-wins is correct
+- **High-frequency telemetry** — CRDTs aren't designed for write-heavy event streams; use a regular entity with append semantics
+
+Mix CRDT and non-CRDT fields freely on the same entity — `Document.title` can be a normal string while `Document.body` is a `LoroText`.
+
+## Production checklist
+
+- **Snapshot frequency** — Loro's hybrid logical clock works well, but for very long-lived docs, periodically save a full snapshot to bound the size of the update history. The engine handles this automatically.
+- **Garbage collection** — Loro tracks tombstones for deletes; `doc.compact()` reclaims memory after large deletions.
+- **Presence cleanup** — set a TTL on presence entries; users who close the tab without explicitly leaving will linger otherwise.
+
+## Examples
+
+- [`examples/collaborative-doc`](https://github.com/pylonsync/pylon/tree/main/examples/collaborative-doc) — minimal CRDT-backed text editor
+- [`examples/forge`](https://github.com/pylonsync/pylon/tree/main/examples/forge) — design-tool-style multi-cursor editing
+- [`examples/linear`](https://github.com/pylonsync/pylon/tree/main/examples/linear) — issue tracker with CRDT-backed comment threads

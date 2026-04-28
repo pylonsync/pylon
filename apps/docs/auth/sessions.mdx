@@ -1,0 +1,273 @@
+---
+title: Sessions
+description: "Opaque tokens, refresh, revoke, persistent storage, cookies — how Pylon manages auth state."
+---
+
+A Pylon session is an opaque 256-bit token (prefixed `pylon_`) that maps to a `Session { token, user_id, expires_at, device, created_at, tenant_id }`. Tokens flow either as `Authorization: Bearer <token>` headers or `HttpOnly` cookies — both resolve through the same `SessionStore`.
+
+There's no JWT, no signing key to rotate, no refresh-token dance. Just opaque strings you can revoke.
+
+## Session shape
+
+```typescript
+type Session = {
+  token: string;          // pylon_<64 hex chars> — 256 bits of CSPRNG entropy
+  user_id: string;        // points at the User row
+  expires_at: number;     // unix epoch seconds; 0 = never expires
+  device?: string;        // optional user-agent / device label
+  created_at: number;     // unix epoch seconds
+  tenant_id?: string;     // active organization (multi-tenant apps)
+}
+```
+
+## Defaults
+
+| Setting | Default |
+| --- | --- |
+| Lifetime | 30 days |
+| Token entropy | 256 bits (CSPRNG) |
+| Storage | In-memory |
+| Cookie HttpOnly | Yes when cookies enabled |
+| Cookie SameSite | `lax` |
+| Cookie Secure | `true` in non-dev mode |
+
+Sessions live in memory by default — fine for development but **users get logged out on every restart**. For production, point Pylon at a SQLite file:
+
+```bash
+PYLON_SESSION_DB=/var/lib/pylon/sessions.db
+```
+
+Now sessions survive restarts, deploys, and crashes. The SQLite file is a write-through cache — reads still hit memory, every save/remove writes to disk.
+
+On **Pylon Cloud**, persistent sessions are configured automatically.
+
+## Refresh
+
+Rotate a session's token without breaking the user's sign-in:
+
+```bash
+curl -X POST https://your-app/api/auth/refresh \
+  -H 'Authorization: Bearer pylon_old_token'
+```
+
+Response:
+
+```json
+{
+  "token": "pylon_new_token",
+  "user_id": "usr_xyz",
+  "expires_at": 1735689600
+}
+```
+
+The old token is revoked; the new token has a fresh 30-day lifetime. Use this on long-running clients to keep sessions alive (the Swift SDK has `startSessionAutoRefresh(intervalSeconds:)` that does this automatically).
+
+## Revoke
+
+### Sign out the current device
+
+```bash
+curl -X DELETE https://your-app/api/auth/session \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+{ "revoked": true }
+```
+
+Also clears the auth cookie (sets `Set-Cookie` with an expired value).
+
+### Sign out everywhere
+
+```bash
+curl -X DELETE https://your-app/api/auth/sessions \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+{ "revoked_count": 4 }
+```
+
+Useful when a user changes their password or you suspect account compromise.
+
+### List active sessions
+
+```bash
+curl https://your-app/api/auth/sessions \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+[
+  {
+    "token_prefix": "pylon_a1",
+    "user_id": "usr_xyz",
+    "device": "iPhone 15 / iOS 17",
+    "created_at": 1735000000,
+    "expires_at": 1737592000
+  }
+]
+```
+
+The full token is never returned — only the first 8 chars for display. Power users can use this to audit active sign-ins and revoke individual ones.
+
+## Cookies vs bearer tokens
+
+Pylon supports both transports for the same `Session`. Pick based on client type:
+
+| Transport | When |
+| --- | --- |
+| **Bearer header** | SPAs, native apps, server-to-server, curl |
+| **HttpOnly cookie** | Multi-page web apps, server-rendered apps where XSS resistance matters |
+
+To enable cookie auth:
+
+```bash
+PYLON_COOKIE_DOMAIN=.yourdomain.com    # subdomain-shared if leading dot
+PYLON_COOKIE_SAMESITE=lax              # lax | strict | none
+PYLON_COOKIE_SECURE=true               # forces HTTPS-only (default in non-dev)
+```
+
+The cookie name is `pylon_session`. It's automatically set on:
+
+- `/api/auth/magic/verify` success
+- `/api/auth/password/login` success
+- `/api/auth/password/register` success
+- `/api/auth/callback/:provider` success (both GET and POST)
+
+And cleared on `/api/auth/session` DELETE.
+
+When both a cookie and a `Authorization: Bearer` header are present on the same request, **the bearer header wins** — explicit beats implicit.
+
+## Multi-tenant: switching organizations
+
+For apps with workspaces/orgs, attach a `tenant_id` to the session so policies like `data.orgId == auth.tenantId` can run automatically:
+
+```bash
+curl -X POST https://your-app/api/auth/select-org \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"orgId": "org_xyz"}'
+```
+
+The server **verifies membership** before committing — looks up an `OrgMember { userId, orgId }` row and returns 403 `NOT_A_MEMBER` if it doesn't exist. Clients can't impersonate an org they don't belong to.
+
+Pass `null` to leave the org (drop back to the lobby):
+
+```bash
+curl -X POST https://your-app/api/auth/select-org \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"orgId": null}'
+```
+
+After `select-org`, every request resolves to an `AuthContext` with `tenantId` set, and your row-scoped policies see it as `auth.tenantId`.
+
+## Guest sessions
+
+For pre-login state (cart contents, theme preference, anonymous draft), mint a guest session:
+
+```bash
+curl -X POST https://your-app/api/auth/guest
+```
+
+Response:
+
+```json
+{
+  "token": "pylon_...",
+  "user_id": "guest_a1b2c3d4...",
+  "guest": true
+}
+```
+
+Guests have a stable `user_id` (so their cart persists across page loads) but `is_authenticated()` returns false — `AuthMode::User` rejects them, so guests can't access user-only routes.
+
+When the user signs in for real, **upgrade** the guest session in place:
+
+```typescript
+// Sign-in flow that preserves the guest's cart:
+import { mutation } from "@pylonsync/functions";
+
+export default mutation({
+  args: { realUserId: v.string() },
+  async handler(ctx, args) {
+    if (!ctx.auth.isGuest) throw new Error("not a guest session");
+
+    // Move the cart from the guest user_id to the real user_id
+    const cart = await ctx.db.query("CartItem", {
+      where: { userId: ctx.auth.userId },
+    });
+    for (const item of cart) {
+      await ctx.db.update("CartItem", item.id, { userId: args.realUserId });
+    }
+  },
+});
+```
+
+The session token stays the same — the client doesn't need to re-store it.
+
+`/api/auth/upgrade` is admin-gated and exists for backfill scripts; normal upgrade should flow through magic-code verify or OAuth callback, which mint a fresh user session and consume the guest token.
+
+## Programmatic session creation (admin only)
+
+In dev mode or with admin auth, mint a session for any user:
+
+```bash
+curl -X POST https://your-app/api/auth/session \
+  -H 'Authorization: Bearer <PYLON_ADMIN_TOKEN>' \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "usr_xyz"}'
+```
+
+This is the **back door** — never expose it without admin auth. In non-dev, non-admin requests get 403 `FORBIDDEN`. Use for:
+
+- Backfill scripts that need to sign in as a user
+- Tests
+- Impersonation features for support agents (gate on `auth.hasRole('support')` in your wrapper)
+
+## Sweep expired sessions
+
+Background cleanup runs automatically — every authenticated request checks `expires_at` and removes the session if expired. For the SQLite-backed store, you can also trigger an explicit sweep:
+
+```typescript
+// In a scheduled job
+sessionStore.sweepExpired();
+```
+
+Cloud runs this hourly. Self-hosted, the on-demand check is usually enough — there's no harm in leaving expired rows in the table briefly.
+
+## Session storage backends
+
+The `SessionStore` accepts a pluggable `SessionBackend`:
+
+```rust
+trait SessionBackend: Send + Sync {
+    fn load_all(&self) -> Vec<Session>;
+    fn save(&self, session: &Session);
+    fn remove(&self, token: &str);
+}
+```
+
+Pylon ships:
+
+- **In-memory** — default; lost on restart
+- **SQLite** — `PYLON_SESSION_DB=path` enables it
+
+Custom backends (Redis, DynamoDB, etc.) are a few lines of Rust — implement the trait, pass via `SessionStore::with_backend`. See `crates/runtime/src/session_backend.rs` for the SQLite reference impl.
+
+## Security defaults
+
+- **Tokens are 256-bit CSPRNG** — un-guessable
+- **Constant-time token lookup** — no timing leak on session resolution
+- **`HttpOnly` cookies** — JS can't read the cookie via XSS
+- **`Secure` cookies in non-dev** — refused over plain HTTP
+- **`SameSite=lax`** — CSRF-resistant by default; switch to `strict` if you don't have cross-site sign-in flows
+- **Sessions can be revoked individually or en masse** — no JWT-style "until expiry, can't kill" problem
+- **`/me` returns the runtime-resolved context, not a fresh DB lookup** — admin-token requests show as admin even though they don't have a session row
