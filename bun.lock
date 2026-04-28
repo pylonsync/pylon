@@ -399,7 +399,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -431,7 +431,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -447,7 +447,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -479,11 +479,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.1",
+      "version": "0.3.2",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.1",
+      "version": "0.3.2",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
