@@ -2140,9 +2140,7 @@ impl Runtime {
     /// Borrow the underlying Postgres `DataStore` if this runtime is
     /// Postgres-backed. Used by the `DataStore` adapter in `datastore.rs`
     /// to delegate `transact`/`search` etc. without re-implementing them.
-    pub(crate) fn pg_data_store(
-        &self,
-    ) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {
+    pub(crate) fn pg_data_store(&self) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {
         self.pg_backend().map(|pg| &pg.store)
     }
 }

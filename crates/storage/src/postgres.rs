@@ -365,8 +365,7 @@ impl postgres::types::ToSql for JsonParam {
             | (JsonParam::Text(s), &Type::VARCHAR)
             | (JsonParam::Text(s), &Type::BPCHAR)
             | (JsonParam::Text(s), &Type::NAME) => s.to_sql(ty, out),
-            (JsonParam::Text(s), &Type::TIMESTAMPTZ)
-            | (JsonParam::Text(s), &Type::TIMESTAMP) => {
+            (JsonParam::Text(s), &Type::TIMESTAMPTZ) | (JsonParam::Text(s), &Type::TIMESTAMP) => {
                 // The runtime currently models datetimes as ISO 8601
                 // strings end-to-end. Bind via the &str impl with the
                 // target type so postgres parses through its TEXT input
@@ -1065,11 +1064,7 @@ pub mod live {
                             }
                         };
                         let alias = format!("{field}_{bucket}");
-                        let expr = format!(
-                            "date_trunc('{}', {})",
-                            trunc_unit,
-                            quote_ident(field),
-                        );
+                        let expr = format!("date_trunc('{}', {})", trunc_unit, quote_ident(field),);
                         group_by.push(expr.clone());
                         group_select.push(format!("{} AS {}", expr, quote_ident(&alias)));
                         group_field_names.push(alias);

@@ -244,9 +244,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         // DATABASE_URL=postgres://... and the runtime opens that instead of
         // the hidden SQLite file.
         let (db_str, is_pg) = match std::env::var("DATABASE_URL") {
-            Ok(url)
-                if url.starts_with("postgres://") || url.starts_with("postgresql://") =>
-            {
+            Ok(url) if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
                 (url, true)
             }
             _ => {

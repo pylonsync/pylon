@@ -98,7 +98,10 @@ fn insert_get_update_delete_roundtrip() {
     let rt = fresh_runtime(&url);
 
     let id = rt
-        .insert("User", &serde_json::json!({"email": "a@b.com", "name": "Ada"}))
+        .insert(
+            "User",
+            &serde_json::json!({"email": "a@b.com", "name": "Ada"}),
+        )
         .expect("insert");
     let row = rt
         .get_by_id("User", &id)
@@ -286,10 +289,7 @@ fn query_filtered_supports_not_and_in() {
         .unwrap();
     }
     let not_p2 = rt
-        .query_filtered(
-            "User",
-            &serde_json::json!({"email": {"$not": "p2@x.com"}}),
-        )
+        .query_filtered("User", &serde_json::json!({"email": {"$not": "p2@x.com"}}))
         .expect("$not filter");
     assert_eq!(not_p2.len(), 4);
     assert!(not_p2
@@ -316,11 +316,8 @@ fn aggregate_count_and_groupby_work_on_postgres() {
         ("b@x.com", "Bob"),
         ("c@x.com", "Alice"),
     ] {
-        rt.insert(
-            "User",
-            &serde_json::json!({"email": email, "name": name}),
-        )
-        .unwrap();
+        rt.insert("User", &serde_json::json!({"email": email, "name": name}))
+            .unwrap();
     }
     // Count total — was returning NOT_SUPPORTED before the PG aggregate impl landed.
     let total = rt

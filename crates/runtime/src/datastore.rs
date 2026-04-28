@@ -279,8 +279,9 @@ impl DataStore for Runtime {
         if self.is_postgres() {
             return Err(DataError {
                 code: "NOT_SUPPORTED".into(),
-                message: "CRDT mode is SQLite-only at this layer; Postgres clients should use JSON CRUD"
-                    .into(),
+                message:
+                    "CRDT mode is SQLite-only at this layer; Postgres clients should use JSON CRUD"
+                        .into(),
             });
         }
         // Find the entity so we can build the projection field list +
