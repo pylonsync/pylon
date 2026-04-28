@@ -90,12 +90,12 @@ If you're moving an existing Supabase app:
 | `pg_net` outbound HTTP | `fetch` inside an action (with `net_guard` plugin for SSRF defense) |
 | `auth.users` | Pylon's `User` entity (you control the shape) |
 
-The biggest delta: Pylon doesn't expose raw SQL. If your app relies on custom Postgres queries (CTEs, complex joins, window functions), you'll either:
+The biggest delta today: Pylon's entity API is the data API. If your app relies on raw Postgres queries (CTEs, window functions, materialized views, pgvector), you have two options:
 
-1. Keep using Postgres and ship those queries as Pylon `actions` that hit the DB directly via `ctx.dbConn.query(...)` (`postgres-live` feature), or
-2. Express the logic in TypeScript inside an action
+1. **Express the logic in a Pylon `action`** in TypeScript — for joins and aggregates this is usually fine, and you keep the type-safe entity model.
+2. **Run a sidecar against the same Postgres** — Pylon doesn't lock the DB; you can connect any tool that speaks Postgres for analytics, BI, or specialized queries.
 
-Most CRUD apps don't need anything beyond Pylon's query interface.
+Raw SQL exposure from inside `action` handlers (e.g. `ctx.pg.query(sql, params)` in `postgres-live` builds) is on the roadmap; there's no architectural reason to gate-keep it. For now, most app workloads fit the entity API; if yours needs more Postgres surface, Supabase has a head start.
 
 ## Honest weakness
 

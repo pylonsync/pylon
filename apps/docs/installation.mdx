@@ -9,17 +9,38 @@ description: "Install the Pylon CLI and runtime."
 - **Rust** ≥ 1.85 (required to build the CLI from source — edition 2024)
 - **Node.js** ≥ 18 (optional, for client tooling)
 
-## Install the CLI
+## Skip the install — use Pylon Cloud
 
-Pylon is currently installed from source. A one-line install script and Homebrew tap are on the roadmap but not yet shipped.
+If you don't want to manage a binary or a server, [Pylon Cloud](/cloud) hosts the same backend you'd run yourself. Sign up at [cloud.pylonsync.com](https://cloud.pylonsync.com), then:
 
 ```bash
-git clone https://github.com/pylonsync/pylon
-cd pylon
-cargo install --path crates/cli --locked
+pylon login
+pylon deploy --target cloud
 ```
 
-This compiles and places a `pylon` binary in `~/.cargo/bin/`.
+You'll still want the CLI for local development and deploys; install it below.
+
+## Install the CLI
+
+<CodeGroup>
+```bash one-line installer (recommended)
+curl -fsSL https://pylonsync.com/install.sh | bash
+```
+
+```bash Homebrew (macOS + Linux)
+brew install pylonsync/tap/pylon
+```
+
+```bash Docker
+docker pull ghcr.io/pylonsync/pylon:latest
+```
+
+```bash Cargo (compiles from source)
+cargo install pylon-cli
+```
+</CodeGroup>
+
+The one-line installer downloads a prebuilt binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required.
 
 Verify:
 
@@ -40,7 +61,7 @@ curl -fsSL https://bun.sh/install | bash
 
 ## Client SDKs
 
-Install into your web app:
+### Web (React, Next.js, Vite, vanilla JS)
 
 <CodeGroup>
 ```bash bun
@@ -55,6 +76,37 @@ npm install @pylonsync/sdk @pylonsync/react
 pnpm add @pylonsync/sdk @pylonsync/react
 ```
 </CodeGroup>
+
+For Next.js, also add `@pylonsync/next`. See [Clients → React](/clients/react) and [Clients → Next.js](/clients/next).
+
+### React Native (iOS + Android)
+
+```bash
+bun add @pylonsync/sdk @pylonsync/react @pylonsync/react-native
+bun add @react-native-async-storage/async-storage expo-sqlite
+```
+
+See [Clients → React Native](/clients/react-native).
+
+### Swift (iOS, macOS, tvOS, watchOS, Linux)
+
+In your `Package.swift`:
+
+```swift
+.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0"),
+```
+
+Then per target:
+
+```swift
+.target(name: "MyApp", dependencies: [
+    .product(name: "PylonClient",   package: "pylon-swift"),
+    .product(name: "PylonSync",     package: "pylon-swift"),
+    .product(name: "PylonSwiftUI",  package: "pylon-swift"),  // optional
+])
+```
+
+Linux: `apt-get install libsqlite3-dev` for the SQLite-backed offline replica. See [Clients → Swift](/clients/swift).
 
 ## Directory conventions
 

@@ -1,0 +1,19 @@
+{
+  "": {
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/primary.swiftdeps"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/PylonRealtime.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/ShardClient.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient.dia"
+  }
+}

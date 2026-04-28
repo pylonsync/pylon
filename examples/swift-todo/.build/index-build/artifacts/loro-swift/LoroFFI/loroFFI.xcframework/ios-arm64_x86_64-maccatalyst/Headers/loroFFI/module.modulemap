@@ -1,0 +1,4 @@
+module loroFFI {
+    header "loroFFI.h"
+    export *
+}

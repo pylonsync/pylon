@@ -1,0 +1,68 @@
+{
+  "": {
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/primary.swiftdeps"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LocalStore.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LocalStore.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LocalStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LocalStore.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LocalStore.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/PylonSync.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/PylonSync.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/PylonSync~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/PylonSync.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/PylonSync.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SSETransport.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SSETransport.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SSETransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SSETransport.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SSETransport.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport.dia"
+  }
+}

@@ -1,0 +1,66 @@
+99278ecf2e1b53666879f974ad791a76d2874b76	not-for-merge	branch 'dev' of https://github.com/loro-dev/loro-swift
+9b9ff22f8f9eef2041505745737bffb4350b9c74	not-for-merge	branch 'feat-upgrade-uniffi' of https://github.com/loro-dev/loro-swift
+01a5466f3ed2d048a39ea8d06df733504ca94ab2	not-for-merge	branch 'feat-upgrade-uniffi-029' of https://github.com/loro-dev/loro-swift
+742c70948521f0f793a1f9af4a85185dfe9df5d1	not-for-merge	branch 'main' of https://github.com/loro-dev/loro-swift
+74b1e926ffc2f0e5dd33c64bca37963a977e2cab	not-for-merge	branch 'pre-release' of https://github.com/loro-dev/loro-swift
+65e1a608beac8e9019bc4f7e50ef6d9718153c20	not-for-merge	branch 'release-1.5.1' of https://github.com/loro-dev/loro-swift
+1b23b6ae412f07f31742d45d00c2f19315fec576	not-for-merge	'refs/pull/1/head' of https://github.com/loro-dev/loro-swift
+f8e49cc58afe3c4f4d4025c7c9cde77f364995f7	not-for-merge	'refs/pull/10/head' of https://github.com/loro-dev/loro-swift
+0aa653c9a902873b54be03d23b6e91f496b0b273	not-for-merge	'refs/pull/11/head' of https://github.com/loro-dev/loro-swift
+2c09b62f03280ba61935215d75e0b5dbddcbb877	not-for-merge	'refs/pull/12/head' of https://github.com/loro-dev/loro-swift
+01a5466f3ed2d048a39ea8d06df733504ca94ab2	not-for-merge	'refs/pull/14/head' of https://github.com/loro-dev/loro-swift
+dbeeccff75fde961155c7e3289d5a8510f42c2c0	not-for-merge	'refs/pull/15/head' of https://github.com/loro-dev/loro-swift
+4ec9cd3d22109311b0cacb2d3345df2e70746982	not-for-merge	'refs/pull/17/head' of https://github.com/loro-dev/loro-swift
+495a1b43a12388d1565cdd152e55c184c7b7e7f5	not-for-merge	'refs/pull/19/head' of https://github.com/loro-dev/loro-swift
+d91cc5cb763de3b2eaeb900e352a6beda09bdfea	not-for-merge	'refs/pull/2/head' of https://github.com/loro-dev/loro-swift
+65e1a608beac8e9019bc4f7e50ef6d9718153c20	not-for-merge	'refs/pull/21/head' of https://github.com/loro-dev/loro-swift
+3f1444c66663734abb93c98c6c7cc2ac08b325ba	not-for-merge	'refs/pull/23/head' of https://github.com/loro-dev/loro-swift
+73c86ad611b8b2621c064b64a3516ce28c73ee33	not-for-merge	'refs/pull/24/head' of https://github.com/loro-dev/loro-swift
+25620094e78f2b3ec0c3807dc363ec35cf4eadf0	not-for-merge	'refs/pull/25/head' of https://github.com/loro-dev/loro-swift
+604165611feac1d5265fbc2831ea11c2d5544117	not-for-merge	'refs/pull/27/head' of https://github.com/loro-dev/loro-swift
+325878f9b80d188190cdd3a6fcae722defb32fd4	not-for-merge	'refs/pull/28/head' of https://github.com/loro-dev/loro-swift
+930cdc9b6c28462f224839c0931552f38a492b07	not-for-merge	'refs/pull/29/head' of https://github.com/loro-dev/loro-swift
+07a4489a8e665650948ff64e76b129f20af1b213	not-for-merge	'refs/pull/29/merge' of https://github.com/loro-dev/loro-swift
+99278ecf2e1b53666879f974ad791a76d2874b76	not-for-merge	'refs/pull/3/head' of https://github.com/loro-dev/loro-swift
+74b1e926ffc2f0e5dd33c64bca37963a977e2cab	not-for-merge	'refs/pull/30/head' of https://github.com/loro-dev/loro-swift
+9b9ff22f8f9eef2041505745737bffb4350b9c74	not-for-merge	'refs/pull/31/head' of https://github.com/loro-dev/loro-swift
+86ad8bc980330a06f0e423436318565ed39b0216	not-for-merge	'refs/pull/31/merge' of https://github.com/loro-dev/loro-swift
+fcbaa0d9a98208dbf5ab520d302a70c8a9d95f18	not-for-merge	'refs/pull/7/head' of https://github.com/loro-dev/loro-swift
+c135e265ae68a17e1ff60e142c80fb49e77037ab	not-for-merge	'refs/pull/9/head' of https://github.com/loro-dev/loro-swift
+c10d640d37df47fb381bc2eeeeaf799a89d5bc73	not-for-merge	tag '0.16.2-alpha.0' of https://github.com/loro-dev/loro-swift
+aa795f4b7de1a733c250b5aa30f42fb6b7ad4be4	not-for-merge	tag '0.16.2-alpha.1' of https://github.com/loro-dev/loro-swift
+f04c3a21cf1c811817796f23f9d005764c702f14	not-for-merge	tag '0.16.2-alpha.2' of https://github.com/loro-dev/loro-swift
+c0d7bd76fb8314ba3ed697b3313b70c04860e4c1	not-for-merge	tag '0.16.2-alpha.3' of https://github.com/loro-dev/loro-swift
+ceaf4c5b5073baa98ee796b340dc247da77f2a2b	not-for-merge	tag '1.0.0-alpha.5' of https://github.com/loro-dev/loro-swift
+8d96d41f3f2f4e8c3370ac64c6e94f660873ef95	not-for-merge	tag '1.1.3' of https://github.com/loro-dev/loro-swift
+39d6a40e3ef7cb433cf0289cdd29928d1c916225	not-for-merge	tag '1.10.0-pre-release' of https://github.com/loro-dev/loro-swift
+844c3751ed99b13a98c18c916217785a152fd272	not-for-merge	tag '1.10.3' of https://github.com/loro-dev/loro-swift
+cc090fea0ceac495a419919cc92c54669c93aaf9	not-for-merge	tag '1.10.3-pre-release' of https://github.com/loro-dev/loro-swift
+ba23941b45aaffda238fb5cb8ad22cdfff448357	not-for-merge	tag '1.2.7-alpha' of https://github.com/loro-dev/loro-swift
+909874c8bc5f6a84baa4fc233d5bd1d67d1a0022	not-for-merge	tag '1.3.0' of https://github.com/loro-dev/loro-swift
+a17c47777759d6c23dddd30740f433ba660c05fe	not-for-merge	tag '1.3.1' of https://github.com/loro-dev/loro-swift
+8e29d84917b94947119b4e28dddb929ebefa5cd3	not-for-merge	tag '1.3.2' of https://github.com/loro-dev/loro-swift
+88caff2e5bc06e4bc37ef5b48287278e39bbf6cf	not-for-merge	tag '1.3.3' of https://github.com/loro-dev/loro-swift
+61942d8f322c8cdd52e2924c0689fa410aefc206	not-for-merge	tag '1.3.3-pre-release' of https://github.com/loro-dev/loro-swift
+8466e575b1f9839aefd85678d366c53d54e370af	not-for-merge	tag '1.4.0' of https://github.com/loro-dev/loro-swift
+e04fb16d8bf11d647e5580247686b7c5aa2d06ee	not-for-merge	tag '1.4.0-pre-release' of https://github.com/loro-dev/loro-swift
+3e94f0c747fab56879e02a8a3f7cca05c381dfdc	not-for-merge	tag '1.4.1' of https://github.com/loro-dev/loro-swift
+aad74849f771d52aac4029c56b0dd76da24d0190	not-for-merge	tag '1.4.1-pre-release' of https://github.com/loro-dev/loro-swift
+fee13cc43a785a31694c870995f89c28f479ac38	not-for-merge	tag '1.4.2' of https://github.com/loro-dev/loro-swift
+920c377ca6a4acd46c13c943b6cd89361b132179	not-for-merge	tag '1.4.3' of https://github.com/loro-dev/loro-swift
+8ef831391455781ad2337c28b1abd7751f8cd577	not-for-merge	tag '1.4.3-pre-release' of https://github.com/loro-dev/loro-swift
+27fea089b8958a1bbdb5157b00445891cec211dc	not-for-merge	tag '1.5.0' of https://github.com/loro-dev/loro-swift
+dddee0470406231b24b90fe4baa863c095e68763	not-for-merge	tag '1.5.1' of https://github.com/loro-dev/loro-swift
+58164fb7400b2fb0e4f58912e6bf5bdb9dd79ed6	not-for-merge	tag '1.5.2' of https://github.com/loro-dev/loro-swift
+7f1ad8253353e247483656c4aa30ecf78d6dd7ca	not-for-merge	tag '1.5.2-pre-release' of https://github.com/loro-dev/loro-swift
+5c5e06822c2017f68ec7e1f47eb417ccbf4acd3a	not-for-merge	tag '1.5.3' of https://github.com/loro-dev/loro-swift
+a90f1ebda87cd9f4b533eb10b1c99ac6aab075af	not-for-merge	tag '1.5.4' of https://github.com/loro-dev/loro-swift
+1c137bb82d1b6ff8416f5215ba2d004c699782cd	not-for-merge	tag '1.5.4-pre-release' of https://github.com/loro-dev/loro-swift
+db58c88a4aa07fddb76255a80869b8d9410581e5	not-for-merge	tag '1.5.5' of https://github.com/loro-dev/loro-swift
+b4eb613ed6293595e061fc9eb4b635aec68d5bda	not-for-merge	tag '1.5.5-pre-release' of https://github.com/loro-dev/loro-swift
+ad79caabd1c6b110e344e018e1e1bc86b8c7790f	not-for-merge	tag '1.6.0' of https://github.com/loro-dev/loro-swift
+404f7d7dd76b8b5315c5976304d47ddb04760930	not-for-merge	tag '1.6.0-pre-release' of https://github.com/loro-dev/loro-swift
+0db47ba55480a35e609715ee6ae061c396f3fd03	not-for-merge	tag '1.6.1' of https://github.com/loro-dev/loro-swift
+d041efa6105f5123e01655ab44ce16c1256a9ac3	not-for-merge	tag '1.6.1-pre-release' of https://github.com/loro-dev/loro-swift
+6d2907f7918091c9d86fd7b5a61f5117e69f5c00	not-for-merge	tag '1.8.1' of https://github.com/loro-dev/loro-swift
+a4ba764a6dd482f4fd29280b89a47a0c3fb2c57e	not-for-merge	tag '1.8.1-pre-release' of https://github.com/loro-dev/loro-swift

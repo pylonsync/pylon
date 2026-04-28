@@ -1,0 +1,102 @@
+---
+title: Pylon vs. Playroom Kit
+description: "Playroom Kit is the easiest way to ship a web multiplayer game today. Pylon is for when 'easiest' isn't enough."
+---
+
+[Playroom Kit](https://playroomkit.com) is a managed multiplayer SDK aimed at web games (HTML5, Unity WebGL, browser puzzles). It optimizes hard for "ship a working multiplayer game in an afternoon" — at the cost of being a managed-only black box.
+
+## TL;DR
+
+- **Choose Playroom** if you're shipping a casual web game this week, you don't want to operate any backend, and you accept managed-only deployment.
+- **Choose Pylon** if you want self-host, full server authority, persistent player data, or more than ~20 concurrent players per room.
+
+## Big picture
+
+| | Pylon | Playroom |
+| --- | --- | --- |
+| License | MIT / Apache 2.0 | Proprietary |
+| Self-host | ✅ | ❌ managed only |
+| Server authority | ✅ tick-based | ⚠️ host-relay model (one client is "host") |
+| Persistent player data | ✅ entities + auth | ⚠️ key-value only, in-memory by default |
+| Built-in auth | ✅ | ⚠️ guest-by-default |
+| File storage | ✅ | ❌ |
+| Search | ✅ | ❌ |
+| Game shards / rooms | ✅ | ✅ |
+| Setup complexity | Medium | Very low |
+| Max concurrent players per room | High (server-bound) | Modest (host-bound) |
+
+## Architecture
+
+Playroom uses a **host-relay** model: when players join a room, one client is elected "host" and runs the authoritative state. Other clients send inputs to the host; the host broadcasts state via Playroom's relay servers. If the host disconnects, another client is promoted.
+
+This is brilliant for "trivia game with 4 friends" — zero server cost, near-zero latency, very simple integration. It struggles when:
+
+- The host has a slow phone and tanks the room
+- The host disconnects mid-game and state has to be re-synced from peers
+- You need server-side validation (anti-cheat, scoring authority)
+- Concurrent players exceed what one client can simulate (~20 in practice)
+
+Pylon (and Colyseus, and Nakama) use a **server-authoritative** model: the server runs the tick loop, all state lives on the server, clients send inputs and receive state. More expensive operationally; more robust.
+
+## Where Playroom is better
+
+- **Time-to-first-multiplayer** — minutes, not hours. The SDK includes a discovery UI, joins via room codes, and "just works" with a few lines of code.
+- **Web/mobile cross-play** — handles different platforms invisibly.
+- **Free tier** — generous for hobbyists.
+- **Voice chat integration** — built in.
+- **No backend to deploy** — at all. Add the SDK, ship.
+- **Phone-as-controller** — Playroom has a slick "stream from your laptop, control from your phone" pattern.
+
+## Where Pylon is better
+
+- **You own your backend** — no vendor outage takes down your game.
+- **Server authority** — players can't hack the host. Critical for competitive games or anything with persistent rewards.
+- **Persistent player data** — every player has a real account with stable identity, not a per-room guest. Inventory, progress, friends, leaderboards, cosmetics — all first-class.
+- **Higher player count per room** — server tick loop scales beyond what one phone can simulate.
+- **Backend logic** — server-side validation, anti-cheat, complex matchmaking, fraud detection.
+- **Self-host** — no per-player pricing as you grow.
+- **Open source** — fork it, ship it, never depend on a vendor.
+
+## Use case fit
+
+| Game type | Recommended |
+| --- | --- |
+| 2–8 player party game | Playroom |
+| Trivia / quiz / drawing | Playroom |
+| Phone-as-controller experience | Playroom |
+| Casual co-op web game | Either |
+| Competitive multiplayer (rankings matter) | Pylon (or Colyseus, Nakama) |
+| Persistent-world game | Pylon |
+| 50+ concurrent players per room | Pylon |
+| Game with progression, inventory, profile | Pylon |
+| Internal corp game (no signup, just join) | Playroom |
+| Mobile game with cross-play | Playroom for prototyping; Pylon for production at scale |
+
+## Pricing
+
+Playroom's pricing is per-CCU (concurrent users) on their managed cloud, with a generous free tier. At scale, costs grow linearly.
+
+Pylon Cloud bills per-request and per-WS-connection-minute, with a free tier. Self-hosted, you pay your VPS — fixed cost regardless of player count up to the box's capacity.
+
+For ~10 concurrent players, Playroom is essentially free. For ~10,000 concurrent players, Pylon self-hosted on a single VPS is cheaper than Playroom's managed offering.
+
+## Migrating from Playroom
+
+If you started with Playroom and outgrew it:
+
+1. **Move authority to the server** — port your "host" logic into a `SimState::tick` impl on the Pylon side
+2. **Convert room state from key-value to entities** — Playroom's `getState`/`setState` pattern maps to Pylon's entity CRUD
+3. **Add real auth** — replace guest sessions with magic-code sign-in (or keep guest sessions for "just play" via `/api/auth/guest`)
+4. **Persist player data** — move from Playroom's volatile state to Pylon entities
+
+The hardest part is the mental shift from peer-state to server-authoritative. The code itself is straightforward.
+
+## Honest weakness
+
+Playroom's developer experience for the "ship a party game this weekend" use case is genuinely better than any server-authoritative option, including Pylon. The SDK is more polished for web games specifically; the room-code join UX is excellent; the phone-as-controller story has no Pylon equivalent.
+
+If you're building a hackathon project or an MVP to validate a multiplayer game idea, **start with Playroom**. Migrate to Pylon (or Colyseus, or Nakama) when you outgrow the host-relay model.
+
+## Both / and
+
+You can use Playroom for the lightweight "lobby + voice chat" UX and Pylon for persistent player data + leaderboards + matchmaking, with the clients pulling from both. This is unusual but valid — Playroom's strength is the realtime party-game shape; Pylon's strength is everything else around it.

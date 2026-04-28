@@ -12,9 +12,10 @@ You are helping a developer build an application on **Pylon** (pylonsync.com), a
 This skill is a starting point, not the ceiling. When the user asks something this skill doesn't cover — a specific error code, an edge case, a feature not discussed below — fetch the source of truth:
 
 - **Full docs index + concept map:** <https://pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
-- **Docs site:** <https://docs.pylonsync.com/> — human docs (Introduction, Quickstart, Installation, Entities, Policies, Functions, Live queries, and more).
-- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, and `@pylonsync/react` source. When in doubt about a method name or signature, read the source, not your training data.
-- **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — 12 full apps covering CRM, ERP, chat, 3D, dashboards, etc. Best place to copy patterns.
+- **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
+- **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, and the Swift SDK at `packages/swift/`. When in doubt about a method name or signature, read the source, not your training data.
+- **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
+- **Pylon Cloud:** <https://cloud.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
 **Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`, `db.useAggregate({sum: ...})`) is probably hallucinated.
@@ -23,8 +24,10 @@ This skill is a starting point, not the ceiling. When the user asks something th
 
 Use this skill whenever:
 - The user's project has a `pylon.manifest.json`, `app.ts` importing from `@pylonsync/*`, or a `functions/` directory next to an `app.ts`.
+- The user's Swift project imports `PylonClient`, `PylonSync`, `PylonRealtime`, or `PylonSwiftUI`.
 - The user says "Pylon", "Pylonsync", "realtime backend", or asks to build a live-syncing feature.
-- The user runs `pylon dev`, `pylon init`, or another `pylon` CLI command.
+- The user runs `pylon dev`, `pylon init`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
+- The user mentions Pylon Cloud, `cloud.pylonsync.com`, or `pylon deploy --target cloud`.
 
 ## Core mental model
 
@@ -461,3 +464,60 @@ For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop
 - Run `bun run app.ts` in the project root — if it errors, the manifest won't build and `pylon dev` will fail silently on function load.
 - If you added a function, verify it's discoverable by opening the project and checking that `pylon dev` logs list your new function name in the `Loaded N functions` output.
 - If you changed an entity, schema auto-migration runs — but destructive changes (dropping a required column) will refuse to apply without bumping `manifest.version`.
+
+## Beyond the React quickstart — what's available
+
+This skill focused on the React/TS happy path. Pylon has more — fetch the docs page when these come up:
+
+### Auth (`/auth/*` in the docs)
+- **Magic codes** (`/api/auth/magic/send` + `/verify`) — recommended sign-in flow. 6-digit, 10-min expiry, throttled.
+- **Email + password** (`/api/auth/password/register` + `/login`) — Argon2id-hashed.
+- **OAuth** — Google + GitHub built in (`/api/auth/login/:provider` + `/callback/:provider`). CSRF-protected via state tokens.
+- **Sessions** — opaque 256-bit tokens, 30-day default. `/api/auth/refresh`, `/sessions` GET/DELETE for management.
+- **RBAC** — roles on the session; `auth.hasRole('x')` in policies. `admin` role bypasses everything.
+- **Multi-tenant** — `auth.tenantId` from `/api/auth/select-org`; row-scoped policies via `data.orgId == auth.tenantId`.
+- **API keys** — via the `api_keys` plugin, scoped + rotatable + Argon2-hashed.
+
+### Plugins (`/plugins/*` in the docs)
+32 built-ins, declared in `manifest.plugins`:
+- **Security**: `rate_limit`, `cors`, `csrf`, `net_guard` (SSRF defense), `totp`, `jwt`, `api_keys`, `session_expiry`, `password_auth`
+- **Data hygiene**: `validation`, `slugify`, `timestamps`, `computed`, `cascade`, `versioning`, `soft_delete`, `tenant_scope`, `organizations`
+- **Search & AI**: `search` (FTS5 + facets), `vector_search`, `ai_proxy`, `mcp` (Model Context Protocol server)
+- **Integrations**: `file_storage` (S3/R2/Stack0), `cache`, `cache_client` (Redis), `email`, `webhooks`, `stripe`, `feature_flags`, `audit_log`
+
+### Clients (`/clients/*` in the docs)
+- `@pylonsync/sdk` — schema DSL + manifest builder
+- `@pylonsync/react` — hooks (covered in this skill)
+- `@pylonsync/react-native` — Expo SQLite-backed offline replica
+- `@pylonsync/next` — Server Actions, RSC data fetching, middleware auth
+- `@pylonsync/sync` — sync engine standalone (Vue, Svelte, Solid, vanilla)
+- `@pylonsync/loro` — Loro CRDT integration for collaborative editing
+- **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
+
+### Pylon Cloud
+Managed Pylon at `cloud.pylonsync.com`. Same binary, same APIs.
+- `pylon login` then `pylon deploy --target cloud`
+- Custom domains via `pylon domain add`
+- Environment vars via `pylon env set/list/unset`
+- Includes: managed Postgres, TLS, magic-link email, OAuth (your creds), file storage, Studio, logs/metrics
+- Pricing: usage-based, no monthly minimums; free tier covers small projects
+
+### Compare-vs-X pages
+If the user asks "Pylon vs Convex/Supabase/Firebase/Colyseus/Playroom/Nakama", point them at `/compare/<vendor>` in the docs — each page has a structured comparison with sources.
+
+## Swift / iOS / macOS specifics
+
+When the user is in a Swift project (Xcode, `Package.swift`, `*.swift` files):
+
+- **Install** via SPM: `.package(url: "https://github.com/pylonsync/pylon-swift.git", from: "0.3.0")`
+- **Auth**: `try await client.startMagicCode(email:)` then `try await client.verifyMagicCode(email:code:)`
+- **Sync**: `await SyncEngine(config: cfg, client: client, persistence: SQLitePersistence(...))`, then `await engine.start()`
+- **Mutations**: `await engine.insert("Todo", ["title": .string("x")])` (optimistic, queued, idempotent)
+- **SwiftUI**: `@StateObject var todos = PylonQuery<Todo>(engine: engine, entity: "Todo")` — `todos.rows` re-renders on change
+- **CRDTs**: `PylonLoroDoc(entity:rowId:)` then `await crdtDoc.attach(to: engine)` — uses `loro-swift` internally
+- **Codegen**: `pylon codegen client manifest.json --target swift --out PylonGenerated.swift` produces typed structs + `PylonClient` extensions
+- **Linux**: works via `FoundationNetworking`; needs `apt-get install libsqlite3-dev`
+
+The Swift SDK is at full TS-sync parity — same wire format, same crash-safety, same offline behavior. CRDT logic is shared with TS via the same Rust Loro core.
+
+Reference example: `examples/swift-todo/` is a complete SwiftUI iOS/macOS app.

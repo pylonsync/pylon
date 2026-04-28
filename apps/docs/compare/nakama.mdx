@@ -1,0 +1,113 @@
+---
+title: Pylon vs. Nakama
+description: "Nakama is a feature-rich Go game backend with social systems. Pylon is leaner with a tighter app/game integration."
+---
+
+[Nakama](https://heroiclabs.com/nakama/) is Heroic Labs' open-source game server — a Go binary with a wide feature set: authoritative match handlers, matchmaker, leaderboards, tournaments, parties, chat, in-app purchases, storage engine. Pylon overlaps significantly; the question is shape and scope.
+
+## TL;DR
+
+- **Choose Nakama** if you want a feature-complete game backend out of the box, you're shipping a free-to-play mobile game with leaderboards / tournaments / IAP, and you have Go (or Lua / TS) game-server engineers.
+- **Choose Pylon** if you want a single binary with both app data and game shards, your team is comfortable with Rust + TypeScript, and you don't need every Nakama feature.
+
+## Architecture
+
+| | Pylon | Nakama |
+| --- | --- | --- |
+| Runtime | Rust binary | Go binary |
+| Backing DB | SQLite (default), Postgres | Postgres (required) |
+| Match handlers | `Shard<S: SimState>` (Rust) | Go / Lua / TypeScript runtime |
+| Storage | Entities (declarative) | Storage Engine (typed JSON blobs) |
+| Auth | Magic codes / password / OAuth | Email / device / Google / Facebook / Apple / Steam / custom |
+| Live queries (non-game) | ✅ | ⚠️ via Storage Engine pull |
+
+Both are single-binary game backends with built-in user systems. The big architectural delta: Pylon treats app data as first-class declarative entities; Nakama treats it as typed JSON blobs in the Storage Engine. Different trade-offs.
+
+## Same shape
+
+Both ship:
+
+- Tick-based authoritative match handlers
+- Matchmaker with customizable algorithm
+- Single self-hosted binary
+- Built-in user accounts + sessions
+- WebSocket realtime
+- Notifications
+- Friends + relationships
+- Open source (Apache 2.0 / MIT-Apache)
+
+## Where Nakama is better
+
+- **Wider feature set** for game-specific concerns:
+  - **Leaderboards** — complete with reset schedules, regional variants, anti-cheat
+  - **Tournaments** — bracketed competitions with leaderboard integration
+  - **Parties** — pre-match group formation
+  - **Groups / clans** — guild-like social systems with ranks
+  - **In-app purchases** — receipt validation for App Store + Play Store + Steam
+  - **Notifications** — persistent in-game notifications with read state
+  - **Streams** — pub/sub channels for game-specific topics
+- **Mature game-server patterns** — written by Heroic Labs, used by [Vela Games](https://www.velagames.com/), [PlayerUnknown Productions](https://playerunknownproductions.net/), and others
+- **Multi-language runtime** — match handlers in Go, Lua, or TypeScript
+- **Console support** — patterns for PlayStation, Xbox, Switch
+- **Multi-region** — sharding patterns for global games
+- **Persistent storage engine** — typed JSON with read/write permission per object
+- **Bigger team behind it** — commercial company with paid support
+
+## Where Pylon is better
+
+- **Declarative app entities** — Pylon's schema is first-class. Nakama's Storage Engine is typed JSON, which is flexible but doesn't give you indexes, relations, or live queries the same way.
+- **Live queries for UI** — Nakama has the Storage Engine for persistent data and Streams for pub/sub; neither gives you "useQuery returns the live array" out of the box.
+- **Faceted search** — Nakama has no FTS or facets. Pylon ships FTS5 + roaring-bitmap facets in the binary.
+- **TypeScript functions tied to data** — Pylon's `mutation`/`action` shares a transaction with the entity write. Nakama's TS runtime is for match logic; for CRUD you use the Storage Engine API.
+- **Smaller binary** — Pylon is ~30 MB; Nakama is ~100 MB. Both fast to boot.
+- **MIT/Apache vs. BSL** — Nakama core is Apache 2.0, but their commercial features (Heroic Cloud, Satori for analytics) are proprietary. Pylon is fully OSS with no enterprise tier dark-pattern.
+- **Single-language story** — Rust + TS for everything. Nakama is Go (server) + your choice (handlers) + SDK language; the runtime polyglot is a feature for some teams and a complexity tax for others.
+
+## Use case fit
+
+| If you're building... | Recommended |
+| --- | --- |
+| F2P mobile RPG with heavy social systems | Nakama (groups, parties, leaderboards, IAP) |
+| Indie multiplayer game with custom backend logic | Either |
+| Multiplayer feature inside a SaaS app | Pylon |
+| Esports-focused competitive game | Nakama (tournaments are a real feature) |
+| Web-first multiplayer game | Pylon (lighter SDK, tighter web integration) |
+| Game with deep persistent world + lots of UI screens | Pylon |
+| Console game | Nakama (patterns exist) |
+| Hyper-casual mobile | Either; Nakama if you want IAP receipts handled |
+| App + game in one product | Pylon |
+
+## Pricing
+
+Nakama is open source — you self-host for free. Heroic Labs offers Heroic Cloud (managed Nakama) and Satori (managed analytics + experiments) as paid services.
+
+Pylon is open source — self-host for free. Pylon Cloud is managed-Pylon, usage-based.
+
+If you're self-hosting either, the cost is your VPS. If you're going managed, both have managed cloud options at different price points.
+
+## Migrating from Nakama
+
+The mental model translates with caveats:
+
+| Nakama | Pylon |
+| --- | --- |
+| Match handler (Lua/Go/TS) | `SimState::tick` (Rust) |
+| Storage Engine | Entities + policies |
+| Leaderboards | Custom entity + sort query (no built-in leaderboard primitive yet) |
+| Tournaments | Custom entity + scheduler (no built-in primitive) |
+| Streams | Pylon's pub/sub + presence |
+| Friends / groups | Custom entities |
+| IAP receipt validation | Pylon function calling Apple/Google APIs (no built-in) |
+| Notifications | Custom entity + push provider integration |
+
+The migration's largest cost is **rewriting features Pylon doesn't have built-in**: leaderboards, tournaments, IAP validation, advanced groups. For each one, you'd build the entity + a small action/function. Doable, not turnkey.
+
+## Honest weakness
+
+Nakama's feature set is genuinely deeper for game-specific concerns. If you need leaderboards-with-reset-schedules, tournaments-with-brackets, IAP validation, or groups with rank hierarchies — those are real things you'd otherwise build yourself. Pylon's primitives let you build them, but Nakama hands them to you.
+
+For pure-game backends with deep social features, Nakama is often the right pick. For app + game backends where the game is one piece of a larger product, Pylon's integration story is cleaner.
+
+## Both / and
+
+You can run Nakama for the game backend and Pylon for the surrounding web/mobile app (account management UI, billing, support tools, content management). This is what some studios do — Nakama for the game, Pylon (or any other backend) for the marketing site, store, and admin tools. The two backends don't conflict; they share the user identity via OAuth or a shared SSO.

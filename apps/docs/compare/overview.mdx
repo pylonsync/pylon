@@ -42,14 +42,21 @@ Drill down: [Pylon vs. Colyseus](/compare/colyseus) · [Pylon vs. Playroom Kit](
 - **No scoreboard inflation.** Where a competitor is genuinely better at something, we say so. (Supabase's Postgres-native data layer is more flexible than ours for analytics; Convex's pure-TS dev loop is genuinely tighter for greenfield TS apps.)
 - **Quarterly review.** This page is checked against current vendor docs every quarter. If you spot a stale claim, [open an issue](https://github.com/pylonsync/pylon/issues).
 
+## How Pylon fits in your stack
+
+Pylon is **the backend**. It's designed to pair with whatever you're already shipping on the frontend — **Next.js, React + Vite, Expo / React Native, Swift / SwiftUI**. The dedicated SDKs ([`@pylonsync/next`](/clients/next), [`@pylonsync/react`](/clients/react), [`@pylonsync/react-native`](/clients/react-native), [Swift SDK](/clients/swift)) exist precisely so you don't have to choose between Pylon and your favorite frontend story. That's the happy path, not a compromise.
+
 ## When we'd recommend NOT using Pylon
 
-Pylon is the right choice for ~80% of "I need a real-time backend" projects. It's the wrong choice when:
+There aren't many cases. The honest ones:
 
-- **You need full Postgres SQL surface.** Custom CTEs, window functions, recursive queries, materialized views, vector with pgvector — Supabase wins. Pylon supports Postgres but doesn't expose every feature.
-- **You're already deep in the GCP stack.** Firebase + GCP integrate cleanly with Cloud Run, BigQuery, Pub/Sub. Pylon doesn't.
-- **You need warehouse-scale analytics.** Move analytical workloads to ClickHouse, DuckDB, or BigQuery. Pylon is for transactional realtime app state.
-- **You want a full-stack framework.** Pylon is the backend. For an opinionated full-stack story, look at Redwood or Wasp; or pair Pylon with Next.js / Vite / Expo.
+- **You're already deep in the GCP stack.** Firebase + GCP integrate cleanly with Cloud Run, BigQuery, Pub/Sub, and the long tail of Google services. Pylon doesn't.
+- **You need warehouse-scale analytics.** Move analytical workloads to ClickHouse, DuckDB, or BigQuery. Pylon is for transactional realtime app state, not OLAP.
+- **You're shipping pure RPC over HTTP with no realtime story.** A simple Express/Fastify app or tRPC is lighter if you genuinely don't need sync, policies, multiplayer, or any of the rest.
+
+## What about raw Postgres access?
+
+Today Pylon's entity API is the data API — no raw SQL escape hatch. That's a deliberate constraint while we ship the cross-backend (SQLite + Postgres) story, **not a permanent stance**. When you're on Postgres mode there's no architectural reason to gate-keep CTEs, window functions, materialized views, or pgvector — and a raw-SQL escape hatch (e.g. `ctx.pg.query(sql, params)` available only in `postgres-live` builds) is on the roadmap. Until then, if a query genuinely doesn't fit the entity model, you can run a Postgres extension or sidecar against the same database — Pylon doesn't lock the DB.
 
 ## Switching costs
 

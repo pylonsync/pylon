@@ -1,0 +1,1305 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.Loro-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/sources",
+      "importPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Container.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Ephemeral.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Event.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Loro.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/LoroFFI.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Value.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Version.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/libloro_swift.a"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "Loro",
+      "moduleOutputPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/Loro.swiftmodule",
+      "objects" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Container.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Ephemeral.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Event.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Loro.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/LoroFFI.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Value.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/Version.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx10.15",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j28",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-I",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-module-cache-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-F",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/include/Loro-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-suppress-warnings",
+        "-package-name",
+        "loro_swift"
+      ],
+      "outputFileMapPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/Loro.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Container.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Ephemeral.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Event.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Loro.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/LoroFFI.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Value.swift",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Version.swift"
+      ],
+      "tempsPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.PylonClient-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/sources",
+      "importPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/HTTPTransport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/JSONValue.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/ServerData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/Storage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/WireTypes.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "PylonClient",
+      "moduleOutputPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonClient.swiftmodule",
+      "objects" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j28",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/include/PylonClient-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonClient.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/HTTPTransport.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/JSONValue.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonClient.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonError.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/ServerData.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/Storage.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/WireTypes.swift"
+      ],
+      "tempsPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.PylonRealtime-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/sources",
+      "importPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/PylonRealtime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/ShardClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonClient.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "PylonRealtime",
+      "moduleOutputPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonRealtime.swiftmodule",
+      "objects" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/PylonRealtime.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/ShardClient.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j28",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/include/PylonRealtime-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonRealtime.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/PylonRealtime.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/ShardClient.swift"
+      ],
+      "tempsPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.PylonSwiftUI-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/sources",
+      "importPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonInfiniteQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonSwiftUI.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonSync.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/libloro_swift.a"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "PylonSwiftUI",
+      "moduleOutputPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonSwiftUI.swiftmodule",
+      "objects" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/PylonInfiniteQuery.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/PylonQuery.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/PylonSwiftUI.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j28",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-I",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-Xcc",
+        "-fmodule-map-file=/Users/ericc59/Dev/pylon/packages/swift/Sources/CSQLite/module.modulemap",
+        "-I/opt/homebrew/opt/sqlite/include",
+        "-module-cache-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-F",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/include/PylonSwiftUI-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonSwiftUI.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonInfiniteQuery.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonQuery.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonSwiftUI.swift"
+      ],
+      "tempsPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.PylonSync-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/sources",
+      "importPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonClient.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/Loro.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/libloro_swift.a"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "PylonSync",
+      "moduleOutputPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonSync.swiftmodule",
+      "objects" : [
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/InfiniteQuery.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/LocalStore.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/LoroBridge.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/MutationQueue.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/PylonSync.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/SQLitePersistence.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/SSETransport.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/SyncEngine.swift.o",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/WebSocketTransport.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j28",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-Xcc",
+        "-fmodule-map-file=/Users/ericc59/Dev/pylon/packages/swift/Sources/CSQLite/module.modulemap",
+        "-I/opt/homebrew/opt/sqlite/include",
+        "-I",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-Xcc",
+        "-I",
+        "-Xcc",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+        "-module-cache-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-F",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/include/PylonSync-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules/PylonSync.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift",
+        "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift"
+      ],
+      "tempsPath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "Loro" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "Loro",
+      "-package-name",
+      "loro_swift",
+      "-c",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Container.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Ephemeral.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Event.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Loro.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/LoroFFI.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Value.swift",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Version.swift",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx10.15",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j28",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-module-cache-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-F",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/include/Loro-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-suppress-warnings",
+      "-package-name",
+      "loro_swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "PylonClient" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "PylonClient",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/HTTPTransport.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/JSONValue.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonClient.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonError.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/ServerData.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/Storage.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/WireTypes.swift",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j28",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/include/PylonClient-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "PylonRealtime" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "PylonRealtime",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/PylonRealtime.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/ShardClient.swift",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j28",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/include/PylonRealtime-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "PylonSwiftUI" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "PylonSwiftUI",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonInfiniteQuery.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonQuery.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonSwiftUI.swift",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j28",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-Xcc",
+      "-fmodule-map-file=/Users/ericc59/Dev/pylon/packages/swift/Sources/CSQLite/module.modulemap",
+      "-I/opt/homebrew/opt/sqlite/include",
+      "-module-cache-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-F",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/include/PylonSwiftUI-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "PylonSync" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "PylonSync",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift",
+      "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j28",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-Xcc",
+      "-fmodule-map-file=/Users/ericc59/Dev/pylon/packages/swift/Sources/CSQLite/module.modulemap",
+      "-I/opt/homebrew/opt/sqlite/include",
+      "-I",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-Xcc",
+      "-I",
+      "-Xcc",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/artifacts/loro-swift/LoroFFI/loroFFI.xcframework/macos-arm64_x86_64/Headers",
+      "-module-cache-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-F",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/include/PylonSync-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "Loro" : [
+      "LoroFFI"
+    ],
+    "PylonClient" : [
+
+    ],
+    "PylonRealtime" : [
+      "PylonClient"
+    ],
+    "PylonSwiftUI" : [
+      "PylonSync",
+      "Loro",
+      "LoroFFI",
+      "CSQLite",
+      "PylonClient"
+    ],
+    "PylonSync" : [
+      "Loro",
+      "LoroFFI",
+      "CSQLite",
+      "PylonClient"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Container.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Ephemeral.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Event.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Loro.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/LoroFFI.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Value.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/checkouts/loro-swift/Sources/Loro/Version.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/Loro.build/sources"
+    },
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/HTTPTransport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/JSONValue.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonError.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/ServerData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/Storage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/WireTypes.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/sources"
+    },
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/PylonRealtime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonRealtime/ShardClient.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonRealtime.build/sources"
+    },
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonInfiniteQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSwiftUI/PylonSwiftUI.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSwiftUI.build/sources"
+    },
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/InfiniteQuery.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LocalStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/LoroBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/MutationQueue.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/PylonSync.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SQLitePersistence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SSETransport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/SyncEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonSync/WebSocketTransport.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonSync.build/sources"
+    },
+    "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

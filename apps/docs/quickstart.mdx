@@ -3,7 +3,11 @@ title: Quickstart
 description: "See Pylon running in five minutes — schema, policy, server, live sync."
 ---
 
-This walkthrough gets a Pylon server running with a schema, one policy, and one server function. You'll then hit the API with `curl` to see it work end-to-end. Once you want a realtime UI on top, point the [React SDK](/concepts/live-queries) at the running server or clone one of the [example apps](https://github.com/pylonsync/pylon/tree/main/examples).
+This walkthrough gets a Pylon server running with a schema, one policy, and one server function. You'll then hit the API with `curl` to see it work end-to-end. Once you want a realtime UI on top, point the [React SDK](/clients/react), [Swift SDK](/clients/swift), or [React Native SDK](/clients/react-native) at the running server, or clone one of the [example apps](https://github.com/pylonsync/pylon/tree/main/examples).
+
+<Tip>
+  Don't want to install anything? Skip to [Pylon Cloud](/cloud) — `pylon login && pylon deploy --target cloud` ships your app to a hosted URL in one step.
+</Tip>
 
 ## 1. Install the CLI
 
@@ -190,4 +194,10 @@ You now have a working Pylon backend with a typed schema, row-level policy, RPC 
   </Card>
 </CardGroup>
 
-Want a full React UI on top? The [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) is the shortest end-to-end reference — schema, functions, Vite app, live subscriptions.
+Want a full UI on top?
+
+- **React**: the [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) — schema, functions, Vite app, live subscriptions
+- **Swift / SwiftUI**: the [swift-todo example](https://github.com/pylonsync/pylon/tree/main/examples/swift-todo) — minimal iOS/macOS app with optimistic mutations
+- **React Native**: the [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) ports cleanly to RN with the [`@pylonsync/react-native`](/clients/react-native) bridge
+
+For all three, the same Pylon server backs the UI — wire format is identical across platforms.

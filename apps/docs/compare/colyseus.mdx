@@ -1,0 +1,114 @@
+---
+title: Pylon vs. Colyseus
+description: "Colyseus is the canonical Node game server. Pylon ships game shards alongside app data."
+---
+
+[Colyseus](https://colyseus.io) is the most popular open-source multiplayer game server framework for Node.js. It nails the "rooms + tick-based state sync" model. Pylon's game shards (`Shard<S: SimState>`) are inspired by Colyseus's `Room` API.
+
+## TL;DR
+
+- **Choose Colyseus** if your game is the whole product, you're already deep in Node, and you don't need an app database / auth / file storage backing it.
+- **Choose Pylon** if your game is one feature in a larger app, you want game state + app data + auth in one binary, or you don't want to operate a Node server.
+
+## Architecture
+
+| | Pylon | Colyseus |
+| --- | --- | --- |
+| Runtime | Rust binary | Node.js |
+| Game model | `Shard<S: SimState>` with tick loop | `Room` with `setSimulationInterval` |
+| State sync | Snapshot delta over WebSocket | Schema-encoded deltas over WebSocket |
+| Auth | Built-in | Bring your own |
+| Database | SQLite/Postgres built-in | Bring your own |
+| File storage | Built-in | Bring your own |
+| Live queries (non-game data) | ✅ | ❌ |
+| Single binary | ✅ | ⚠️ Node + your code |
+
+## Game-loop primitives
+
+Both:
+
+- Run a fixed-rate tick loop server-side (Colyseus: `setSimulationInterval(ms)`, Pylon: `tick_rate_hz` in `ShardConfig`)
+- Maintain authoritative state on the server
+- Broadcast snapshot deltas to subscribed clients
+- Accept inputs from clients (Colyseus: `onMessage` handlers; Pylon: `apply_input_json`)
+- Support reconnection
+- Have built-in matchmakers
+
+## Where Colyseus is better
+
+- **More mature** — 8+ years of production use, more integrations, more examples for specific game genres.
+- **Schema encoding** — Colyseus's `@type` schema decorators produce extremely compact binary deltas. Pylon's snapshot delta is JSON; smaller for typical game state, but Colyseus is more bandwidth-efficient at scale.
+- **Unity / Unreal SDKs** — first-class. Pylon's realtime client today is JS + Swift; for Unity you'd use Pylon's WebSocket protocol manually (it's simple, but not turnkey).
+- **Game-specific features** — voice chat integration, lobby UIs, more nuanced matchmaker filters.
+- **Larger community** — more discord activity, more YouTube tutorials, more stack overflow answers for game-dev specific problems.
+
+## Where Pylon is better
+
+- **Backend in one binary** — Colyseus is "your game state". You need Postgres or another DB for player profiles, leaderboards, cosmetic inventory, and a separate auth system. Pylon ships all of that in the same process.
+- **Live queries for UI** — Pylon's sync engine + `useQuery` lets you build the lobby UI, friend list, leaderboard, etc. with server-authoritative reactive data. Colyseus rooms can broadcast state, but they're not designed for "show me all my friends online" queries.
+- **Auth + sessions** — magic codes, OAuth, RBAC, all in the binary. Colyseus has middleware hooks but you build the auth flow.
+- **Single deployment unit** — one Rust binary on a VPS. Colyseus needs Node + your DB + your auth service + your storage.
+- **Performance ceiling** — Rust runs faster than Node for tick loops with non-trivial physics. For pure state-broadcast games (where the bottleneck is the network), they're comparable.
+- **AOI built-in** — Pylon's `area_of_interest` is part of `Shard`. Colyseus's `@filter` decorators provide manual per-property filtering; spatial AOI isn't a primitive.
+
+## Self-host shape
+
+| | Pylon | Colyseus |
+| --- | --- | --- |
+| Install | `cargo install pylon-cli` | `npm install colyseus` + write your server |
+| Run | `pylon serve` | `node index.js` |
+| Backing services | None (SQLite included) | Postgres + Redis (for multi-process) |
+| Process model | Single binary | Node app + dependencies |
+
+Both deploy to a Linux VPS. Colyseus's "standard Node.js application" is straightforward to deploy; Pylon's single binary is just one more level of "drop and run."
+
+## Use case fit
+
+| If you're building... | Recommended |
+| --- | --- |
+| MMO with persistent world + characters | Pylon (game shards + entities + auth in one) |
+| Quick web/mobile multiplayer (.io game style) | Either; Colyseus for Unity, Pylon for web |
+| Turn-based strategy with matchmaking | Either |
+| Real-time twitch shooter | Pylon (Rust tick loop) or Colyseus (mature Node) |
+| Game with deep social features (chat, leaderboards, inventory) | Pylon (built-in) |
+| Existing Node app adding multiplayer | Colyseus (drop into your stack) |
+| Game where the backend is the product | Colyseus |
+| Game that's one feature in a broader app | Pylon |
+
+## Migrating from Colyseus
+
+The mental model translates almost directly:
+
+```typescript
+// Colyseus
+class GameRoom extends Room<State> {
+  onCreate() { this.setSimulationInterval(dt => this.update(dt), 1000 / 20); }
+  onMessage("move", (client, data) => { /* ... */ });
+  update(dt) { /* tick logic */ }
+}
+```
+
+```rust
+// Pylon
+struct GameState { /* ... */ }
+impl SimState for GameState {
+    fn tick(&mut self, dt: f32) { /* tick logic */ }
+    fn apply_input(&mut self, client_id: &str, input: &str) { /* ... */ }
+    fn snapshot(&self) -> serde_json::Value { /* ... */ }
+}
+let shard = Shard::new("match_42", GameState::default(), ShardConfig { tick_rate_hz: 20, ..Default::default() });
+```
+
+The Pylon side is Rust, not TS — that's the largest porting cost. If your team is JS-only, that matters; if you're polyglot, the migration is straightforward.
+
+## Honest weakness
+
+Pylon's realtime shard system is **newer**. Colyseus has 8 years of production hardening, edge-case fixes, integration guides, and deployment patterns. For mission-critical multiplayer where every minute of downtime costs money, Colyseus's maturity is a real asset.
+
+Pylon's shard implementation is built on the same primitives the Pylon team uses internally for [Mooncraft](https://github.com/pylonsync/pylon) (the canonical example). It's tested, but not yet at Colyseus's deployment-count level.
+
+## Both / and
+
+Some teams use Pylon for everything *except* the realtime tick loop, and Colyseus for the multiplayer match itself. Pylon hosts auth, leaderboards, friend graph, item shop, chat lobbies; Colyseus handles the in-match state. The clients talk to both. This works because both protocols are simple WebSocket — no impedance mismatch.
+
+The downside is two backends to deploy and operate. If you're starting fresh, Pylon's all-in-one is simpler.

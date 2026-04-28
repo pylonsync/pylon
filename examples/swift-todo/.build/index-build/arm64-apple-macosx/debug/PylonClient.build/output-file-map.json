@@ -1,0 +1,54 @@
+{
+  "": {
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/primary.swiftdeps"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/HTTPTransport.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/HTTPTransport.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/JSONValue.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/JSONValue.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonClient.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonClient.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/PylonError.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/PylonError.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/ServerData.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/ServerData.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/Storage.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/Storage.dia"
+  },
+  "/Users/ericc59/Dev/pylon/packages/swift/Sources/PylonClient/WireTypes.swift": {
+    "dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes.d",
+    "object": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes.swift.o",
+    "swiftmodule": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes~partial.swiftmodule",
+    "swift-dependencies": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes.swiftdeps",
+    "diagnostics": "/Users/ericc59/Dev/pylon/examples/swift-todo/.build/index-build/arm64-apple-macosx/debug/PylonClient.build/WireTypes.dia"
+  }
+}
