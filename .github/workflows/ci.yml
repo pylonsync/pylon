@@ -82,6 +82,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # pylon-studio-api's build.rs panics if web/dist/index.html is
+      # missing — `dist/` is gitignored so every cargo invocation in CI
+      # has to build it first. Same step as in the publish-crates job
+      # of release.yml.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
       - run: cargo clippy --workspace --all-targets
 
   test:
@@ -97,6 +107,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
       - run: cargo test --workspace --all-targets -- --test-threads=1
       - run: cargo test --workspace --doc
 
@@ -116,6 +132,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --bin pylon --target ${{ matrix.target }}
