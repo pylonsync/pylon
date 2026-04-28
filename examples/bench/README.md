@@ -70,3 +70,15 @@ latency, green dashed = p50 latency.
 - `client/worker.ts` — WebWorker that drives `bumpCounter` at a
   configured rate and reports per-call latency back
 - `web/` — Vite UI mounting `BenchApp`
+
+## Run it
+
+The point of the bench is to measure your hardware, your workload, your network. Sample a few configurations:
+
+- **Smoke test**: 4 clients × 25 mut/sec. Latency should be a few milliseconds.
+- **Mid-load**: 16 clients × 50 mut/sec. Watch p95 stay flat and TPS scale linearly.
+- **Saturation**: bump clients × rate until p99 visibly climbs and TPS stops growing. That's your single-process ceiling for this workload.
+
+For higher write throughput than SQLite's single-writer ceiling, switch to Postgres mode (`DATABASE_URL=postgres://...`) and re-run — the bench is identical; only the backend changes.
+
+For canonical numbers across hardware tiers, see [Sizing](https://docs.pylonsync.com/operations/sizing).

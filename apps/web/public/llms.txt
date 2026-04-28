@@ -40,18 +40,18 @@ The system has four primitives: entities (typed tables), policies (row-level acc
 
 ## Examples (under `examples/`)
 
-- [CRM](https://github.com/pylonsync/pylon/tree/main/examples/crm): Contacts, deals, pipelines — classic Salesforce-style app.
-- [ERP](https://github.com/pylonsync/pylon/tree/main/examples/erp): Inventory, orders, invoices, multi-org.
-- [Linear](https://github.com/pylonsync/pylon/tree/main/examples/linear): Issue tracker with teams, cycles, projects.
-- [Chat](https://github.com/pylonsync/pylon/tree/main/examples/chat): Threads + messages + presence.
-- [World3D](https://github.com/pylonsync/pylon/tree/main/examples/world3d): Three.js avatar world — live position sync.
-- [Forge](https://github.com/pylonsync/pylon/tree/main/examples/forge): Collaborative 3D scene editor.
-- [Arena](https://github.com/pylonsync/pylon/tree/main/examples/arena): Mass-multiplayer dot world — scale test.
-- [Trade](https://github.com/pylonsync/pylon/tree/main/examples/trade): Market dashboard with live ticks.
-- [Bench](https://github.com/pylonsync/pylon/tree/main/examples/bench): In-browser load test for Pylon.
-- [Stage](https://github.com/pylonsync/pylon/tree/main/examples/stage): Live performance staging environment.
-- [Auction House](https://github.com/pylonsync/pylon/tree/main/examples/auction-house): Real-time bidding.
-- [Todo](https://github.com/pylonsync/pylon/tree/main/examples/todo-app): Minimal reference app.
+- [Todo](https://github.com/pylonsync/pylon/tree/main/examples/todo-app): Minimal reference app — schema, policy, function, live query.
+- [Swift Todo](https://github.com/pylonsync/pylon/tree/main/examples/swift-todo): SwiftUI iOS/macOS app on the Swift SDK.
+- [Chat](https://github.com/pylonsync/pylon/tree/main/examples/chat): Slack-style messaging with presence, typing, tenant isolation.
+- [Linear](https://github.com/pylonsync/pylon/tree/main/examples/linear): Issue tracker with teams, cycles, projects, monotonic IDs.
+- [Auction House](https://github.com/pylonsync/pylon/tree/main/examples/auction-house): Transactional bids + scheduled settlement.
+- [Store](https://github.com/pylonsync/pylon/tree/main/examples/store): 10k-SKU faceted search with live counts.
+- [ERP](https://github.com/pylonsync/pylon/tree/main/examples/erp): Multi-tenant B2B fabrication ERP — orgs, roles, inventory.
+- [Forge](https://github.com/pylonsync/pylon/tree/main/examples/forge): Collaborative 3D scene editor — Figma-for-3D.
+- [World3D](https://github.com/pylonsync/pylon/tree/main/examples/world3d): Three.js multiplayer avatar world.
+- [Arena](https://github.com/pylonsync/pylon/tree/main/examples/arena): Mass-multiplayer 2D dot world — scale test.
+- [Trade](https://github.com/pylonsync/pylon/tree/main/examples/trade): Market dashboard with live tick fan-out.
+- [Bench](https://github.com/pylonsync/pylon/tree/main/examples/bench): In-browser load test with p50/p95/p99 percentiles.
 
 ## Optional
 

@@ -3,7 +3,11 @@ title: Sizing
 description: "Measured throughput numbers, capacity planning, and when to switch from SQLite to Postgres."
 ---
 
-Measured on a 2024 laptop (Apple M-series, 16 GB RAM), in-memory SQLite. Numbers are per-process throughput — SQLite is single-writer, so vertical scaling of writes is bounded. Reads scale across a connection pool.
+Numbers are per-process throughput — SQLite is single-writer, so vertical scaling of writes is bounded. Reads scale across a connection pool.
+
+<Note>
+  The values in the tables below were measured on earlier reference hardware (a 2024 Apple M-series laptop, 16 GB RAM) and are pending re-measurement on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB). Expect the M3 Ultra to land meaningfully higher — treat these as a lower bound until refreshed.
+</Note>
 
 Re-run with:
 

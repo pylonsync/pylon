@@ -50,3 +50,9 @@ Open <http://localhost:5174>, click to move, open more tabs, spawn bots.
 - `functions/removeBots.ts` — bulk delete of bot rows
 - `client/ArenaApp.tsx` — canvas, interpolation, HUD, bot driver
 - `web/` — Vite UI mounting `ArenaApp`
+
+## What to look for
+
+The latency HUD turns red when p95 exceeds 100ms — that's where the canvas starts to feel laggy. Open multiple tabs and push bot counts (+10, +100, +500) to watch p50/p95 evolve as concurrency grows. The interesting thing is how flat latency stays as N grows — the live-query fan-out is the same code path regardless of subscriber count.
+
+For canonical throughput numbers across hardware tiers, see [Sizing](https://docs.pylonsync.com/operations/sizing). Run the [`bench`](../bench) example to measure your own box.

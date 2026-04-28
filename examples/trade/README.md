@@ -56,3 +56,15 @@ ticker button.
 - `client/TradeApp.tsx` — dashboard UI (movers table, watchlist,
   detail panel with sparkline)
 - `web/` — Vite UI
+
+## What to look for
+
+Open two tabs side-by-side, start the ticker in one, watch sparklines update in real-time in the other — that's a single live query subscription doing all the fanout, no app-specific socket.
+
+The interesting axes to push:
+
+- **Inner batch size** — bump from 20 to 50 to 100 to drive higher writes/sec per tick
+- **Symbol count** — expand `SYMBOLS` in `seedMarket.ts` (20 → 100 → 500 → 5000) to see how live-query fan-out cost scales with subscribed-row count
+- **Subscriber count** — open more reader tabs (or use the bot driver) to put fan-out load on the server
+
+For canonical throughput numbers across hardware tiers, see [Sizing](https://docs.pylonsync.com/operations/sizing). Run the [`bench`](../bench) example to measure your own box.

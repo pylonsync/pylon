@@ -1,8 +1,12 @@
 # Sizing
 
-Measured on a 2024 laptop (Apple M-series, 16 GB RAM), in-memory SQLite.
 Numbers are per-process throughput — SQLite is single-writer, so vertical
 scaling of writes is bounded. Reads scale across a connection pool.
+
+> NOTE: Values in the tables below were measured on earlier reference
+> hardware (a 2024 Apple M-series laptop, 16 GB). Pending re-measurement
+> on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB) —
+> expect higher values on the new hardware. Treat these as a lower bound.
 
 Re-run with:
 
