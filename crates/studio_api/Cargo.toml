@@ -10,6 +10,27 @@ keywords.workspace = true
 categories.workspace = true
 version.workspace = true
 
+# Explicitly include the Studio JS bundle in the published tarball. The
+# whole `web/` source tree is gitignored output (Vite emits to dist/)
+# AND `dist/` itself is gitignored, so without this `include` cargo
+# publish would package only the .rs files + Cargo.toml, and the verify
+# step (cargo publish re-builds from the packaged tarball) would
+# panic in build.rs with "web/dist/index.html is missing." That panic
+# was the mode of failure on the v0.3.1 release. The 6-day-cycle CI
+# runs `bun run build` before publish, so dist/ is freshly populated
+# at publish time — `include` just makes sure cargo packs it.
+#
+# Why list dist/ files explicitly instead of `include = ["**/*"]`:
+# avoids dragging node_modules/ into the crate package (it's huge and
+# pointless on crates.io). Listing the relevant files is the standard
+# pattern.
+include = [
+    "src/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "web/dist/**/*",
+]
+
 [lib]
 path = "src/lib.rs"
 

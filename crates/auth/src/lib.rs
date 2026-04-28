@@ -1003,6 +1003,16 @@ impl MagicCodeStore {
     /// Verify a code. Returns a typed error so callers can surface specific
     /// messages. On the MAX_ATTEMPTS-th failure, the code is burned — even
     /// correct subsequent attempts return `TooManyAttempts`.
+    /// Every magic code currently in the cache. Powers the Studio
+    /// "Auth tables" view; not for app use. Includes expired codes —
+    /// the cache only drops them on next verify attempt for that email.
+    pub fn list_all_unfiltered(&self) -> Vec<MagicCode> {
+        self.cache
+            .lock()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn try_verify(&self, email: &str, code: &str) -> Result<(), MagicCodeError> {
         let now = now_secs();
         let mut codes = self.cache.lock().unwrap();
@@ -1176,6 +1186,17 @@ impl SessionStore {
             b.save(&new);
         }
         Some(new)
+    }
+
+    /// Every session in the store, including expired ones, with no
+    /// filtering. Powers the Studio "Auth tables" view so operators
+    /// can see orphaned sessions / debug stuck logins. Don't use for
+    /// app code — `list_for_user` is the right surface there.
+    pub fn list_all_unfiltered(&self) -> Vec<Session> {
+        self.sessions
+            .lock()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// List all active sessions for a user.
@@ -1409,6 +1430,11 @@ pub trait AccountBackend: Send + Sync {
     fn find_for_user(&self, user_id: &str) -> Vec<Account>;
     /// Remove a single provider link. Returns `true` if a row was removed.
     fn unlink(&self, provider_id: &str, account_id: &str) -> bool;
+    /// Every account in the store. Used by `AccountStore::list_all_unfiltered`
+    /// to power the Studio admin inspector. Backends that can stream
+    /// (SQLite, Postgres) just `SELECT *`; the in-memory backend
+    /// returns its full map.
+    fn list_all(&self) -> Vec<Account>;
 }
 
 /// In-memory account backend (default). Lost on restart — production
@@ -1463,6 +1489,9 @@ impl AccountBackend for InMemoryAccountBackend {
             .remove(&(provider_id.to_string(), account_id.to_string()))
             .is_some()
     }
+    fn list_all(&self) -> Vec<Account> {
+        self.accounts.lock().unwrap().values().cloned().collect()
+    }
 }
 
 /// Account store. Wraps an `AccountBackend` and provides the methods the
@@ -1497,6 +1526,23 @@ impl AccountStore {
     }
     pub fn unlink(&self, provider_id: &str, account_id: &str) -> bool {
         self.backend.unlink(provider_id, account_id)
+    }
+
+    /// Every account in the store. Powers the Studio "Auth tables"
+    /// view; not for app use. Implemented by walking the backend's
+    /// per-user index — doable because account counts per user are
+    /// small (typically ≤ 5) and total account count tracks user
+    /// count.
+    ///
+    /// We don't add a `list_all` method to the `AccountBackend` trait
+    /// because the in-memory + sqlite + postgres impls would each
+    /// need a separate implementation, and the operational use case
+    /// (Studio inspector) is narrow enough to live behind a wrapper
+    /// that walks the underlying store directly. For PG/SQLite that
+    /// means a `SELECT * FROM _pylon_accounts` — which the backends
+    /// can grow if we ever need this at scale.
+    pub fn list_all_unfiltered(&self) -> Vec<Account> {
+        self.backend.list_all()
     }
 }
 

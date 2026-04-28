@@ -12,6 +12,7 @@ pub mod actions;
 pub mod admin_data;
 pub mod ai;
 pub mod auth;
+pub mod auth_admin;
 pub mod crdt;
 pub mod entities;
 pub mod files;

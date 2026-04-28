@@ -239,6 +239,37 @@ impl AccountBackend for SqliteAccountBackend {
             .map(|n| n > 0)
             .unwrap_or(false)
     }
+
+    fn list_all(&self) -> Vec<Account> {
+        let Ok(guard) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let mut stmt = match guard.prepare(&format!("SELECT {SELECT_COLS} FROM {SQLITE_TABLE}")) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let iter = match stmt.query_map([], |row| {
+            Ok(row_to_account(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get(11)?,
+                row.get(12)?,
+            ))
+        }) {
+            Ok(i) => i,
+            Err(_) => return Vec::new(),
+        };
+        iter.flatten().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +428,34 @@ mod pg {
             )
             .map(|n| n > 0)
             .unwrap_or(false)
+        }
+
+        fn list_all(&self) -> Vec<Account> {
+            let Ok(mut c) = self.client.lock() else {
+                return Vec::new();
+            };
+            let rows = c
+                .query(&format!("SELECT {SELECT_COLS} FROM {PG_TABLE}"), &[])
+                .unwrap_or_default();
+            rows.iter()
+                .map(|row| {
+                    row_to_account(
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                        row.get::<_, Option<String>>(4),
+                        row.get::<_, Option<String>>(5),
+                        row.get::<_, Option<String>>(6),
+                        row.get::<_, Option<i64>>(7),
+                        row.get::<_, Option<i64>>(8),
+                        row.get::<_, Option<String>>(9),
+                        row.get::<_, Option<String>>(10),
+                        row.get(11),
+                        row.get(12),
+                    )
+                })
+                .collect()
         }
     }
 }

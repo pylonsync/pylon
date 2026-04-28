@@ -20,7 +20,10 @@ import { Label } from "@/components/ui/label";
 import {
 	Select,
 	SelectContent,
+	SelectGroup,
 	SelectItem,
+	SelectLabel,
+	SelectSeparator,
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
@@ -47,6 +50,27 @@ function emptyJsonForEntity(entity: ManifestEntity): string {
 	return JSON.stringify(obj, null, 2);
 }
 
+/// Framework-internal auth tables. These don't appear in the manifest
+/// (and shouldn't be exposed via /api/entities) but operators want to
+/// inspect them from Studio for debugging "did the OAuth callback
+/// actually create an account row" / "is there a stuck session." The
+/// Rust side at /api/admin/auth/<key> handles read + redaction.
+const AUTH_TABLES = [
+	{ key: "accounts", label: "_pylon_accounts" },
+	{ key: "sessions", label: "_pylon_sessions" },
+	{ key: "magic_codes", label: "_pylon_magic_codes" },
+	{ key: "oauth_state", label: "_pylon_oauth_state" },
+] as const;
+const AUTH_TABLE_PREFIX = "auth:";
+
+function isAuthTable(selected: string): boolean {
+	return selected.startsWith(AUTH_TABLE_PREFIX);
+}
+
+function authTableKey(selected: string): string {
+	return selected.slice(AUTH_TABLE_PREFIX.length);
+}
+
 export function EntitiesPage() {
 	const entities = MANIFEST.entities;
 	const [selected, setSelected] = useState<string>(entities[0]?.name ?? "");
@@ -56,18 +80,20 @@ export function EntitiesPage() {
 	const [insertJson, setInsertJson] = useState("{}");
 	const [inspectRow, setInspectRow] = useState<Row | null>(null);
 
+	const isAuth = isAuthTable(selected);
 	const entity = useMemo<ManifestEntity | undefined>(
-		() => entities.find((e) => e.name === selected),
-		[entities, selected],
+		() => (isAuth ? undefined : entities.find((e) => e.name === selected)),
+		[entities, selected, isAuth],
 	);
 
 	const load = useCallback(async () => {
 		if (!selected) return;
 		setLoading(true);
 		try {
-			const data = await api<Row[] | { data?: Row[] }>(
-				`/api/entities/${selected}`,
-			);
+			const path = isAuth
+				? `/api/admin/auth/${authTableKey(selected)}`
+				: `/api/entities/${selected}`;
+			const data = await api<Row[] | { data?: Row[] }>(path);
 			setRows(Array.isArray(data) ? data : data?.data ?? []);
 		} catch (err) {
 			if (err instanceof ApiError) {
@@ -79,7 +105,7 @@ export function EntitiesPage() {
 		} finally {
 			setLoading(false);
 		}
-	}, [selected]);
+	}, [selected, isAuth]);
 
 	useEffect(() => {
 		void load();
@@ -122,6 +148,9 @@ export function EntitiesPage() {
 
 	const columns = useMemo(() => {
 		if (rows.length === 0) {
+			// Auth tables — column shape comes from the row schema, not
+			// the manifest. We don't pre-render a header; empty-state
+			// just says "no rows."
 			return entity ? ["id", ...entity.fields.map((f) => f.name)] : [];
 		}
 		const seen = new Set<string>();
@@ -136,6 +165,11 @@ export function EntitiesPage() {
 		}
 		return out;
 	}, [rows, entity]);
+
+	const selectedLabel = isAuth
+		? AUTH_TABLES.find((t) => t.key === authTableKey(selected))?.label ??
+		  selected
+		: selected;
 
 	if (entities.length === 0) {
 		return (
@@ -156,15 +190,34 @@ export function EntitiesPage() {
 		<div className="space-y-4">
 			<div className="flex flex-wrap items-center gap-2">
 				<Select value={selected} onValueChange={setSelected}>
-					<SelectTrigger className="w-[220px]">
-						<SelectValue />
+					<SelectTrigger className="w-[260px]">
+						<SelectValue>{selectedLabel}</SelectValue>
 					</SelectTrigger>
 					<SelectContent>
-						{entities.map((e) => (
-							<SelectItem key={e.name} value={e.name}>
-								{e.name}
-							</SelectItem>
-						))}
+						<SelectGroup>
+							<SelectLabel className="text-xs text-muted-foreground">
+								App entities
+							</SelectLabel>
+							{entities.map((e) => (
+								<SelectItem key={e.name} value={e.name}>
+									{e.name}
+								</SelectItem>
+							))}
+						</SelectGroup>
+						<SelectSeparator />
+						<SelectGroup>
+							<SelectLabel className="text-xs text-muted-foreground">
+								Auth tables (framework, read-only)
+							</SelectLabel>
+							{AUTH_TABLES.map((t) => (
+								<SelectItem
+									key={t.key}
+									value={`${AUTH_TABLE_PREFIX}${t.key}`}
+								>
+									<span className="font-mono text-xs">{t.label}</span>
+								</SelectItem>
+							))}
+						</SelectGroup>
 					</SelectContent>
 				</Select>
 				<Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -179,15 +232,17 @@ export function EntitiesPage() {
 					<span className="text-xs text-muted-foreground">
 						{rows.length} row{rows.length === 1 ? "" : "s"}
 					</span>
-					<Button
-						size="sm"
-						onClick={() => {
-							setInsertJson(entity ? emptyJsonForEntity(entity) : "{}");
-							setInsertOpen(true);
-						}}
-					>
-						<Plus className="size-3.5" /> Insert
-					</Button>
+					{!isAuth && (
+						<Button
+							size="sm"
+							onClick={() => {
+								setInsertJson(entity ? emptyJsonForEntity(entity) : "{}");
+								setInsertOpen(true);
+							}}
+						>
+							<Plus className="size-3.5" /> Insert
+						</Button>
+					)}
 				</div>
 			</div>
 
@@ -229,16 +284,18 @@ export function EntitiesPage() {
 											</TableCell>
 										))}
 										<TableCell className="text-right">
-											<Button
-												variant="ghost"
-												size="sm"
-												onClick={(e) => {
-													e.stopPropagation();
-													void onDelete(row);
-												}}
-											>
-												<Trash2 className="size-3.5" />
-											</Button>
+											{!isAuth && (
+												<Button
+													variant="ghost"
+													size="sm"
+													onClick={(e) => {
+														e.stopPropagation();
+														void onDelete(row);
+													}}
+												>
+													<Trash2 className="size-3.5" />
+												</Button>
+											)}
 										</TableCell>
 									</TableRow>
 								))}

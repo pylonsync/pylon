@@ -697,6 +697,27 @@ fn start_server(
         let method = request.method().clone();
         let url = request.url().to_string();
 
+        // Per-request access log — visibility into what's hitting the
+        // server, mirroring Next.js's `GET /login 200 in 27ms` style.
+        // Suppress for noisy paths (/health, /metrics) so dev-mode logs
+        // don't drown in proxy/scrape traffic. Status + duration get
+        // logged separately by `metrics.record_request` so we don't
+        // need to thread them through every response branch.
+        //
+        // Per-request peer IP keeps it useful for debugging
+        // multi-origin setups (CSRF rejections, rate-limit hits) —
+        // resolve_client_ip already honors PYLON_TRUST_PROXY_HOPS so
+        // this matches what the rest of the server sees.
+        let request_peer_ip = resolve_client_ip(&request, trust_proxy_hops);
+        let request_started_at = std::time::Instant::now();
+        if url != "/health" && url != "/metrics" {
+            tracing::info!("→ {} {} from {}", method.as_str(), url, request_peer_ip);
+            // Stash for the response log (`record_request` reads this
+            // thread-local to emit method/url/status/duration in one
+            // line, like Next.js's `GET /login 200 in 27ms`).
+            crate::metrics::set_current_request(&url, request_started_at);
+        }
+
         // --- Health check: fast path before auth or body parsing ---
         if url == "/health" && method == Method::Get {
             let uptime = start_time.elapsed().as_secs();

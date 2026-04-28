@@ -45,6 +45,33 @@ pub struct Metrics {
     start_time: Instant,
 }
 
+/// Per-request context tracked across the dispatch path so the
+/// `record_request` access log can emit URL + duration without every
+/// response site threading them in. Set at request receive in
+/// `server.rs`, consumed on `record_request`.
+struct CurrentRequest {
+    url: String,
+    started: std::time::Instant,
+}
+
+thread_local! {
+    static CURRENT_REQUEST: std::cell::Cell<Option<CurrentRequest>> = const { std::cell::Cell::new(None) };
+}
+
+/// Stash the in-flight request URL + start time so the next
+/// `record_request` call on this thread can emit a complete access
+/// log line. Pass `None` for paths we want to skip in the log
+/// (currently /health + /metrics — they're called by liveness probes
+/// and Prometheus scrapers and would drown out real traffic).
+pub fn set_current_request(url: &str, started: std::time::Instant) {
+    CURRENT_REQUEST.with(|cell| {
+        cell.set(Some(CurrentRequest {
+            url: url.to_string(),
+            started,
+        }))
+    });
+}
+
 impl Metrics {
     /// Create a new metrics instance. The uptime clock starts immediately.
     pub fn new() -> Self {
@@ -59,6 +86,14 @@ impl Metrics {
 
     /// Record a completed request. A status code in the 200-399 range is
     /// counted as successful; everything else counts as an error.
+    ///
+    /// Also emits an access log line via tracing if a thread-local
+    /// request context was set (see [`set_current_request`]). The
+    /// thread-local trick keeps the existing 30+ call sites of this
+    /// method untouched while still giving us Next.js-style
+    /// `GET /foo 200 in 27ms` output for free. Server `recv()` is
+    /// single-threaded per request, so the thread-local matches the
+    /// in-flight request without cross-talk.
     pub fn record_request(&self, method: &str, status: u16) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         if (200..400).contains(&status) {
@@ -67,6 +102,23 @@ impl Metrics {
             self.requests_err.fetch_add(1, Ordering::Relaxed);
         }
         self.requests_by_method.increment(method);
+
+        // Pull the per-request context if set. We log even without it
+        // (just method + status) so callers that haven't been wired
+        // through still get partial visibility. /health and /metrics
+        // are noisy and intentionally skipped at the call site of
+        // `set_current_request` — they don't set the thread-local, so
+        // the URL ends up "?".
+        let ctx = CURRENT_REQUEST.take();
+        match ctx {
+            Some(c) => {
+                let dur_ms = c.started.elapsed().as_millis();
+                tracing::info!("← {} {} {} in {}ms", method, c.url, status, dur_ms);
+            }
+            None => {
+                tracing::debug!("← {} {} (no per-request ctx)", method, status);
+            }
+        }
     }
 
     /// Seconds elapsed since this `Metrics` instance was created.
