@@ -1239,6 +1239,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![owner_read_todos, authenticated_create, owner_toggle],
+            auth: Default::default(),
         }
     }
 

@@ -678,7 +678,11 @@ pub(crate) fn complete_oauth_login(
         refreshed.created_at = existing.created_at;
         ctx.account_store.upsert(&refreshed);
         existing.user_id
-    } else if let Ok(Some(row)) = ctx.store.lookup("User", "email", &userinfo.email) {
+    } else if let Ok(Some(row)) = ctx.store.lookup(
+        &ctx.store.manifest().auth.user.entity,
+        "email",
+        &userinfo.email,
+    ) {
         // First-time link of this provider to an existing user (matched
         // by email). Stamp emailVerified opportunistically since the
         // provider just vouched for the address.
@@ -694,9 +698,11 @@ pub(crate) fn complete_oauth_login(
             // Best-effort — schemas without the field silently drop the
             // update. We do NOT bail on this error since the user
             // already existed and OAuth still succeeded.
-            let _ = ctx
-                .store
-                .update("User", &id, &serde_json::json!({ "emailVerified": now }));
+            let _ = ctx.store.update(
+                &ctx.store.manifest().auth.user.entity,
+                &id,
+                &serde_json::json!({ "emailVerified": now }),
+            );
         }
         ctx.account_store
             .upsert(&pylon_auth::Account::new(id.clone(), &userinfo, &tokens));
@@ -706,10 +712,11 @@ pub(crate) fn complete_oauth_login(
         // fail loudly — a silent failure here is what produced the
         // "session for nonexistent user" bug.
         let display_name = userinfo.name.as_deref().unwrap_or(&userinfo.email);
+        let user_entity = ctx.store.manifest().auth.user.entity.clone();
         let id = ctx
             .store
             .insert(
-                "User",
+                &user_entity,
                 &serde_json::json!({
                     "email": userinfo.email,
                     "displayName": display_name,
@@ -1817,6 +1824,7 @@ mod auth_gate_tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         }
     }
 
@@ -2797,6 +2805,7 @@ mod auth_gate_tests {
                 allow_update: Some("false".into()),
                 ..Default::default()
             }],
+            auth: Default::default(),
         };
         let store = StubDataStore {
             manifest: manifest.clone(),
@@ -3118,6 +3127,7 @@ mod auth_gate_tests {
                 allow_update: Some("auth.userId == data.ownerId".into()),
                 ..Default::default()
             }],
+            auth: Default::default(),
         };
         let pub_m = super::public_manifest(&m);
         let p = &pub_m.policies[0];

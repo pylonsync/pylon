@@ -1202,6 +1202,10 @@ pub trait SessionBackend: Send + Sync {
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Session>>,
     backend: Option<Box<dyn SessionBackend>>,
+    /// Default lifetime for new sessions (seconds). Sourced from the
+    /// manifest's `auth.session.expires_in` config at server boot;
+    /// falls back to `Session::DEFAULT_LIFETIME_SECS` (30 days).
+    default_lifetime_secs: u64,
 }
 
 impl Default for SessionStore {
@@ -1215,7 +1219,15 @@ impl SessionStore {
         Self {
             sessions: Mutex::new(HashMap::new()),
             backend: None,
+            default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
         }
+    }
+
+    /// Override the default session lifetime. Used by `pylon-runtime`'s
+    /// server bootstrap to apply the manifest's `auth.session.expires_in`.
+    pub fn with_lifetime(mut self, lifetime_secs: u64) -> Self {
+        self.default_lifetime_secs = lifetime_secs;
+        self
     }
 
     /// Build a session store backed by a persistent store. Existing sessions
@@ -1231,12 +1243,15 @@ impl SessionStore {
         Self {
             sessions: Mutex::new(map),
             backend: Some(backend),
+            default_lifetime_secs: Session::DEFAULT_LIFETIME_SECS,
         }
     }
 
-    /// Create a session for a user and return it.
+    /// Create a session for a user and return it. Uses the store's
+    /// configured `default_lifetime_secs` (from the manifest's
+    /// `auth.session.expires_in`, default 30 days).
     pub fn create(&self, user_id: String) -> Session {
-        let session = Session::new(user_id);
+        let session = Session::with_lifetime(user_id, self.default_lifetime_secs);
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(session.token.clone(), session.clone());
         if let Some(b) = &self.backend {

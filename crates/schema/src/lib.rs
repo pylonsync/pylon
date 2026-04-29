@@ -1572,6 +1572,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         }
     }
 

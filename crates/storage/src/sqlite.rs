@@ -803,6 +803,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         }
     }
 
@@ -1065,6 +1066,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
 
         let plan = adapter.plan_schema(&manifest).unwrap();

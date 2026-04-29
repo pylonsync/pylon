@@ -499,5 +499,6 @@ export function buildManifest(options: {
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),
     policies: policiesToManifest(options.policies ?? []),
+            auth: Default::default(),
   };
 }

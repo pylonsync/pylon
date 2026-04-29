@@ -91,7 +91,7 @@ impl fmt::Display for Diagnostic {
 
 pub const MANIFEST_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AppManifest {
     pub manifest_version: u32,
     pub name: String,
@@ -104,6 +104,131 @@ pub struct AppManifest {
     pub actions: Vec<ManifestAction>,
     #[serde(default)]
     pub policies: Vec<ManifestPolicy>,
+    /// App-level auth configuration. Mirrors better-auth's
+    /// `betterAuth({ user, session, trustedOrigins })` shape — controls
+    /// the manifest entity name pylon treats as the User table, which
+    /// fields get exposed via `/api/auth/session`, the cookie claims
+    /// cache, and per-app trusted origins.
+    ///
+    /// Defaults are sensible (`User` entity, hide `passwordHash`,
+    /// 30-day sessions, no cookie cache, trusted-origins from
+    /// `PYLON_TRUSTED_ORIGINS` env) so apps that don't define an
+    /// `auth({...})` block in app.ts still work.
+    #[serde(default)]
+    pub auth: ManifestAuthConfig,
+}
+
+/// Pylon's auth configuration block — emitted by the SDK's
+/// `auth({...})` factory in app.ts. All fields optional; missing
+/// values fall back to framework defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManifestAuthConfig {
+    #[serde(default)]
+    pub user: ManifestAuthUserConfig,
+    #[serde(default)]
+    pub session: ManifestAuthSessionConfig,
+    /// Per-app trusted origins for OAuth `?callback=` validation.
+    /// Merged with anything in `PYLON_TRUSTED_ORIGINS` env.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_origins: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAuthUserConfig {
+    /// Manifest entity name pylon treats as the User table.
+    /// Default `"User"` — the convention every existing pylon app
+    /// already follows.
+    #[serde(default = "default_user_entity")]
+    pub entity: String,
+    /// Optional allowlist of fields exposed via `/api/auth/session`.
+    /// When set, ONLY these fields appear in the response (`id` is
+    /// always included). Useful for apps that want strict schemas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose: Vec<String>,
+    /// Additional fields to strip from the User row before responding.
+    /// Combined with the framework defaults (`passwordHash` plus
+    /// anything starting with `_`). Use this for app-specific
+    /// secrets stored on the User row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hide: Vec<String>,
+}
+
+impl Default for ManifestAuthUserConfig {
+    fn default() -> Self {
+        Self {
+            entity: default_user_entity(),
+            expose: Vec::new(),
+            hide: Vec::new(),
+        }
+    }
+}
+
+fn default_user_entity() -> String {
+    "User".into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAuthSessionConfig {
+    /// Lifetime of new sessions in seconds. Default 30 days.
+    #[serde(default = "default_session_lifetime")]
+    pub expires_in: u64,
+    /// Cookie cache config — bakes the listed claims into the cookie
+    /// itself so `/api/auth/me`-style probes can resolve identity
+    /// without a session-store lookup. Mirrors better-auth's
+    /// `session.cookieCache`.
+    #[serde(default)]
+    pub cookie_cache: ManifestAuthCookieCacheConfig,
+}
+
+impl Default for ManifestAuthSessionConfig {
+    fn default() -> Self {
+        Self {
+            expires_in: default_session_lifetime(),
+            cookie_cache: ManifestAuthCookieCacheConfig::default(),
+        }
+    }
+}
+
+fn default_session_lifetime() -> u64 {
+    30 * 24 * 60 * 60
+}
+
+/// Cookie-cache settings. When `enabled`, the session cookie carries
+/// a signed JWT-style envelope including the claims listed in
+/// `claims` (defaults to `is_admin` + `tenant_id`). Cookie reads
+/// resolve identity without touching the session store, at the cost
+/// of staleness up to `max_age` seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAuthCookieCacheConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max age of the cached claims in seconds. After this, the
+    /// cookie envelope is treated as expired and the session store
+    /// is consulted again. Default 5 minutes — same as better-auth.
+    #[serde(default = "default_cookie_cache_max_age")]
+    pub max_age: u64,
+    /// Auth-context fields baked into the cookie envelope. Always
+    /// includes `user_id`; the operator opts in to anything else.
+    #[serde(default = "default_cookie_cache_claims")]
+    pub claims: Vec<String>,
+}
+
+impl Default for ManifestAuthCookieCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age: default_cookie_cache_max_age(),
+            claims: default_cookie_cache_claims(),
+        }
+    }
+}
+
+fn default_cookie_cache_max_age() -> u64 {
+    5 * 60
+}
+
+fn default_cookie_cache_claims() -> Vec<String> {
+    vec!["is_admin".into(), "tenant_id".into()]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

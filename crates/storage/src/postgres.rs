@@ -916,27 +916,59 @@ pub mod live {
                                             "<=".into(),
                                             value_to_pg(v),
                                         )),
-                                        "$like" => planned.push((
-                                            field.into(),
-                                            "LIKE".into(),
-                                            value_to_pg(v),
-                                        )),
+                                        "$like" => {
+                                            // Wrap in `%...%` to match the
+                                            // SQLite path's substring
+                                            // semantics. Pre-fix divergence:
+                                            // SQLite wrapped, PG forwarded
+                                            // literally — `{name: {$like: "ann"}}`
+                                            // matched "Joanne" on SQLite but
+                                            // nothing on PG. Caller-supplied
+                                            // wildcards inside the value still
+                                            // work (`%j_n%` etc.) because we
+                                            // only add wraps, never strip.
+                                            let raw = match v {
+                                                serde_json::Value::String(s) => s.clone(),
+                                                other => other.to_string(),
+                                            };
+                                            planned.push((
+                                                field.into(),
+                                                "LIKE".into(),
+                                                JsonParam::Text(format!("%{raw}%")),
+                                            ));
+                                        }
                                         "$in" => {
                                             if let Some(arr) = v.as_array() {
-                                                let placeholders: Vec<String> = (0..arr.len())
-                                                    .map(|i| format!("${}", planned.len() + 1 + i))
-                                                    .collect();
-                                                where_clauses.push(format!(
-                                                    "{} IN ({})",
-                                                    quote_ident(field),
-                                                    placeholders.join(", "),
-                                                ));
-                                                for x in arr {
-                                                    planned.push((
-                                                        format!("__inline_{}", planned.len()),
-                                                        "__INLINE__".into(),
-                                                        value_to_pg(x),
+                                                if arr.is_empty() {
+                                                    // `field IN ()` is invalid
+                                                    // SQL on PG (and on SQLite
+                                                    // too, technically — its
+                                                    // path also short-circuits).
+                                                    // An empty $in matches
+                                                    // nothing; emit a guaranteed-
+                                                    // false predicate so the
+                                                    // parser doesn't choke and
+                                                    // the result set comes back
+                                                    // empty.
+                                                    where_clauses.push("FALSE".into());
+                                                } else {
+                                                    let placeholders: Vec<String> = (0..arr.len())
+                                                        .map(|i| {
+                                                            format!("${}", planned.len() + 1 + i)
+                                                        })
+                                                        .collect();
+                                                    where_clauses.push(format!(
+                                                        "{} IN ({})",
+                                                        quote_ident(field),
+                                                        placeholders.join(", "),
                                                     ));
+                                                    for x in arr {
+                                                        planned.push((
+                                                            format!("__inline_{}", planned.len()),
+                                                            "__INLINE__".into(),
+                                                            value_to_pg(x),
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
@@ -968,11 +1000,20 @@ pub mod live {
             } else {
                 format!(" WHERE {}", where_clauses.join(" AND "))
             };
+            // Default deterministic order when the caller didn't pass
+            // `$order` — matches the SQLite path. Without this,
+            // identical queries return rows in different orders across
+            // backends, which makes paginated APIs flaky.
+            let final_order = if order_clause.is_empty() {
+                format!(" ORDER BY {}", quote_ident("id"))
+            } else {
+                order_clause
+            };
             let sql = format!(
                 "SELECT * FROM {}{}{}{}{}",
                 quote_ident(entity),
                 where_sql,
-                order_clause,
+                final_order,
                 limit_clause,
                 offset_clause,
             );
@@ -1508,6 +1549,7 @@ mod tests {
             actions: vec![],
             policies: vec![],
             routes: vec![],
+            auth: Default::default(),
         }
     }
 

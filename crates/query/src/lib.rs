@@ -120,6 +120,7 @@ mod tests {
                     input: vec![f("id", "id(Todo)", false)],
                 },
             ],
+            auth: Default::default(),
         }
     }
 

@@ -31,6 +31,7 @@ fn empty_manifest() -> AppManifest {
         queries: vec![],
         actions: vec![],
         policies: vec![],
+        auth: Default::default(),
     }
 }
 
@@ -610,5 +611,85 @@ fn timestamptz_binds_iso_string_correctly() {
         row["verifiedAt"].is_null(),
         "nullable TIMESTAMPTZ should round-trip as JSON null, got {:?}",
         row["verifiedAt"]
+    );
+}
+
+#[test]
+fn query_filtered_like_substring_match_matches_sqlite() {
+    // Codex P2: `$like: "ann"` was substring-matching on SQLite (wraps
+    // in %...%) but exact-pattern-matching on PG (forwarded literally).
+    // Now the PG path wraps too — `{name: $like "ann"}` finds "Joanne".
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fresh_runtime(&url);
+    rt.insert(
+        "User",
+        &serde_json::json!({"email": "j@x.com", "name": "Joanne"}),
+    )
+    .unwrap();
+    rt.insert(
+        "User",
+        &serde_json::json!({"email": "b@x.com", "name": "Bob"}),
+    )
+    .unwrap();
+    let hits = rt
+        .query_filtered("User", &serde_json::json!({"name": {"$like": "ann"}}))
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected substring match on Joanne, got {hits:?}"
+    );
+    assert_eq!(hits[0]["name"], "Joanne");
+}
+
+#[test]
+fn query_filtered_empty_in_returns_no_rows_no_sql_error() {
+    // Codex P2: `$in: []` was emitting `field IN ()` which Postgres
+    // rejects as a syntax error. Now short-circuits to FALSE → empty
+    // result set, matching the SQLite path's behavior.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fresh_runtime(&url);
+    rt.insert(
+        "User",
+        &serde_json::json!({"email": "x@x.com", "name": "X"}),
+    )
+    .unwrap();
+    let hits = rt
+        .query_filtered("User", &serde_json::json!({"email": {"$in": []}}))
+        .expect("empty $in should not fail with a SQL error");
+    assert_eq!(hits.len(), 0);
+}
+
+#[test]
+fn query_filtered_default_order_by_id_matches_sqlite() {
+    // Codex P2: SQLite filtered queries defaulted to ORDER BY id, PG
+    // had no default order — same query returned rows in different
+    // orders across backends. Now both default to ORDER BY id.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fresh_runtime(&url);
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        ids.push(
+            rt.insert(
+                "User",
+                &serde_json::json!({"email": format!("o{i}@x.com"), "name": format!("o{i}")}),
+            )
+            .unwrap(),
+        );
+    }
+    let hits = rt.query_filtered("User", &serde_json::json!({})).unwrap();
+    let returned_ids: Vec<&str> = hits.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    let expected: Vec<&str> = sorted.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        returned_ids, expected,
+        "rows should come back in id order without explicit $order"
     );
 }

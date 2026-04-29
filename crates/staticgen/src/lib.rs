@@ -202,6 +202,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
 
         let pages = generate_static_pages(&m);
@@ -228,6 +229,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
 
         let pages = generate_static_pages(&m);
@@ -257,6 +259,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
 
         let pages = generate_static_pages(&m);
@@ -311,6 +314,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
 
         let pages = generate_static_pages(&m);

@@ -367,6 +367,7 @@ export interface AppManifest {
   queries: ManifestQuery[];
   actions: ManifestAction[];
   policies: ManifestPolicy[];
+  auth?: ManifestAuthConfig;
 }
 
 export function entitiesToManifest(
@@ -481,6 +482,94 @@ export function policiesToManifest(
   });
 }
 
+/**
+ * Auth configuration block for the manifest. Mirrors better-auth's
+ * `betterAuth({ user, session, trustedOrigins })` shape.
+ *
+ * All fields optional with sensible defaults — apps that don't pass
+ * an `auth({...})` block to `buildManifest` get the framework defaults
+ * (User entity named "User", strip `passwordHash`, 30-day sessions,
+ * no cookie cache, trusted origins from `PYLON_TRUSTED_ORIGINS` env).
+ *
+ * @example
+ * auth({
+ *   user: {
+ *     entity: "User",
+ *     expose: ["id", "email", "displayName"],
+ *     hide: ["passwordHash", "internalNotes"],
+ *   },
+ *   session: { expiresIn: 60 * 60 * 24 * 7 }, // 7 days
+ *   trustedOrigins: ["https://app.example.com"],
+ * })
+ */
+export type AuthConfig = {
+  user?: {
+    /** Manifest entity name pylon treats as the User table. Default `"User"`. */
+    entity?: string;
+    /** Allowlist of fields exposed via `/api/auth/session`. Empty = all (minus hide list). */
+    expose?: string[];
+    /** Additional fields stripped (combined with default `passwordHash` + `_*`). */
+    hide?: string[];
+  };
+  session?: {
+    /** New session lifetime in seconds. Default 30 days. */
+    expiresIn?: number;
+    /** Cookie cache config — bake claims into the cookie so reads avoid the DB. */
+    cookieCache?: {
+      enabled?: boolean;
+      /** Max staleness in seconds. Default 5 minutes. */
+      maxAge?: number;
+      /** Auth-context fields baked into the cookie envelope (always includes `user_id`). */
+      claims?: string[];
+    };
+  };
+  /** Per-app trusted origins for OAuth `?callback=` validation. Merged with `PYLON_TRUSTED_ORIGINS` env. */
+  trustedOrigins?: string[];
+};
+
+export type ManifestAuthConfig = {
+  user: {
+    entity: string;
+    expose: string[];
+    hide: string[];
+  };
+  session: {
+    expires_in: number;
+    cookie_cache: {
+      enabled: boolean;
+      max_age: number;
+      claims: string[];
+    };
+  };
+  trusted_origins: string[];
+};
+
+/**
+ * Build the manifest's `auth` block from the user-facing camelCase
+ * config. Translates to the snake_case shape the Rust runtime expects.
+ *
+ * Defaults match `pylon_kernel::ManifestAuthConfig::default()` so
+ * passing nothing is equivalent to omitting the `auth({...})` call.
+ */
+export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
+  return {
+    user: {
+      entity: cfg.user?.entity ?? "User",
+      expose: cfg.user?.expose ?? [],
+      hide: cfg.user?.hide ?? [],
+    },
+    session: {
+      expires_in: cfg.session?.expiresIn ?? 30 * 24 * 60 * 60,
+      cookie_cache: {
+        enabled: cfg.session?.cookieCache?.enabled ?? false,
+        max_age: cfg.session?.cookieCache?.maxAge ?? 5 * 60,
+        claims: cfg.session?.cookieCache?.claims ?? ["is_admin", "tenant_id"],
+      },
+    },
+    trusted_origins: cfg.trustedOrigins ?? [],
+  };
+}
+
 export function buildManifest(options: {
   name: string;
   version: string;
@@ -489,6 +578,7 @@ export function buildManifest(options: {
   queries?: QueryDefinition[];
   actions?: ActionDefinition[];
   policies?: PolicyDefinition[];
+  auth?: ManifestAuthConfig;
 }): AppManifest {
   return {
     manifest_version: MANIFEST_VERSION,
@@ -499,5 +589,6 @@ export function buildManifest(options: {
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),
     policies: policiesToManifest(options.policies ?? []),
+    auth: options.auth ?? auth(),
   };
 }

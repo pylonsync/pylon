@@ -708,6 +708,7 @@ mod tests {
                 ],
             }],
             policies: vec![],
+            auth: Default::default(),
         }
     }
 
@@ -905,6 +906,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
         let spec = generate_openapi(&manifest, "");
 

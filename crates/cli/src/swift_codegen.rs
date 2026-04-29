@@ -310,6 +310,7 @@ mod tests {
                 name: "createTodo".into(),
                 input: vec![f("title", "string", false), f("done", "bool", true)],
             }],
+            auth: Default::default(),
         }
     }
 

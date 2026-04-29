@@ -136,6 +136,7 @@ fn test_manifest() -> AppManifest {
         queries: vec![],
         actions: vec![],
         policies: vec![],
+        auth: Default::default(),
     }
 }
 

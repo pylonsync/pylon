@@ -603,6 +603,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         }
     }
 
@@ -663,6 +664,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
         let plan = adapter.plan_schema(&manifest).unwrap();
         assert!(plan.is_empty());
@@ -890,6 +892,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.is_empty());
@@ -948,6 +951,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.operations.iter().any(|op| matches!(op, SchemaOperation::AddField { entity, field } if entity == "User" && field.name == "name")));
@@ -1001,6 +1005,7 @@ mod tests {
             queries: vec![],
             actions: vec![],
             policies: vec![],
+            auth: Default::default(),
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan

@@ -96,6 +96,8 @@ pub(crate) fn handle(
     // - Returns `user: null` when the caller is anonymous, a guest,
     //   or the User row was deleted out from under the session.
     if url == "/api/auth/session" && method == HttpMethod::Get {
+        let auth_cfg = &ctx.store.manifest().auth;
+        let user_entity = &auth_cfg.user.entity;
         let mut body = serde_json::Map::new();
         let session_value = serde_json::to_value(ctx.auth_ctx).unwrap_or(serde_json::Value::Null);
         body.insert("session".into(), session_value);
@@ -104,8 +106,8 @@ pub(crate) fn handle(
             .user_id
             .as_deref()
             .filter(|_| !ctx.auth_ctx.is_guest)
-            .and_then(|uid| ctx.store.get_by_id("User", uid).ok().flatten())
-            .map(redact_user_row)
+            .and_then(|uid| ctx.store.get_by_id(user_entity, uid).ok().flatten())
+            .map(|row| project_user_row(row, &auth_cfg.user))
             .unwrap_or(serde_json::Value::Null);
         body.insert("user".into(), user_value);
         return Some((200, serde_json::Value::Object(body).to_string()));
@@ -1039,26 +1041,42 @@ pub(crate) fn handle(
     None
 }
 
-/// Strip sensitive fields from a User row before returning it through
-/// `/api/auth/session`. Drops:
-/// - `passwordHash` — credential material; never goes to the client.
-///   (Better-auth keeps the password hash in its `account` table for
-///   the same reason; pylon stores it on `_pylon_accounts.password`
-///   when password auth lands, so the manifest-defined User row
-///   shouldn't carry it either — but apps in transition might.)
-/// - Anything starting with `_` — framework-internal columns the
-///   manifest doesn't expose.
+/// Project a User row down to the fields safe for `/api/auth/session`.
 ///
-/// Apps wanting a different projection can wrap this call with a
-/// custom `getMe` TS function; the framework's job is to give a
-/// safe default so 90% of apps don't have to think about it.
-fn redact_user_row(row: serde_json::Value) -> serde_json::Value {
+/// Defaults strip `passwordHash` + anything starting with `_`
+/// (framework-internal). The manifest's `auth.user.expose` /
+/// `auth.user.hide` config refines this:
+/// - `expose` (allowlist): when non-empty, ONLY listed fields appear
+///   (`id` is always included). Useful for apps with strict client
+///   schemas.
+/// - `hide` (blocklist): additional fields to strip on top of defaults.
+///   Use for app-specific secrets stored on the User row.
+fn project_user_row(
+    row: serde_json::Value,
+    cfg: &pylon_kernel::ManifestAuthUserConfig,
+) -> serde_json::Value {
     let serde_json::Value::Object(obj) = row else {
         return row;
     };
     let filtered: serde_json::Map<String, serde_json::Value> = obj
         .into_iter()
-        .filter(|(k, _)| k != "passwordHash" && !k.starts_with('_'))
+        .filter(|(k, _)| {
+            if k == "id" {
+                return true; // always include id
+            }
+            // Allowlist takes precedence: only `expose` fields pass.
+            if !cfg.expose.is_empty() && !cfg.expose.iter().any(|f| f == k) {
+                return false;
+            }
+            // Default + manifest blocklist.
+            if k == "passwordHash" || k.starts_with('_') {
+                return false;
+            }
+            if cfg.hide.iter().any(|f| f == k) {
+                return false;
+            }
+            true
+        })
         .collect();
     serde_json::Value::Object(filtered)
 }

@@ -129,6 +129,7 @@ mod tests {
                     }],
                 },
             ],
+            auth: Default::default(),
         }
     }
 

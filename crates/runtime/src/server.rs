@@ -248,7 +248,8 @@ fn start_server(
     // Stash a handle so `request_shutdown()` can unblock the loop.
     let _ = SERVER_HANDLE.set(Arc::clone(&server));
 
-    let auth_stores = build_auth_stores(runtime.db_path().as_deref());
+    let session_lifetime = runtime.manifest().auth.session.expires_in;
+    let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime);
     let session_store = auth_stores.session_store;
     let magic_codes = auth_stores.magic_codes;
     let oauth_state = auth_stores.oauth_state;
@@ -585,6 +586,11 @@ fn start_server(
     // which may differ from the dashboard's (e.g. dashboard at
     // /dashboard, API at api.example.com). Better-auth's `trustedOrigins`
     // is the model here — explicit allowlist, no implicit trust.
+    // Manifest-declared trusted origins (from auth({trustedOrigins: [...]})
+    // in app.ts) get merged with the env list. Manifest is the
+    // type-safe declarative source; env is the operator override for
+    // ops-only deploys.
+    let manifest_trusted: Vec<String> = runtime.manifest().auth.trusted_origins.clone();
     let trusted_origins: Vec<String> = std::env::var("PYLON_TRUSTED_ORIGINS")
         .map(|v| {
             v.split(',')
@@ -610,7 +616,14 @@ fn start_server(
                 Vec::new()
             }
         });
-    let trusted_origins = Arc::new(trusted_origins);
+    // Combine env + manifest, dedup, drop empties.
+    let mut combined: Vec<String> = trusted_origins;
+    for m in manifest_trusted {
+        if !m.is_empty() && !combined.contains(&m) {
+            combined.push(m);
+        }
+    }
+    let trusted_origins = Arc::new(combined);
 
     // Start WebSocket server on port+1.
     //
@@ -2117,7 +2130,7 @@ struct AuthStores {
     account_store: Arc<pylon_auth::AccountStore>,
 }
 
-fn build_auth_stores(app_db_path: Option<&str>) -> AuthStores {
+fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
     // Forced in-memory escape hatch — used by integration tests that
     // never want to touch disk.
     let force_in_memory = std::env::var("PYLON_SESSION_IN_MEMORY")
@@ -2134,9 +2147,9 @@ fn build_auth_stores(app_db_path: Option<&str>) -> AuthStores {
         if force_in_memory {
             // Tests that explicitly opt out of persistence shouldn't be
             // overridden by an ambient DATABASE_URL in CI.
-            return in_memory_auth_stores();
+            return in_memory_auth_stores(session_lifetime);
         }
-        return build_pg_auth_stores(&url);
+        return build_pg_auth_stores(&url, session_lifetime);
     }
 
     let sqlite_path = std::env::var("PYLON_SESSION_DB")
@@ -2144,29 +2157,29 @@ fn build_auth_stores(app_db_path: Option<&str>) -> AuthStores {
         .or_else(|| app_db_path.map(|p| format!("{p}.sessions.db")));
 
     match (force_in_memory, sqlite_path) {
-        (true, _) | (_, None) => in_memory_auth_stores(),
-        (false, Some(path)) => build_sqlite_auth_stores(&path),
+        (true, _) | (_, None) => in_memory_auth_stores(session_lifetime),
+        (false, Some(path)) => build_sqlite_auth_stores(&path, session_lifetime),
     }
 }
 
-fn in_memory_auth_stores() -> AuthStores {
+fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
     AuthStores {
-        session_store: Arc::new(SessionStore::new()),
+        session_store: Arc::new(SessionStore::new().with_lifetime(session_lifetime)),
         magic_codes: Arc::new(pylon_auth::MagicCodeStore::new()),
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
     }
 }
 
-fn build_sqlite_auth_stores(path: &str) -> AuthStores {
+fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
     let session_store = match crate::session_backend::SqliteSessionBackend::open(path) {
         Ok(b) => {
             tracing::info!("[pylon] Auth state (SQLite): {path}");
-            SessionStore::with_backend(Box::new(b))
+            SessionStore::with_backend(Box::new(b)).with_lifetime(session_lifetime)
         }
         Err(e) => {
             tracing::warn!("[pylon] could not open session DB {path}: {e}. In-memory fallback.");
-            SessionStore::new()
+            SessionStore::new().with_lifetime(session_lifetime)
         }
     };
     let magic_codes = match crate::magic_code_backend::SqliteMagicCodeBackend::open(path) {
@@ -2198,7 +2211,7 @@ fn build_sqlite_auth_stores(path: &str) -> AuthStores {
     }
 }
 
-fn build_pg_auth_stores(url: &str) -> AuthStores {
+fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
     // Each backend opens its own connection. Sessions/oauth-state/magic-codes/
     // accounts are low-frequency relative to entity CRUD — keeping them on
     // separate connections avoids a "oauth lookup blocks an entity write"
@@ -2206,11 +2219,11 @@ fn build_pg_auth_stores(url: &str) -> AuthStores {
     let session_store = match crate::session_backend::PostgresSessionBackend::connect(url) {
         Ok(b) => {
             tracing::info!("[pylon] Auth state (Postgres): {url}");
-            SessionStore::with_backend(Box::new(b))
+            SessionStore::with_backend(Box::new(b)).with_lifetime(session_lifetime)
         }
         Err(e) => {
             tracing::warn!("[pylon] PG session backend unavailable: {e}. In-memory fallback.");
-            SessionStore::new()
+            SessionStore::new().with_lifetime(session_lifetime)
         }
     };
     let magic_codes = match crate::magic_code_backend::PostgresMagicCodeBackend::connect(url) {
