@@ -112,9 +112,34 @@ pub(crate) fn handle(
         let path = path.split('?').next().unwrap_or(path);
         let parts: Vec<&str> = path.splitn(3, '/').collect();
         if parts.len() == 3 && method == HttpMethod::Get {
+            // Fetch the row FIRST, then run the policy against the
+            // actual row data. Without this, per-row policies like
+            // `auth.userId == data.createdBy` see `data` as null and
+            // ALWAYS deny — every lookup 403s for non-admin callers.
+            // Same pattern the GET /api/entities/:id/:field path uses.
+            let row = match ctx.store.lookup(parts[0], parts[1], parts[2]) {
+                Ok(r) => r,
+                Err(e) => return Some((400, json_error(&e.code, &e.message))),
+            };
+            // Return 404 BEFORE the policy check when the row is
+            // missing — the existence of a row at this slug isn't
+            // policy-relevant, and the alternative (404 vs 403) leaks
+            // less information about other tenants' rows.
+            let row = match row {
+                Some(r) => r,
+                None => {
+                    return Some((
+                        404,
+                        json_error(
+                            "NOT_FOUND",
+                            &format!("{}.{} = {} not found", parts[0], parts[1], parts[2]),
+                        ),
+                    ));
+                }
+            };
             let check = ctx
                 .policy_engine
-                .check_entity_read(parts[0], ctx.auth_ctx, None);
+                .check_entity_read(parts[0], ctx.auth_ctx, Some(&row));
             if let pylon_policy::PolicyResult::Denied {
                 policy_name,
                 reason,
@@ -126,20 +151,10 @@ pub(crate) fn handle(
                 );
                 return Some((403, json_error("POLICY_DENIED", "Access denied by policy")));
             }
-            return Some(match ctx.store.lookup(parts[0], parts[1], parts[2]) {
-                Ok(Some(row)) => (
-                    200,
-                    serde_json::to_string(&row).unwrap_or_else(|_| "{}".into()),
-                ),
-                Ok(None) => (
-                    404,
-                    json_error(
-                        "NOT_FOUND",
-                        &format!("{}.{} = {} not found", parts[0], parts[1], parts[2]),
-                    ),
-                ),
-                Err(e) => (400, json_error(&e.code, &e.message)),
-            });
+            return Some((
+                200,
+                serde_json::to_string(&row).unwrap_or_else(|_| "{}".into()),
+            ));
         }
     }
 
