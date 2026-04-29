@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli-linux-arm64",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Pylon CLI binary for linux-arm64. Installed automatically by @pylonsync/cli on ARM64 Linux (e.g. Fly arm machines, Raspberry Pi).",
   "license": "MIT",
   "homepage": "https://pylonsync.com",
