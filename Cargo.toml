@@ -27,7 +27,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-version = "0.3.4"  # x-release-please-version
+version = "0.3.5"  # x-release-please-version
 description = "Pylon — realtime backend as a single Rust binary. Schema, policies, server functions, live queries, auth — one process."
 homepage = "https://pylonsync.com"
 repository = "https://github.com/pylonsync/pylon"
