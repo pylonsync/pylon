@@ -641,13 +641,13 @@ pub(crate) fn complete_oauth_login(
         });
     };
 
-    let now = format!(
-        "{}Z",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
+    // Real-world bug this replaces: the previous formatter produced
+    // strings like "1761811234Z" (epoch-seconds with a stray Z) that
+    // SQLite happily stored as TEXT but PostgreSQL rejected as
+    // invalid TIMESTAMPTZ — every Google sign-up against pylon-cloud
+    // failed with USER_CREATE_FAILED. Use the kernel's ISO 8601
+    // formatter for a value both backends parse cleanly.
+    let now = chrono_now_iso();
 
     // Resolve user_id in priority order:
     //   1. Existing account link by (provider, provider_account_id) — the
