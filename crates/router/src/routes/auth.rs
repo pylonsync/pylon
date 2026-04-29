@@ -62,20 +62,53 @@ pub(crate) fn handle(
 
     // GET /api/auth/me
     //
-    // Returns the resolved AuthContext the runtime computed for this
-    // request, NOT a fresh `session_store.resolve(token)` lookup. The
-    // distinction matters: PYLON_ADMIN_TOKEN bearer auth is resolved
-    // by the runtime (server.rs) before route() is called, and the
-    // result lives in `ctx.auth_ctx`. Calling session_store.resolve
-    // here would skip the admin-token branch entirely and report
-    // every admin caller as anonymous — which Studio relied on to
-    // decide whether to surface admin tabs and which the dashboard
-    // layout used to gate `/dashboard`. Trust the runtime's resolution.
+    // Cheap session/identity probe. Returns just the AuthContext
+    // (`{ user_id, is_admin, roles, tenant_id }`) — no DB hit, no
+    // entity fetch. Use this when all you need is "is the caller
+    // signed in?" or "are they an admin?" — middleware, route gates,
+    // permission checks. For the full `{ session, user }` payload
+    // (with the User row from the DB), call /api/auth/session.
+    //
+    // AuthContext comes from the runtime's pre-route resolution —
+    // calling session_store.resolve here would miss the
+    // PYLON_ADMIN_TOKEN bearer-auth branch.
     if url == "/api/auth/me" && method == HttpMethod::Get {
         return Some((
             200,
             serde_json::to_string(ctx.auth_ctx).unwrap_or_else(|_| "{}".into()),
         ));
+    }
+
+    // GET /api/auth/session
+    //
+    // Better-auth's `getSession()` shape: returns both the session
+    // (auth context) AND the User row in a single round-trip. The
+    // SDK uses this for layout/dashboard reads; /api/auth/me stays
+    // available for the cheap session-only probe.
+    //
+    // - User row is fetched by id from the manifest's User entity
+    //   (conventionally named "User"; configurable user-entity is
+    //   a follow-up).
+    // - Sensitive fields stripped: `passwordHash` + anything starting
+    //   with `_` (framework-internal columns). Apps wanting a custom
+    //   projection can still expose a TS `getMe` function and call it
+    //   alongside this endpoint.
+    // - Returns `user: null` when the caller is anonymous, a guest,
+    //   or the User row was deleted out from under the session.
+    if url == "/api/auth/session" && method == HttpMethod::Get {
+        let mut body = serde_json::Map::new();
+        let session_value = serde_json::to_value(ctx.auth_ctx).unwrap_or(serde_json::Value::Null);
+        body.insert("session".into(), session_value);
+        let user_value = ctx
+            .auth_ctx
+            .user_id
+            .as_deref()
+            .filter(|_| !ctx.auth_ctx.is_guest)
+            .and_then(|uid| ctx.store.get_by_id("User", uid).ok().flatten())
+            .map(redact_user_row)
+            .unwrap_or(serde_json::Value::Null);
+        body.insert("user".into(), user_value);
+        return Some((200, serde_json::Value::Object(body).to_string()));
     }
 
     // POST /api/auth/guest
@@ -1004,4 +1037,28 @@ pub(crate) fn handle(
     }
 
     None
+}
+
+/// Strip sensitive fields from a User row before returning it through
+/// `/api/auth/session`. Drops:
+/// - `passwordHash` — credential material; never goes to the client.
+///   (Better-auth keeps the password hash in its `account` table for
+///   the same reason; pylon stores it on `_pylon_accounts.password`
+///   when password auth lands, so the manifest-defined User row
+///   shouldn't carry it either — but apps in transition might.)
+/// - Anything starting with `_` — framework-internal columns the
+///   manifest doesn't expose.
+///
+/// Apps wanting a different projection can wrap this call with a
+/// custom `getMe` TS function; the framework's job is to give a
+/// safe default so 90% of apps don't have to think about it.
+fn redact_user_row(row: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(obj) = row else {
+        return row;
+    };
+    let filtered: serde_json::Map<String, serde_json::Value> = obj
+        .into_iter()
+        .filter(|(k, _)| k != "passwordHash" && !k.starts_with('_'))
+        .collect();
+    serde_json::Value::Object(filtered)
 }

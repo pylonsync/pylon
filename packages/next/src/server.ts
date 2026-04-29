@@ -206,21 +206,39 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 		auth: PylonAuth;
 		user: U;
 	} | null> {
-		const auth = await getAuth();
-		if (!auth) return null;
-		try {
-			const user = await pylonJsonBound<U>(`/api/fn/${getMeFn}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: "{}",
-			});
-			if (user == null) return null;
-			return { auth, user };
-		} catch {
-			// Function may not be registered yet, or the row was
-			// deleted while logged in — treat as anonymous.
-			return null;
-		}
+		// Single round-trip to /api/auth/session — pylon returns
+		// `{ session, user }` where `user` is the User row projected
+		// to safe fields (passwordHash + framework-internal columns
+		// stripped). This replaces the older two-step
+		// /api/auth/me + /api/fn/getMe dance.
+		const session = await readSession();
+		if (!session) return null;
+		const resp = await fetch(`${target()}/api/auth/session`, {
+			headers: { cookie: session.header },
+			cache: "no-store",
+		})
+			.then(
+				(r) =>
+					r.json() as Promise<{
+						session?: {
+							user_id?: string;
+							tenant_id?: string | null;
+							is_admin?: boolean;
+						};
+						user?: U | null;
+					}>,
+			)
+			.catch(() => ({}) as { session?: undefined; user?: undefined });
+		if (!resp.session?.user_id || !resp.user) return null;
+		return {
+			auth: {
+				userId: resp.session.user_id,
+				tenantId: resp.session.tenant_id ?? null,
+				isAdmin: resp.session.is_admin ?? false,
+				cookieHeader: session.header,
+			},
+			user: resp.user,
+		};
 	}
 
 	async function requireMe<U = Record<string, unknown>>(): Promise<{
