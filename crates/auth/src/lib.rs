@@ -695,16 +695,37 @@ impl OAuthRegistry {
 // OAuth state store — CSRF protection for OAuth flows
 // ---------------------------------------------------------------------------
 
-/// Backing store for OAuth state tokens. Default impl keeps them in memory
-/// (fine for tests + dev); the runtime swaps in a SQLite-backed impl so a
-/// restart in the middle of an OAuth handshake doesn't leave the user with
-/// "invalid state" on the callback. Same pattern as `SessionBackend`.
+/// One stored OAuth state record. Carries the post-callback redirect
+/// URLs alongside the provider so the callback handler doesn't need to
+/// consult an env var to know where to send the user. Both URLs are
+/// validated against `PYLON_TRUSTED_ORIGINS` at create time, so the
+/// callback can trust them without re-checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthState {
+    pub provider: String,
+    /// URL the callback redirects to on success. The frontend supplies
+    /// this via `?callback=` on the start request.
+    pub callback_url: String,
+    /// URL the callback redirects to on failure. Defaults to
+    /// `callback_url` when the frontend doesn't pass an explicit
+    /// `?error_callback=`. The error code + message ride along as
+    /// query params (`?oauth_error=X&oauth_error_message=Y`).
+    pub error_callback_url: String,
+    pub expires_at: u64,
+}
+
+/// Backing store for OAuth state records. Default impl keeps them in
+/// memory (fine for tests + dev); the runtime swaps in a SQLite or
+/// Postgres backend so a restart in the middle of an OAuth handshake
+/// doesn't leave the user with "invalid state" on the callback.
 pub trait OAuthStateBackend: Send + Sync {
-    fn put(&self, token: &str, provider: &str, expires_at: u64);
-    /// Atomic compare-and-consume: returns the stored provider if the token
-    /// exists and hasn't expired, then removes it. Returning `None` means
-    /// either the token never existed or it has already been used.
-    fn take(&self, token: &str, now_unix_secs: u64) -> Option<String>;
+    /// Persist a state record under `token`.
+    fn put(&self, token: &str, state: &OAuthState);
+    /// Atomic compare-and-consume: returns the stored record if the
+    /// token exists and hasn't expired, then removes it. Returning
+    /// `None` means either the token never existed or it has already
+    /// been used / expired.
+    fn take(&self, token: &str, now_unix_secs: u64) -> Option<OAuthState>;
 }
 
 /// In-memory backend (default). Lost on restart.
@@ -727,22 +748,19 @@ impl Default for InMemoryOAuthBackend {
 }
 
 impl OAuthStateBackend for InMemoryOAuthBackend {
-    fn put(&self, token: &str, provider: &str, expires_at: u64) {
-        self.states.lock().unwrap().insert(
-            token.to_string(),
-            OAuthState {
-                provider: provider.to_string(),
-                expires_at,
-            },
-        );
+    fn put(&self, token: &str, state: &OAuthState) {
+        self.states
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), state.clone());
     }
-    fn take(&self, token: &str, now_unix_secs: u64) -> Option<String> {
+    fn take(&self, token: &str, now_unix_secs: u64) -> Option<OAuthState> {
         let mut s = self.states.lock().unwrap();
         let entry = s.remove(token)?;
         if entry.expires_at <= now_unix_secs {
             return None;
         }
-        Some(entry.provider)
+        Some(entry)
     }
 }
 
@@ -750,14 +768,10 @@ impl OAuthStateBackend for InMemoryOAuthBackend {
 ///
 /// State tokens are short-lived (10 minutes) and single-use. Backed by an
 /// `OAuthStateBackend`; defaults to in-memory but the runtime persists them
-/// to SQLite so they survive a restart that happens mid-OAuth-handshake.
+/// to SQLite (or Postgres when `DATABASE_URL` is set) so they survive a
+/// restart that happens mid-OAuth-handshake.
 pub struct OAuthStateStore {
     backend: Box<dyn OAuthStateBackend>,
-}
-
-pub struct OAuthState {
-    pub provider: String,
-    pub expires_at: u64,
 }
 
 impl Default for OAuthStateStore {
@@ -777,32 +791,121 @@ impl OAuthStateStore {
         Self { backend }
     }
 
-    /// Generate and store a new state parameter. Returns the random state string.
-    pub fn create(&self, provider: &str) -> String {
+    /// Generate and store a new state record. Returns the random
+    /// state token (the value the OAuth provider echoes back as
+    /// `?state=…` on the callback).
+    ///
+    /// Caller is responsible for validating `callback_url` and
+    /// `error_callback_url` against the trusted-origins allowlist
+    /// BEFORE calling this — the store trusts what it's given.
+    pub fn create(&self, provider: &str, callback_url: &str, error_callback_url: &str) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let token = generate_token();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.backend.put(&token, provider, now + 600);
+        let state = OAuthState {
+            provider: provider.to_string(),
+            callback_url: callback_url.to_string(),
+            error_callback_url: error_callback_url.to_string(),
+            expires_at: now + 600,
+        };
+        self.backend.put(&token, &state);
         token
     }
 
-    /// Validate and consume a state parameter. Returns true iff the state
-    /// existed, has not expired, and matches `expected_provider`. The token
-    /// is removed either way to make replay impossible.
-    pub fn validate(&self, state: &str, expected_provider: &str) -> bool {
+    /// Validate and consume a state token. Returns the stored record
+    /// iff the token existed, has not expired, AND matches
+    /// `expected_provider`. The token is removed either way to make
+    /// replay impossible.
+    pub fn validate(&self, state: &str, expected_provider: &str) -> Option<OAuthState> {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        match self.backend.take(state, now) {
-            Some(provider) => provider == expected_provider,
-            None => false,
+        let entry = self.backend.take(state, now)?;
+        if entry.provider != expected_provider {
+            return None;
+        }
+        Some(entry)
+    }
+}
+
+/// Validate that `url` has an origin (scheme://host[:port]) listed in
+/// `trusted_origins`. Returns `Ok(url)` when trusted (echoes input for
+/// chaining), `Err` with a code/message when not. Used by the OAuth
+/// start endpoint to gate `?callback=` + `?error_callback=` values
+/// before storing them in the state record.
+///
+/// `trusted_origins` entries are origin strings like
+/// `"https://app.example.com"` or `"http://localhost:3000"` — no
+/// trailing slash, no path. A `url` like
+/// `"http://localhost:3000/dashboard?x=1"` matches the
+/// `"http://localhost:3000"` entry.
+///
+/// Borrowed wholesale from better-auth's `trustedOrigins` model:
+/// explicit allowlist, no implicit "same-origin trust," no env-var
+/// magic. An open-redirect via OAuth is one of the easier auth bugs
+/// to ship by accident.
+pub fn validate_trusted_redirect(
+    url: &str,
+    trusted_origins: &[String],
+) -> Result<(), TrustedOriginError> {
+    if url.is_empty() {
+        return Err(TrustedOriginError::Empty);
+    }
+    // Must be absolute http(s) URL — no relative paths, no schemes
+    // like javascript:, file:, data:.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(TrustedOriginError::NotHttp);
+    }
+    let url_origin = origin_of(url);
+    if trusted_origins.iter().any(|t| t == &url_origin) {
+        Ok(())
+    } else {
+        Err(TrustedOriginError::NotTrusted { origin: url_origin })
+    }
+}
+
+/// Reasons a redirect URL might be rejected by [`validate_trusted_redirect`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedOriginError {
+    Empty,
+    NotHttp,
+    NotTrusted { origin: String },
+}
+
+impl std::fmt::Display for TrustedOriginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustedOriginError::Empty => write!(f, "redirect URL is empty"),
+            TrustedOriginError::NotHttp => {
+                write!(f, "redirect URL must use http:// or https:// scheme")
+            }
+            TrustedOriginError::NotTrusted { origin } => write!(
+                f,
+                "redirect origin {origin:?} is not in PYLON_TRUSTED_ORIGINS"
+            ),
         }
     }
+}
+
+/// Extract the origin (`scheme://host[:port]`) from a URL string,
+/// stripping any path/query/fragment. Best-effort string slicing —
+/// no full URL parser dep. Public so router crates can reuse the same
+/// logic when comparing redirect URLs against the trusted-origins list.
+pub fn origin_of(url: &str) -> String {
+    let after_scheme = match url.find("://") {
+        Some(i) => i + 3,
+        None => return url.trim_end_matches('/').to_string(),
+    };
+    let rest = &url[after_scheme..];
+    let cut = rest
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    url[..after_scheme + cut].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1850,22 +1953,48 @@ mod tests {
     #[test]
     fn oauth_state_store_create_and_validate() {
         let store = OAuthStateStore::new();
-        let state = store.create("google");
-        assert!(store.validate(&state, "google"));
-        // Second validation should fail — consumed.
-        assert!(!store.validate(&state, "google"));
+        let token = store.create("google", "https://app/cb", "https://app/login");
+        let rec = store.validate(&token, "google").expect("valid first time");
+        assert_eq!(rec.callback_url, "https://app/cb");
+        assert_eq!(rec.error_callback_url, "https://app/login");
+        // Second validation should fail — single-use.
+        assert!(store.validate(&token, "google").is_none());
     }
 
     #[test]
     fn oauth_state_store_wrong_provider_rejected() {
         let store = OAuthStateStore::new();
-        let state = store.create("google");
-        assert!(!store.validate(&state, "github"));
+        let token = store.create("google", "https://app/cb", "https://app/cb");
+        assert!(store.validate(&token, "github").is_none());
     }
 
     #[test]
     fn oauth_state_store_invalid_state_rejected() {
         let store = OAuthStateStore::new();
-        assert!(!store.validate("nonexistent", "google"));
+        assert!(store.validate("nonexistent", "google").is_none());
+    }
+
+    #[test]
+    fn validate_trusted_redirect_basics() {
+        let trusted = vec!["http://localhost:3000".to_string()];
+        assert!(validate_trusted_redirect("http://localhost:3000/dashboard", &trusted).is_ok());
+        assert!(validate_trusted_redirect("http://localhost:3000", &trusted).is_ok());
+        assert!(validate_trusted_redirect("http://localhost:3000/x?y=1", &trusted).is_ok());
+
+        // Wrong port → wrong origin.
+        assert!(matches!(
+            validate_trusted_redirect("http://localhost:4321/dashboard", &trusted),
+            Err(TrustedOriginError::NotTrusted { .. })
+        ));
+        // Non-http scheme rejected even before trusted check (defense
+        // against javascript:, file:, data:).
+        assert!(matches!(
+            validate_trusted_redirect("javascript:alert(1)", &trusted),
+            Err(TrustedOriginError::NotHttp)
+        ));
+        assert!(matches!(
+            validate_trusted_redirect("", &trusted),
+            Err(TrustedOriginError::Empty)
+        ));
     }
 }

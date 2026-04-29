@@ -576,6 +576,42 @@ fn start_server(
     };
     let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(csrf_origins));
 
+    // Trusted origins for OAuth `?callback=` / `?error_callback=`
+    // redirect URLs. Required if any OAuth provider is configured —
+    // an unconfigured list with a configured provider means every
+    // sign-in attempt 403s with UNTRUSTED_REDIRECT, which is
+    // operator-visible and recoverable. We don't auto-derive from
+    // PYLON_CORS_ORIGIN: the CORS origin is the API caller's origin,
+    // which may differ from the dashboard's (e.g. dashboard at
+    // /dashboard, API at api.example.com). Better-auth's `trustedOrigins`
+    // is the model here — explicit allowlist, no implicit trust.
+    let trusted_origins: Vec<String> = std::env::var("PYLON_TRUSTED_ORIGINS")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|_| {
+            // Dev-mode default: trust localhost on the conventional
+            // ports so `pylon dev` + `next dev` works without env
+            // surgery. Production (PYLON_DEV_MODE=false or unset) gets
+            // an empty list, which fails-closed at the OAuth start
+            // endpoint with a clear error pointing the operator at
+            // PYLON_TRUSTED_ORIGINS.
+            if is_dev_early {
+                vec![
+                    "http://localhost:3000".to_string(),
+                    "http://localhost:4321".to_string(),
+                    "http://localhost:5173".to_string(),
+                    "http://127.0.0.1:3000".to_string(),
+                ]
+            } else {
+                Vec::new()
+            }
+        });
+    let trusted_origins = Arc::new(trusted_origins);
+
     // Start WebSocket server on port+1.
     //
     // The snapshot fetcher gives the WS reader a way to ship the current
@@ -682,6 +718,7 @@ fn start_server(
         let mt = Arc::clone(&metrics);
         let os = Arc::clone(&oauth_state);
         let acc = Arc::clone(&account_store);
+        let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
         let jq = Arc::clone(&job_queue);
@@ -1919,6 +1956,7 @@ fn start_server(
                     shards: shard_ops,
                     plugin_hooks: &plugin_hooks,
                     auth_ctx: &auth_ctx,
+                    trusted_origins: &trusted_origins_ref,
                     is_dev,
                     request_headers: &request_headers,
                     peer_ip: peer_ip.as_str(),

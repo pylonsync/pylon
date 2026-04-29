@@ -696,35 +696,88 @@ pub(crate) fn handle(
         ));
     }
 
-    // GET /api/auth/login/:provider
+    // GET /api/auth/login/:provider?callback=<url>[&error_callback=<url>][&redirect=1]
+    //
+    // The frontend MUST pass `callback` — the URL pylon should 302 the
+    // browser to after a successful OAuth handshake. Optional
+    // `error_callback` is where failures land (defaults to `callback`,
+    // with `?oauth_error=…&oauth_error_message=…` appended). Both URLs
+    // must have origins listed in `PYLON_TRUSTED_ORIGINS` — same
+    // pattern as better-auth's `trustedOrigins`. No env-var fallback;
+    // an unconfigured trusted-origins list is a 400 from this route.
     if let Some(provider_raw) = url.strip_prefix("/api/auth/login/") {
         let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
         if method == HttpMethod::Get {
             let registry = pylon_auth::OAuthRegistry::from_env();
-            if let Some(config) = registry.get(provider) {
-                let state = ctx.oauth_state.create(provider);
-                let redirect = config.auth_url_with_state(&state);
-                let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
-                let want_redirect = parse_query(query)
-                    .get("redirect")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                if want_redirect {
-                    ctx.add_response_header("Location", redirect);
-                    return Some((302, String::new()));
-                }
+            let Some(config) = registry.get(provider) else {
                 return Some((
-                    200,
-                    serde_json::json!({"redirect": redirect, "state": state}).to_string(),
+                    404,
+                    json_error_with_hint(
+                        "PROVIDER_NOT_FOUND",
+                        &format!("OAuth provider \"{provider}\" is not configured"),
+                        "Set PYLON_OAUTH_GOOGLE_CLIENT_ID / PYLON_OAUTH_GITHUB_CLIENT_ID environment variables",
+                    ),
                 ));
+            };
+
+            let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let params = parse_query(query);
+            let callback = match params.get("callback").map(String::as_str) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    return Some((
+                        400,
+                        json_error_with_hint(
+                            "MISSING_CALLBACK",
+                            "GET /api/auth/login/:provider requires a `callback` query parameter",
+                            "Add ?callback=<your-success-url>&error_callback=<your-failure-url>; both origins must be in PYLON_TRUSTED_ORIGINS",
+                        ),
+                    ));
+                }
+            };
+            // error_callback defaults to callback — the frontend can
+            // disambiguate via the `?oauth_error=` query param appended
+            // on failure.
+            let error_callback = params
+                .get("error_callback")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| callback.clone());
+
+            // Trusted-origins gate. Both URLs validated against the
+            // same allowlist so an attacker can't sneak a redirect
+            // through one parameter that they couldn't through the
+            // other.
+            for (kind, target) in [("callback", &callback), ("error_callback", &error_callback)] {
+                if let Err(err) = pylon_auth::validate_trusted_redirect(target, ctx.trusted_origins)
+                {
+                    tracing::warn!(
+                        "[oauth] rejected {kind}={target:?} for provider {provider}: {err}"
+                    );
+                    return Some((
+                        403,
+                        json_error_with_hint(
+                            "UNTRUSTED_REDIRECT",
+                            &format!("OAuth {kind} redirect rejected: {err}"),
+                            "Add the redirect's origin (scheme://host[:port]) to PYLON_TRUSTED_ORIGINS (comma-separated)",
+                        ),
+                    ));
+                }
+            }
+
+            let state = ctx.oauth_state.create(provider, &callback, &error_callback);
+            let auth_url = config.auth_url_with_state(&state);
+            let want_redirect = params
+                .get("redirect")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if want_redirect {
+                ctx.add_response_header("Location", auth_url);
+                return Some((302, String::new()));
             }
             return Some((
-                404,
-                json_error_with_hint(
-                    "PROVIDER_NOT_FOUND",
-                    &format!("OAuth provider \"{provider}\" is not configured"),
-                    "Set PYLON_OAUTH_GOOGLE_CLIENT_ID / PYLON_OAUTH_GITHUB_CLIENT_ID environment variables",
-                ),
+                200,
+                serde_json::json!({"redirect": auth_url, "state": state}).to_string(),
             ));
         }
     }
@@ -732,6 +785,11 @@ pub(crate) fn handle(
     // /api/auth/callback/:provider
     if let Some(provider_raw) = url.strip_prefix("/api/auth/callback/") {
         let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
+
+        // POST: SDK / programmatic flow. Returns JSON. State is
+        // validated here (single-use take); we don't need the
+        // callback URLs from the state record because the caller is
+        // parsing the response body.
         if method == HttpMethod::Post {
             let data: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
@@ -750,8 +808,21 @@ pub(crate) fn handle(
             let code = data.get("code").and_then(|v| v.as_str());
             let dev_email = data.get("email").and_then(|v| v.as_str());
             let dev_name = data.get("name").and_then(|v| v.as_str());
+
+            if state
+                .and_then(|s| ctx.oauth_state.validate(s, provider))
+                .is_none()
+            {
+                return Some((
+                    403,
+                    json_error(
+                        "OAUTH_INVALID_STATE",
+                        "Invalid or missing OAuth state parameter",
+                    ),
+                ));
+            }
             return Some(
-                match complete_oauth_login(ctx, provider, state, code, dev_email, dev_name) {
+                match complete_oauth_login(ctx, provider, code, dev_email, dev_name) {
                     Ok((user_id, session)) => {
                         ctx.maybe_set_session_cookie(&session.token);
                         (
@@ -769,80 +840,97 @@ pub(crate) fn handle(
                 },
             );
         }
+
+        // GET: browser flow. State validation gives us the callback
+        // URLs the start endpoint stored. No env-var lookup needed.
         if method == HttpMethod::Get {
-            let dashboard = match std::env::var("PYLON_DASHBOARD_URL") {
-                Ok(v) if !v.is_empty() => v,
-                _ => {
+            let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let params = parse_query(query);
+            let state_token = params.get("state").map(String::as_str);
+            let code = params.get("code").map(String::as_str);
+
+            // Validate state ONCE (single-use take) and capture the
+            // stored callback URLs. We use them for both the success
+            // 302 and the failure 302 — the start endpoint already
+            // validated both URLs against PYLON_TRUSTED_ORIGINS.
+            let state_record = match state_token.and_then(|s| ctx.oauth_state.validate(s, provider))
+            {
+                Some(s) => s,
+                None => {
+                    // Without a validated state we don't know where to
+                    // redirect; the only safe response is a JSON 403.
+                    // This also catches the legitimate "user opens an
+                    // OAuth callback URL by hand or after a long delay"
+                    // case where the state has already expired.
                     return Some((
-                        500,
+                        403,
                         json_error(
-                            "OAUTH_DASHBOARD_URL_MISSING",
-                            "GET /api/auth/callback/:provider requires PYLON_DASHBOARD_URL to know where to redirect after sign-in",
+                            "OAUTH_INVALID_STATE",
+                            "Invalid, expired, or already-consumed OAuth state. Restart the sign-in flow.",
                         ),
                     ));
                 }
             };
-            let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
-            let params = parse_query(query);
-            let state = params.get("state").map(String::as_str);
-            let code = params.get("code").map(String::as_str);
-            match complete_oauth_login(ctx, provider, state, code, None, None) {
+
+            match complete_oauth_login(ctx, provider, code, None, None) {
                 Ok((_user_id, session)) => {
                     let cookie_value = ctx.cookie_config.set_value(&session.token);
                     ctx.add_response_header("Set-Cookie", cookie_value);
-                    ctx.add_response_header("Location", dashboard);
-                    return Some((302, String::new()));
+                    ctx.add_response_header("Location", state_record.callback_url);
+                    Some((302, String::new()))
                 }
                 Err(err) => {
-                    // Log the full message server-side — the redirect
-                    // only carries the code, so without this the
-                    // operator can't see WHY signup failed (the actual
-                    // PG error, missing field name, etc.). The browser
-                    // doesn't render 302 response bodies so dropping
-                    // this on the floor is silent.
+                    // Server-side log carries the full detail (the
+                    // browser sees only the redirect URL). Without
+                    // this an operator has no way to see WHY signup
+                    // failed when the user reports an opaque error.
                     tracing::warn!(
                         "[oauth] callback {} failed: {} {}",
                         provider,
                         err.code,
                         err.message
                     );
-                    // Pass the message through to the dashboard too so
-                    // the login page can show "couldn't create user:
-                    // missing column avatarColor" instead of an opaque
-                    // error code. Truncated to 500 chars to keep the
-                    // URL sane.
+                    // Carry the message through to the failure URL so
+                    // the frontend can render "couldn't create user:
+                    // missing column X" rather than an opaque code.
+                    // Truncate to 500 chars to keep the URL sane.
                     let msg = if err.message.len() > 500 {
                         format!("{}…", &err.message[..500])
                     } else {
                         err.message.clone()
                     };
-                    // The login page lives at the origin's `/login`,
-                    // NOT at `${PYLON_DASHBOARD_URL}/login` — operators
-                    // typically point PYLON_DASHBOARD_URL at the
-                    // protected dashboard root (e.g.
-                    // `http://localhost:3000/dashboard`), and naively
-                    // appending `/login` produces `/dashboard/login`,
-                    // which doesn't exist in any Next.js routing
-                    // convention. Take the origin (scheme://host[:port])
-                    // and append `/login` there. PYLON_LOGIN_URL
-                    // overrides for operators with a separate marketing
-                    // host.
-                    let login_target = std::env::var("PYLON_LOGIN_URL")
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| format!("{}/login", crate::origin_of(&dashboard)));
+                    // Append query params with the right separator
+                    // (existing query strings on the error_callback URL
+                    // get an `&`, fresh ones get a `?`).
+                    let sep = if state_record.error_callback_url.contains('?') {
+                        '&'
+                    } else {
+                        '?'
+                    };
                     let target = format!(
-                        "{}?oauth_error={}&oauth_error_message={}",
-                        login_target,
+                        "{}{}oauth_error={}&oauth_error_message={}",
+                        state_record.error_callback_url,
+                        sep,
                         url_encode(err.code),
                         url_encode(&msg)
                     );
                     ctx.add_response_header("Location", target);
-                    return Some((302, String::new()));
+                    Some((302, String::new()))
                 }
             }
+        } else {
+            None
         }
-    }
+    } else {
+        // Fall through to the rest of the auth route table.
+        // (Earlier `if let Some(...)` branches `return` directly so
+        // we only reach this when the URL didn't match.)
+        None
+    };
+    let _: Option<(u16, String)> = None; // Placate the type-checker;
+                                         // the `if let` chain above is the actual dispatch.
+
+    let _ = body; // Suppress unused-warning for arms that don't read body.
 
     // DELETE /api/auth/session
     if url == "/api/auth/session" && method == HttpMethod::Delete {

@@ -41,8 +41,17 @@ fn oauth_state_backend_take_is_atomic_single_use() {
         return;
     };
     let b = PostgresOAuthBackend::connect(&url).expect("connect");
-    b.put("tok_pg_oauth", "google", 9_999_999_999);
-    assert_eq!(b.take("tok_pg_oauth", 0).as_deref(), Some("google"));
+    let s = pylon_auth::OAuthState {
+        provider: "google".into(),
+        callback_url: "https://app/dash".into(),
+        error_callback_url: "https://app/login".into(),
+        expires_at: 9_999_999_999,
+    };
+    b.put("tok_pg_oauth", &s);
+    let got = b.take("tok_pg_oauth", 0).expect("first take wins");
+    assert_eq!(got.provider, "google");
+    assert_eq!(got.callback_url, "https://app/dash");
+    assert_eq!(got.error_callback_url, "https://app/login");
     // Second take returns None — DELETE … RETURNING is atomic so
     // concurrent callbacks for the same token can't both succeed.
     assert!(b.take("tok_pg_oauth", 0).is_none());

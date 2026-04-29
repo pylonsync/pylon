@@ -67,12 +67,33 @@ export async function listOAuthProviders(): Promise<OAuthProvider[]> {
 /**
  * Kick off an OAuth login. Browser navigates to Pylon's GET login
  * route, which 302s to the provider, which 302s back to Pylon's GET
- * callback (Set-Cookie + 302 to PYLON_DASHBOARD_URL). The OAuth code
+ * callback (Set-Cookie + 302 to the success URL). The OAuth code
  * never enters JS, so XSS in the dashboard can't intercept the
  * handshake.
+ *
+ * `successUrl` and `errorUrl` MUST have origins listed in the
+ * server's PYLON_TRUSTED_ORIGINS — otherwise pylon's start endpoint
+ * 403s with UNTRUSTED_REDIRECT. Defaults are sensible for typical
+ * Next.js layouts (current origin's `/dashboard` and `/login`); pass
+ * explicit values for apps that route auth elsewhere.
  */
-export function startOAuthLogin(provider: OAuthProvider["provider"]): void {
-	window.location.href = `/api/auth/login/${provider}?redirect=1`;
+export type StartOAuthLoginOptions = {
+	successUrl?: string;
+	errorUrl?: string;
+};
+export function startOAuthLogin(
+	provider: OAuthProvider["provider"],
+	opts: StartOAuthLoginOptions = {},
+): void {
+	const origin = window.location.origin;
+	const successUrl = opts.successUrl ?? `${origin}/dashboard`;
+	const errorUrl = opts.errorUrl ?? `${origin}/login`;
+	const params = new URLSearchParams({
+		redirect: "1",
+		callback: successUrl,
+		error_callback: errorUrl,
+	});
+	window.location.href = `/api/auth/login/${provider}?${params.toString()}`;
 }
 
 export async function sendVerificationEmail(): Promise<{

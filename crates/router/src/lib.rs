@@ -492,6 +492,15 @@ pub struct RouterContext<'a> {
     pub shards: Option<&'a dyn ShardOps>,
     pub plugin_hooks: &'a dyn PluginHookOps,
     pub auth_ctx: &'a AuthContext,
+    /// Allowlist of origins (`scheme://host[:port]`) that the OAuth
+    /// start endpoint will accept as `?callback=` / `?error_callback=`
+    /// targets. Sourced from `PYLON_TRUSTED_ORIGINS` (comma-separated)
+    /// at server boot. Borrowed from better-auth's `trustedOrigins`
+    /// model — explicit allowlist, no implicit "same-origin trust" or
+    /// env-var magic. Open redirects via OAuth are an easy bug to
+    /// ship by accident; this list is the only thing standing between
+    /// a misconfigured frontend and an attacker-controlled redirect.
+    pub trusted_origins: &'a [String],
     pub is_dev: bool,
     /// Raw HTTP request headers (lowercased names). Used by the webhook
     /// action endpoint to pass the exact signing-relevant headers through
@@ -565,24 +574,21 @@ pub(crate) struct OAuthError {
 /// Shared OAuth code-for-session exchange. Returns the user_id + minted
 /// session, or a structured error suitable for both JSON (POST) and
 /// 302-redirect-with-error-param (GET) responses.
+/// Complete an OAuth login. Caller must have ALREADY validated the
+/// state token via `ctx.oauth_state.validate(...)` and is passing the
+/// resulting `OAuthState` record in via... well, by virtue of having
+/// called this function. State validation lives at the call site (not
+/// here) because the GET /api/auth/callback/:provider handler needs
+/// the validated record's callback URLs to know where to redirect on
+/// both success and failure — and validate is single-use, so it can
+/// only be called once per token.
 pub(crate) fn complete_oauth_login(
     ctx: &RouterContext,
     provider: &str,
-    state: Option<&str>,
     code: Option<&str>,
     dev_email: Option<&str>,
     dev_name: Option<&str>,
 ) -> Result<(String, pylon_auth::Session), OAuthError> {
-    // CSRF state. Same store the GET /api/auth/login/:provider handler
-    // populated when minting the auth URL.
-    if !state.is_some_and(|s| ctx.oauth_state.validate(s, provider)) {
-        return Err(OAuthError {
-            status: 403,
-            code: "OAUTH_INVALID_STATE",
-            message: "Invalid or missing OAuth state parameter".into(),
-        });
-    }
-
     // Resolve (UserInfo, TokenSet): real OAuth code, or dev-mode shortcut.
     // The dev shortcut exists so integration tests don't need to spin up a
     // real provider — gated on PYLON_DEV_MODE so prod can never mint a
@@ -1854,6 +1860,7 @@ mod auth_gate_tests {
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
             account_store: &account_store,
+            trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
             notifier: &notifier,
@@ -1925,7 +1932,9 @@ mod auth_gate_tests {
         with_ctx(false, &anon, |ctx| {
             // Mint a state token so the state check passes — the `code`
             // requirement is what must still stop us.
-            let state = ctx.oauth_state.create("google");
+            let state = ctx
+                .oauth_state
+                .create("google", "https://app/cb", "https://app/cb");
             let body = format!(r#"{{"state":"{state}","email":"victim@example.com"}}"#);
             let (status, resp, _ct) = route(
                 ctx,
@@ -2290,6 +2299,7 @@ mod auth_gate_tests {
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
             account_store: &account_store,
+            trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
             notifier: &notifier,
@@ -2820,6 +2830,7 @@ mod auth_gate_tests {
                 magic_codes: &magic_codes,
                 oauth_state: &oauth_state,
                 account_store: &account_store,
+                trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,
                 notifier: &notifier,
