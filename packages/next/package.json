@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.3.7",
+  "version": "0.3.8",
   "type": "module",
   "description": "Next.js helpers for Pylon — cookie-based auth gate, server-side session helpers, and reusable client hooks.",
   "exports": {
