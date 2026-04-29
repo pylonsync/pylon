@@ -389,32 +389,32 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.3",
-        "@pylonsync/cli-darwin-x64": "0.3.3",
-        "@pylonsync/cli-linux-arm64": "0.3.3",
-        "@pylonsync/cli-linux-x64": "0.3.3",
+        "@pylonsync/cli-darwin-arm64": "0.3.4",
+        "@pylonsync/cli-darwin-x64": "0.3.4",
+        "@pylonsync/cli-linux-arm64": "0.3.4",
+        "@pylonsync/cli-linux-x64": "0.3.4",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/create-pylon": {
       "name": "create-pylon",
@@ -428,7 +428,7 @@
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -460,7 +460,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -476,7 +476,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -508,11 +508,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.3",
+      "version": "0.3.4",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
