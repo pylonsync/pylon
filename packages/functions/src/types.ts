@@ -44,6 +44,29 @@ export interface DbReader {
   ): Promise<Record<string, unknown>>;
 
   /**
+   * Faceted full-text search against an entity that declares a
+   * `search:` config. Mirrors the typed-client `client.search()` /
+   * the HTTP `/api/search/<entity>` shape.
+   *
+   * ```ts
+   * const result = await ctx.db.search("Product", {
+   *   query: "rust async",
+   *   filters: { brand: "Atlas" },
+   *   facets: ["category"],
+   *   page: 0,
+   *   pageSize: 20,
+   * });
+   * ```
+   *
+   * Returns `{ hits, facetCounts, total, tookMs }`. Throws on
+   * entities without a `search:` config (`SEARCH_NOT_CONFIGURED`).
+   */
+  search(
+    entity: string,
+    query: Record<string, unknown>
+  ): Promise<SearchResult>;
+
+  /**
    * Cursor-paginated list. Pass `cursor` from a previous page's `nextCursor`
    * to continue; pass `null` for the first page.
    *
@@ -68,6 +91,19 @@ export interface PaginationResult<T = Record<string, unknown>> {
   nextCursor: string | null;
   /** True when there are no more rows after this page. */
   isDone: boolean;
+}
+
+/** Result shape for [`DbReader.search`]. */
+export interface SearchResult<T = Record<string, unknown>> {
+  /** Ranked (or sorted) hit rows. */
+  hits: T[];
+  /** `{facet_name: {value: count}}` — counts excluded for the
+   *  active filter on the same facet (standard exclusion pattern). */
+  facetCounts: Record<string, Record<string, number>>;
+  /** Total hit count before pagination. */
+  total: number;
+  /** Milliseconds spent in the search engine. */
+  tookMs: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -242,6 +242,11 @@ pub enum DbOp {
     QueryGraph,
     Link,
     Unlink,
+    /// Faceted full-text search. The query body is whatever the entity
+    /// declares in its `search:` config — query string, filters,
+    /// facets, sort, page, pageSize. Carried on `data`.
+    /// Response shape: `{ hits, facetCounts, total, tookMs }`.
+    Search,
 }
 
 /// A stream chunk to forward to the HTTP client as SSE.

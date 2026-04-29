@@ -105,8 +105,12 @@ fn default_page_size() -> usize {
     20
 }
 
-/// What the server hands back.
+/// What the server hands back. Wire format uses camelCase
+/// (`facetCounts`, `tookMs`) to match the typed-client SDKs and
+/// `ctx.db.search` TS surface — Rust callers still see snake_case
+/// field names because the rename is only on the serde layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     /// Hit rows in ranked (or sorted) order. Each is a plain JSON row.
     pub hits: Vec<serde_json::Value>,
@@ -121,6 +125,39 @@ pub struct SearchResult {
     /// Milliseconds spent in the query engine, for client-side perf
     /// instrumentation and snappy-feeling dashboards.
     pub took_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Cross-backend helpers — used by both SQLite (`search_maintenance`)
+// and Postgres (`pg_search`). Living here keeps the two backends from
+// drifting on the same row-merge / facet-stringify rules.
+// ---------------------------------------------------------------------------
+
+/// Shallow merge: `patch` overwrites corresponding fields on `old_row`.
+/// Both backends use this when rebuilding the FTS row after a partial
+/// UPDATE — the new tsvector reflects the post-update state.
+pub fn merge_row(old_row: &serde_json::Value, patch: &serde_json::Value) -> serde_json::Value {
+    let mut merged = old_row.as_object().cloned().unwrap_or_default();
+    if let Some(obj) = patch.as_object() {
+        for (k, v) in obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
+/// Coerce a JSON value into the canonical string used as a facet
+/// bitmap key (SQLite) or facet equality value (Postgres). Numbers
+/// drop trailing zeros so `4.50` and `4.5` map to the same value;
+/// nulls + complex types become `None` so they don't get a bucket.
+pub fn stringify_facet(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +244,7 @@ mod tests {
             text: vec![],
             facets: vec!["brand".into()],
             sortable: vec![],
+            language: None,
         };
         assert!(create_fts_table_sql("Product", &cfg).is_none());
     }
@@ -217,6 +255,7 @@ mod tests {
             text: vec!["name".into(), "description".into()],
             facets: vec![],
             sortable: vec![],
+            language: None,
         };
         let sql = create_fts_table_sql("Product", &cfg).unwrap();
         assert!(sql.contains("\"_fts_Product\""));

@@ -9,6 +9,7 @@ pub mod job_store;
 pub mod jobs;
 pub mod log;
 pub mod loro_store;
+pub mod pg_loro_store;
 pub mod magic_code_backend;
 pub mod metrics;
 pub mod oauth_backend;
@@ -53,6 +54,19 @@ impl std::fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+/// Lift a `DataError` (the cross-crate error type for PG `DataStore`
+/// operations) into a `RuntimeError`. Used by `PostgresDataStore`
+/// closure bounds (`with_client`, `with_transaction`) so callers in
+/// the runtime can propagate PG errors with their native error type.
+impl From<pylon_http::DataError> for RuntimeError {
+    fn from(e: pylon_http::DataError) -> Self {
+        RuntimeError {
+            code: e.code,
+            message: e.message,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SQL safety helpers
@@ -199,8 +213,13 @@ struct SqliteBackend {
 
 /// Postgres-backed entity store. Wraps `PostgresDataStore` from
 /// pylon-storage and delegates the `DataStore` surface directly.
-struct PgBackend {
-    store: pylon_storage::pg_datastore::PostgresDataStore,
+pub(crate) struct PgBackend {
+    pub(crate) store: pylon_storage::pg_datastore::PostgresDataStore,
+    /// Per-row LoroDoc snapshot store for entities with `crdt: true`.
+    /// Arc'd so the runtime layer can hand a clone to PgCrdtHookImpl
+    /// (the bridge that lets PgTxStore call back into CRDT machinery
+    /// from inside a held tx).
+    pub(crate) crdt: std::sync::Arc<crate::pg_loro_store::PgLoroStore>,
 }
 
 /// Number of read-only connections to open in the pool.
@@ -256,13 +275,27 @@ impl Runtime {
     pub fn open_postgres(url: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
         let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
             .map_err(data_err_to_runtime)?;
+        // Bootstrap the CRDT sidecar table on every open. Idempotent
+        // (`CREATE TABLE IF NOT EXISTS`); same shape as the SQLite
+        // path's `ensure_sidecar` call. Without this, the first
+        // CRDT-mode write would error because `_pylon_crdt_snapshots`
+        // doesn't exist yet on a fresh PG database.
+        store.with_client(|c| crate::pg_loro_store::ensure_sidecar(c)).map_err(|e| {
+            RuntimeError {
+                code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
+                message: format!("ensure pg crdt sidecar: {e}"),
+            }
+        })?;
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
             .iter()
             .map(|e| (e.name.clone(), e.clone()))
             .collect();
         Ok(Self {
-            backend: RuntimeBackend::Postgres(PgBackend { store }),
+            backend: RuntimeBackend::Postgres(PgBackend {
+                store,
+                crdt: std::sync::Arc::new(crate::pg_loro_store::PgLoroStore::new()),
+            }),
             manifest,
             entities,
             is_in_memory: false,
@@ -670,6 +703,49 @@ impl Runtime {
     /// reads, indexes, FTS, and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
+            let ent = self.require_entity(entity)?;
+            // Both CRDT-mode and non-CRDT writes go through one
+            // transaction so the row, the FTS shadow, and (for CRDT)
+            // the LoroDoc snapshot either all commit or all roll back.
+            // Pre-fix this was three separate autocommits and any
+            // failure between them desynced the layers.
+            if ent.crdt {
+                let crdt_fields = self.crdt_fields_for(ent)?;
+                let id = generate_id();
+                // Inject the generated id so build_insert_sql reuses
+                // it — keeps the snapshot key and the row id aligned.
+                let mut row = data.clone();
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("id".into(), serde_json::Value::String(id.clone()));
+                }
+                let result = pg.store.with_transaction_raw(|tx| -> Result<(), RuntimeError> {
+                    pg.crdt
+                        .apply_patch(tx, entity, &id, &crdt_fields, data)
+                        .map_err(|e| RuntimeError {
+                            code: "CRDT_APPLY_FAILED".into(),
+                            message: format!("crdt write {entity}/{id}: {e}"),
+                        })?;
+                    pylon_storage::pg_tx_store::tx_insert(tx, &self.manifest, entity, &row)
+                        .map(|_| ())
+                        .map_err(data_err_to_runtime)?;
+                    pg.crdt.cache_after_commit(tx, entity, &id);
+                    Ok(())
+                });
+                if result.is_err() {
+                    // Rollback drops the persisted snapshot, but the
+                    // in-memory LoroDoc was mutated in-place by
+                    // apply_patch. Evict it so the next access
+                    // re-hydrates from disk (which is back in the
+                    // pre-apply state). Without this, the cache would
+                    // hold a doc ahead of the materialized row.
+                    pg.crdt.evict(entity, &id);
+                }
+                result?;
+                return Ok(id);
+            }
+            // Non-CRDT path: still one tx — the typed `DataStore::insert`
+            // already wraps in `with_transaction` internally for FTS
+            // atomicity, so we can delegate straight through.
             return pylon_http::DataStore::insert(&pg.store, entity, data)
                 .map_err(data_err_to_runtime);
         }
@@ -886,6 +962,68 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
+            let ent = self.require_entity(entity)?;
+            if ent.crdt {
+                // CRDT mode: snapshot apply + materialized update +
+                // FTS shadow rebuild all share one tx. Pre-fix the
+                // snapshot landed in autocommit and the row write in
+                // a separate one — a mid-write crash desynced them.
+                //
+                // The closure also FAILS the tx if `tx_update` returns
+                // false (no row matched). Without that, the snapshot
+                // would commit alone — orphaned state pointing at a
+                // row that doesn't exist. Codex flagged this. On
+                // rollback the runtime evicts the cached LoroDoc so
+                // the next read re-hydrates from the (unchanged)
+                // sidecar.
+                let crdt_fields = self.crdt_fields_for(ent)?;
+                let result = pg.store.with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                    pg.crdt
+                        .apply_patch(tx, entity, id, &crdt_fields, data)
+                        .map_err(|e| RuntimeError {
+                            code: "CRDT_APPLY_FAILED".into(),
+                            message: format!("crdt update {entity}/{id}: {e}"),
+                        })?;
+                    let updated = pylon_storage::pg_tx_store::tx_update(
+                        tx,
+                        &self.manifest,
+                        entity,
+                        id,
+                        data,
+                    )
+                    .map_err(data_err_to_runtime)?;
+                    if !updated {
+                        // Roll back via Err so the snapshot doesn't
+                        // commit against a missing row.
+                        return Err(RuntimeError {
+                            code: "ENTITY_NOT_FOUND".into(),
+                            message: format!(
+                                "Update on {entity}/{id} found no row — refusing to commit \
+                                 a CRDT snapshot that would orphan."
+                            ),
+                        });
+                    }
+                    // Refresh the cache from the just-persisted
+                    // snapshot so post-commit reads on this process
+                    // skip the re-hydration round-trip.
+                    pg.crdt.cache_after_commit(tx, entity, id);
+                    Ok(updated)
+                });
+                if result.is_err() {
+                    pg.crdt.evict(entity, id);
+                    // ENTITY_NOT_FOUND from the inner closure is the
+                    // intended return for "no such row" — translate
+                    // into Ok(false) so callers see the same shape
+                    // the SQLite path returns. Real errors (CRDT
+                    // apply failed, BEGIN/COMMIT failed) propagate.
+                    if let Err(ref e) = result {
+                        if e.code == "ENTITY_NOT_FOUND" {
+                            return Ok(false);
+                        }
+                    }
+                }
+                return result;
+            }
             return pylon_http::DataStore::update(&pg.store, entity, id, data)
                 .map_err(data_err_to_runtime);
         }
@@ -979,6 +1117,34 @@ impl Runtime {
     /// Delete a row by ID. Returns true if a row was actually deleted.
     pub fn delete(&self, entity: &str, id: &str) -> Result<bool, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
+            let ent = self.require_entity(entity)?;
+            if ent.crdt {
+                // Sidecar delete + entity delete + FTS shadow delete
+                // share one tx. Eviction of the in-memory cache runs
+                // AFTER commit so a rolled-back delete leaves the
+                // cache valid (the snapshot is still on disk).
+                let result = pg.store.with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                    tx.execute(
+                        "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
+                        &[&entity, &id],
+                    )
+                    .map_err(|e| RuntimeError {
+                        code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                        message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
+                    })?;
+                    pylon_storage::pg_tx_store::tx_delete(tx, &self.manifest, entity, id)
+                        .map_err(data_err_to_runtime)
+                });
+                // Evict regardless of whether tx_delete found a row —
+                // we issued the sidecar DELETE inside the same tx, so
+                // any cached doc is now stale even if the entity row
+                // was already gone (orphan sidecar case codex flagged).
+                // Only skip eviction if the WHOLE tx rolled back.
+                if result.is_ok() {
+                    pg.crdt.evict(entity, id);
+                }
+                return result;
+            }
             return pylon_http::DataStore::delete(&pg.store, entity, id)
                 .map_err(data_err_to_runtime);
         }
@@ -2141,8 +2307,10 @@ impl Runtime {
     }
 
     /// Borrow the Postgres backend, or `None` for SQLite. Used by the
-    /// per-method dispatch at the top of each entity-CRUD function.
-    fn pg_backend(&self) -> Option<&PgBackend> {
+    /// per-method dispatch at the top of each entity-CRUD function
+    /// AND by the `DataStore` impl in `datastore.rs` to reach the
+    /// CRDT sidecar.
+    pub(crate) fn pg_backend(&self) -> Option<&PgBackend> {
         match &self.backend {
             RuntimeBackend::Sqlite(_) => None,
             RuntimeBackend::Postgres(pg) => Some(pg),
@@ -2152,6 +2320,42 @@ impl Runtime {
     /// Borrow the underlying Postgres `DataStore` if this runtime is
     /// Postgres-backed. Used by the `DataStore` adapter in `datastore.rs`
     /// to delegate `transact`/`search` etc. without re-implementing them.
+    /// Accessor for the underlying PostgresDataStore. Used by
+    /// integration tests to exercise in-tx primitives directly
+    /// without going through a TS function handler. Also useful for
+    /// callers that need to drop down to raw PG (e.g. running an
+    /// EXPLAIN against the live cluster from an admin tool).
+    /// Returns None on SQLite-backed runtimes.
+    pub fn pg_data_store_pub(&self) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {
+        self.pg_data_store()
+    }
+
+    #[doc(hidden)]
+    pub fn pg_data_store_for_tests(&self) -> &pylon_storage::pg_datastore::PostgresDataStore {
+        self.pg_data_store().expect("pg backend")
+    }
+
+    /// Test-only: run a closure inside a PG mutation tx with the
+    /// CRDT hook installed — same code path FnOpsImpl::call uses
+    /// for `Mutation` handlers. Lets integration tests verify the
+    /// hook without spinning up a Bun runtime.
+    #[doc(hidden)]
+    pub fn run_in_pg_mutation_tx_for_tests<F, T, E>(&self, body: F) -> Result<T, E>
+    where
+        F: FnOnce(&dyn pylon_http::DataStore) -> Result<T, E>,
+        E: From<pylon_http::DataError>,
+    {
+        let pg_backend = self.pg_backend().expect("pg backend");
+        let crdt_hook: std::sync::Arc<dyn pylon_storage::pg_tx_store::PgCrdtHook> =
+            std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
+                crdt: std::sync::Arc::clone(&pg_backend.crdt),
+                manifest: std::sync::Arc::new(self.manifest.clone()),
+            });
+        pg_backend
+            .store
+            .with_transaction_crdt(crdt_hook, body)
+    }
+
     pub(crate) fn pg_data_store(&self) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {
         self.pg_backend().map(|pg| &pg.store)
     }

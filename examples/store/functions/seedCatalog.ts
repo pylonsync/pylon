@@ -5,10 +5,11 @@ import { mutation, v } from "@pylonsync/functions";
  * skips if the store is already populated. Runs on first launch of
  * the example so visitors land on a full-looking store page.
  *
- * Performance note: each insert is a separate transaction via
- * `ctx.db.insert`. For a real bulk import you'd wrap the whole thing
- * in a single `ctx.db.transact([...])` call and pay the fsync once.
- * ~10k rows × ~3ms each = 30s on an SSD; fine for a dev seed.
+ * Performance note: this whole handler is one mutation, so all the
+ * inserts share a single transaction (the handler IS the transaction)
+ * and pay the fsync once. ~10k rows × ~3ms each = 30s on an SSD; fine
+ * for a dev seed. For larger bulk imports outside a function call,
+ * use the HTTP `/api/transact` endpoint with batched ops.
  */
 const BRANDS = [
   "Summit", "Orbit", "Nimbus", "Harbor", "Forge",

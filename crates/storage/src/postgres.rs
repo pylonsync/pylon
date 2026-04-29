@@ -33,8 +33,61 @@ fn pg_column_type(field_type: &str) -> &'static str {
 /// Quote a SQL identifier, escaping embedded double-quotes by doubling them.
 ///
 /// PostgreSQL standard: `"foo""bar"` represents the identifier `foo"bar`.
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Public re-export for sibling modules (e.g. `pg_tx_store`) that need
+/// to build SQL strings against the same dialect rules. Keeping the
+/// crate-private function untouched preserves the existing call sites
+/// inside this module.
+#[cfg(feature = "postgres-live")]
+pub fn quote_ident_pub(name: &str) -> String {
+    quote_ident(name)
+}
+
+/// Public re-export of [`live::row_to_json`] for sibling modules. Used
+/// by `pg_tx_store` so transactional reads return rows in the same
+/// JSON shape as the non-transactional path.
+#[cfg(feature = "postgres-live")]
+pub fn row_to_json_pub(row: &postgres::Row) -> serde_json::Value {
+    live::row_to_json(row)
+}
+
+/// Public re-export of the filter builder so the in-tx PgTxStore can
+/// reuse the same operator surface ($eq, $like, $in, $order, $limit,
+/// $offset, $not, $gt, $gte, $lt, $lte) as the non-tx path. Returns
+/// `(sql, params)` ready to feed to either `client.query` or
+/// `transaction.query`.
+#[cfg(feature = "postgres-live")]
+pub fn build_query_filtered_sql_pub(
+    entity: &str,
+    filter: &serde_json::Value,
+    valid_columns: &[String],
+) -> Result<(String, Vec<JsonParam>), StorageError> {
+    live::LivePostgresAdapter::build_query_filtered_sql(entity, filter, valid_columns)
+}
+
+/// Public re-export of the aggregate builder. Returns
+/// `(sql, params, column_names)` — the column_names list drives the
+/// per-row projection in `aggregate_rows_to_json_pub`.
+#[cfg(feature = "postgres-live")]
+pub fn build_aggregate_sql_pub(
+    entity: &str,
+    spec: &serde_json::Value,
+    valid_columns: &[String],
+) -> Result<(String, Vec<JsonParam>, Vec<String>), StorageError> {
+    live::LivePostgresAdapter::build_aggregate_sql(entity, spec, valid_columns)
+}
+
+/// Public re-export of the post-processing helper that converts raw
+/// aggregate `Row`s into the `{ rows: [{...}] }` JSON shape.
+#[cfg(feature = "postgres-live")]
+pub fn aggregate_rows_to_json_pub(
+    rows: &[postgres::Row],
+    column_names: &[String],
+) -> serde_json::Value {
+    live::aggregate_rows_to_json(rows, column_names)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +254,42 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 unique,
             } => {
                 statements.push(create_index_sql(entity, name, fields, *unique));
+            }
+            SchemaOperation::CreateSearchIndex { entity, config } => {
+                #[cfg(feature = "postgres-live")]
+                {
+                    statements.extend(crate::pg_search::create_search_index_sql(entity, config));
+                }
+                #[cfg(not(feature = "postgres-live"))]
+                {
+                    let _ = (entity, config);
+                    return Err(StorageError {
+                        code: "PG_SEARCH_FEATURE_OFF".into(),
+                        message: "CreateSearchIndex requires the `postgres-live` feature".into(),
+                    });
+                }
+            }
+            SchemaOperation::RemoveSearchIndex { entity } => {
+                // Without the original config we don't know which
+                // facet/sort indexes were created. Drop the FTS table
+                // and the GIN index by their fixed names; per-field
+                // facet/sort indexes are dropped automatically by the
+                // entity DROP path. Operators removing search via
+                // schema diff will see leftover indexes only if the
+                // entity table itself still exists — at which point
+                // the next CREATE INDEX IF NOT EXISTS catches up.
+                //
+                // quote_ident on the synthetic table/index names so a
+                // malicious entity name with embedded `"` can't break
+                // out of the identifier.
+                statements.push(format!(
+                    "DROP TABLE IF EXISTS {} CASCADE",
+                    quote_ident(&format!("_fts_{entity}"))
+                ));
+                statements.push(format!(
+                    "DROP INDEX IF EXISTS {}",
+                    quote_ident(&format!("{entity}_fts_gin"))
+                ));
             }
             SchemaOperation::Noop => {}
             other => {
@@ -472,20 +561,48 @@ pub fn build_insert_sql(
     entity: &str,
     data: &serde_json::Value,
 ) -> Result<(String, Vec<JsonParam>), StorageError> {
-    let id = generate_id();
     let obj = data.as_object().ok_or_else(|| StorageError {
         code: "PG_INVALID_DATA".into(),
         message: "Insert data must be a JSON object".into(),
     })?;
 
+    // Honor caller-supplied `id` (used by the CRDT path that needs to
+    // share the row id with the LoroDoc snapshot key it just wrote).
+    // Fall back to a fresh ULID-shaped id when absent. A non-string
+    // `id` value is rejected explicitly — silently regenerating would
+    // mask schema bugs (e.g. a caller passing an int id) and let the
+    // CRDT snapshot key drift from the materialized row id.
+    let id = match obj.get("id") {
+        None | Some(serde_json::Value::Null) => generate_id(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(StorageError {
+                code: "PG_INVALID_ID".into(),
+                message: format!(
+                    "Insert data carried a non-string `id` value: {other}. Pylon row ids \
+                     are always strings (40-char hex). Drop the `id` field to let the \
+                     server generate one, or supply a string."
+                ),
+            });
+        }
+    };
+
     let mut col_names = vec!["id".to_string()];
     let mut placeholders = vec!["$1".to_string()];
     let mut values: Vec<JsonParam> = vec![JsonParam::Text(id)];
 
-    for (i, (key, val)) in obj.iter().enumerate() {
+    let mut i = 0usize;
+    for (key, val) in obj {
+        if key == "id" {
+            // Already emitted via the synthetic first column; skipping
+            // here avoids `INSERT ... (id, id, ...)` which Postgres
+            // rejects with `duplicate key value`.
+            continue;
+        }
         col_names.push(quote_ident(key));
         placeholders.push(format!("${}", i + 2));
         values.push(JsonParam::from_json(val));
+        i += 1;
     }
 
     let sql = format!(
@@ -520,9 +637,33 @@ pub fn build_update_sql(
     let mut set_clauses = Vec::new();
     let mut values: Vec<JsonParam> = vec![JsonParam::Text(id.to_string())];
 
-    for (i, (key, val)) in obj.iter().enumerate() {
+    let mut i = 0usize;
+    for (key, val) in obj {
+        if key == "id" {
+            // Reject primary-key mutation. Letting `id` into the SET
+            // clause lets a client move a row out from under its CRDT
+            // sidecar (which is keyed by the original row_id) and its
+            // FTS shadow row (FK-bound to the original id). The SQLite
+            // path silently drops `id` here too — keep the same
+            // shape, but errors so the caller sees the bug.
+            return Err(StorageError {
+                code: "PG_INVALID_UPDATE".into(),
+                message:
+                    "Updating the `id` column is not allowed — Pylon row ids are immutable; \
+                     drop the field from the patch."
+                        .into(),
+            });
+        }
         set_clauses.push(format!("{} = ${}", quote_ident(key), i + 2));
         values.push(JsonParam::from_json(val));
+        i += 1;
+    }
+
+    if set_clauses.is_empty() {
+        return Err(StorageError {
+            code: "PG_INVALID_DATA".into(),
+            message: "Update data must contain at least one non-id field".into(),
+        });
     }
 
     let sql = format!(
@@ -562,6 +703,17 @@ pub mod live {
     }
 
     impl LivePostgresAdapter {
+        /// Borrow the underlying postgres client mutably. Used by
+        /// `PostgresDataStore::with_transaction` to start an
+        /// interactive transaction across multiple TS-function
+        /// `ctx.db` calls. `pub(crate)` because exposing raw
+        /// `&mut Client` outside pylon-storage would let callers
+        /// issue arbitrary SQL, bypassing the typed `DataStore`
+        /// surface that the rest of the framework relies on.
+        pub(crate) fn client_mut(&mut self) -> &mut postgres::Client {
+            &mut self.client
+        }
+
         /// Connect to a Postgres database.
         pub fn connect(url: &str) -> Result<Self, StorageError> {
             let client =
@@ -825,6 +977,26 @@ pub mod live {
             filter: &serde_json::Value,
             valid_columns: &[String],
         ) -> Result<Vec<serde_json::Value>, StorageError> {
+            let (sql, params) = Self::build_query_filtered_sql(entity, filter, valid_columns)?;
+            let pg_params = as_pg_params(&params);
+            let rows = self
+                .client
+                .query(sql.as_str(), &pg_params)
+                .map_err(pg_err)?;
+            Ok(rows.iter().map(row_to_json).collect())
+        }
+
+        /// Build the `SELECT ... FROM entity ...` SQL + bound params for
+        /// a `query_filtered` request. Pure: takes a manifest's column
+        /// list, returns text. Both the live adapter and the in-tx
+        /// `PgTxStore` call this so the operator surface ($eq, $like,
+        /// $in, $order, $limit, $offset) stays identical regardless of
+        /// where the query runs.
+        pub(crate) fn build_query_filtered_sql(
+            entity: &str,
+            filter: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<(String, Vec<JsonParam>), StorageError> {
             let empty = serde_json::Map::new();
             let obj = filter.as_object().unwrap_or(&empty);
 
@@ -851,17 +1023,39 @@ pub mod live {
             for (key, val) in obj {
                 match key.as_str() {
                     "$search" => {
-                        // FTS5 (SQLite) has no portable equivalent in
-                        // Postgres without an explicit tsvector column.
-                        // Return a clear error rather than silently
-                        // ignoring the operator — callers that hit this
-                        // need to either branch on backend or define a
-                        // tsvector + GIN index in their schema.
-                        return Err(StorageError {
-                            code: "SEARCH_NOT_SUPPORTED".into(),
-                            message: "$search is SQLite-FTS5-only; use a Postgres tsvector column with the storage adapter's full-text path"
-                                .into(),
-                        });
+                        // PG full-text via the entity's `_fts_<entity>`
+                        // shadow table: `id IN (SELECT entity_id FROM
+                        // _fts_<E> WHERE tsv @@ plainto_tsquery(...))`.
+                        // Mirrors the SQLite path that joins the FTS5
+                        // virtual table; the join here is a subquery so
+                        // it composes with arbitrary other predicates
+                        // (`$gt`, `$in`, etc.) in the same WHERE.
+                        let raw = match val {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        // Bind as a normal text param so all the
+                        // existing placeholder-numbering and binding
+                        // logic applies. The SQL uses the placeholder
+                        // inside `plainto_tsquery('english', $N)`.
+                        // Positioning logic mirrors the `$in` arm: the
+                        // value will land at `planned.len()+1` because
+                        // the materialization pass below pushes one
+                        // param per planned item in order.
+                        let placeholder_n = planned.len() + 1;
+                        where_clauses.push(format!(
+                            "{}.id IN (SELECT entity_id FROM \"_fts_{entity}\" \
+                                       WHERE tsv @@ plainto_tsquery('english', ${placeholder_n}))",
+                            quote_ident(entity),
+                        ));
+                        // Reuse the IN-style sentinel so the
+                        // materialization pass below pushes the param
+                        // without re-emitting a where_clause for it.
+                        planned.push((
+                            format!("__search_{}", planned.len()),
+                            "__INLINE__".into(),
+                            JsonParam::Text(raw),
+                        ));
                     }
                     "$order" => {
                         if let Some(ord) = val.as_object() {
@@ -1018,12 +1212,7 @@ pub mod live {
                 offset_clause,
             );
 
-            let pg_params = as_pg_params(&params);
-            let rows = self
-                .client
-                .query(sql.as_str(), &pg_params)
-                .map_err(pg_err)?;
-            Ok(rows.iter().map(row_to_json).collect())
+            Ok((sql, params))
         }
 
         /// Run a `DataStore::aggregate` spec against Postgres. Mirrors the
@@ -1050,6 +1239,27 @@ pub mod live {
             spec: &serde_json::Value,
             valid_columns: &[String],
         ) -> Result<serde_json::Value, StorageError> {
+            let (sql, params, column_names) =
+                Self::build_aggregate_sql(entity, spec, valid_columns)?;
+            let pg_params = as_pg_params(&params);
+            let rows = self
+                .client
+                .query(sql.as_str(), &pg_params)
+                .map_err(pg_err)?;
+            Ok(aggregate_rows_to_json(&rows, &column_names))
+        }
+
+        /// Build the aggregate `SELECT` SQL + bound params + the
+        /// expected output column names. Pure: takes the entity's
+        /// validated column list, returns text. Both the live adapter
+        /// and the in-tx `PgTxStore` call this so spec parsing
+        /// (validation, bucket vocabulary, where-clause translation)
+        /// stays identical regardless of where the query runs.
+        pub(crate) fn build_aggregate_sql(
+            entity: &str,
+            spec: &serde_json::Value,
+            valid_columns: &[String],
+        ) -> Result<(String, Vec<JsonParam>, Vec<String>), StorageError> {
             let obj = spec.as_object().ok_or_else(|| StorageError {
                 code: "INVALID_QUERY".into(),
                 message: "aggregate spec must be a JSON object".into(),
@@ -1211,35 +1421,40 @@ pub mod live {
                 group_sql,
             );
 
-            let pg_params = as_pg_params(&params);
-            let rows = self
-                .client
-                .query(sql.as_str(), &pg_params)
-                .map_err(pg_err)?;
-
             let column_names: Vec<String> = group_field_names
                 .iter()
                 .chain(result_fields.iter())
                 .cloned()
                 .collect();
 
-            let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let row_json = row_to_json(row);
-                if let serde_json::Value::Object(map) = &row_json {
-                    let mut filtered = serde_json::Map::new();
-                    for name in &column_names {
-                        if let Some(v) = map.get(name) {
-                            filtered.insert(name.clone(), v.clone());
-                        }
-                    }
-                    out.push(serde_json::Value::Object(filtered));
-                } else {
-                    out.push(row_json);
-                }
-            }
-            Ok(serde_json::json!({ "rows": out }))
+            Ok((sql, params, column_names))
         }
+    }
+
+    /// Project rows from an aggregate `SELECT` into the
+    /// `{ rows: [{...}] }` JSON shape both the SQLite path and the
+    /// PG path return. Pure post-processing — works on rows produced
+    /// from either `Client::query` or `Transaction::query`.
+    pub fn aggregate_rows_to_json(
+        rows: &[postgres::Row],
+        column_names: &[String],
+    ) -> serde_json::Value {
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row_json = row_to_json(row);
+            if let serde_json::Value::Object(map) = &row_json {
+                let mut filtered = serde_json::Map::new();
+                for name in column_names {
+                    if let Some(v) = map.get(name) {
+                        filtered.insert(name.clone(), v.clone());
+                    }
+                }
+                out.push(serde_json::Value::Object(filtered));
+            } else {
+                out.push(row_json);
+            }
+        }
+        serde_json::json!({ "rows": out })
     }
 
     /// Atomic operation describing a single mutation inside [`LivePostgresAdapter::transact`].
@@ -1321,7 +1536,7 @@ pub mod live {
         JsonParam::from_json(v)
     }
 
-    fn row_to_json(row: &postgres::Row) -> serde_json::Value {
+    pub(super) fn row_to_json(row: &postgres::Row) -> serde_json::Value {
         use postgres::types::Type;
         let mut obj = serde_json::Map::new();
         for (i, col) in row.columns().iter().enumerate() {

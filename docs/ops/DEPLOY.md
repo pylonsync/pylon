@@ -127,9 +127,12 @@ What still uses local SQLite even with `DATABASE_URL` set:
 - Workflow engine — same shape as jobs, local per-replica.
 - OAuth state — local per-replica; OAuth flows must complete on the same
   replica that started them (sticky-session covers this too).
-- CRDT mode + FTS5 search — SQLite-only at the runtime layer. CRDT
-  broadcasts degrade to JSON change events on Postgres; FTS goes through
-  the storage adapter's tsvector path under `query_filtered($search)`.
+- CRDT mode + FTS5 search — supported on both backends. CRDT uses
+  per-row Loro snapshots stored in `_crdt_<entity>` (a separate table
+  on Postgres, alongside the row table on SQLite). FTS5 maps to a
+  `_fts_<entity>` table with `tsvector` columns + GIN index on
+  Postgres, FTS5 virtual table on SQLite. Both maintained automatically
+  on every insert/update/delete.
 
 For a single-replica Postgres deploy (one ECS task, one Fly machine)
 none of these caveats apply — sticky sessions are trivially satisfied

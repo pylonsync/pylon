@@ -281,15 +281,11 @@ fn count_facet_values(
     Ok(out)
 }
 
-fn value_to_facet_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::String(s) => Some(s.clone()),
-        Value::Array(_) | Value::Object(_) => None,
-    }
-}
+// `value_to_facet_string` is now `crate::search::stringify_facet` —
+// both SQLite and Postgres facet-key normalization run through the
+// same helper, so a future change to (say) trimming whitespace lands
+// for both backends at once.
+use crate::search::stringify_facet as value_to_facet_string;
 
 /// Unsorted page fetch — one SELECT with an IN list, rowid-ordered.
 /// Called only when no sort is requested; caller has already sliced
@@ -485,6 +481,7 @@ mod tests {
             text: vec!["name".into(), "description".into()],
             facets: vec!["brand".into(), "category".into()],
             sortable: vec!["price".into()],
+            language: None,
         };
         conn.execute(&create_fts_table_sql("Product", &cfg).unwrap(), [])
             .unwrap();
@@ -524,6 +521,7 @@ mod tests {
             text: vec!["name".into(), "description".into()],
             facets: vec!["brand".into(), "category".into()],
             sortable: vec!["price".into()],
+            language: None,
         }
     }
 

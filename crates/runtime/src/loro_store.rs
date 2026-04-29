@@ -149,6 +149,17 @@ impl std::fmt::Display for LoroStoreError {
 
 impl std::error::Error for LoroStoreError {}
 
+/// Lift a `DataError` into a `LoroStoreError::Storage` so closures
+/// passed to `PostgresDataStore::with_client` can return
+/// `LoroStoreError` directly. The `with_client` bound requires
+/// `E: From<DataError>` so the lock-poisoning case can fan out into
+/// the caller's error type.
+impl From<pylon_http::DataError> for LoroStoreError {
+    fn from(e: pylon_http::DataError) -> Self {
+        LoroStoreError::Storage(format!("[{}] {}", e.code, e.message))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------

@@ -341,21 +341,31 @@ fn aggregate_count_and_groupby_work_on_postgres() {
 }
 
 #[test]
-fn search_returns_clear_error_on_postgres() {
+fn search_on_entity_without_search_config_errors_clearly() {
     use pylon_http::DataStore;
     let Some(url) = pg_url() else {
         return;
     };
     let rt = fresh_runtime(&url);
-    let err = DataStore::search(&rt, "User", &serde_json::json!({"q": "x"})).unwrap_err();
-    assert_eq!(err.code, "NOT_SUPPORTED");
+    // The User entity in `fresh_runtime` declares no `search:` config.
+    // The PG search path now rejects with `SEARCH_NOT_CONFIGURED` —
+    // same shape as the SQLite path so callers can branch on the
+    // code rather than the backend.
+    let err = DataStore::search(&rt, "User", &serde_json::json!({"query": "x"})).unwrap_err();
+    assert_eq!(err.code, "SEARCH_NOT_CONFIGURED");
 
-    // $search inside query_filtered should also error with a useful code,
-    // not silently return broad results.
+    // `$search` inside query_filtered references a `_fts_<entity>`
+    // table the planner only creates for searchable entities. On a
+    // non-searchable entity the planner emits no shadow table, so
+    // the operator hits PG with a missing-table error. Surfaced as
+    // PG_QUERY_FAILED, which the SDK can map back to a clear message.
     let err = rt
         .query_filtered("User", &serde_json::json!({"$search": "anything"}))
         .unwrap_err();
-    assert_eq!(err.code, "SEARCH_NOT_SUPPORTED");
+    assert!(
+        err.code == "PG_QUERY_FAILED" || err.code.contains("FTS"),
+        "expected a clear error referencing the missing FTS table; got: {err:?}"
+    );
 }
 
 #[test]
@@ -692,4 +702,496 @@ fn query_filtered_default_order_by_id_matches_sqlite() {
         returned_ids, expected,
         "rows should come back in id order without explicit $order"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CRDT integration — exercises PgLoroStore + sidecar table + reprojection
+// ---------------------------------------------------------------------------
+
+fn crdt_runtime(url: &str) -> Runtime {
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "Note".into(),
+            fields: vec![
+                ManifestField {
+                    name: "title".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                },
+                ManifestField {
+                    name: "body".into(),
+                    field_type: "string".into(),
+                    optional: true,
+                    unique: false,
+                    crdt: None,
+                },
+            ],
+            indexes: vec![],
+            relations: vec![],
+            // crdt: true opts the entity into the LoroDoc projection
+            // path. Default field shape is LWW, which we exercise here.
+            crdt: true,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Note\" CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_crdt_snapshots CASCADE");
+    let plan = adapter
+        .plan_from_live(&manifest)
+        .expect("plan against fresh schema");
+    adapter.apply_plan(&plan).expect("apply schema");
+    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+}
+
+#[test]
+fn crdt_snapshot_roundtrips_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = crdt_runtime(&url);
+    let id = rt
+        .insert("Note", &serde_json::json!({"title": "hello", "body": "world"}))
+        .unwrap();
+
+    // Snapshot returns the encoded LoroDoc bytes — non-empty after a
+    // CRDT-mode insert because the apply_patch ran in the PG path.
+    let snap = DataStore::crdt_snapshot(&rt, "Note", &id)
+        .expect("crdt_snapshot")
+        .expect("Some(snap)");
+    assert!(!snap.is_empty(), "snapshot should be non-empty after insert");
+
+    // Sidecar row exists.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = $1",
+            &[&id],
+        )
+        .expect("sidecar count");
+    let count: i64 = row.get(0);
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn crdt_insert_failure_rolls_back_snapshot() {
+    // Atomicity regression: a failed entity insert must not leave a
+    // stale snapshot in `_pylon_crdt_snapshots`. Pre-fix the snapshot
+    // landed in autocommit before the insert ran, so a CHECK / FK /
+    // type-cast violation on the entity row would orphan the snapshot.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = crdt_runtime(&url);
+    // Force the entity insert to fail with an unknown column. Anything
+    // that breaks the SQL after `apply_patch` succeeds works as the
+    // probe; this is the easiest one to trigger from outside.
+    let bad_insert =
+        rt.insert("Note", &serde_json::json!({"title": "x", "definitely_not_a_column": 1}));
+    assert!(bad_insert.is_err(), "insert should have failed");
+
+    // Sidecar must have NO row for any Note id — the failed insert's
+    // snapshot was rolled back along with the row write.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        count, 0,
+        "failed entity insert must roll back the CRDT snapshot too"
+    );
+}
+
+#[test]
+fn crdt_apply_update_reprojects_to_postgres_row() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = crdt_runtime(&url);
+    let id = rt
+        .insert("Note", &serde_json::json!({"title": "v1", "body": ""}))
+        .unwrap();
+
+    // Take the current snapshot so we can build a remote update from
+    // a divergent LoroDoc and feed it back through `crdt_apply_update`.
+    // The simplest divergent op: another LoroDoc applies a different
+    // title, exports its update, and we ship that to the runtime.
+    use pylon_crdt::{encode_snapshot, loro::LoroDoc, root_map};
+    let snap = DataStore::crdt_snapshot(&rt, "Note", &id).unwrap().unwrap();
+    let peer = LoroDoc::new();
+    pylon_crdt::apply_update(&peer, &snap).unwrap();
+    // The Pylon CRDT shape stores fields in a root map keyed `"row"` —
+    // matching what `pylon_crdt::root_map` returns. Insert directly
+    // there so the projection picks up our new value.
+    root_map(&peer).insert("title", "v2-from-peer").unwrap();
+    peer.commit();
+    let update = encode_snapshot(&peer);
+
+    let new_snap = DataStore::crdt_apply_update(&rt, "Note", &id, &update)
+        .expect("crdt_apply_update");
+    assert!(!new_snap.is_empty());
+
+    // The materialized row's title column should now reflect the
+    // peer's value because crdt_apply_update re-projects into PG.
+    let row = rt.get_by_id("Note", &id).unwrap().unwrap();
+    assert_eq!(row["title"], "v2-from-peer");
+}
+
+// ---------------------------------------------------------------------------
+// FTS integration — exercises pg_search create + maintenance + run_search
+// ---------------------------------------------------------------------------
+
+fn fts_runtime(url: &str) -> Runtime {
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "Product".into(),
+            fields: vec![
+                ManifestField {
+                    name: "name".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                },
+                ManifestField {
+                    name: "description".into(),
+                    field_type: "string".into(),
+                    optional: true,
+                    unique: false,
+                    crdt: None,
+                },
+                ManifestField {
+                    name: "brand".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                },
+            ],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: Some(ManifestSearchConfig {
+                text: vec!["name".into(), "description".into()],
+                facets: vec!["brand".into()],
+                sortable: vec![],
+            language: None,
+            }),
+        }],
+        ..empty_manifest()
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"_fts_Product\" CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Product\" CASCADE");
+    let plan = adapter
+        .plan_from_live(&manifest)
+        .expect("plan against fresh schema");
+    adapter.apply_plan(&plan).expect("apply schema");
+    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+}
+
+#[test]
+fn fts_insert_writes_fts_shadow_row_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fts_runtime(&url);
+    let _id = rt
+        .insert(
+            "Product",
+            &serde_json::json!({
+                "name": "Atlas runner",
+                "description": "lightweight trail shoe",
+                "brand": "Atlas",
+            }),
+        )
+        .unwrap();
+
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let row = client
+        .query_one("SELECT COUNT(*) FROM \"_fts_Product\"", &[])
+        .expect("fts shadow row count");
+    let count: i64 = row.get(0);
+    assert_eq!(count, 1, "FTS shadow row should exist after insert");
+}
+
+#[test]
+fn aggregate_inside_pg_mutation_tx_sees_pending_writes() {
+    // Regression: PgTxStore::aggregate previously returned
+    // NOT_SUPPORTED_IN_TX. The fix wires the same SQL builder the
+    // non-tx path uses so aggregates inside a TS mutation handler
+    // run through the held tx and see the handler's own pending
+    // writes.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_storage::pg_datastore::PostgresDataStore;
+    let _ = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url)
+        .unwrap()
+        .exec_raw("DROP TABLE IF EXISTS \"User\" CASCADE");
+    let rt = fresh_runtime(&url);
+    let store: &PostgresDataStore = rt.pg_data_store_for_tests();
+    let count = store
+        .with_transaction::<_, serde_json::Value, pylon_http::DataError>(|s| {
+            s.insert("User", &serde_json::json!({"email": "a@x.com", "name": "a"}))?;
+            s.insert("User", &serde_json::json!({"email": "b@x.com", "name": "b"}))?;
+            // Aggregate runs through the held tx — must see both
+            // pending inserts even though they haven't committed yet.
+            s.aggregate("User", &serde_json::json!({"count": "*"}))
+        })
+        .expect("aggregate inside tx should succeed");
+    assert_eq!(count["rows"][0]["count"], 2);
+}
+
+#[test]
+fn crdt_update_on_missing_row_rolls_back_snapshot() {
+    // Codex regression: previously apply_patch persisted a snapshot
+    // before tx_update ran. If tx_update found no row, the snapshot
+    // committed alone — orphaned state pointing at a non-existent
+    // row. The fix: tx_update returning false bubbles up as
+    // ENTITY_NOT_FOUND so the with_transaction_raw closure rolls back.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = crdt_runtime(&url);
+    let updated = rt
+        .update("Note", "no-such-id", &serde_json::json!({"title": "ghost"}))
+        .expect("update returns Ok(false), not an error");
+    assert!(!updated);
+
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = 'no-such-id'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        count, 0,
+        "no snapshot should have been committed for a missing row"
+    );
+}
+
+#[test]
+fn pg_transact_maintains_fts_shadow() {
+    // Codex regression: PG /api/transact bypassed tx_insert so FTS
+    // shadow rows weren't maintained for batched admin writes. Now
+    // PostgresDataStore::transact runs each op through tx_insert/
+    // tx_update/tx_delete so FTS stays in sync.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = fts_runtime(&url);
+    let store = rt.pg_data_store_for_tests();
+    let (_committed, results) = store
+        .transact(&[serde_json::json!({
+            "op": "insert",
+            "entity": "Product",
+            "data": {
+                "name": "tx-batched",
+                "description": "lands via /api/transact",
+                "brand": "Atlas",
+            }
+        })])
+        .expect("transact succeeds");
+    let inserted_id = results[0]["id"].as_str().unwrap().to_string();
+
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT COUNT(*) FROM \"_fts_Product\" WHERE entity_id = $1",
+            &[&inserted_id],
+        )
+        .unwrap();
+    let count: i64 = row.get(0);
+    assert_eq!(
+        count, 1,
+        "FTS shadow row must exist after /api/transact insert"
+    );
+}
+
+#[test]
+fn pgtxstore_crdt_hook_persists_sidecar_on_insert() {
+    // Codex regression #3: TS mutation handlers go through
+    // FnOpsImpl::call PG branch, which constructs a PgTxStore
+    // wrapped in PgBufferedTxStore. Pre-fix that wrapper just
+    // forwarded insert/update/delete to tx_insert/update/delete
+    // without CRDT projection. Now PgTxStore::with_crdt installs
+    // PgCrdtHookImpl so writes on crdt:true entities persist the
+    // sidecar in the same tx.
+    //
+    // Direct test: use PostgresDataStore::with_transaction_crdt to
+    // simulate what FnOpsImpl does.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = crdt_runtime(&url);
+    let id = rt
+        .run_in_pg_mutation_tx_for_tests::<_, String, pylon_http::DataError>(|store| {
+            store.insert("Note", &serde_json::json!({"title": "via-mutation", "body": "x"}))
+        })
+        .expect("with_transaction_crdt insert");
+
+    // Sidecar row exists.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = $1",
+            &[&id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        count, 1,
+        "TS-mutation insert via CRDT hook must create sidecar row"
+    );
+}
+
+#[test]
+fn pg_transact_maintains_crdt_sidecar_for_crdt_entities() {
+    // Codex regression #2: /api/transact previously bypassed CRDT
+    // maintenance — an insert against a `crdt: true` entity wrote
+    // the materialized row but no `_pylon_crdt_snapshots` row, so
+    // crdt_snapshot returned an empty doc and binary CRDT broadcasts
+    // were silently broken. Now Runtime::transact (the DataStore
+    // impl) routes through pg_transact_with_crdt which projects
+    // through PgLoroStore for crdt:true entities.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = crdt_runtime(&url);
+    let (_committed, results) = DataStore::transact(
+        &rt,
+        &[serde_json::json!({
+            "op": "insert",
+            "entity": "Note",
+            "data": {"title": "from-transact", "body": "via /api/transact"}
+        })],
+    )
+    .expect("transact succeeds");
+    let id = results[0]["id"].as_str().unwrap().to_string();
+
+    // Sidecar row exists.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = 'Note' AND row_id = $1",
+            &[&id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 1, "transact insert on crdt:true entity must create sidecar row");
+
+    // crdt_snapshot returns non-empty bytes.
+    let snap = DataStore::crdt_snapshot(&rt, "Note", &id).unwrap().unwrap();
+    assert!(!snap.is_empty());
+}
+
+#[test]
+fn pg_update_rejects_id_mutation() {
+    // Codex regression: build_update_sql used to include `id` in the
+    // SET clause when present in the patch — letting a client move a
+    // row out from under its CRDT sidecar / FTS shadow keys. Now it
+    // errors with PG_INVALID_UPDATE.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fresh_runtime(&url);
+    let id = rt
+        .insert("User", &serde_json::json!({"email": "z@x.com", "name": "z"}))
+        .unwrap();
+    let err = rt
+        .update("User", &id, &serde_json::json!({"id": "different-id", "name": "z2"}))
+        .unwrap_err();
+    assert_eq!(err.code, "PG_INVALID_UPDATE");
+}
+
+#[test]
+fn fts_insert_failure_rolls_back_shadow_row() {
+    // Atomicity regression: a failed entity insert must not leave a
+    // stale FTS shadow row. Pre-fix the FTS apply_insert ran in the
+    // same `with_transaction` as the entity insert via PgTxStore, so
+    // this is mainly a guard against future refactors that might
+    // split them again.
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = fts_runtime(&url);
+    let bad =
+        rt.insert("Product", &serde_json::json!({"name": "x", "definitely_not_a_column": 1}));
+    assert!(bad.is_err(), "insert should have failed");
+
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let count: i64 = client
+        .query_one("SELECT COUNT(*) FROM \"_fts_Product\"", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        count, 0,
+        "failed entity insert must roll back the FTS shadow row too"
+    );
+}
+
+#[test]
+fn fts_search_returns_matched_rows_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = fts_runtime(&url);
+    rt.insert(
+        "Product",
+        &serde_json::json!({
+            "name": "Atlas runner",
+            "description": "lightweight trail shoe",
+            "brand": "Atlas",
+        }),
+    )
+    .unwrap();
+    rt.insert(
+        "Product",
+        &serde_json::json!({
+            "name": "Summit jacket",
+            "description": "waterproof hiking shell",
+            "brand": "Summit",
+        }),
+    )
+    .unwrap();
+
+    let result = DataStore::search(
+        &rt,
+        "Product",
+        &serde_json::json!({
+            "query": "trail",
+            "facets": ["brand"],
+            "page": 0,
+            "pageSize": 10,
+        }),
+    )
+    .expect("search returns Ok");
+
+    let hits = result["hits"].as_array().expect("hits array");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["name"], "Atlas runner");
+    assert_eq!(result["total"], 1);
+
+    // Facet exclusion: the brand facet should report Atlas:1 even
+    // though we didn't filter on brand. The non-matching Summit row
+    // is excluded by the text query, not by the facet.
+    let facets = result["facetCounts"]["brand"].as_object().expect("brand facets");
+    assert_eq!(facets["Atlas"], 1);
 }

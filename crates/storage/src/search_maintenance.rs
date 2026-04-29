@@ -14,7 +14,7 @@ use roaring::RoaringBitmap;
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::search::{deserialize_bitmap, serialize_bitmap, SearchConfig};
+use crate::search::{deserialize_bitmap, merge_row, serialize_bitmap, stringify_facet, SearchConfig};
 use crate::StorageError;
 
 // ---------------------------------------------------------------------------
@@ -125,19 +125,6 @@ pub fn apply_delete(
         }
     }
     Ok(())
-}
-
-/// Shallow merge: patch overwrites corresponding fields on old_row.
-/// Used when a partial UPDATE's patch + old row both contribute to the
-/// rebuilt FTS5 row.
-fn merge_row(old_row: &Value, patch: &Value) -> Value {
-    let mut merged = old_row.as_object().cloned().unwrap_or_default();
-    if let Some(obj) = patch.as_object() {
-        for (k, v) in obj {
-            merged.insert(k.clone(), v.clone());
-        }
-    }
-    Value::Object(merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -254,20 +241,6 @@ fn bitmap_set_bit(
     Ok(())
 }
 
-/// Coerce a JSON value into the canonical string the bitmap keys on.
-/// Numbers are formatted without trailing zeros so `4.50` and `4.5` map
-/// to the same facet value; nulls and complex types become `None`
-/// (they don't get bitmap entries).
-fn stringify_facet(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::String(s) => Some(s.clone()),
-        Value::Array(_) | Value::Object(_) => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -289,6 +262,7 @@ mod tests {
             text: vec!["name".into()],
             facets: vec!["brand".into(), "category".into()],
             sortable: vec!["price".into()],
+            language: None,
         };
         conn.execute(&create_fts_table_sql("Product", &cfg).unwrap(), [])
             .unwrap();
@@ -310,6 +284,7 @@ mod tests {
             text: vec!["name".into()],
             facets: vec!["brand".into(), "category".into()],
             sortable: vec![],
+            language: None,
         };
 
         insert_product(&conn, "p1", "Nike Air Max", "Nike", "shoes");
@@ -351,6 +326,7 @@ mod tests {
             text: vec!["name".into()],
             facets: vec!["brand".into()],
             sortable: vec![],
+            language: None,
         };
         insert_product(&conn, "p1", "Air Max", "Nike", "shoes");
         apply_insert(
@@ -404,6 +380,7 @@ mod tests {
             text: vec![],
             facets: vec!["brand".into()],
             sortable: vec![],
+            language: None,
         };
         conn.execute(
             "INSERT INTO \"Product\" (id, brand) VALUES ('p1', 'Nike')",
@@ -437,6 +414,7 @@ mod tests {
             text: vec!["name".into()],
             facets: vec!["brand".into()],
             sortable: vec![],
+            language: None,
         };
         insert_product(&conn, "p1", "Air Max", "Nike", "shoes");
         apply_insert(

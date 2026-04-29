@@ -286,11 +286,27 @@ pub struct ManifestSearchConfig {
     pub facets: Vec<String>,
     #[serde(default)]
     pub sortable: Vec<String>,
+    /// Tokenizer language for the FTS index (Postgres `to_tsvector` /
+    /// `plainto_tsquery` config). Only the names Postgres ships in
+    /// `pg_ts_config` are valid: `english`, `spanish`, `german`,
+    /// `french`, `simple`, etc. SQLite ignores the field — its FTS5
+    /// virtual table uses `unicode61 remove_diacritics 2` regardless,
+    /// which is language-agnostic. Defaults to `english` so existing
+    /// manifests don't change behavior.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl ManifestSearchConfig {
     pub fn is_empty(&self) -> bool {
         self.text.is_empty() && self.facets.is_empty() && self.sortable.is_empty()
+    }
+
+    /// Resolve the tsvector language config — caller's `language` if
+    /// set, otherwise `english`. Only used by the Postgres backend;
+    /// SQLite ignores it.
+    pub fn language_or_default(&self) -> &str {
+        self.language.as_deref().unwrap_or("english")
     }
 }
 

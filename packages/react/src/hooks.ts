@@ -872,9 +872,9 @@ export function useSearch<T = Row>(
       });
       const json = (await res.json()) as {
         hits?: T[];
-        facet_counts?: Record<string, Record<string, number>>;
+        facetCounts?: Record<string, Record<string, number>>;
         total?: number;
-        took_ms?: number;
+        tookMs?: number;
         error?: { message: string };
       };
       if (myId !== requestIdRef.current) return; // stale — newer in flight
@@ -882,9 +882,9 @@ export function useSearch<T = Row>(
         throw new Error(json.error?.message ?? `HTTP ${res.status}`);
       }
       setHits(json.hits ?? []);
-      setFacetCounts(json.facet_counts ?? {});
+      setFacetCounts(json.facetCounts ?? {});
       setTotal(json.total ?? 0);
-      setTookMs(json.took_ms ?? 0);
+      setTookMs(json.tookMs ?? 0);
     } catch (e) {
       if (myId !== requestIdRef.current) return; // stale — ignore
       if ((e as Error)?.name === "AbortError") return;

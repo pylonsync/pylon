@@ -9,6 +9,308 @@ use pylon_http::{DataError, DataStore};
 use crate::Runtime;
 
 // ---------------------------------------------------------------------------
+// In-flight mutation schedule buffering
+// ---------------------------------------------------------------------------
+
+/// A scheduled function call captured during a mutation handler. Held in
+/// the per-mutation pending list until the surrounding transaction
+/// commits — at which point we drain and enqueue. On rollback the list
+/// is dropped without enqueuing, so a failed mutation can't leave behind
+/// scheduled side-effects (the docs claim this; before this buffer the
+/// claim was false).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingSchedule {
+    pub fn_name: String,
+    pub args: serde_json::Value,
+    pub delay_ms: Option<u64>,
+    pub run_at: Option<u64>,
+}
+
+thread_local! {
+    /// Set by the mutation entry point (top-level + nested) for the
+    /// duration of a TS handler call. The schedule hook checks this
+    /// thread-local: when `Some`, scheduling buffers into the inner
+    /// `Vec`; when `None`, the hook enqueues immediately (the
+    /// historical, non-mutation behavior). The Bun stdio loop is
+    /// single-threaded per call (the runner holds `io_lock` for the
+    /// whole call duration), so a thread-local is the right scoping
+    /// primitive — no cross-thread leakage.
+    pub(crate) static MUTATION_SCHEDULE_BUFFER: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard that pushes a schedule buffer onto the thread-local for
+/// the duration of a mutation handler call, then restores the previous
+/// value (which is almost always `None`, but supports nested mutation
+/// handlers stacking buffers correctly).
+pub(crate) struct ScheduleBufferGuard {
+    previous: Option<std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>>,
+    current: std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>,
+}
+
+impl ScheduleBufferGuard {
+    pub(crate) fn enter() -> Self {
+        let current = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let previous = MUTATION_SCHEDULE_BUFFER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let old = slot.take();
+            *slot = Some(current.clone());
+            old
+        });
+        Self { previous, current }
+    }
+
+    /// Drain the buffer captured during this guard's lifetime. Caller
+    /// flushes after COMMIT succeeds; on rollback the buffer is just
+    /// dropped along with the guard.
+    pub(crate) fn take(&self) -> Vec<PendingSchedule> {
+        std::mem::take(&mut *self.current.borrow_mut())
+    }
+}
+
+impl Drop for ScheduleBufferGuard {
+    fn drop(&mut self) {
+        MUTATION_SCHEDULE_BUFFER.with(|cell| {
+            *cell.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-flight mutation depth marker (deadlock guard)
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Counter of mutation-tx frames currently on the stack for this
+    /// thread. Both backends acquire a single connection mutex per
+    /// mutation (SQLite's write_conn, PG's `LivePostgresAdapter`).
+    /// `std::sync::Mutex` is NOT re-entrant — a TS handler that calls
+    /// `runMutation` from inside another mutation would block forever
+    /// trying to re-acquire the connection lock it already holds.
+    /// The nested-call hook checks this counter and rejects the call
+    /// with `NESTED_MUTATION` instead of hanging.
+    ///
+    /// Counter (not bool) so future savepoint-based nesting could
+    /// switch to a tx-reuse path without changing call sites.
+    static MUTATION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII marker — incremented on entry to a mutation handler, decremented
+/// on exit (including unwind). Used by the nested-call hook to detect
+/// recursive mutations and reject them with a clear error rather than
+/// deadlocking on the non-reentrant connection mutex.
+pub(crate) struct MutationDepthGuard;
+
+impl MutationDepthGuard {
+    pub(crate) fn enter() -> Self {
+        MUTATION_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for MutationDepthGuard {
+    fn drop(&mut self) {
+        MUTATION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// True iff this thread is currently inside a mutation handler's tx.
+pub(crate) fn in_mutation_tx() -> bool {
+    MUTATION_DEPTH.with(|d| d.get() > 0)
+}
+
+// ---------------------------------------------------------------------------
+// PG /api/transact CRDT-aware impl
+// ---------------------------------------------------------------------------
+
+impl Runtime {
+    /// PG `/api/transact` implementation that runs each op through
+    /// the typed `tx_*` helpers (so FTS shadow rows + the new id-
+    /// reject + per-row locking all apply) AND adds CRDT projection
+    /// + sidecar maintenance for `crdt: true` entities. Without this,
+    /// batched admin writes desync from the CRDT layer.
+    pub(crate) fn pg_transact_with_crdt(
+        &self,
+        pg: &crate::PgBackend,
+        ops: &[serde_json::Value],
+    ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        use pylon_storage::pg_tx_store::{tx_delete, tx_insert, tx_update};
+
+        // Pre-validate every op shape — a malformed payload should
+        // never open a tx and immediately roll back.
+        enum Op<'a> {
+            Insert {
+                entity: &'a str,
+                data: &'a serde_json::Value,
+            },
+            Update {
+                entity: &'a str,
+                id: &'a str,
+                data: &'a serde_json::Value,
+            },
+            Delete {
+                entity: &'a str,
+                id: &'a str,
+            },
+        }
+        let mut typed: Vec<Op<'_>> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let entity = op
+                .get("entity")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| DataError {
+                    code: "TX_INVALID_OP".into(),
+                    message: "Each transact op must have an \"entity\" field".into(),
+                })?;
+            match op_type {
+                "insert" => {
+                    let data = op.get("data").ok_or_else(|| DataError {
+                        code: "TX_INVALID_OP".into(),
+                        message: "insert op requires \"data\"".into(),
+                    })?;
+                    typed.push(Op::Insert { entity, data });
+                }
+                "update" => {
+                    let id = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| DataError {
+                            code: "TX_INVALID_OP".into(),
+                            message: "update op requires \"id\"".into(),
+                        })?;
+                    let data = op.get("data").ok_or_else(|| DataError {
+                        code: "TX_INVALID_OP".into(),
+                        message: "update op requires \"data\"".into(),
+                    })?;
+                    typed.push(Op::Update { entity, id, data });
+                }
+                "delete" => {
+                    let id = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| DataError {
+                            code: "TX_INVALID_OP".into(),
+                            message: "delete op requires \"id\"".into(),
+                        })?;
+                    typed.push(Op::Delete { entity, id });
+                }
+                other => {
+                    return Err(DataError {
+                        code: "TX_INVALID_OP".into(),
+                        message: format!("unknown op \"{other}\""),
+                    });
+                }
+            }
+        }
+
+        // Track which CRDT rows we touched so we can refresh their
+        // cache entries after commit (or evict on rollback).
+        let mut crdt_touched: Vec<(String, String)> = Vec::new();
+
+        let manifest = self.manifest.clone();
+        let result = pg.store.with_transaction_raw(|tx| -> Result<Vec<serde_json::Value>, DataError> {
+            let mut json_results: Vec<serde_json::Value> = Vec::with_capacity(typed.len());
+            for op in &typed {
+                let result = match op {
+                    Op::Insert { entity, data } => {
+                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        let id = if ent.map(|e| e.crdt).unwrap_or(false) {
+                            let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
+                                DataError { code: e.code, message: e.message }
+                            })?;
+                            let id = crate::generate_id();
+                            pg.crdt
+                                .apply_patch(tx, entity, &id, &crdt_fields, data)
+                                .map_err(|e| DataError {
+                                    code: "CRDT_APPLY_FAILED".into(),
+                                    message: format!("crdt write {entity}/{id}: {e}"),
+                                })?;
+                            let mut row = (*data).clone();
+                            if let Some(obj) = row.as_object_mut() {
+                                obj.insert("id".into(), serde_json::Value::String(id.clone()));
+                            }
+                            tx_insert(tx, &manifest, entity, &row)?;
+                            crdt_touched.push((entity.to_string(), id.clone()));
+                            id
+                        } else {
+                            tx_insert(tx, &manifest, entity, data)?
+                        };
+                        serde_json::json!({ "op": "insert", "id": id })
+                    }
+                    Op::Update { entity, id, data } => {
+                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        let updated = if ent.map(|e| e.crdt).unwrap_or(false) {
+                            let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
+                                DataError { code: e.code, message: e.message }
+                            })?;
+                            pg.crdt
+                                .apply_patch(tx, entity, id, &crdt_fields, data)
+                                .map_err(|e| DataError {
+                                    code: "CRDT_APPLY_FAILED".into(),
+                                    message: format!("crdt update {entity}/{id}: {e}"),
+                                })?;
+                            let updated = tx_update(tx, &manifest, entity, id, data)?;
+                            if !updated {
+                                return Err(DataError {
+                                    code: "ENTITY_NOT_FOUND".into(),
+                                    message: format!(
+                                        "Update on {entity}/{id} found no row — refusing to commit \
+                                         a CRDT snapshot that would orphan."
+                                    ),
+                                });
+                            }
+                            crdt_touched.push((entity.to_string(), id.to_string()));
+                            updated
+                        } else {
+                            tx_update(tx, &manifest, entity, id, data)?
+                        };
+                        serde_json::json!({ "op": "update", "id": id, "updated": updated })
+                    }
+                    Op::Delete { entity, id } => {
+                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        let deleted = if ent.map(|e| e.crdt).unwrap_or(false) {
+                            tx.execute(
+                                "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
+                                &[entity, id],
+                            )
+                            .map_err(|e| DataError {
+                                code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                                message: format!(
+                                    "delete pg crdt snapshot {entity}/{id}: {e}"
+                                ),
+                            })?;
+                            let deleted = tx_delete(tx, &manifest, entity, id)?;
+                            crdt_touched.push((entity.to_string(), id.to_string()));
+                            deleted
+                        } else {
+                            tx_delete(tx, &manifest, entity, id)?
+                        };
+                        serde_json::json!({ "op": "delete", "id": id, "deleted": deleted })
+                    }
+                };
+                json_results.push(result);
+            }
+            // Refresh cache for CRDT rows we touched.
+            for (entity, id) in &crdt_touched {
+                pg.crdt.cache_after_commit(tx, entity, id);
+            }
+            Ok(json_results)
+        });
+
+        match result {
+            Ok(json_results) => Ok((true, json_results)),
+            Err(e) => {
+                for (entity, id) in &crdt_touched {
+                    pg.crdt.evict(entity, id);
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DataStore → Runtime bridge
 // ---------------------------------------------------------------------------
 
@@ -93,11 +395,13 @@ impl DataStore for Runtime {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
-        // Postgres mode delegates to the underlying store, which runs a real
-        // PG transaction with automatic ROLLBACK on Drop. The legacy SQLite
-        // path below is unmanaged BEGIN/COMMIT against the held connection.
-        if let Some(pg) = self.pg_data_store() {
-            return pg.transact(ops);
+        // Postgres mode: delegate to the runtime-layer wrapper that
+        // adds CRDT projection + sidecar maintenance for crdt:true
+        // entities. The storage layer's transact (PostgresDataStore::
+        // transact) only knows about FTS — codex flagged that
+        // /api/transact would silently desync CRDT state.
+        if let Some(pg) = self.pg_backend() {
+            return self.pg_transact_with_crdt(pg, ops);
         }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         let _ = conn.execute("BEGIN", []);
@@ -175,22 +479,6 @@ impl DataStore for Runtime {
         entity: &str,
         query: &serde_json::Value,
     ) -> Result<serde_json::Value, DataError> {
-        // Postgres: full-text search on the runtime layer is SQLite-FTS5
-        // shaped (rank/MATCH). There is no portable equivalent in
-        // Postgres without an explicit tsvector column + GIN index in
-        // the manifest, which the storage adapter doesn't auto-generate
-        // yet. Return NOT_SUPPORTED with an honest message rather than
-        // silently returning empty results.
-        if self.is_postgres() {
-            return Err(DataError {
-                code: "NOT_SUPPORTED".into(),
-                message:
-                    "search() (FTS5) is SQLite-only; on Postgres add a tsvector column + GIN index \
-                     and query it via the storage adapter directly. Tracked in the Postgres-FTS \
-                     follow-up issue."
-                        .into(),
-            });
-        }
         let ent = self
             .manifest()
             .entities
@@ -209,6 +497,25 @@ impl DataStore for Runtime {
                 code: "INVALID_QUERY".into(),
                 message: format!("search query body: {e}"),
             })?;
+
+        // Postgres: dispatch to the PG-native FTS path (`tsvector` +
+        // GIN index, maintained transactionally alongside CRUD by
+        // PgTxStore). Same `SearchResult` shape as the SQLite path.
+        if self.is_postgres() {
+            let pg = self.pg_data_store().ok_or_else(|| DataError {
+                code: "PG_DATASTORE_MISSING".into(),
+                message: "is_postgres=true but pg_data_store() returned None".into(),
+            })?;
+            let result = pg.run_search(entity, cfg, &parsed).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+            return serde_json::to_value(&result).map_err(|e| DataError {
+                code: "SEARCH_SERIALIZE_FAILED".into(),
+                message: e.to_string(),
+            });
+        }
+
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         let result =
             pylon_storage::search_query::run_search(&conn, entity, cfg, &parsed).map_err(|e| {
@@ -228,12 +535,40 @@ impl DataStore for Runtime {
     /// that to decide whether to ship a binary update over WebSocket
     /// after the write.
     fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
-        // Postgres: per-row Loro snapshots aren't stored alongside
-        // entity rows yet. Return Ok(None) — same shape as a non-CRDT
-        // entity. The router treats both identically (skip binary
-        // broadcast, rely on JSON change events).
+        // Postgres: read from the PG `_pylon_crdt_snapshots` sidecar
+        // via the same `PgLoroStore` that maintenance writes go
+        // through. Same Ok(None) early-exit for non-CRDT entities so
+        // the router skips the binary broadcast.
         if self.is_postgres() {
-            return Ok(None);
+            let ent = self
+                .manifest()
+                .entities
+                .iter()
+                .find(|e| e.name == entity)
+                .ok_or_else(|| DataError {
+                    code: "ENTITY_NOT_FOUND".into(),
+                    message: format!("Unknown entity: {entity}"),
+                })?;
+            if !ent.crdt {
+                return Ok(None);
+            }
+            let pg_backend = match self.pg_backend() {
+                Some(pg) => pg,
+                None => return Ok(None),
+            };
+            // Single-read; with_client is fine here. PgLoroStore's
+            // hydrate-on-miss + per-row Mutex ensures consistent
+            // bytes even under concurrent applies on other threads.
+            let snap = pg_backend.store.with_client(|client| -> Result<Vec<u8>, DataError> {
+                pg_backend
+                    .crdt
+                    .snapshot(client, entity, row_id)
+                    .map_err(|e| DataError {
+                        code: "CRDT_SNAPSHOT_FAILED".into(),
+                        message: format!("snapshot {entity}/{row_id}: {e}"),
+                    })
+            })?;
+            return Ok(Some(snap));
         }
         let ent = self
             .manifest()
@@ -273,16 +608,109 @@ impl DataStore for Runtime {
         row_id: &str,
         update: &[u8],
     ) -> Result<Vec<u8>, DataError> {
-        // Postgres: client-pushed Loro updates aren't supported on the
-        // PG backend yet. Return NOT_SUPPORTED with a clear message so
-        // SDKs can degrade to JSON CRUD instead of the binary CRDT path.
+        // Postgres: import the binary update into the row's PG-side
+        // LoroDoc, persist the new snapshot in `_pylon_crdt_snapshots`,
+        // re-project to the materialized PG row's columns, and return
+        // the fresh full snapshot for the router to broadcast. Same
+        // shape as the SQLite path below.
         if self.is_postgres() {
-            return Err(DataError {
-                code: "NOT_SUPPORTED".into(),
-                message:
-                    "CRDT mode is SQLite-only at this layer; Postgres clients should use JSON CRUD"
-                        .into(),
+            let ent = self
+                .manifest()
+                .entities
+                .iter()
+                .find(|e| e.name == entity)
+                .ok_or_else(|| DataError {
+                    code: "ENTITY_NOT_FOUND".into(),
+                    message: format!("Unknown entity: {entity}"),
+                })?
+                .clone();
+            if !ent.crdt {
+                return Err(DataError {
+                    code: "NOT_SUPPORTED".into(),
+                    message: format!(
+                        "CRDT update sent for entity \"{entity}\" which has crdt: false"
+                    ),
+                });
+            }
+            let pg_backend = self.pg_backend().ok_or_else(|| DataError {
+                code: "PG_BACKEND_MISSING".into(),
+                message: "is_postgres=true but pg_backend() returned None".into(),
+            })?;
+            let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
+
+            // One transaction: apply the peer's update into the
+            // LoroDoc + persist the new snapshot + reproject into the
+            // materialized PG row + read back the fresh snapshot for
+            // broadcast. Pre-fix this was three separate autocommits
+            // — a failure between them desynced the layers, and the
+            // broadcast snapshot might not reflect what actually
+            // landed on disk.
+            let result = pg_backend.store.with_transaction_raw(|tx| -> Result<Vec<u8>, DataError> {
+                let projected = pg_backend
+                    .crdt
+                    .apply_remote_update(tx, entity, row_id, &crdt_fields, update)
+                    .map_err(|e| {
+                        // Distinguish decode errors (malformed client
+                        // bytes — caller's fault, 400) from apply
+                        // errors (schema mismatch, also caller's
+                        // fault but a different shape). The CRDT
+                        // route maps CRDT_DECODE_FAILED → 400, so
+                        // unmapped errors land as 500 — codex
+                        // flagged the asymmetry vs the SQLite path.
+                        let code = match &e {
+                            crate::loro_store::LoroStoreError::Decode(_) => "CRDT_DECODE_FAILED",
+                            _ => "CRDT_APPLY_FAILED",
+                        };
+                        DataError {
+                            code: code.into(),
+                            message: format!("crdt apply update {entity}/{row_id}: {e}"),
+                        }
+                    })?;
+                let updated = pylon_storage::pg_tx_store::tx_update(
+                    tx,
+                    self.manifest(),
+                    entity,
+                    row_id,
+                    &projected,
+                )?;
+                if !updated {
+                    // Same orphan guard as Runtime::update — refuse
+                    // to commit a snapshot for a row that doesn't
+                    // exist. Peer pushed an update for a row this
+                    // replica's never seen.
+                    return Err(DataError {
+                        code: "ENTITY_NOT_FOUND".into(),
+                        message: format!(
+                            "Peer-pushed CRDT update targets {entity}/{row_id} which has \
+                             no materialized row — refusing to commit an orphan snapshot."
+                        ),
+                    });
+                }
+                // Read the snapshot back from the tx, bypassing the
+                // cache — a prior `crdt_snapshot()` call could have
+                // populated the cache with bytes that predate this
+                // peer update, and broadcasting them would silently
+                // omit the just-applied change. Codex flagged this.
+                let snap = crate::pg_loro_store::PgLoroStore::read_snapshot_via_conn(tx, entity, row_id)
+                    .map_err(|e| DataError {
+                        code: "CRDT_SNAPSHOT_FAILED".into(),
+                        message: format!(
+                            "post-update snapshot {entity}/{row_id}: {e}"
+                        ),
+                    })?;
+                // Refresh the cache so the next reader on this
+                // process skips the round-trip.
+                pg_backend.crdt.cache_after_commit(tx, entity, row_id);
+                Ok(snap)
             });
+            if result.is_err() {
+                // Same cache-coherency hygiene as Runtime::insert /
+                // update — the in-memory doc absorbed the peer's
+                // update before the tx rolled back, so evict to
+                // force re-hydration from the persisted snapshot.
+                pg_backend.crdt.evict(entity, row_id);
+            }
+            return result;
         }
         // Find the entity so we can build the projection field list +
         // confirm CRDT mode is on. Cheap manifest scan; counts are tiny.
@@ -1155,6 +1583,190 @@ impl<'a> DataStore for TxStore<'a> {
             message: "ctx.db.transact() is not allowed inside a mutation handler (the handler itself is transactional)".into(),
         })
     }
+
+    fn search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        // Search reads against the FTS shadow are read-only; route
+        // through the runtime's main `search` impl which already
+        // validates the entity + branches on backend. The held write
+        // connection is fine for reads (SQLite serializes anyway).
+        <Runtime as DataStore>::search(self.runtime, entity, query)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PG-transaction buffering wrapper
+// ---------------------------------------------------------------------------
+
+/// `DataStore` wrapper used by the Postgres mutation path. The Postgres
+/// `PgTxStore` owns the transaction; this wrapper layers the same
+/// "buffer change events, flush after COMMIT" guarantee that SQLite's
+/// `TxStore` provides directly. The underlying `inner` ref lives only
+/// for the duration of `PostgresDataStore::with_transaction`'s closure
+/// — the lifetime tracks through.
+struct PgBufferedTxStore<'a> {
+    inner: &'a dyn DataStore,
+    pending: std::sync::Mutex<Vec<pylon_sync::ChangeEvent>>,
+}
+
+impl<'a> PgBufferedTxStore<'a> {
+    fn new(inner: &'a dyn DataStore) -> Self {
+        Self {
+            inner,
+            pending: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: pylon_sync::ChangeKind,
+        data: Option<&serde_json::Value>,
+    ) {
+        if let Ok(mut p) = self.pending.lock() {
+            p.push(pylon_sync::ChangeEvent {
+                seq: 0,
+                entity: entity.to_string(),
+                row_id: row_id.to_string(),
+                kind,
+                data: data.cloned(),
+                timestamp: String::new(),
+            });
+        }
+    }
+
+    fn take_pending(self) -> Vec<pylon_sync::ChangeEvent> {
+        self.pending.into_inner().unwrap_or_default()
+    }
+}
+
+impl<'a> DataStore for PgBufferedTxStore<'a> {
+    fn manifest(&self) -> &pylon_kernel::AppManifest {
+        self.inner.manifest()
+    }
+
+    fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+        let id = self.inner.insert(entity, data)?;
+        self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(data));
+        Ok(id)
+    }
+
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
+        self.inner.get_by_id(entity, id)
+    }
+
+    fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.list(entity)
+    }
+
+    fn list_after(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.list_after(entity, after, limit)
+    }
+
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        let updated = self.inner.update(entity, id, data)?;
+        if updated {
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(data));
+        }
+        Ok(updated)
+    }
+
+    fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+        let deleted = self.inner.delete(entity, id)?;
+        if deleted {
+            self.record(entity, id, pylon_sync::ChangeKind::Delete, None);
+        }
+        Ok(deleted)
+    }
+
+    fn lookup(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Option<serde_json::Value>, DataError> {
+        self.inner.lookup(entity, field, value)
+    }
+
+    fn link(
+        &self,
+        entity: &str,
+        id: &str,
+        relation: &str,
+        target_id: &str,
+    ) -> Result<bool, DataError> {
+        let linked = self.inner.link(entity, id, relation, target_id)?;
+        if linked {
+            // `link` is implemented as a typed `update` under the hood —
+            // record an Update so subscribers see the FK-set the same way
+            // they'd see any other column change.
+            let data = serde_json::json!({ relation: target_id });
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&data));
+        }
+        Ok(linked)
+    }
+
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
+        let unlinked = self.inner.unlink(entity, id, relation)?;
+        if unlinked {
+            let data = serde_json::json!({ relation: serde_json::Value::Null });
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&data));
+        }
+        Ok(unlinked)
+    }
+
+    fn query_filtered(
+        &self,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.query_filtered(entity, filter)
+    }
+
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+        self.inner.query_graph(query)
+    }
+
+    fn aggregate(
+        &self,
+        entity: &str,
+        spec: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        self.inner.aggregate(entity, spec)
+    }
+
+    fn transact(
+        &self,
+        ops: &[serde_json::Value],
+    ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        // Forward to the inner PgTxStore, which already returns
+        // NESTED_TRANSACTION. Keeping the forward (instead of erroring
+        // here) means the wrapper stays a faithful pass-through and any
+        // future change to the inner policy applies uniformly.
+        self.inner.transact(ops)
+    }
+
+    fn search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        // Forward to inner — `PgTxStore::search` (default impl)
+        // currently returns NOT_SUPPORTED for in-tx search, which is
+        // the right answer: PG search uses a separate connection
+        // pool today and would deadlock on the in-handler tx if we
+        // tried to fan out from the same client.
+        self.inner.search(entity, query)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1798,48 @@ pub struct FnOpsImpl {
     pub change_log: Arc<pylon_sync::ChangeLog>,
     /// Where to broadcast change events after a function mutation commits.
     pub notifier: Arc<dyn pylon_router::ChangeNotifier>,
+    /// Job queue for flushing schedules buffered during a mutation
+    /// handler. The schedule hook itself owns its own clone for the
+    /// non-mutation enqueue path; this clone is what the
+    /// post-COMMIT flush uses.
+    pub job_queue: Arc<crate::jobs::JobQueue>,
+}
+
+impl FnOpsImpl {
+    /// Drain a per-mutation schedule buffer and enqueue each entry on
+    /// the job queue. Called only after COMMIT succeeds — a rolled-back
+    /// handler's buffer is dropped without flushing.
+    fn flush_pending_schedules(&self, pending: Vec<PendingSchedule>) {
+        for sched in pending {
+            let delay_secs = match (sched.delay_ms, sched.run_at) {
+                (Some(ms), _) => ms / 1000,
+                (None, Some(ts)) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if ts > now { (ts - now) / 1000 } else { 0 }
+                }
+                _ => 0,
+            };
+            if let Err(e) = self.job_queue.try_enqueue_with_options(
+                &sched.fn_name,
+                sched.args,
+                crate::jobs::Priority::Normal,
+                delay_secs,
+                3,
+                "functions",
+            ) {
+                // Schedule was already acked OK to the TS handler — the
+                // mutation has committed. Best we can do now is log
+                // loudly so an operator notices the dropped enqueue.
+                tracing::warn!(
+                    "[functions] post-COMMIT enqueue failed for \"{}\": {e}",
+                    sched.fn_name
+                );
+            }
+        }
+    }
 }
 
 impl pylon_router::FnOps for FnOpsImpl {
@@ -1212,21 +1866,94 @@ impl pylon_router::FnOps for FnOpsImpl {
 
         match def.fn_type {
             FnType::Mutation => {
-                // Postgres backend: TS-function transactional `ctx.db`
-                // mutations aren't wired through to a real PG transaction
-                // yet — `TxStore` was designed around a held SQLite
-                // connection. Fail fast with a clear error rather than
-                // silently doing non-transactional writes (which would
-                // leave partial state on a handler error).
+                // Postgres backend: route through PostgresDataStore::with_transaction
+                // so the TS handler runs against a held PG transaction. Reads
+                // see the handler's own pending writes; an error rolls
+                // everything back atomically. Change events are buffered in a
+                // `PgBufferedTxStore` wrapper and flushed only after COMMIT —
+                // mirrors the SQLite `TxStore` behavior.
                 if self.runtime.is_postgres() {
-                    return Err(FnCallError {
-                        code: "NOT_SUPPORTED".into(),
-                        message: format!(
-                            "Mutation handler \"{fn_name}\" requires the SQLite backend; \
-                             Postgres-backed Pylon does not yet support TS function ctx.db transactions. \
-                             Use ctx.db.transact() from a query/action, or run mutations via the HTTP /api/entities path."
-                        ),
+                    let pg_backend = self.runtime.pg_backend().ok_or_else(|| FnCallError {
+                        code: "PG_BACKEND_MISSING".into(),
+                        message:
+                            "Postgres backend reported is_postgres=true but pg_backend() returned None"
+                                .into(),
+                    })?;
+
+                    // The closure has to own its own state (Box the stream
+                    // callback so we can move it inside). Capture
+                    // `request`/`auth`/`args` by move; they aren't needed
+                    // again outside the closure.
+                    let runner = self.runner.clone();
+                    let fn_type = def.fn_type;
+                    let fn_name_owned = fn_name.to_string();
+
+                    // Push the schedule buffer onto the thread-local for
+                    // the duration of the handler. Drain after COMMIT
+                    // succeeds; on rollback the buffer is dropped.
+                    let sched_guard = ScheduleBufferGuard::enter();
+                    // Mark "we're in a mutation tx" so the nested-call
+                    // hook rejects recursive mutation calls instead of
+                    // deadlocking on the connection mutex.
+                    let _depth_guard = MutationDepthGuard::enter();
+
+                    // Install the CRDT hook so PgTxStore projects
+                    // `ctx.db.X` writes on `crdt: true` entities through
+                    // PgLoroStore + persists the snapshot in the same
+                    // tx. Without this, codex-flagged: TS mutation
+                    // writes on CRDT entities desync from the sidecar.
+                    let crdt_hook: std::sync::Arc<
+                        dyn pylon_storage::pg_tx_store::PgCrdtHook,
+                    > = std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
+                        crdt: std::sync::Arc::clone(&pg_backend.crdt),
+                        manifest: std::sync::Arc::new(self.runtime.manifest().clone()),
                     });
+
+                    let pg = &pg_backend.store;
+                    let tx_result: Result<
+                        (serde_json::Value, FnTrace, Vec<pylon_sync::ChangeEvent>),
+                        FnCallError,
+                    > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
+                        let buffered = PgBufferedTxStore::new(inner_store);
+                        let (value, trace) = runner.call(
+                            &buffered,
+                            &fn_name_owned,
+                            fn_type,
+                            args,
+                            auth,
+                            on_stream,
+                            request,
+                        )?;
+                        Ok((value, trace, buffered.take_pending()))
+                    });
+
+                    return match tx_result {
+                        Ok((value, trace, pending)) => {
+                            // Mirror the SQLite path: append to the change
+                            // log first (so /api/sync/pull tail callers see
+                            // it), then notify WS/SSE subscribers.
+                            for ev in pending {
+                                let seq = self.change_log.append(
+                                    &ev.entity,
+                                    &ev.row_id,
+                                    ev.kind.clone(),
+                                    ev.data.clone(),
+                                );
+                                let event = pylon_sync::ChangeEvent { seq, ..ev };
+                                self.notifier.notify(&event);
+                            }
+                            // Flush scheduled jobs after the commit lands.
+                            // On rollback the early `Err(e)` arm below
+                            // skips this and the buffer is dropped.
+                            self.flush_pending_schedules(sched_guard.take());
+                            drop(sched_guard);
+                            Ok((value, trace))
+                        }
+                        Err(e) => {
+                            drop(sched_guard);
+                            Err(e)
+                        }
+                    };
                 }
                 // Hold the write connection for the entire handler duration.
                 // This keeps the BEGIN/COMMIT span free of interleaving from
@@ -1247,6 +1974,12 @@ impl pylon_router::FnOps for FnOpsImpl {
                         message: format!("Failed to start transaction: {e}"),
                     });
                 }
+
+                // Same schedule buffering as the PG path — `runAfter`
+                // calls inside this handler defer until COMMIT succeeds.
+                let sched_guard = ScheduleBufferGuard::enter();
+                // Same nested-mutation deadlock guard as the PG path.
+                let _depth_guard = MutationDepthGuard::enter();
 
                 let tx_store = TxStore::new(&self.runtime, &conn_guard);
                 let result = self.runner.call(
@@ -1284,6 +2017,12 @@ impl pylon_router::FnOps for FnOpsImpl {
                                 let event = pylon_sync::ChangeEvent { seq, ..ev };
                                 self.notifier.notify(&event);
                             }
+                            // Same flush as the PG path — durable commit,
+                            // then flush schedules. Drop the guard
+                            // explicitly so the thread-local clears
+                            // before the result returns.
+                            self.flush_pending_schedules(sched_guard.take());
+                            drop(sched_guard);
                             Ok(value)
                         }
                         Err(commit_err) => {
@@ -1446,7 +2185,37 @@ pub fn try_spawn_functions(
     // Wire scheduler requests from functions into the job queue. Use the
     // Result-returning variant so a persist failure surfaces as a TS-side
     // SCHEDULE_FAILED error instead of `{scheduled:true, id:""}`.
+    //
+    // Transaction-bound semantics: when this hook is invoked from inside
+    // a mutation handler, the per-call `MUTATION_SCHEDULE_BUFFER`
+    // thread-local is set. Schedules buffer there and drain post-COMMIT
+    // (so a rolled-back mutation can't leave behind scheduled work).
+    // Outside a mutation (queries, actions, top-level non-mutation
+    // jobs), the buffer is `None` and we enqueue immediately — matching
+    // the historical contract for those code paths.
     runner.set_schedule_hook(Box::new(move |fn_name, args, delay_ms, run_at| {
+        // Check the thread-local first. If we're inside a mutation, the
+        // buffer is `Some` and we defer.
+        let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
+            let slot = cell.borrow();
+            slot.as_ref().map(|b| {
+                b.borrow_mut().push(PendingSchedule {
+                    fn_name: fn_name.to_string(),
+                    args: args.clone(),
+                    delay_ms,
+                    run_at,
+                });
+            }).is_some()
+        });
+        if buffered {
+            // No real job-id yet — the actual enqueue happens after
+            // COMMIT. Returning a synthetic id keeps the TS contract
+            // (`{scheduled:true,id:string}`) intact; a mutation that
+            // rolls back will discard the buffer and the id was never
+            // observable to anyone outside the handler anyway.
+            return Ok(format!("pending:{fn_name}"));
+        }
+
         let delay_secs = match (delay_ms, run_at) {
             (Some(ms), _) => ms / 1000,
             (None, Some(ts)) => {
@@ -1484,6 +2253,7 @@ pub fn try_spawn_functions(
         fn_rate_limiter,
         change_log,
         notifier,
+        job_queue: Arc::clone(&job_queue_for_handlers),
     });
 
     install_nested_call_hook(&ops);
@@ -1565,6 +2335,92 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
 
             match fn_type {
                 FnType::Mutation => {
+                    // Reject nested mutations: both backends acquire a
+                    // single (non-reentrant) connection mutex per
+                    // mutation, so a TS handler that calls runMutation
+                    // from inside another mutation would block forever.
+                    // Surface a clear NESTED_MUTATION error instead of
+                    // hanging — callers should restructure to call the
+                    // shared logic as a function (not a separate
+                    // mutation) or call from an action.
+                    if in_mutation_tx() {
+                        return Err((
+                            "NESTED_MUTATION".into(),
+                            format!(
+                                "ctx.runMutation(\"{fn_name}\") is not allowed from inside \
+                                 another mutation handler — the mutation handler IS the \
+                                 transaction, and the connection mutex is non-reentrant. \
+                                 Restructure the shared logic into a regular function (not \
+                                 a registered mutation), or call from an action handler."
+                            ),
+                        ));
+                    }
+
+                    // Postgres backend: route through the PG with_transaction
+                    // closure, mirroring the top-level mutation path. Without
+                    // this, action -> ctx.runMutation(...) errors with
+                    // NOT_SQLITE_BACKEND on PG even though the top-level path
+                    // works fine.
+                    if ops.runtime.is_postgres() {
+                        let pg_backend = ops.runtime.pg_backend().ok_or_else(|| {
+                            (
+                                "PG_BACKEND_MISSING".into(),
+                                "Postgres backend reported is_postgres=true but pg_backend() returned None".into(),
+                            )
+                        })?;
+                        let pg = &pg_backend.store;
+                        let runner = ops.runner.clone();
+                        let fn_name_owned = fn_name.to_string();
+                        let sched_guard = ScheduleBufferGuard::enter();
+                        let _depth_guard = MutationDepthGuard::enter();
+                        // Same CRDT hook as the top-level mutation
+                        // path so action -> runMutation on a crdt:true
+                        // entity also maintains the sidecar.
+                        let crdt_hook: std::sync::Arc<
+                            dyn pylon_storage::pg_tx_store::PgCrdtHook,
+                        > = std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
+                            crdt: std::sync::Arc::clone(&pg_backend.crdt),
+                            manifest: std::sync::Arc::new(ops.runtime.manifest().clone()),
+                        });
+                        let tx_result: Result<
+                            (serde_json::Value, Vec<pylon_sync::ChangeEvent>),
+                            FnCallError,
+                        > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
+                            let buffered = PgBufferedTxStore::new(inner_store);
+                            let (value, _trace) = runner.call_inner(
+                                &buffered,
+                                &fn_name_owned,
+                                fn_type,
+                                args,
+                                auth,
+                                None,
+                                None,
+                            )?;
+                            Ok((value, buffered.take_pending()))
+                        });
+                        return match tx_result {
+                            Ok((value, pending)) => {
+                                for ev in pending {
+                                    let seq = ops.change_log.append(
+                                        &ev.entity,
+                                        &ev.row_id,
+                                        ev.kind.clone(),
+                                        ev.data.clone(),
+                                    );
+                                    let event = pylon_sync::ChangeEvent { seq, ..ev };
+                                    ops.notifier.notify(&event);
+                                }
+                                ops.flush_pending_schedules(sched_guard.take());
+                                drop(sched_guard);
+                                Ok(value)
+                            }
+                            Err(e) => {
+                                drop(sched_guard);
+                                Err((e.code, e.message))
+                            }
+                        };
+                    }
+
                     // Wrap the nested mutation in its own write-conn + BEGIN
                     // + COMMIT, matching the top-level mutation contract.
                     let conn_guard = ops
@@ -1574,6 +2430,8 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                     if let Err(e) = conn_guard.execute("BEGIN", []) {
                         return Err(("BEGIN_FAILED".into(), e.to_string()));
                     }
+                    let sched_guard = ScheduleBufferGuard::enter();
+                    let _depth_guard = MutationDepthGuard::enter();
                     let tx_store = TxStore::new(&ops.runtime, &conn_guard);
                     // Re-enter protocol without acquiring io_lock — we're
                     // already inside the outer call_inner which holds it.
@@ -1604,10 +2462,13 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                                 let event = pylon_sync::ChangeEvent { seq, ..ev };
                                 ops.notifier.notify(&event);
                             }
+                            ops.flush_pending_schedules(sched_guard.take());
+                            drop(sched_guard);
                             Ok(value)
                         }
                         Err(e) => {
                             let _ = conn_guard.execute("ROLLBACK", []);
+                            drop(sched_guard);
                             Err((e.code, e.message))
                         }
                     }

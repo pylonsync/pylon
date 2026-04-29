@@ -53,11 +53,14 @@ ctx.db.get(entity, id)
 ctx.db.query(entity, filter?)
 ctx.db.update(entity, id, patch)
 ctx.db.delete(entity, id)
-ctx.db.transact(ops[])
+ctx.db.link(entity, id, relation, targetId)
+ctx.db.unlink(entity, id, relation)
 
-ctx.error(code, message)      // throw typed error
-ctx.schedule(delayMs, fn, args)  // delayed execution
+ctx.error(code, message)              // throw typed error → rolls back
+ctx.scheduler.runAfter(delayMs, ...)  // schedule (deferred until COMMIT)
 ```
+
+> A mutation handler IS the transaction — every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
 
 ## Validators
 

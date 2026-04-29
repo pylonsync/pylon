@@ -745,6 +745,23 @@ fn execute_db_op(
                 Err(e) => (Err(e), None),
             }
         }
+        DbOp::Search => {
+            let query = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
+            match store.search(&msg.entity, &query) {
+                Ok(result) => {
+                    // Surface a coarse hit count for traces. The
+                    // SearchResult JSON shape is `{ hits, ... }`; if
+                    // the structure ever changes, the trace just
+                    // shows None — never crashes.
+                    let count = result
+                        .get("hits")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len());
+                    (Ok(result), count)
+                }
+                Err(e) => (Err(e), None),
+            }
+        }
     }
 }
 
@@ -765,6 +782,21 @@ impl std::fmt::Display for FnCallError {
 }
 
 impl std::error::Error for FnCallError {}
+
+/// Lift a `DataError` straight into a `FnCallError`. Lets the Postgres
+/// mutation path use `PostgresDataStore::with_transaction(|store| ...)`
+/// — its bound is `E: From<DataError>`, so any infrastructure failure
+/// (lock poisoning, BEGIN/COMMIT) surfaces as a clean `FnCallError`
+/// rather than needing manual mapping at the closure boundary. The
+/// mapping is 1:1 because both error types carry just `{ code, message }`.
+impl From<pylon_http::DataError> for FnCallError {
+    fn from(e: pylon_http::DataError) -> Self {
+        FnCallError {
+            code: e.code,
+            message: e.message,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

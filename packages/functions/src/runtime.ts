@@ -316,6 +316,14 @@ function buildDbReader(callId: string): DbReader {
         limit: numItems,
       })) as any;
     },
+    async search(entity, query) {
+      return (await rpcDb(callId, {
+        type: "db",
+        op: "search",
+        entity,
+        data: query,
+      })) as any;
+    },
   };
 }
 
