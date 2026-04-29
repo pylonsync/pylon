@@ -802,7 +802,9 @@ pub(crate) fn handle(
                     // this on the floor is silent.
                     tracing::warn!(
                         "[oauth] callback {} failed: {} {}",
-                        provider, err.code, err.message
+                        provider,
+                        err.code,
+                        err.message
                     );
                     // Pass the message through to the dashboard too so
                     // the login page can show "couldn't create user:
