@@ -58,10 +58,31 @@ impl CsrfPlugin {
 
     /// Validate an incoming request.
     ///
-    /// For safe methods this always succeeds. For state-changing methods the
-    /// `Origin` header is checked first; if absent the origin is derived from
-    /// the `Referer` header. If neither header provides a trusted origin the
-    /// request is rejected.
+    /// For safe methods this always succeeds. For state-changing
+    /// methods, the `Origin` header is checked first; if absent the
+    /// origin is derived from the `Referer` header.
+    ///
+    /// **CSRF defense model.** Modern browsers always send `Origin`
+    /// on cross-origin state-changing requests — a malicious page
+    /// can't suppress it. Browsers also send `Origin` on same-site
+    /// POSTs in current spec. So a request with NEITHER `Origin` nor
+    /// `Referer` is by definition not a browser request — it's a
+    /// server-to-server caller (Next.js SSR forwarding a session
+    /// cookie, a curl script with `--cookie`, an internal admin
+    /// tool, etc.). Those callers attach the cookie explicitly via
+    /// the `Cookie:` header rather than relying on browser
+    /// auto-attachment, so the cross-site forgery attack surface
+    /// the CSRF gate exists to protect against doesn't apply.
+    ///
+    /// Without this allowance every Next.js dashboard route that
+    /// calls a Pylon mutation server-side (`pylon.json("/api/fn/X",
+    /// {method: "POST"})`) would 403 — Next.js SSR has no Origin to
+    /// send. We learned this the hard way via the dashboard
+    /// "Members" page returning empty after release 0.3.11.
+    ///
+    /// When a header IS present it must match the allowlist; an
+    /// attacker can never inject one, so its presence is always
+    /// trustworthy.
     pub fn check(
         &self,
         method: &str,
@@ -83,11 +104,8 @@ impl CsrfPlugin {
                 message: format!("Origin '{}' not allowed", o),
                 status: 403,
             }),
-            None => Err(PluginError {
-                code: "CSRF_NO_ORIGIN".into(),
-                message: "Missing Origin header on state-changing request".into(),
-                status: 403,
-            }),
+            // Server-to-server caller — see contract above.
+            None => Ok(()),
         }
     }
 }
@@ -159,14 +177,24 @@ mod tests {
         assert_eq!(err.status, 403);
     }
 
-    // -- Missing origin rejected --
+    // -- Server-to-server callers (no Origin/Referer) pass --
 
     #[test]
-    fn missing_origin_rejected() {
+    fn server_to_server_no_origin_passes() {
+        // Modern browsers always send Origin on state-changing
+        // requests, so absent Origin = not-a-browser = no CSRF
+        // attack surface. Legitimate server-to-server callers
+        // (Next.js SSR, curl --cookie, internal admin tools)
+        // attach the cookie explicitly via Cookie header. Pre-fix
+        // this returned CSRF_NO_ORIGIN and broke server-side POSTs
+        // from the dashboard.
         let csrf = localhost_plugin();
-        let err = csrf.check("PUT", None, None).unwrap_err();
-        assert_eq!(err.code, "CSRF_NO_ORIGIN");
-        assert_eq!(err.status, 403);
+        for method in &["POST", "PUT", "PATCH", "DELETE"] {
+            assert!(
+                csrf.check(method, None, None).is_ok(),
+                "{method} with no Origin/Referer should be allowed (server-to-server)"
+            );
+        }
     }
 
     // -- Wildcard allows all --
@@ -215,13 +243,16 @@ mod tests {
         assert_eq!(err.code, "CSRF_REJECTED");
     }
 
-    // -- All state-changing methods are checked --
+    // -- All state-changing methods validate present-but-wrong Origin --
 
     #[test]
-    fn all_state_changing_methods_require_origin() {
+    fn all_state_changing_methods_reject_wrong_origin() {
         let csrf = localhost_plugin();
         for method in &["POST", "PUT", "PATCH", "DELETE"] {
-            assert!(csrf.check(method, None, None).is_err());
+            let err = csrf
+                .check(method, Some("https://evil.com"), None)
+                .unwrap_err();
+            assert_eq!(err.code, "CSRF_REJECTED", "{method} with bad Origin");
         }
     }
 

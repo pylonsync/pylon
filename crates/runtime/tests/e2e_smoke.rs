@@ -109,9 +109,12 @@ fn http_request(method: &str, url: &str, body: Option<&str>) -> (u16, String) {
         None => (host, "/"),
     };
     let body_str = body.unwrap_or("");
-    // Origin is required on state-changing requests by the CSRF plugin.
-    // Dev mode accepts any origin (allowlist `*`), so `http://<host:port>`
-    // sails through. Tests that omit Origin hit 403 CSRF_NO_ORIGIN.
+    // CSRF plugin: state-changing requests must either have NO
+    // origin/referer (server-to-server callers) or a present
+    // origin that's in the allowlist. Dev mode allowlists `*`, so
+    // `http://<host:port>` always passes. We send Origin
+    // explicitly here so the test exercises the validate path
+    // rather than the bypass path.
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nOrigin: http://{host_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
         body_str.len()
