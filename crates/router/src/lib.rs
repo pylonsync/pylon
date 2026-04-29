@@ -1467,6 +1467,64 @@ pub(crate) fn chrono_now_iso() -> String {
     pylon_kernel::util::now_iso()
 }
 
+/// Extract the origin (`scheme://host[:port]`) from a URL string,
+/// stripping any path/query/fragment. Used by the OAuth failure
+/// redirect to land on the origin's `/login` instead of the
+/// `${PYLON_DASHBOARD_URL}/login` (which 404s when the dashboard URL
+/// includes a path like `/dashboard`).
+///
+/// Best-effort string slicing — no full URL parser dep. Falls back to
+/// the input as-is if it doesn't look like an `http(s)://host…` shape,
+/// so misconfigured `PYLON_DASHBOARD_URL` values produce a still-
+/// reasonable redirect rather than a panic.
+pub(crate) fn origin_of(url: &str) -> String {
+    let after_scheme = match url.find("://") {
+        Some(i) => i + 3,
+        None => return url.trim_end_matches('/').to_string(),
+    };
+    // Find the next `/`, `?`, or `#` after the host[:port] segment.
+    let rest = &url[after_scheme..];
+    let cut = rest
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    url[..after_scheme + cut].to_string()
+}
+
+#[cfg(test)]
+mod origin_of_tests {
+    use super::origin_of;
+
+    #[test]
+    fn strips_path_query_fragment() {
+        assert_eq!(
+            origin_of("http://localhost:3000/dashboard"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            origin_of("https://app.example.com/foo?x=1#bar"),
+            "https://app.example.com"
+        );
+    }
+
+    #[test]
+    fn keeps_origin_when_no_path() {
+        assert_eq!(
+            origin_of("https://app.example.com"),
+            "https://app.example.com"
+        );
+        assert_eq!(
+            origin_of("https://app.example.com/"),
+            "https://app.example.com"
+        );
+    }
+
+    #[test]
+    fn no_panic_on_garbage() {
+        assert_eq!(origin_of("not-a-url"), "not-a-url");
+        assert_eq!(origin_of(""), "");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests — auth-bypass regressions
 // ---------------------------------------------------------------------------

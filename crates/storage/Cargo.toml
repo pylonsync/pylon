@@ -21,11 +21,12 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true }
 postgres = { workspace = true, optional = true }
 bytes = { version = "1", optional = true }
+chrono = { workspace = true, optional = true }
 tracing = { workspace = true }
 roaring = { workspace = true }
 ureq = { workspace = true }
 
 [features]
 default = []
-postgres-live = ["postgres", "bytes"]
+postgres-live = ["postgres", "bytes", "chrono"]
 

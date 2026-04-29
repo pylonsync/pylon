@@ -527,3 +527,88 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
         err.message
     );
 }
+
+#[test]
+fn timestamptz_binds_iso_string_correctly() {
+    // Regression: the OAuth callback writes ISO 8601 strings into
+    // TIMESTAMPTZ columns (User.createdAt / User.emailVerified). The
+    // earlier impl bound the raw ASCII bytes through &str::to_sql,
+    // which Postgres rejected with "incorrect binary data format in
+    // bind parameter N." This test pushes through the same code path
+    // (Runtime::insert against an entity with datetime fields) and
+    // confirms the row lands without a wire-format error.
+    let Some(url) = pg_url() else {
+        return;
+    };
+
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "TsTest".into(),
+            fields: vec![
+                ManifestField {
+                    name: "label".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                },
+                ManifestField {
+                    name: "createdAt".into(),
+                    field_type: "datetime".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                },
+                ManifestField {
+                    name: "verifiedAt".into(),
+                    field_type: "datetime".into(),
+                    optional: true,
+                    unique: false,
+                    crdt: None,
+                },
+            ],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            search: None,
+        }],
+        ..empty_manifest()
+    };
+
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    adapter
+        .exec_raw("DROP TABLE IF EXISTS \"TsTest\" CASCADE")
+        .unwrap();
+    let plan = adapter.plan_from_live(&manifest).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    let rt = Runtime::open_postgres(&url, manifest).unwrap();
+    let id = rt
+        .insert(
+            "TsTest",
+            &serde_json::json!({
+                "label": "row1",
+                "createdAt": "2026-04-29T14:28:34Z",
+                "verifiedAt": serde_json::Value::Null,
+            }),
+        )
+        .expect("TIMESTAMPTZ insert should succeed");
+
+    let row = rt.get_by_id("TsTest", &id).unwrap().unwrap();
+    assert_eq!(row["label"], "row1");
+    // PG returns timestamps as ISO strings via row_to_json — exact
+    // format may differ (with/without 'T' / fractional seconds) but
+    // the year + month + day must round-trip.
+    let created = row["createdAt"]
+        .as_str()
+        .expect("createdAt should round-trip as a string");
+    assert!(
+        created.starts_with("2026-04-29"),
+        "expected createdAt to start with 2026-04-29, got {created:?}"
+    );
+    assert!(
+        row["verifiedAt"].is_null(),
+        "nullable TIMESTAMPTZ should round-trip as JSON null, got {:?}",
+        row["verifiedAt"]
+    );
+}

@@ -88,6 +88,111 @@ pub fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+/// Parse an ISO-8601 / RFC 3339 timestamp into Unix-epoch seconds.
+///
+/// Accepts the formats pylon emits (`epoch_to_iso` shape) plus the
+/// common RFC 3339 variants users send through the API:
+/// - `YYYY-MM-DDTHH:MM:SSZ`
+/// - `YYYY-MM-DDTHH:MM:SS.fffZ` (fractional seconds dropped)
+/// - `YYYY-MM-DDTHH:MM:SS+HH:MM` / `-HH:MM` (offset applied)
+///
+/// Hand-rolled to keep `pylon-kernel` std-only — no chrono dep. Used
+/// by the Postgres adapter to bind TIMESTAMPTZ columns from JSON
+/// strings; SQLite stores them as TEXT and never needed parsing.
+pub fn iso_to_epoch(s: &str) -> Result<u64, String> {
+    // Minimal length check: "YYYY-MM-DDTHH:MM:SS" = 19 chars before the
+    // tz suffix.
+    if s.len() < 20 {
+        return Err(format!("timestamp too short for ISO 8601: {s:?}"));
+    }
+    let parse_n = |slice: &str| -> Result<i64, String> {
+        slice
+            .parse::<i64>()
+            .map_err(|_| format!("non-numeric segment in {slice:?}"))
+    };
+    let y = parse_n(&s[0..4])?;
+    if &s[4..5] != "-"
+        || &s[7..8] != "-"
+        || &s[10..11] != "T"
+        || &s[13..14] != ":"
+        || &s[16..17] != ":"
+    {
+        return Err(format!("expected YYYY-MM-DDTHH:MM:SS shape, got {s:?}"));
+    }
+    let mo = parse_n(&s[5..7])?;
+    let d = parse_n(&s[8..10])?;
+    let h = parse_n(&s[11..13])?;
+    let mi = parse_n(&s[14..16])?;
+    let se = parse_n(&s[17..19])?;
+
+    // Tz suffix: `Z`, `+HH:MM`, `-HH:MM`, optionally preceded by `.fff`.
+    // We tolerate fractional seconds by skipping them — TIMESTAMPTZ
+    // round-trips fine at second precision for pylon's surface.
+    let mut tz_start = 19;
+    if s.as_bytes().get(tz_start) == Some(&b'.') {
+        tz_start += 1;
+        while let Some(&b) = s.as_bytes().get(tz_start) {
+            if b.is_ascii_digit() {
+                tz_start += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    let tz = &s[tz_start..];
+    let offset_secs: i64 = match tz {
+        "Z" | "" => 0,
+        _ if tz.len() == 6 && (tz.starts_with('+') || tz.starts_with('-')) => {
+            let sign: i64 = if &tz[0..1] == "+" { 1 } else { -1 };
+            let oh = parse_n(&tz[1..3])?;
+            let om = parse_n(&tz[4..6])?;
+            sign * (oh * 3600 + om * 60)
+        }
+        other => return Err(format!("unrecognized timezone suffix: {other:?}")),
+    };
+
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return Err(format!("month/day out of range in {s:?}"));
+    }
+
+    // Days from epoch (1970-01-01) to the start of the target year.
+    let mut days: i64 = 0;
+    if y >= 1970 {
+        for yr in 1970..y {
+            days += if is_leap(yr) { 366 } else { 365 };
+        }
+    } else {
+        for yr in y..1970 {
+            days -= if is_leap(yr) { 366 } else { 365 };
+        }
+    }
+    let leap = is_leap(y);
+    let month_days: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for i in 0..(mo as usize - 1) {
+        days += month_days[i];
+    }
+    days += d - 1;
+
+    let total = days * 86400 + h * 3600 + mi * 60 + se - offset_secs;
+    if total < 0 {
+        return Err(format!("pre-1970 timestamp not supported: {s:?}"));
+    }
+    Ok(total as u64)
+}
+
 // ---------------------------------------------------------------------------
 // File ID validation (defense-in-depth against path traversal)
 // ---------------------------------------------------------------------------

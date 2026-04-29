@@ -40,7 +40,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 tiny_http = "0.12"
-postgres = { version = "0.19", features = ["with-serde_json-1"] }
+postgres = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tungstenite = "0.24"
 # Loro — Rust-native CRDT library used as Pylon's local-first substrate.
 # Same library powers Remboard's iOS (loro-swift) and web (loro-crdt npm)

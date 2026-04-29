@@ -397,13 +397,41 @@ impl postgres::types::ToSql for JsonParam {
             | (JsonParam::Text(s), &Type::VARCHAR)
             | (JsonParam::Text(s), &Type::BPCHAR)
             | (JsonParam::Text(s), &Type::NAME) => s.to_sql(ty, out),
-            (JsonParam::Text(s), &Type::TIMESTAMPTZ) | (JsonParam::Text(s), &Type::TIMESTAMP) => {
-                // The runtime currently models datetimes as ISO 8601
-                // strings end-to-end. Bind via the &str impl with the
-                // target type so postgres parses through its TEXT input
-                // function for that type. Cheaper than introducing
-                // chrono just for date binding.
-                s.as_str().to_sql(ty, out)
+            (JsonParam::Text(s), &Type::TIMESTAMPTZ) => {
+                // The runtime models datetimes as ISO 8601 strings
+                // (`pylon_kernel::util::now_iso` shape, plus
+                // user-supplied RFC 3339). Postgres's TIMESTAMPTZ
+                // binary wire format is `i64` microseconds since
+                // 2000-01-01 UTC — NOT the bytes of an ISO string.
+                // The previous impl bound via `&str::to_sql(TIMESTAMPTZ, ...)`,
+                // which advertised TIMESTAMPTZ format but wrote raw
+                // ASCII; Postgres rejected with "incorrect binary
+                // data format in bind parameter N". This was the
+                // OAuth-callback failure mode on pylon-cloud
+                // (User.createdAt). Parse via chrono and let the
+                // postgres crate's `with-chrono-0_4` ToSql impl
+                // emit the proper binary format.
+                let dt = chrono::DateTime::parse_from_rfc3339(s)
+                    .map_err(|e| format!("invalid TIMESTAMPTZ string {s:?}: {e}"))?
+                    .with_timezone(&chrono::Utc);
+                dt.to_sql(ty, out)
+            }
+            (JsonParam::Text(s), &Type::TIMESTAMP) => {
+                // TIMESTAMP (no timezone) — same conversion shape but
+                // bind as NaiveDateTime so chrono picks the right
+                // binary encoding for the column.
+                let dt = chrono::DateTime::parse_from_rfc3339(s)
+                    .map_err(|e| format!("invalid TIMESTAMP string {s:?}: {e}"))?
+                    .with_timezone(&chrono::Utc)
+                    .naive_utc();
+                dt.to_sql(ty, out)
+            }
+            (JsonParam::Text(s), &Type::DATE) => {
+                let dt = chrono::DateTime::parse_from_rfc3339(s)
+                    .map_err(|e| format!("invalid DATE string {s:?}: {e}"))?
+                    .with_timezone(&chrono::Utc)
+                    .date_naive();
+                dt.to_sql(ty, out)
             }
 
             // Cross-type fallback: render as text and bind into a TEXT
@@ -1308,6 +1336,30 @@ pub mod live {
                         .map(serde_json::Value::String)
                         .unwrap_or(serde_json::Value::Null)
                 }
+                Type::TIMESTAMPTZ => {
+                    // Decode via chrono::DateTime<Utc> (postgres's
+                    // `with-chrono-0_4` feature provides FromSql) and
+                    // re-format as ISO 8601 — the shape pylon's clients
+                    // expect (matches `pylon_kernel::util::now_iso`,
+                    // so timestamps round-trip with the same surface
+                    // across SQLite + PG).
+                    try_get_or_null::<Option<chrono::DateTime<chrono::Utc>>>(row, i)
+                        .flatten()
+                        .map(|dt| {
+                            serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                        })
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                Type::TIMESTAMP => try_get_or_null::<Option<chrono::NaiveDateTime>>(row, i)
+                    .flatten()
+                    .map(|dt| {
+                        serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+                Type::DATE => try_get_or_null::<Option<chrono::NaiveDate>>(row, i)
+                    .flatten()
+                    .map(|d| serde_json::Value::String(d.format("%Y-%m-%d").to_string()))
+                    .unwrap_or(serde_json::Value::Null),
                 _ => {
                     // Last resort: ask Postgres to render anything else as
                     // text via a stringifying decode through Vec<u8>. If even

@@ -816,9 +816,24 @@ pub(crate) fn handle(
                     } else {
                         err.message.clone()
                     };
+                    // The login page lives at the origin's `/login`,
+                    // NOT at `${PYLON_DASHBOARD_URL}/login` — operators
+                    // typically point PYLON_DASHBOARD_URL at the
+                    // protected dashboard root (e.g.
+                    // `http://localhost:3000/dashboard`), and naively
+                    // appending `/login` produces `/dashboard/login`,
+                    // which doesn't exist in any Next.js routing
+                    // convention. Take the origin (scheme://host[:port])
+                    // and append `/login` there. PYLON_LOGIN_URL
+                    // overrides for operators with a separate marketing
+                    // host.
+                    let login_target = std::env::var("PYLON_LOGIN_URL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("{}/login", crate::origin_of(&dashboard)));
                     let target = format!(
-                        "{}/login?oauth_error={}&oauth_error_message={}",
-                        dashboard.trim_end_matches('/'),
+                        "{}?oauth_error={}&oauth_error_message={}",
+                        login_target,
                         url_encode(err.code),
                         url_encode(&msg)
                     );
