@@ -19,13 +19,13 @@ default = []
 workers = ["dep:worker", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:futures"]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.9" }
-pylon-http = { path = "../http", version = "0.3.9" }
-pylon-router = { path = "../router", version = "0.3.9" }
-pylon-auth = { path = "../auth", version = "0.3.9" }
-pylon-policy = { path = "../policy", version = "0.3.9" }
-pylon-sync = { path = "../sync", version = "0.3.9" }
-pylon-realtime = { path = "../realtime", version = "0.3.9" }
+pylon-kernel = { path = "../core", version = "0.3.10" }
+pylon-http = { path = "../http", version = "0.3.10" }
+pylon-router = { path = "../router", version = "0.3.10" }
+pylon-auth = { path = "../auth", version = "0.3.10" }
+pylon-policy = { path = "../policy", version = "0.3.10" }
+pylon-sync = { path = "../sync", version = "0.3.10" }
+pylon-realtime = { path = "../realtime", version = "0.3.10" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
