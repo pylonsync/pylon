@@ -794,10 +794,31 @@ pub(crate) fn handle(
                     return Some((302, String::new()));
                 }
                 Err(err) => {
+                    // Log the full message server-side — the redirect
+                    // only carries the code, so without this the
+                    // operator can't see WHY signup failed (the actual
+                    // PG error, missing field name, etc.). The browser
+                    // doesn't render 302 response bodies so dropping
+                    // this on the floor is silent.
+                    tracing::warn!(
+                        "[oauth] callback {} failed: {} {}",
+                        provider, err.code, err.message
+                    );
+                    // Pass the message through to the dashboard too so
+                    // the login page can show "couldn't create user:
+                    // missing column avatarColor" instead of an opaque
+                    // error code. Truncated to 500 chars to keep the
+                    // URL sane.
+                    let msg = if err.message.len() > 500 {
+                        format!("{}…", &err.message[..500])
+                    } else {
+                        err.message.clone()
+                    };
                     let target = format!(
-                        "{}/login?oauth_error={}",
+                        "{}/login?oauth_error={}&oauth_error_message={}",
                         dashboard.trim_end_matches('/'),
-                        url_encode(err.code)
+                        url_encode(err.code),
+                        url_encode(&msg)
                     );
                     ctx.add_response_header("Location", target);
                     return Some((302, String::new()));
