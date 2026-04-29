@@ -1199,16 +1199,26 @@ impl Runtime {
                                 }
                                 "$in" => {
                                     if let Some(arr) = op_val.as_array() {
-                                        let placeholders: Vec<String> = arr
-                                            .iter()
-                                            .map(|v| {
-                                                let p = format!("?{idx}");
-                                                values.push(json_to_sql(v));
-                                                idx += 1;
-                                                p
-                                            })
-                                            .collect();
-                                        if !placeholders.is_empty() {
+                                        if arr.is_empty() {
+                                            // Empty $in matches nothing.
+                                            // Previously SQLite SKIPPED the
+                                            // predicate (returning ALL rows)
+                                            // while PG short-circuited to
+                                            // FALSE — a real cross-backend
+                                            // drift bug codex caught. Both
+                                            // now emit `0` (false) so empty
+                                            // $in returns an empty set.
+                                            where_clauses.push("0".into());
+                                        } else {
+                                            let placeholders: Vec<String> = arr
+                                                .iter()
+                                                .map(|v| {
+                                                    let p = format!("?{idx}");
+                                                    values.push(json_to_sql(v));
+                                                    idx += 1;
+                                                    p
+                                                })
+                                                .collect();
                                             where_clauses.push(format!(
                                                 "{quoted_key} IN ({})",
                                                 placeholders.join(", ")

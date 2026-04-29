@@ -347,35 +347,39 @@ pub(crate) fn handle(
                         .unwrap_or_default()
                         .as_secs()
                 );
-                let user_id = match ctx.store.lookup("User", "email", email) {
-                    Ok(Some(row)) => {
-                        let id = row["id"].as_str().unwrap_or("").to_string();
-                        // Magic-link login implicitly verifies the
-                        // email — the caller proved control by typing
-                        // the code we sent there. Stamp emailVerified
-                        // if not already set.
-                        if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                            let _ = ctx.store.update(
-                                "User",
-                                &id,
-                                &serde_json::json!({ "emailVerified": now }),
-                            );
-                        }
-                        id
-                    }
-                    _ => ctx
+                let user_id =
+                    match ctx
                         .store
-                        .insert(
-                            "User",
-                            &serde_json::json!({
-                                "email": email,
-                                "displayName": email,
-                                "emailVerified": now,
-                                "createdAt": now,
-                            }),
-                        )
-                        .unwrap_or_else(|_| email.to_string()),
-                };
+                        .lookup(&ctx.store.manifest().auth.user.entity, "email", email)
+                    {
+                        Ok(Some(row)) => {
+                            let id = row["id"].as_str().unwrap_or("").to_string();
+                            // Magic-link login implicitly verifies the
+                            // email — the caller proved control by typing
+                            // the code we sent there. Stamp emailVerified
+                            // if not already set.
+                            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                                let _ = ctx.store.update(
+                                    &ctx.store.manifest().auth.user.entity,
+                                    &id,
+                                    &serde_json::json!({ "emailVerified": now }),
+                                );
+                            }
+                            id
+                        }
+                        _ => ctx
+                            .store
+                            .insert(
+                                &ctx.store.manifest().auth.user.entity,
+                                &serde_json::json!({
+                                    "email": email,
+                                    "displayName": email,
+                                    "emailVerified": now,
+                                    "createdAt": now,
+                                }),
+                            )
+                            .unwrap_or_else(|_| email.to_string()),
+                    };
                 let session = ctx.session_store.create(user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
                 return Some((
@@ -409,7 +413,10 @@ pub(crate) fn handle(
             Some(id) => id,
             None => return Some((401, json_error("UNAUTHORIZED", "Sign in required"))),
         };
-        let user = match ctx.store.get_by_id("User", user_id) {
+        let user = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, user_id)
+        {
             Ok(Some(u)) => u,
             _ => return Some((404, json_error("USER_NOT_FOUND", "User not found"))),
         };
@@ -495,7 +502,10 @@ pub(crate) fn handle(
             Some(c) => c,
             None => return Some((400, json_error("MISSING_CODE", "code is required"))),
         };
-        let user = match ctx.store.get_by_id("User", user_id) {
+        let user = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, user_id)
+        {
             Ok(Some(u)) => u,
             _ => return Some((404, json_error("USER_NOT_FOUND", "User not found"))),
         };
@@ -522,7 +532,7 @@ pub(crate) fn handle(
                 // schemas with it will accept the update. Either way
                 // the verification *intent* succeeded.
                 let _ = ctx.store.update(
-                    "User",
+                    &ctx.store.manifest().auth.user.entity,
                     user_id,
                     &serde_json::json!({ "emailVerified": now }),
                 );
@@ -586,7 +596,10 @@ pub(crate) fn handle(
             .unwrap_or(email.as_str())
             .to_string();
 
-        if let Ok(Some(_)) = ctx.store.lookup("User", "email", &email) {
+        if let Ok(Some(_)) =
+            ctx.store
+                .lookup(&ctx.store.manifest().auth.user.entity, "email", &email)
+        {
             return Some((409, json_error("EMAIL_TAKEN", "Email already registered")));
         }
 
@@ -610,7 +623,7 @@ pub(crate) fn handle(
         let avatar_color = palette[(hash_val.unsigned_abs() as usize) % palette.len()];
 
         let user_id = match ctx.store.insert(
-            "User",
+            &ctx.store.manifest().auth.user.entity,
             &serde_json::json!({
                 "email": email,
                 "displayName": display_name,
@@ -660,7 +673,11 @@ pub(crate) fn handle(
             None => return Some((400, json_error("MISSING_PASSWORD", "password is required"))),
         };
 
-        let row = ctx.store.lookup("User", "email", &email).ok().flatten();
+        let row = ctx
+            .store
+            .lookup(&ctx.store.manifest().auth.user.entity, "email", &email)
+            .ok()
+            .flatten();
         let (user_id, stored_hash): (Option<String>, Option<String>) = match row {
             Some(r) => (
                 r.get("id").and_then(|v| v.as_str()).map(String::from),
@@ -878,6 +895,13 @@ pub(crate) fn handle(
 
         // GET: browser flow. State validation gives us the callback
         // URLs the start endpoint stored. No env-var lookup needed.
+        //
+        // CRITICAL: every arm here must `return Some(...)` directly.
+        // Earlier code built `Some((302, ...))` as the value of the
+        // match without returning, then a stray `let _ = ...` line
+        // discarded it — every browser OAuth callback fell through
+        // silently and produced no response. (Caught by codex P1
+        // review of 0.3.9.)
         if method == HttpMethod::Get {
             let query = provider_raw.split_once('?').map(|(_, q)| q).unwrap_or("");
             let params = parse_query(query);
@@ -892,11 +916,6 @@ pub(crate) fn handle(
             {
                 Some(s) => s,
                 None => {
-                    // Without a validated state we don't know where to
-                    // redirect; the only safe response is a JSON 403.
-                    // This also catches the legitimate "user opens an
-                    // OAuth callback URL by hand or after a long delay"
-                    // case where the state has already expired.
                     return Some((
                         403,
                         json_error(
@@ -912,31 +931,20 @@ pub(crate) fn handle(
                     let cookie_value = ctx.cookie_config.set_value(&session.token);
                     ctx.add_response_header("Set-Cookie", cookie_value);
                     ctx.add_response_header("Location", state_record.callback_url);
-                    Some((302, String::new()))
+                    return Some((302, String::new()));
                 }
                 Err(err) => {
-                    // Server-side log carries the full detail (the
-                    // browser sees only the redirect URL). Without
-                    // this an operator has no way to see WHY signup
-                    // failed when the user reports an opaque error.
                     tracing::warn!(
                         "[oauth] callback {} failed: {} {}",
                         provider,
                         err.code,
                         err.message
                     );
-                    // Carry the message through to the failure URL so
-                    // the frontend can render "couldn't create user:
-                    // missing column X" rather than an opaque code.
-                    // Truncate to 500 chars to keep the URL sane.
                     let msg = if err.message.len() > 500 {
                         format!("{}…", &err.message[..500])
                     } else {
                         err.message.clone()
                     };
-                    // Append query params with the right separator
-                    // (existing query strings on the error_callback URL
-                    // get an `&`, fresh ones get a `?`).
                     let sep = if state_record.error_callback_url.contains('?') {
                         '&'
                     } else {
@@ -950,20 +958,11 @@ pub(crate) fn handle(
                         url_encode(&msg)
                     );
                     ctx.add_response_header("Location", target);
-                    Some((302, String::new()))
+                    return Some((302, String::new()));
                 }
             }
-        } else {
-            None
         }
-    } else {
-        // Fall through to the rest of the auth route table.
-        // (Earlier `if let Some(...)` branches `return` directly so
-        // we only reach this when the URL didn't match.)
-        None
-    };
-    let _: Option<(u16, String)> = None; // Placate the type-checker;
-                                         // the `if let` chain above is the actual dispatch.
+    }
 
     let _ = body; // Suppress unused-warning for arms that don't read body.
 

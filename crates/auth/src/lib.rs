@@ -1297,7 +1297,12 @@ impl SessionStore {
         if old.is_expired() {
             return None;
         }
-        let mut new = Session::new(old.user_id.clone());
+        // Use the store's configured lifetime so a manifest-set
+        // `auth.session.expires_in` survives session refresh. Previous
+        // bug: `Session::new(...)` baked in 30 days regardless of
+        // config — apps with a custom lifetime got the right value on
+        // first sign-in and lost it on the next refresh.
+        let mut new = Session::with_lifetime(old.user_id.clone(), self.default_lifetime_secs);
         new.device = old.device.clone();
         sessions.insert(new.token.clone(), new.clone());
         if let Some(b) = &self.backend {
