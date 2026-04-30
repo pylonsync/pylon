@@ -1,3 +1,5 @@
+"use client";
+
 import { SyncEngine, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { callFn, getBaseUrl, getReactStorage, storageKey } from "./index";

@@ -13,36 +13,36 @@ const QS_STEPS: {
 }[] = [
   {
     num: "01",
-    title: "Install",
-    desc: "One curl command. Prebuilt binary — no Rust toolchain, no Docker required.",
+    title: "Scaffold",
+    desc: "One npm command. Generates a Pylon backend + Next.js frontend in a single workspace — no global binary, no Rust toolchain, no Docker required.",
     filename: "shell",
     lang: "sh",
-    code: `❯ curl -fsSL https://pylonsync.com/install.sh | bash
-  ==> Installed pylon v0.2.6 to ~/.local/bin/pylon
-❯ pylon --version
-pylon 0.2.6`,
+    code: `❯ npm create pylon@latest my-app
+  Creating my-app in ./my-app
+  ✓ Scaffolded api/ + web/ + shared schema
+❯ cd my-app`,
   },
   {
     num: "02",
-    title: "Init a project",
-    desc: "Scaffolds a TypeScript schema entry point you extend by hand.",
+    title: "Install",
+    desc: "Pulls @pylonsync/cli (platform-specific binary) + @pylonsync/sdk + @pylonsync/react. No global install.",
     filename: "shell",
     lang: "sh",
-    code: `❯ pylon init my-app
-  ✓ app.ts
-  ✓ tsconfig.json
-❯ cd my-app && bun add @pylonsync/sdk @pylonsync/functions`,
+    code: `❯ npm install
+  added 421 packages in 6s
+  → @pylonsync/cli installed (darwin-arm64)
+  → @pylonsync/sdk, @pylonsync/react ready`,
   },
   {
     num: "03",
     title: "Run dev",
-    desc: "Starts the server, watches your code, regenerates the typed client on every save.",
+    desc: "Spins up the API + web together. Watches your schema, regenerates the typed client on every save.",
     filename: "shell",
     lang: "sh",
-    code: `❯ pylon dev app.ts
-  ✓ my-app v0.1.0 — 1 entities, 0 queries, 0 actions, 1 policies
-  Server:   http://localhost:4321
-  Database: .pylon/dev.db (schema synced)`,
+    code: `❯ npm run dev
+  api  http://localhost:4321
+  web  http://localhost:3000
+  ✓ schema synced — 1 entity, 1 query, 1 action`,
   },
   {
     num: "04",

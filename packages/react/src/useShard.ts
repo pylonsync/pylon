@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * useShard — React hook for real-time sharded simulations (games, MMO zones, etc.).
  *

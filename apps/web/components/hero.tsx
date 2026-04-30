@@ -5,7 +5,7 @@ import { CodeLines, type Lang } from "@/lib/highlight";
 
 function InstallCmd() {
   const [copied, setCopied] = React.useState(false);
-  const cmd = "curl -fsSL https://pylonsync.com/install.sh | bash";
+  const cmd = "npm create pylon@latest";
   const onClick = () => {
     navigator.clipboard?.writeText(cmd);
     setCopied(true);
@@ -184,13 +184,13 @@ function ChatDemo() {
 
 function HeroTerminal() {
   const lines = [
-    { t: "prompt", v: "❯ ", c: "curl -fsSL https://pylonsync.com/install.sh | bash" },
-    { t: "out", v: "   ==> Resolving latest release..." },
-    { t: "out-ok", v: "   ==> Installed pylon v0.2.6 to ~/.local/bin/pylon" },
-    { t: "prompt", v: "❯ ", c: "pylon dev app.ts" },
-    { t: "out", v: "  ✓ my-app v0.1.0 — 12 entities, 4 policies" },
-    { t: "out-accent", v: "  Server:   http://localhost:4321" },
-    { t: "out", v: "  Database: .pylon/dev.db (schema synced)" },
+    { t: "prompt", v: "❯ ", c: "npm create pylon@latest my-app" },
+    { t: "out", v: "  Creating my-app in ./my-app" },
+    { t: "out-ok", v: "  ✓ Scaffolded api/ + web/ + shared schema" },
+    { t: "prompt", v: "❯ ", c: "cd my-app && npm run dev" },
+    { t: "out", v: "  ✓ my-app v0.0.1 — 1 entity, 1 query, 1 action" },
+    { t: "out-accent", v: "  api  http://localhost:4321" },
+    { t: "out-accent", v: "  web  http://localhost:3000" },
     { t: "out-ok", v: "  ✓ typed client regenerated" },
   ] as const;
   return (

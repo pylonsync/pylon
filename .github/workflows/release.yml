@@ -147,7 +147,7 @@ jobs:
           # catches that BEFORE any package gets published, so the release
           # tag can be reverted and re-cut without leaving the registry
           # in a broken half-published state.
-          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/next)
+          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/next packages/create-pylon)
           REFERENCE_VERSION=""
           for pkg in "${PYLON_PKGS[@]}"; do
             [[ -f "$pkg/package.json" ]] || continue

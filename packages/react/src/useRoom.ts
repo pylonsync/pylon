@@ -1,3 +1,5 @@
+"use client";
+
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getBaseUrl, getReactStorage, storageKey } from './index';
 

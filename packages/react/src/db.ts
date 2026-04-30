@@ -1,3 +1,5 @@
+"use client";
+
 import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@pylonsync/sync";
 import {
   useQuery as useQueryHook,

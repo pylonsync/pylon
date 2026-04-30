@@ -1,3 +1,5 @@
+"use client";
+
 import { SyncEngine, type ResolvedSession } from "@pylonsync/sync";
 import { useEffect, useSyncExternalStore } from "react";
 

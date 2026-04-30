@@ -15,8 +15,8 @@
     "@pylonsync/sync": "workspace:*"
   },
   "peerDependencies": {
-    "react": ">=18",
-    "react-native": ">=0.72",
+    "react": ">=19",
+    "react-native": ">=0.74",
     "@react-native-async-storage/async-storage": ">=1.19",
     "@react-native-community/netinfo": ">=9.0"
   },

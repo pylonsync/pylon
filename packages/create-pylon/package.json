@@ -1,14 +1,33 @@
 {
   "name": "create-pylon",
-  "version": "0.1.0",
+  "version": "0.3.14",
+  "description": "Scaffold a new Pylon app — realtime backend + Next.js frontend in one command. Run via `npm create pylon@latest`.",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
-    "create-pylon": "src/index.ts"
+    "create-pylon": "./bin/create-pylon.js"
   },
-  "scripts": {
-    "check": "tsc -p tsconfig.json --noEmit"
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
   },
-  "devDependencies": {
-    "bun-types": "latest"
-  }
+  "keywords": [
+    "pylon",
+    "scaffold",
+    "create",
+    "nextjs",
+    "realtime",
+    "backend"
+  ],
+  "homepage": "https://pylonsync.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pylonsync/pylon",
+    "directory": "packages/create-pylon"
+  },
+  "license": "MIT"
 }
