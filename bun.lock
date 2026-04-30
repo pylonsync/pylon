@@ -389,7 +389,7 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.10",
+      "version": "0.3.15",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
@@ -402,33 +402,30 @@
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/create-pylon": {
-      "name": "create-pylon",
-      "version": "0.1.0",
+      "name": "create-pylon-app",
+      "version": "0.3.15",
       "bin": {
-        "create-pylon": "src/index.ts",
-      },
-      "devDependencies": {
-        "bun-types": "latest",
+        "create-pylon-app": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.10",
+      "version": "0.3.15",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -455,12 +452,12 @@
         "typescript": "^5.5",
       },
       "peerDependencies": {
-        "react": ">=18.0.0",
+        "react": ">=19.0.0",
       },
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.10",
+      "version": "0.3.15",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -469,14 +466,14 @@
         "typescript": "^5.0.0",
       },
       "peerDependencies": {
-        "next": ">=15.0.0 <17.0.0",
-        "react": ">=18.0.0 <20.0.0",
-        "react-dom": ">=18.0.0 <20.0.0",
+        "next": ">=16.0.0",
+        "react": ">=19.0.0",
+        "react-dom": ">=19.0.0",
       },
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.10",
+      "version": "0.3.15",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -485,7 +482,7 @@
         "@types/react": "^19.0.0",
       },
       "peerDependencies": {
-        "react": ">=18.0.0",
+        "react": ">=19.0.0",
       },
     },
     "packages/react-native": {
@@ -502,17 +499,17 @@
       "peerDependencies": {
         "@react-native-async-storage/async-storage": ">=1.19",
         "@react-native-community/netinfo": ">=9.0",
-        "react": ">=18",
-        "react-native": ">=0.72",
+        "react": ">=19",
+        "react-native": ">=0.74",
       },
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.10",
+      "version": "0.3.15",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -979,7 +976,7 @@
 
     "convert-source-map": ["convert-source-map@2.0.0", "", {}, "sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg=="],
 
-    "create-pylon": ["create-pylon@workspace:packages/create-pylon"],
+    "create-pylon-app": ["create-pylon-app@workspace:packages/create-pylon"],
 
     "cross-spawn": ["cross-spawn@7.0.6", "", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
 
