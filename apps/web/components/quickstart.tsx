@@ -17,7 +17,7 @@ const QS_STEPS: {
     desc: "One npm command. Generates a Pylon backend + Next.js frontend in a single workspace — no global binary, no Rust toolchain, no Docker required.",
     filename: "shell",
     lang: "sh",
-    code: `❯ npm create pylon@latest my-app
+    code: `❯ npm create pylon-app@latest my-app
   Creating my-app in ./my-app
   ✓ Scaffolded api/ + web/ + shared schema
 ❯ cd my-app`,

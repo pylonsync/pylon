@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * create-pylon — scaffold a new Pylon app.
+ * create-pylon-app — scaffold a new Pylon app.
  *
- * Run via `npm create pylon@latest [name]` (or yarn/pnpm/bun create pylon).
+ * Run via `npm create pylon-app@latest [name]` (or yarn/pnpm/bun
+ * create pylon-app).
  *
  * Generates a workspace with two packages:
  *   - api/ — Pylon backend (schema + functions; runs `pylon dev` from
@@ -24,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.14";
+const PYLON_VERSION = "0.3.15";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
@@ -42,7 +43,7 @@ const flags = {
 };
 
 if (flags.help) {
-	process.stdout.write(`\nUsage: npm create pylon [name] [--bun|--pnpm|--yarn|--npm] [--skip-install]\n\n`);
+	process.stdout.write(`\nUsage: npm create pylon-app [name] [--bun|--pnpm|--yarn|--npm] [--skip-install]\n\n`);
 	exit(0);
 }
 
