@@ -5,10 +5,10 @@
  * Run via `npm create @pylonsync/pylon@latest [name]` (or yarn/pnpm/bun
  * create @pylonsync/pylon).
  *
- * Generates a workspace with two packages:
- *   - api/ — Pylon backend (schema + functions; runs `pylon dev` from
- *     the @pylonsync/cli npm package, no global binary required)
- *   - web/ — Next.js 16 + React 19 frontend wired to @pylonsync/react
+ * Generates a workspace with three packages under apps/* + packages/*:
+ *   - apps/api   — Pylon backend (schema + functions/* handlers).
+ *   - apps/web   — Next.js 16 + React 19 + Tailwind v4 frontend.
+ *   - packages/ui — shared shadcn-style UI primitives consumed by web.
  *
  * Node-runnable (no Bun required) so `npm create` works for every
  * package manager. Uses only Node-builtin APIs — no runtime deps.
@@ -25,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.16";
+const PYLON_VERSION = "0.3.17";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
@@ -86,11 +86,11 @@ writeJson("package.json", {
 	name: projectName,
 	private: true,
 	type: "module",
-	workspaces: ["api", "web"],
+	workspaces: ["apps/*", "packages/*"],
 	scripts: {
 		dev: "npm-run-all --parallel dev:api dev:web",
-		"dev:api": "npm --workspace api run dev",
-		"dev:web": "npm --workspace web run dev",
+		"dev:api": "npm --workspace apps/api run dev",
+		"dev:web": "npm --workspace apps/web run dev",
 		build: "npm --workspaces run build --if-present",
 	},
 	devDependencies: {
@@ -107,8 +107,8 @@ out/
 .env.local
 *.db
 *.db-journal
-api/pylon.manifest.json
-api/pylon.client.ts
+apps/api/pylon.manifest.json
+apps/api/pylon.client.ts
 `);
 
 write(".env.example", `# Backend port the Pylon control plane listens on.
@@ -126,7 +126,33 @@ write(
 	"README.md",
 	`# ${projectName}
 
-Realtime backend + Next.js dashboard, scaffolded by [create-pylon](https://npmjs.com/create-pylon).
+Realtime backend + Next.js dashboard, scaffolded by [@pylonsync/create-pylon](https://npmjs.com/@pylonsync/create-pylon).
+
+## Layout
+
+\`\`\`
+apps/
+  api/       Pylon backend — schema, policies, function handlers
+    schema.ts
+    functions/
+      listTodos.ts        live query handler
+      addTodo.ts          mutation handler
+
+  web/       Next.js 16 + React 19 + Tailwind v4 frontend
+    src/
+      app/
+        layout.tsx
+        page.tsx          server component → fetches initial todos
+        components/
+          TodoList.tsx    client component → optimistic add
+      lib/
+        pylon.ts          cookie-attached fetch helper
+
+packages/
+  ui/        Shared shadcn-style primitives (Button, Input, etc.)
+    src/
+      button.tsx, input.tsx, card.tsx, ...
+\`\`\`
 
 ## Getting started
 
@@ -137,31 +163,16 @@ ${flags.pm === "npm" ? "npm run dev" : `${flags.pm} run dev`}
 
 That spins up two processes:
 
-- **api** on http://localhost:4321 — Pylon control plane (schema, queries,
-  mutations, live sync, auth)
-- **web** on http://localhost:3000 — Next.js 16 frontend wired to the API
-  via [\`@pylonsync/react\`](https://npmjs.com/package/@pylonsync/react)
-
-## Project layout
-
-\`\`\`
-api/
-  schema.ts         entities + policies + manifest
-  functions/        TS query / mutation / action handlers
-  pylon.manifest.json   (codegen — gitignored)
-  pylon.client.ts       (typed client codegen — gitignored)
-
-web/
-  src/app/          Next.js app-router pages
-  src/lib/pylon.ts  Pylon server helper (cookie-attached fetches)
-\`\`\`
+- **api** on http://localhost:4321 — Pylon control plane
+- **web** on http://localhost:3000 — Next.js frontend wired via
+  [\`@pylonsync/next\`](https://npmjs.com/@pylonsync/next)
 
 ## What to do next
 
-- Edit \`api/schema.ts\` to add your entities + policies.
-- Add TS handlers to \`api/functions/\` — they're auto-discovered.
-- Edit \`web/src/app/page.tsx\` — it uses the typed client codegen
-  produced from your manifest.
+- Edit \`apps/api/schema.ts\` to add entities + policies.
+- Add handlers under \`apps/api/functions/\` — auto-discovered by name.
+- Drop new UI primitives into \`packages/ui/src/\`; import them from
+  any app via \`import { Button } from "@${projectName}/ui";\`.
 
 ## Docs
 
@@ -170,11 +181,11 @@ web/
 );
 
 // ---------------------------------------------------------------------------
-// api/ — the Pylon control plane
+// apps/api — Pylon backend
 // ---------------------------------------------------------------------------
 
-writeJson("api/package.json", {
-	name: `${projectName}-api`,
+writeJson("apps/api/package.json", {
+	name: `@${projectName}/api`,
 	version: "0.0.1",
 	private: true,
 	type: "module",
@@ -194,7 +205,7 @@ writeJson("api/package.json", {
 	},
 });
 
-writeJson("api/tsconfig.json", {
+writeJson("apps/api/tsconfig.json", {
 	compilerOptions: {
 		target: "ES2022",
 		module: "ESNext",
@@ -208,9 +219,18 @@ writeJson("api/tsconfig.json", {
 	include: ["schema.ts", "functions/**/*.ts"],
 });
 
+// Schema declares NAMES only — the SDK's query/action/mutation are
+// pure manifest declarations. Handler code lives under functions/*.
 write(
-	"api/schema.ts",
-	`import { entity, field, defineRoute, query, action, policy, buildManifest } from "@pylonsync/sdk";
+	"apps/api/schema.ts",
+	`import {
+\tentity,
+\tfield,
+\tquery,
+\taction,
+\tpolicy,
+\tbuildManifest,
+} from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -223,32 +243,18 @@ const Todo = entity("Todo", {
 });
 
 // ---------------------------------------------------------------------------
-// Queries / mutations
+// Function declarations — names only. Implementations live under
+// functions/<name>.ts and are auto-discovered by the runtime.
 // ---------------------------------------------------------------------------
 
-const listTodos = query("listTodos", {
-\thandler: \`
-\t\tasync (ctx) => {
-\t\t\treturn await ctx.db.query("Todo", { $order: { createdAt: "desc" } });
-\t\t}
-\t\`,
-});
+const listTodos = query("listTodos");
 
 const addTodo = action("addTodo", {
-\targs: { title: { type: "string" } },
-\thandler: \`
-\t\tasync (ctx, args) => {
-\t\t\treturn await ctx.db.insert("Todo", {
-\t\t\t\ttitle: args.title,
-\t\t\t\tdone: false,
-\t\t\t\tcreatedAt: new Date().toISOString(),
-\t\t\t});
-\t\t}
-\t\`,
+\tinput: [{ name: "title", type: "string" }],
 });
 
 // ---------------------------------------------------------------------------
-// Policies — wide-open by default. Tighten before production.
+// Policies — wide-open by default. Tighten for production.
 // ---------------------------------------------------------------------------
 
 const todoPolicy = policy({
@@ -261,7 +267,7 @@ const todoPolicy = policy({
 });
 
 // ---------------------------------------------------------------------------
-// Manifest — codegen reads this and emits pylon.manifest.json
+// Manifest — pylon codegen reads this and emits pylon.manifest.json
 // ---------------------------------------------------------------------------
 
 export default buildManifest({
@@ -276,12 +282,240 @@ export default buildManifest({
 `,
 );
 
+write(
+	"apps/api/functions/listTodos.ts",
+	`import { query } from "@pylonsync/functions";
+
+/**
+ * Live query — every Todo, newest first. The Pylon runtime
+ * subscribes the calling client to row-change events so any
+ * \`useQuery("Todo")\` consumer auto-refreshes when this list
+ * changes.
+ */
+export default query({
+\targs: {},
+\tasync handler(ctx) {
+\t\treturn await ctx.db.query("Todo", { $order: { createdAt: "desc" } });
+\t},
+});
+`,
+);
+
+write(
+	"apps/api/functions/addTodo.ts",
+	`import { action, v } from "@pylonsync/functions";
+
+/**
+ * Insert a new Todo. Runs as an action (not a mutation) so the
+ * client can call it via POST /api/fn/addTodo and get the
+ * inserted row back synchronously. The change-event broadcast
+ * the runtime emits for the insert is what wakes up
+ * \`useQuery("Todo")\` consumers without an explicit refetch.
+ */
+export default action({
+\targs: { title: v.string() },
+\tasync handler(ctx, args: { title: string }) {
+\t\tconst id = await ctx.db.insert("Todo", {
+\t\t\ttitle: args.title,
+\t\t\tdone: false,
+\t\t\tcreatedAt: new Date().toISOString(),
+\t\t});
+\t\treturn await ctx.db.get("Todo", id);
+\t},
+});
+`,
+);
+
 // ---------------------------------------------------------------------------
-// web/ — Next.js 16 + React 19 + Tailwind v4 + @pylonsync/react
+// packages/ui — shared shadcn-style primitives
 // ---------------------------------------------------------------------------
 
-writeJson("web/package.json", {
-	name: `${projectName}-web`,
+writeJson("packages/ui/package.json", {
+	name: `@${projectName}/ui`,
+	version: "0.0.1",
+	private: true,
+	type: "module",
+	main: "src/index.ts",
+	types: "src/index.ts",
+	exports: {
+		".": "./src/index.ts",
+		"./button": "./src/button.tsx",
+		"./input": "./src/input.tsx",
+		"./card": "./src/card.tsx",
+		"./cn": "./src/cn.ts",
+	},
+	dependencies: {
+		clsx: "^2.1.0",
+		"tailwind-merge": "^2.5.0",
+	},
+	peerDependencies: {
+		react: "^19.0.0",
+	},
+	devDependencies: {
+		"@types/react": "^19.0.0",
+		typescript: "^5.5.0",
+	},
+});
+
+writeJson("packages/ui/tsconfig.json", {
+	compilerOptions: {
+		target: "ES2022",
+		lib: ["dom", "esnext"],
+		jsx: "preserve",
+		module: "ESNext",
+		moduleResolution: "Bundler",
+		strict: true,
+		skipLibCheck: true,
+		noEmit: true,
+		esModuleInterop: true,
+		allowSyntheticDefaultImports: true,
+	},
+	include: ["src/**/*.ts", "src/**/*.tsx"],
+});
+
+write(
+	"packages/ui/src/cn.ts",
+	`import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/**
+ * Tailwind-aware class merger. Last-class-wins semantics so a
+ * caller's \`className\` reliably overrides a default in a UI
+ * primitive (e.g. <Button className="bg-red-500"> beats the
+ * primitive's bg-neutral-900 base).
+ */
+export function cn(...inputs: ClassValue[]): string {
+\treturn twMerge(clsx(inputs));
+}
+`,
+);
+
+write(
+	"packages/ui/src/button.tsx",
+	`import * as React from "react";
+import { cn } from "./cn";
+
+type Variant = "default" | "primary" | "ghost";
+type Size = "sm" | "md";
+
+const variants: Record<Variant, string> = {
+\tdefault:
+\t\t"bg-neutral-100 hover:bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-100",
+\tprimary:
+\t\t"bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900",
+\tghost:
+\t\t"bg-transparent hover:bg-neutral-100 text-neutral-700 dark:hover:bg-neutral-800 dark:text-neutral-300",
+};
+
+const sizes: Record<Size, string> = {
+\tsm: "h-8 px-3 text-[13px]",
+\tmd: "h-9 px-4 text-sm",
+};
+
+export interface ButtonProps
+\textends React.ButtonHTMLAttributes<HTMLButtonElement> {
+\tvariant?: Variant;
+\tsize?: Size;
+}
+
+export function Button({
+\tclassName,
+\tvariant = "default",
+\tsize = "md",
+\t...props
+}: ButtonProps) {
+\treturn (
+\t\t<button
+\t\t\tclassName={cn(
+\t\t\t\t"inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
+\t\t\t\tvariants[variant],
+\t\t\t\tsizes[size],
+\t\t\t\tclassName,
+\t\t\t)}
+\t\t\t{...props}
+\t\t/>
+\t);
+}
+`,
+);
+
+write(
+	"packages/ui/src/input.tsx",
+	`import * as React from "react";
+import { cn } from "./cn";
+
+export type InputProps = React.InputHTMLAttributes<HTMLInputElement>;
+
+export const Input = React.forwardRef<HTMLInputElement, InputProps>(
+\tfunction Input({ className, ...props }, ref) {
+\t\treturn (
+\t\t\t<input
+\t\t\t\tref={ref}
+\t\t\t\tclassName={cn(
+\t\t\t\t\t"flex h-9 w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50",
+\t\t\t\t\tclassName,
+\t\t\t\t)}
+\t\t\t\t{...props}
+\t\t\t/>
+\t\t);
+\t},
+);
+`,
+);
+
+write(
+	"packages/ui/src/card.tsx",
+	`import * as React from "react";
+import { cn } from "./cn";
+
+export function Card({
+\tclassName,
+\t...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+\treturn (
+\t\t<div
+\t\t\tclassName={cn(
+\t\t\t\t"rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900",
+\t\t\t\tclassName,
+\t\t\t)}
+\t\t\t{...props}
+\t\t/>
+\t);
+}
+
+export function CardHeader({
+\tclassName,
+\t...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+\treturn (
+\t\t<div className={cn("p-5 border-b border-neutral-200 dark:border-neutral-800", className)} {...props} />
+\t);
+}
+
+export function CardContent({
+\tclassName,
+\t...props
+}: React.HTMLAttributes<HTMLDivElement>) {
+\treturn <div className={cn("p-5", className)} {...props} />;
+}
+`,
+);
+
+write(
+	"packages/ui/src/index.ts",
+	`export { cn } from "./cn";
+export { Button, type ButtonProps } from "./button";
+export { Input, type InputProps } from "./input";
+export { Card, CardHeader, CardContent } from "./card";
+`,
+);
+
+// ---------------------------------------------------------------------------
+// apps/web — Next.js 16 + React 19 + Tailwind v4
+// ---------------------------------------------------------------------------
+
+writeJson("apps/web/package.json", {
+	name: `@${projectName}/web`,
 	version: "0.0.1",
 	private: true,
 	type: "module",
@@ -292,6 +526,7 @@ writeJson("web/package.json", {
 		lint: "next lint",
 	},
 	dependencies: {
+		[`@${projectName}/ui`]: "workspace:*",
 		"@pylonsync/sdk": `^${PYLON_VERSION}`,
 		"@pylonsync/react": `^${PYLON_VERSION}`,
 		"@pylonsync/next": `^${PYLON_VERSION}`,
@@ -300,16 +535,16 @@ writeJson("web/package.json", {
 		"react-dom": "^19.0.0",
 	},
 	devDependencies: {
+		"@types/node": "^20.0.0",
 		"@types/react": "^19.0.0",
 		"@types/react-dom": "^19.0.0",
-		"@types/node": "^20.0.0",
 		"@tailwindcss/postcss": "^4.0.0",
 		tailwindcss: "^4.0.0",
 		typescript: "^5.5.0",
 	},
 });
 
-writeJson("web/tsconfig.json", {
+writeJson("apps/web/tsconfig.json", {
 	compilerOptions: {
 		target: "ES2022",
 		lib: ["dom", "dom.iterable", "esnext"],
@@ -332,16 +567,17 @@ writeJson("web/tsconfig.json", {
 });
 
 write(
-	"web/next.config.ts",
+	"apps/web/next.config.ts",
 	`import type { NextConfig } from "next";
 
 /**
  * Pylon's typed client + functions packages re-export across the
- * server/client boundary; \`transpilePackages\` makes Next bundle them
- * cleanly from the workspace.
+ * server/client boundary AND the workspace UI package ships TSX.
+ * \`transpilePackages\` makes Next bundle them cleanly.
  */
 const config: NextConfig = {
 \ttranspilePackages: [
+\t\t"@${projectName}/ui",
 \t\t"@pylonsync/sdk",
 \t\t"@pylonsync/react",
 \t\t"@pylonsync/next",
@@ -355,7 +591,7 @@ export default config;
 );
 
 write(
-	"web/postcss.config.mjs",
+	"apps/web/postcss.config.mjs",
 	`/** Tailwind v4 PostCSS pipeline. */
 export default {
 \tplugins: { "@tailwindcss/postcss": {} },
@@ -364,8 +600,9 @@ export default {
 );
 
 write(
-	"web/src/app/globals.css",
+	"apps/web/src/app/globals.css",
 	`@import "tailwindcss";
+@source "../../../../packages/ui/src/**/*.{ts,tsx}";
 
 :root {
 \tcolor-scheme: light dark;
@@ -377,7 +614,7 @@ body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
 );
 
 write(
-	"web/src/app/layout.tsx",
+	"apps/web/src/app/layout.tsx",
 	`import type { Metadata } from "next";
 import "./globals.css";
 
@@ -403,7 +640,7 @@ export default function RootLayout({
 );
 
 write(
-	"web/src/lib/pylon.ts",
+	"apps/web/src/lib/pylon.ts",
 	`import { createPylonServer } from "@pylonsync/next/server";
 
 /**
@@ -422,9 +659,9 @@ export const pylon = createPylonServer({
 );
 
 write(
-	"web/src/app/page.tsx",
+	"apps/web/src/app/page.tsx",
 	`import { pylon } from "@/lib/pylon";
-import { TodoList } from "./TodoList";
+import { TodoList } from "./components/TodoList";
 
 // Force dynamic — every render reads the live todo list from Pylon.
 // Without this Next would try to statically generate the page and
@@ -440,7 +677,11 @@ type Todo = {
 
 export default async function HomePage() {
 \tconst todos = await pylon
-\t\t.json<Todo[]>("/api/fn/listTodos", { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })
+\t\t.json<Todo[]>("/api/fn/listTodos", {
+\t\t\tmethod: "POST",
+\t\t\tbody: "{}",
+\t\t\theaders: { "Content-Type": "application/json" },
+\t\t})
 \t\t.catch(() => [] as Todo[]);
 
 \treturn (
@@ -449,10 +690,14 @@ export default async function HomePage() {
 \t\t\t\t<h1 className="text-3xl font-semibold tracking-tight">${projectName}</h1>
 \t\t\t\t<p className="text-sm text-neutral-500 dark:text-neutral-400">
 \t\t\t\t\tA Pylon-powered realtime app. Edit{" "}
-\t\t\t\t\t<code className="font-mono text-xs">api/schema.ts</code> to change the
-\t\t\t\t\tdata model or{" "}
-\t\t\t\t\t<code className="font-mono text-xs">web/src/app/page.tsx</code> for
-\t\t\t\t\tthe UI.
+\t\t\t\t\t<code className="font-mono text-xs">apps/api/schema.ts</code> to change
+\t\t\t\t\tthe data model,{" "}
+\t\t\t\t\t<code className="font-mono text-xs">apps/api/functions/</code> to add
+\t\t\t\t\thandlers, or{" "}
+\t\t\t\t\t<code className="font-mono text-xs">
+\t\t\t\t\t\tapps/web/src/app/components/TodoList.tsx
+\t\t\t\t\t</code>{" "}
+\t\t\t\t\tfor the UI.
 \t\t\t\t</p>
 \t\t\t</header>
 
@@ -464,10 +709,12 @@ export default async function HomePage() {
 );
 
 write(
-	"web/src/app/TodoList.tsx",
+	"apps/web/src/app/components/TodoList.tsx",
 	`"use client";
 
 import { useState, useTransition } from "react";
+import { Button } from "@${projectName}/ui";
+import { Input } from "@${projectName}/ui";
 
 type Todo = {
 \tid: string;
@@ -478,9 +725,9 @@ type Todo = {
 
 /**
  * Optimistic todo list — local state mirrors the server-fetched
- * initial list and refreshes on every successful add. For full
- * real-time updates wire \`@pylonsync/react\`'s \`useQuery\` hook
- * (see https://pylonsync.com/docs/clients/react).
+ * initial list and prepends new rows on successful add. Wire
+ * \`@pylonsync/react\`'s \`useQuery\` hook for full realtime updates
+ * that re-render on every change-event push.
  */
 export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \tconst [todos, setTodos] = useState(initialTodos);
@@ -513,20 +760,20 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t\t}}
 \t\t\t\tclassName="flex gap-2"
 \t\t\t>
-\t\t\t\t<input
+\t\t\t\t<Input
 \t\t\t\t\tvalue={title}
 \t\t\t\t\tonChange={(e) => setTitle(e.target.value)}
 \t\t\t\t\tplaceholder="What needs doing?"
-\t\t\t\t\tclassName="flex-1 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
 \t\t\t\t\tdisabled={pending}
+\t\t\t\t\tclassName="flex-1"
 \t\t\t\t/>
-\t\t\t\t<button
+\t\t\t\t<Button
 \t\t\t\t\ttype="submit"
-\t\t\t\t\tclassName="rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
+\t\t\t\t\tvariant="primary"
 \t\t\t\t\tdisabled={pending || !title.trim()}
 \t\t\t\t>
 \t\t\t\t\tAdd
-\t\t\t\t</button>
+\t\t\t\t</Button>
 \t\t\t</form>
 
 \t\t\t{todos.length === 0 ? (
@@ -554,7 +801,7 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 );
 
 write(
-	"web/next-env.d.ts",
+	"apps/web/next-env.d.ts",
 	`/// <reference types="next" />
 /// <reference types="next/image-types/global" />
 `,
@@ -605,11 +852,15 @@ console.log(`
   → api  http://localhost:4321  (Pylon control plane)
   → web  http://localhost:3000  (Next.js dashboard)
 
+Layout:
+  apps/api    schema + functions/ handlers
+  apps/web    Next.js 16 + React 19 + Tailwind v4
+  packages/ui shared shadcn-style primitives
+
 Next:
-  - Edit api/schema.ts to add entities + policies.
-  - Drop TypeScript handlers into api/functions/ — auto-discovered.
-  - The Next page at web/src/app/page.tsx talks to the API via the
-    cookie-attached helper in web/src/lib/pylon.ts.
+  - Edit apps/api/schema.ts to add entities + policies.
+  - Drop handlers into apps/api/functions/ — auto-discovered by name.
+  - Components go in apps/web/src/app/components/.
 
 Docs: https://pylonsync.com/docs
 `);

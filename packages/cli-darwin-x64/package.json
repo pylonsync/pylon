@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli-darwin-x64",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "description": "Pylon CLI binary for darwin-x64. Installed automatically by @pylonsync/cli on Intel Macs.",
   "license": "MIT",
   "homepage": "https://pylonsync.com",
