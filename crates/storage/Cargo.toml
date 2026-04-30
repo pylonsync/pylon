@@ -14,12 +14,14 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.17" }
-pylon-http = { path = "../http", version = "0.3.17" }
+pylon-kernel = { path = "../core", version = "0.3.18" }
+pylon-http = { path = "../http", version = "0.3.18" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
 postgres = { workspace = true, optional = true }
+postgres-native-tls = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
 bytes = { version = "1", optional = true }
 chrono = { workspace = true, optional = true }
 tracing = { workspace = true }
@@ -28,5 +30,5 @@ ureq = { workspace = true }
 
 [features]
 default = []
-postgres-live = ["postgres", "bytes", "chrono"]
+postgres-live = ["postgres", "postgres-native-tls", "native-tls", "bytes", "chrono"]
 

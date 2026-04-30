@@ -697,6 +697,152 @@ pub mod live {
         ColumnSnapshot, IndexSnapshot, SchemaSnapshot, StorageAdapter, StorageError, TableSnapshot,
     };
 
+    /// SSL parsing result for `parse_pg_url_ssl`. We need both the
+    /// cleaned-up URL (libpq-only params stripped) and the boolean
+    /// "should we use TLS for this connection" so the connect path
+    /// can pick between `NoTls` and `MakeTlsConnector`.
+    pub(super) struct PgUrlSsl {
+        pub use_tls: bool,
+    }
+
+    /// Pre-process a Postgres URL: strip libpq-specific query params
+    /// the Rust `postgres` crate's URL parser doesn't accept, and
+    /// figure out whether TLS should be enabled for the connection.
+    ///
+    /// Recognizes:
+    ///   - sslmode=disable / prefer / allow → no TLS
+    ///   - sslmode=require / verify-ca / verify-full → TLS
+    ///   - sslrootcert=system → TLS, use OS CA store (handled by
+    ///     `native-tls` automatically; we just record the intent)
+    ///   - sslrootcert=<path> → TLS, but the path is currently
+    ///     ignored — `native-tls` reads system roots only. Logged
+    ///     as a one-time warning so operators see the gap.
+    ///
+    /// Anything we don't understand is dropped from the URL silently
+    /// (defense against future libpq additions confusing the parser).
+    pub(super) fn parse_pg_url_ssl(url: &str) -> (String, PgUrlSsl) {
+        let (base, query) = match url.find('?') {
+            Some(idx) => (&url[..idx], &url[idx + 1..]),
+            None => return (url.to_string(), PgUrlSsl { use_tls: false }),
+        };
+
+        let mut use_tls = false;
+        let mut kept: Vec<String> = Vec::new();
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = match pair.find('=') {
+                Some(i) => (&pair[..i], &pair[i + 1..]),
+                None => (pair, ""),
+            };
+            match k {
+                "sslmode" => match v.to_ascii_lowercase().as_str() {
+                    "disable" | "allow" => {
+                        // Caller said "no TLS" — pass through to the
+                        // postgres crate, which knows `disable`.
+                        kept.push("sslmode=disable".to_string());
+                    }
+                    "prefer" => {
+                        // Postgres crate's default; let it through.
+                        kept.push("sslmode=prefer".to_string());
+                    }
+                    "require" | "verify-ca" | "verify-full" | "" => {
+                        // All the "use TLS" modes. Rust crate only
+                        // accepts `require`; verify-* would be
+                        // rejected. Normalize to `require` and let
+                        // our TLS connector handle cert verification.
+                        use_tls = true;
+                        kept.push("sslmode=require".to_string());
+                    }
+                    other => {
+                        tracing::warn!(
+                            "[pg] unknown sslmode='{other}' — defaulting to require + TLS"
+                        );
+                        use_tls = true;
+                        kept.push("sslmode=require".to_string());
+                    }
+                },
+                "sslrootcert" => {
+                    // Either "system" (use OS roots — that's what
+                    // native-tls does anyway) or a path (which we
+                    // can't honor without bringing in openssl). Log
+                    // and drop in both cases; TLS still happens.
+                    if v != "system" && !v.is_empty() {
+                        tracing::warn!(
+                            "[pg] sslrootcert={v} ignored — native-tls uses system roots"
+                        );
+                    }
+                    use_tls = true;
+                }
+                _ => {
+                    // Forward everything else (search_path, application_name,
+                    // connect_timeout, etc.) so libpq-style URLs that work
+                    // for the rest of the world keep working here.
+                    kept.push(pair.to_string());
+                }
+            }
+        }
+
+        let cleaned = if kept.is_empty() {
+            base.to_string()
+        } else {
+            format!("{}?{}", base, kept.join("&"))
+        };
+        (cleaned, PgUrlSsl { use_tls })
+    }
+
+    #[cfg(test)]
+    mod url_tests {
+        use super::parse_pg_url_ssl;
+
+        #[test]
+        fn strips_libpq_only_sslmode_verify_full() {
+            let (cleaned, ssl) = parse_pg_url_ssl(
+                "postgres://u:p@h:5432/db?sslmode=verify-full&sslrootcert=system",
+            );
+            assert!(ssl.use_tls);
+            // verify-full normalized to require; sslrootcert dropped.
+            assert_eq!(cleaned, "postgres://u:p@h:5432/db?sslmode=require");
+        }
+
+        #[test]
+        fn passes_through_disable() {
+            let (cleaned, ssl) = parse_pg_url_ssl("postgres://h/db?sslmode=disable");
+            assert!(!ssl.use_tls);
+            assert_eq!(cleaned, "postgres://h/db?sslmode=disable");
+        }
+
+        #[test]
+        fn no_query_string_no_tls() {
+            let (cleaned, ssl) = parse_pg_url_ssl("postgres://h/db");
+            assert!(!ssl.use_tls);
+            assert_eq!(cleaned, "postgres://h/db");
+        }
+
+        #[test]
+        fn unknown_params_pass_through() {
+            let (cleaned, _) = parse_pg_url_ssl(
+                "postgres://h/db?application_name=pylon&connect_timeout=5",
+            );
+            assert!(cleaned.contains("application_name=pylon"));
+            assert!(cleaned.contains("connect_timeout=5"));
+        }
+
+        #[test]
+        fn sslrootcert_alone_enables_tls() {
+            // Rare but valid — sslrootcert=system implies TLS even
+            // without an explicit sslmode.
+            let (cleaned, ssl) = parse_pg_url_ssl(
+                "postgres://h/db?sslrootcert=system",
+            );
+            assert!(ssl.use_tls);
+            // No sslmode synthesized — the postgres crate defaults
+            // to `prefer` which happily upgrades to our TLS connector.
+            assert_eq!(cleaned, "postgres://h/db");
+        }
+    }
+
     /// A live Postgres adapter with a real database connection.
     pub struct LivePostgresAdapter {
         client: postgres::Client,
@@ -715,12 +861,39 @@ pub mod live {
         }
 
         /// Connect to a Postgres database.
+        ///
+        /// Honors libpq-style URL params the Rust postgres crate doesn't
+        /// natively understand:
+        ///   - `sslmode=verify-full`, `verify-ca`, `require` → use TLS
+        ///     via `postgres-native-tls`. The Rust crate only knows
+        ///     `disable`, `prefer`, `require` — it rejects the libpq
+        ///     extras with "invalid connection string".
+        ///   - `sslrootcert=system` → trust the OS CA store (the
+        ///     `native-tls` connector reads it via SecurityFramework /
+        ///     SChannel / openssl). `sslrootcert=<path>` is not yet
+        ///     supported and falls back to system roots with a warning.
+        ///
+        /// Strips the libpq-only params from the URL before passing to
+        /// the postgres crate's parser, so it doesn't choke. Common
+        /// real-world example that was failing pre-fix: Fly Postgres
+        /// emits `?sslmode=verify-full&sslrootcert=system` URLs.
         pub fn connect(url: &str) -> Result<Self, StorageError> {
-            let client =
-                postgres::Client::connect(url, postgres::NoTls).map_err(|e| StorageError {
-                    code: "PG_CONNECT_FAILED".into(),
-                    message: format!("Failed to connect to Postgres: {e}"),
-                })?;
+            let (cleaned, ssl) = parse_pg_url_ssl(url);
+            let result = if ssl.use_tls {
+                let connector =
+                    native_tls::TlsConnector::new().map_err(|e| StorageError {
+                        code: "PG_TLS_INIT_FAILED".into(),
+                        message: format!("Failed to initialize TLS: {e}"),
+                    })?;
+                let tls = postgres_native_tls::MakeTlsConnector::new(connector);
+                postgres::Client::connect(&cleaned, tls)
+            } else {
+                postgres::Client::connect(&cleaned, postgres::NoTls)
+            };
+            let client = result.map_err(|e| StorageError {
+                code: "PG_CONNECT_FAILED".into(),
+                message: format!("Failed to connect to Postgres: {e}"),
+            })?;
             Ok(Self { client })
         }
 
