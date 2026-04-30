@@ -5,7 +5,7 @@ import { CodeLines, type Lang } from "@/lib/highlight";
 
 function InstallCmd() {
   const [copied, setCopied] = React.useState(false);
-  const cmd = "npm create pylon-app@latest";
+  const cmd = "npm create @pylonsync/pylon@latest";
   const onClick = () => {
     navigator.clipboard?.writeText(cmd);
     setCopied(true);
@@ -184,7 +184,7 @@ function ChatDemo() {
 
 function HeroTerminal() {
   const lines = [
-    { t: "prompt", v: "❯ ", c: "npm create pylon-app@latest my-app" },
+    { t: "prompt", v: "❯ ", c: "npm create @pylonsync/pylon@latest my-app" },
     { t: "out", v: "  Creating my-app in ./my-app" },
     { t: "out-ok", v: "  ✓ Scaffolded api/ + web/ + shared schema" },
     { t: "prompt", v: "❯ ", c: "cd my-app && npm run dev" },

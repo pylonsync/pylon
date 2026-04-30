@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli-linux-x64",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Pylon CLI binary for linux-x64. Installed automatically by @pylonsync/cli on x86_64 Linux (most VPS, Fly, ECS, etc.).",
   "license": "MIT",
   "homepage": "https://pylonsync.com",

@@ -147,6 +147,11 @@ jobs:
           # catches that BEFORE any package gets published, so the release
           # tag can be reverted and re-cut without leaving the registry
           # in a broken half-published state.
+          # `packages/create-pylon` publishes as @pylonsync/create-pylon —
+          # scoped name so the existing @pylonsync/* automation token
+          # has rights to publish it. End users invoke via
+          # `npm create @pylonsync/pylon@latest` (npm rewrites
+          # `@pylonsync/pylon` to `@pylonsync/create-pylon`).
           PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/next packages/create-pylon)
           REFERENCE_VERSION=""
           for pkg in "${PYLON_PKGS[@]}"; do

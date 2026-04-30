@@ -1,13 +1,13 @@
 {
-  "name": "create-pylon-app",
-  "version": "0.3.15",
-  "description": "Scaffold a new Pylon app — realtime backend + Next.js frontend in one command. Run via `npm create pylon-app@latest`.",
+  "name": "@pylonsync/create-pylon",
+  "version": "0.3.16",
+  "description": "Scaffold a new Pylon app — realtime backend + Next.js frontend in one command. Run via `npm create @pylonsync/pylon@latest`.",
   "publishConfig": {
     "access": "public"
   },
   "type": "module",
   "bin": {
-    "create-pylon-app": "./bin/create-pylon.js"
+    "create-pylon": "./bin/create-pylon.js"
   },
   "files": [
     "bin"
