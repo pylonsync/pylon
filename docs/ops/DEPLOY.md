@@ -30,8 +30,12 @@ Optional:
 
 ```sh
 PYLON_JOBS_DB=/var/lib/pylon/jobs.db  # durable job queue
-PYLON_OAUTH_GOOGLE_CLIENT_ID=...         # enable Google OAuth
-PYLON_OAUTH_GITHUB_CLIENT_ID=...         # enable GitHub OAuth
+PYLON_OAUTH_GOOGLE_CLIENT_ID=...         # 25 builtin providers + any OIDC IdP
+PYLON_OAUTH_GITHUB_CLIENT_ID=...         # see /auth/oauth for the full list
+# Apple, Microsoft, Discord, Slack, Spotify, Twitch, Twitter, LinkedIn,
+# Facebook, GitLab, Reddit, Notion, Linear, Vercel, Zoom, Salesforce,
+# Atlassian, Figma, Dropbox, TikTok, PayPal, Kick, Roblox.
+# OIDC: PYLON_OAUTH_<NAME>_OIDC_ISSUER=https://issuer (Auth0/Okta/etc).
 PYLON_EMAIL_PROVIDER=stack0              # or sendgrid | resend | webhook
 PYLON_EMAIL_API_KEY=sk_live_...          # provider API key
 PYLON_EMAIL_FROM=noreply@yourdomain.com  # verified sender

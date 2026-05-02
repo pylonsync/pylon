@@ -652,8 +652,24 @@ impl OAuthConfig {
             } => {
                 let provider_account_id = json_pointer_string(&parsed, id_path)
                     .ok_or_else(|| format!("no id at {id_path} in userinfo"))?;
-                let email = json_pointer_string(&parsed, email_path)
+                let raw_email = json_pointer_string(&parsed, email_path)
                     .ok_or_else(|| format!("no email at {email_path} in userinfo"))?;
+                // Twitter/Reddit don't expose real emails — they map a
+                // username into the email slot. Tag it so account
+                // policies can distinguish "real verified email" from
+                // "we made this up." `.invalid` is reserved by RFC 6761.
+                let email = if !raw_email.contains('@') {
+                    let domain = match self.provider.as_str() {
+                        "twitter" => "x.invalid",
+                        "reddit" => "reddit.invalid",
+                        other => return Err(format!(
+                            "{other}: userinfo `email` field is not an email address (got {raw_email:?}); refusing to synthesize",
+                        )),
+                    };
+                    format!("{raw_email}@{domain}")
+                } else {
+                    raw_email
+                };
                 let name = name_path.and_then(|p| json_pointer_string(&parsed, p));
                 Ok(UserInfo {
                     provider: self.provider.clone(),
@@ -735,47 +751,133 @@ fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, Stri
 /// of it) on auth failure. Without this, a misconfigured deployment
 /// can leak `client_secret`, the Apple JWT, or even the auth `code`
 /// into the user's browser history and CDN logs.
+///
+/// Covers both shapes echoed by real providers:
+///   - form / query: `client_secret=sk_…`
+///   - JSON: `"client_secret":"sk_…"` (Notion, Atlassian)
 fn sanitize_token_error(err: String) -> String {
-    let mut out = err;
-    for sensitive in [
+    const SENSITIVE: &[&str] = &[
         "client_secret",
         "code_verifier",
         "client_assertion",
         "refresh_token",
         "access_token",
-    ] {
-        // Replace `&client_secret=…&` (or trailing) with redacted
-        // marker. Conservative pattern — collapses any value, even
-        // url-encoded ones.
-        out = redact_param(&out, sensitive);
+        "id_token",
+        // The auth `code` itself is single-use but still sensitive
+        // until the token endpoint consumes it — and many providers
+        // echo it back on a 4xx token-exchange error before the
+        // attacker has had a chance to redeem it.
+        "code",
+    ];
+    let mut out = err;
+    for key in SENSITIVE {
+        out = redact_param_form(&out, key);
+        out = redact_param_json(&out, key);
     }
     out
 }
 
-/// Replace the value of `key=…` (form or query string) with `***`,
-/// terminating at `&`, `\n`, `"`, or end-of-string. Case-sensitive
-/// match for the key prefix; case-insensitive value handling isn't
-/// needed since we only redact known sensitive parameter names.
-fn redact_param(input: &str, key: &str) -> String {
-    let needle_eq = format!("{key}=");
+/// Replace the value of `key=…` (form/query string) with `***`,
+/// terminating at any of `& \n " '`. UTF-8 safe — uses `char_indices`
+/// so a stray multibyte character before a sensitive key won't panic.
+fn redact_param_form(input: &str, key: &str) -> String {
+    let needle = format!("{key}=");
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
-    let bytes = input.as_bytes();
-    while i < bytes.len() {
-        if input[i..].starts_with(&needle_eq) {
-            out.push_str(&needle_eq);
+    while i < input.len() {
+        if input[i..].starts_with(&needle) {
+            out.push_str(&needle);
             out.push_str("***");
-            i += needle_eq.len();
-            // Skip until terminator.
-            while i < bytes.len() && !matches!(bytes[i], b'&' | b'\n' | b'"' | b' ') {
-                i += 1;
+            i += needle.len();
+            // Skip until a terminator. char_indices keeps i aligned
+            // to char boundaries.
+            while let Some((rel, ch)) = input[i..].char_indices().next() {
+                if matches!(ch, '&' | '\n' | '"' | ' ' | '\'') {
+                    i += rel;
+                    break;
+                }
+                i += rel + ch.len_utf8();
             }
         } else {
-            // Push one UTF-8 char's worth — input.is_char_boundary
-            // walking would be cleaner, but errors are ASCII-ish
-            // in practice, so byte-by-byte is safe enough.
-            out.push(bytes[i] as char);
-            i += 1;
+            // Advance by one full char to stay UTF-8 aligned.
+            let (_, ch) = input[i..].char_indices().next().expect("non-empty");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Replace the value in `"key":"…"` with `***`. Case-sensitive,
+/// tolerant of whitespace between `:` and the value (per JSON).
+fn redact_param_json(input: &str, key: &str) -> String {
+    let needle = format!("\"{key}\"");
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if !input[i..].starts_with(&needle) {
+            let (_, ch) = input[i..].char_indices().next().expect("non-empty");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        // Found `"key"`. Walk forward over `:` + optional whitespace,
+        // then `"`, then the value, then closing `"`. If anything
+        // is off (not actually a string-valued field) bail and
+        // copy verbatim.
+        let mut j = i + needle.len();
+        // optional whitespace
+        while let Some((_, ch)) = input[j..].char_indices().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            j += ch.len_utf8();
+        }
+        if !input[j..].starts_with(':') {
+            // Not a key-value form (could be in an array, etc.).
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        j += 1;
+        while let Some((_, ch)) = input[j..].char_indices().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            j += ch.len_utf8();
+        }
+        if !input[j..].starts_with('"') {
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        let value_start = j + 1;
+        // Find the closing `"`, honoring `\"` escapes.
+        let mut k = value_start;
+        let mut prev_backslash = false;
+        let mut closing: Option<usize> = None;
+        while k < input.len() {
+            let (_, ch) = input[k..].char_indices().next().expect("non-empty");
+            if ch == '"' && !prev_backslash {
+                closing = Some(k);
+                break;
+            }
+            prev_backslash = ch == '\\' && !prev_backslash;
+            k += ch.len_utf8();
+        }
+        match closing {
+            Some(end) => {
+                out.push_str(&input[i..value_start]);
+                out.push_str("***");
+                out.push('"');
+                i = end + 1;
+            }
+            None => {
+                // Malformed JSON, redact to end of input to be safe.
+                out.push_str(&input[i..value_start]);
+                out.push_str("***");
+                i = input.len();
+            }
         }
     }
     out
@@ -2700,6 +2802,34 @@ mod tests {
         // Non-sensitive context preserved.
         assert!(scrubbed.contains("invalid_grant"));
         assert!(scrubbed.contains("hint=check%20your%20code"));
+    }
+
+    /// P1 (codex round-2): JSON-shaped error bodies (Notion,
+    /// Atlassian) must also have their secret fields redacted.
+    #[test]
+    fn sanitize_token_error_redacts_json_secrets() {
+        let raw = r#"HTTP 400: {"error":"invalid_grant","client_secret":"sk_jsonleak","refresh_token":"rt_abcxyz","id_token":"ey.payload.sig"}"#;
+        let scrubbed = sanitize_token_error(raw.into());
+        assert!(!scrubbed.contains("sk_jsonleak"), "got: {scrubbed}");
+        assert!(!scrubbed.contains("rt_abcxyz"), "got: {scrubbed}");
+        assert!(!scrubbed.contains("ey.payload.sig"), "got: {scrubbed}");
+        assert!(scrubbed.contains(r#""client_secret":"***""#), "got: {scrubbed}");
+        assert!(scrubbed.contains(r#""refresh_token":"***""#), "got: {scrubbed}");
+        assert!(scrubbed.contains(r#""id_token":"***""#), "got: {scrubbed}");
+        assert!(scrubbed.contains("invalid_grant"));
+    }
+
+    /// P2 (codex round-2): redact_param_form must NOT panic on
+    /// multibyte chars before the sensitive key. Earlier byte-index
+    /// implementation hit `panicked at byte index N is not a char
+    /// boundary` on bodies with emoji or non-ASCII text.
+    #[test]
+    fn sanitize_token_error_handles_utf8() {
+        let raw = "HTTP 400: ⚠️ provider says the secret is wrong: client_secret=sk_x";
+        let scrubbed = sanitize_token_error(raw.into());
+        assert!(scrubbed.contains("⚠️"), "non-ASCII chars must survive: {scrubbed}");
+        assert!(!scrubbed.contains("sk_x"));
+        assert!(scrubbed.contains("client_secret=***"));
     }
 
     /// P2: OIDC discovery must respect

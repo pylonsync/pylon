@@ -124,7 +124,7 @@ PYLON_ADMIN_TOKEN=<64+ random hex>     # required for admin endpoints
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db  # persistent sessions
 ```
 
-OAuth (optional):
+OAuth — 25 built-in providers + any OIDC IdP. Set two env vars per provider you want to enable:
 
 ```bash
 PYLON_OAUTH_GOOGLE_CLIENT_ID=...
@@ -134,7 +134,24 @@ PYLON_OAUTH_GOOGLE_REDIRECT=https://yourapp.com/api/auth/callback/google
 PYLON_OAUTH_GITHUB_CLIENT_ID=...
 PYLON_OAUTH_GITHUB_CLIENT_SECRET=...
 PYLON_OAUTH_GITHUB_REDIRECT=https://yourapp.com/api/auth/callback/github
+
+# Apple, Microsoft, Discord, Slack, Spotify, Twitch, Twitter/X,
+# LinkedIn, Facebook, GitLab, Reddit, Notion, Linear, Vercel, Zoom,
+# Salesforce, Atlassian, Figma, Dropbox, TikTok, PayPal, Kick, Roblox
+# — same shape: <PROVIDER>_CLIENT_ID + _CLIENT_SECRET + _REDIRECT.
+
+# Apple needs ES256 signing material:
+PYLON_OAUTH_APPLE_TEAM_ID=ABCDE12345
+PYLON_OAUTH_APPLE_KEY_ID=KEYID12345
+PYLON_OAUTH_APPLE_PRIVATE_KEY=/path/to/AuthKey.p8
+
+# Generic OIDC (Auth0, Okta, Keycloak, Cognito, …):
+PYLON_OAUTH_AUTH0_OIDC_ISSUER=https://acme.auth0.com
+PYLON_OAUTH_AUTH0_CLIENT_ID=...
+PYLON_OAUTH_AUTH0_CLIENT_SECRET=...
 ```
+
+See [OAuth providers](/auth/oauth) for the full list and provider-specific notes.
 
 Email (for magic codes — picks up from environment):
 

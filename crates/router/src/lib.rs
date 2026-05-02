@@ -576,18 +576,20 @@ pub(crate) struct OAuthError {
 /// `oauth_error_message` redirect URLs. Provider error bodies can be
 /// huge or contain echoed-back request fields — keep the redirect
 /// short and safe to log.
+///
+/// MAX is the budget for the *output*, including the ellipsis (3
+/// bytes), so the slice itself caps at MAX-3.
 fn truncate_for_redirect(s: &str) -> String {
     const MAX: usize = 240;
     if s.len() <= MAX {
-        s.to_string()
-    } else {
-        // Be careful with multi-byte UTF-8 boundaries.
-        let mut end = MAX;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
+        return s.to_string();
     }
+    let budget = MAX - "…".len();
+    let mut end = budget;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// session, or a structured error suitable for both JSON (POST) and

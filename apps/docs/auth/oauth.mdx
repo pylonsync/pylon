@@ -1,38 +1,114 @@
 ---
-title: OAuth (Google + GitHub)
-description: "Built-in Google and GitHub sign-in with CSRF-protected state tokens."
+title: OAuth — 25+ providers + OIDC
+description: "Built-in OAuth for Google, GitHub, Apple, Microsoft, Discord, Slack, plus 19 more — and any OpenID Connect provider via discovery."
 ---
 
-Pylon ships native OAuth for Google and GitHub. Users click sign in, get redirected to the provider, come back with a session token. CSRF-protected via single-use state tokens that survive a server restart mid-handshake.
+Pylon ships native OAuth for **25 providers** out of the box, plus **OpenID Connect discovery** for any compliant IdP (Auth0, Okta, Keycloak, Cognito, Logto, Authentik, Zitadel...). Users click sign in, get redirected to the provider, come back with a session token. CSRF-protected via single-use state tokens that survive a server restart mid-handshake. PKCE for providers that require it (Twitter/X, Kick). `response_mode=form_post` for Apple. The provider-specific quirks are handled — you set two env vars per provider.
+
+## Built-in providers
+
+| Provider | id | Notes |
+| --- | --- | --- |
+| Google | `google` | OIDC, `openid email profile` |
+| GitHub | `github` | `user:email`, falls back to `/user/emails` for private addresses |
+| Apple | `apple` | ES256-signed JWT client_secret, `response_mode=form_post`, identity from `id_token` — see [Apple section](#apple) |
+| Microsoft | `microsoft` | Tenant-aware, defaults to `common` |
+| Discord | `discord` | `identify email` |
+| Slack | `slack` | OIDC |
+| Spotify | `spotify` | Basic-auth token endpoint |
+| Twitch | `twitch` | OIDC |
+| Twitter / X | `twitter` | PKCE-required, no email by default |
+| LinkedIn | `linkedin` | OIDC |
+| Facebook | `facebook` | `email public_profile` |
+| GitLab | `gitlab` | OIDC |
+| Reddit | `reddit` | No email exposed — synthesized as `<name>@reddit.invalid` |
+| Notion | `notion` | Basic-auth + JSON body, `Notion-Version` header |
+| Linear | `linear` | GraphQL userinfo |
+| Vercel | `vercel` | — |
+| Zoom | `zoom` | — |
+| Salesforce | `salesforce` | OIDC |
+| Atlassian | `atlassian` | JSON-body token exchange, `audience=api.atlassian.com` |
+| Figma | `figma` | — |
+| Dropbox | `dropbox` | POST userinfo (RPC-style) |
+| TikTok | `tiktok` | Uses `client_key` + comma-separated scopes |
+| PayPal | `paypal` | OIDC |
+| Kick | `kick` | PKCE-required |
+| Roblox | `roblox` | OIDC |
+
+For **any other OIDC-compliant IdP**, use the generic OIDC adapter — see [Generic OIDC](#generic-oidc).
 
 ## Set up credentials
 
-Register your app with the provider:
-
-- **Google** — [Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client IDs](https://console.cloud.google.com/apis/credentials). Authorized redirect URI: `https://your-app.com/api/auth/callback/google`.
-- **GitHub** — [GitHub Settings → Developer settings → OAuth Apps](https://github.com/settings/developers). Authorization callback URL: `https://your-app.com/api/auth/callback/github`.
-
-Set the env vars:
+Register your app with the provider, then set:
 
 ```bash
-PYLON_OAUTH_GOOGLE_CLIENT_ID=...
-PYLON_OAUTH_GOOGLE_CLIENT_SECRET=...
-PYLON_OAUTH_GOOGLE_REDIRECT=https://your-app.com/api/auth/callback/google
+PYLON_OAUTH_<PROVIDER>_CLIENT_ID=...
+PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET=...
+PYLON_OAUTH_<PROVIDER>_REDIRECT=https://your-app.com/api/auth/callback/<provider>
 
-PYLON_OAUTH_GITHUB_CLIENT_ID=...
-PYLON_OAUTH_GITHUB_CLIENT_SECRET=...
-PYLON_OAUTH_GITHUB_REDIRECT=https://your-app.com/api/auth/callback/github
+# Optional per-provider:
+PYLON_OAUTH_<PROVIDER>_SCOPES="custom scope list"   # override default scopes
+PYLON_OAUTH_MICROSOFT_TENANT=contoso.onmicrosoft.com  # Microsoft only
 ```
+
+Replace `<PROVIDER>` with `GOOGLE`, `GITHUB`, `APPLE`, etc. (the uppercase form of the table id above).
 
 If a provider's `CLIENT_ID` or `CLIENT_SECRET` is unset, that provider is silently disabled — `/api/auth/providers` won't list it.
 
-On **Pylon Cloud**, set these in `Settings → Environment` per workspace. Cloud also offers shared dev credentials in non-prod workspaces so you can prototype before registering your own.
+On **Pylon Cloud**, set these in `Settings → Environment` per workspace.
+
+### Apple
+
+Apple is special — `client_secret` is a JWT you sign with your developer ES256 key, not a static string. Pylon mints a fresh JWT on every token exchange so you don't manage rotation.
+
+```bash
+PYLON_OAUTH_APPLE_CLIENT_ID=com.example.app   # Service ID or bundle id
+PYLON_OAUTH_APPLE_REDIRECT=https://your-app.com/api/auth/callback/apple
+PYLON_OAUTH_APPLE_TEAM_ID=ABCDE12345           # 10-char team id
+PYLON_OAUTH_APPLE_KEY_ID=KEYID12345            # 10-char key id
+PYLON_OAUTH_APPLE_PRIVATE_KEY=/path/to/AuthKey_KEYID12345.p8
+# OR inline the PEM:
+PYLON_OAUTH_APPLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
+```
+
+Apple POSTs the callback (`response_mode=form_post`) instead of the usual GET — pylon's callback handler accepts both. The user's identity comes from the `id_token` JWT in the token response, not a userinfo endpoint.
+
+> **Note:** Apple sends the user's name only on the **first** sign-in for a given app. Subsequent logins return `sub` + `email` only. Pylon stores what it can and doesn't overwrite an existing `displayName`.
+
+### Microsoft
+
+Set `PYLON_OAUTH_MICROSOFT_TENANT` for single-tenant apps:
+
+```bash
+PYLON_OAUTH_MICROSOFT_TENANT=contoso.onmicrosoft.com
+# Or for work-only multi-tenant apps:
+PYLON_OAUTH_MICROSOFT_TENANT=organizations
+```
+
+Default is `common` (any account — work, school, personal).
+
+### Twitter / X
+
+Twitter requires PKCE — pylon generates the verifier/challenge automatically and stores them in the OAuth state record. No extra config needed. Twitter's userinfo doesn't include email by default; Pylon synthesizes `<username>@x.invalid` so account rows still have a value. Apps that require a real email should reject these accounts.
+
+### Generic OIDC
+
+For any OpenID Connect provider — Auth0, Okta, Keycloak, Cognito, Logto, Authentik, Zitadel, your homegrown IdP — set:
+
+```bash
+PYLON_OAUTH_AUTH0_OIDC_ISSUER=https://acme.auth0.com
+PYLON_OAUTH_AUTH0_CLIENT_ID=...
+PYLON_OAUTH_AUTH0_CLIENT_SECRET=...
+PYLON_OAUTH_AUTH0_REDIRECT=https://your-app.com/api/auth/callback/auth0
+```
+
+The provider id is the lowercase of the env-var prefix (`auth0` here). Pylon fetches `<issuer>/.well-known/openid-configuration` on first use and caches the discovered endpoints. The discovery doc's `token_endpoint_auth_methods_supported` decides whether pylon uses Basic auth (the OIDC default) or a `client_secret`-in-body POST.
 
 ## How it works
 
 ```
                         ┌──────────────────────────────────────┐
-client  →  GET /api/auth/login/google                          │
+client  →  GET /api/auth/login/google?callback=…              │
    ←  { redirect: "https://accounts.google.com/o/oauth2/...", state: "xyz" }
                                                                │
 client  →  redirects user to Google                            │
@@ -40,11 +116,11 @@ client  →  redirects user to Google                            │
        /api/auth/callback/google?code=...&state=xyz            │
                                                                │
 server  →  validates state (CSRF check)                        │
-        →  exchanges code for access_token                     │
-        →  fetches userinfo from Google                        │
+        →  exchanges code for access_token (+ id_token)        │
+        →  fetches userinfo from Google (or decodes id_token)  │
         →  upserts User row                                    │
         →  mints Session                                       │
-   ←  302 redirect to PYLON_DASHBOARD_URL with cookie set      │
+   ←  302 redirect to your callback URL with cookie set        │
        (or JSON { token, user_id, expires_at } if POSTed)      │
                         └──────────────────────────────────────┘
 ```
@@ -53,20 +129,20 @@ server  →  validates state (CSRF check)                        │
 
 ### Browser flow (302 redirect)
 
-`GET /api/auth/login/google?redirect=1` returns a 302 directly to the provider. The callback handler sets a cookie and redirects to `PYLON_DASHBOARD_URL`. This is the simplest integration for a typical web app:
+`GET /api/auth/login/<provider>?callback=<url>&redirect=1` returns a 302 directly to the provider. The callback handler sets a cookie and 302s to the `callback` URL you supplied:
 
 ```html
-<a href="/api/auth/login/google?redirect=1">Sign in with Google</a>
+<a href="/api/auth/login/google?callback=/dashboard&redirect=1">Sign in with Google</a>
 ```
 
-Set `PYLON_DASHBOARD_URL=https://your-app.com` so the callback knows where to send the user after sign-in.
+`callback` (and the optional `error_callback`) MUST have an origin listed in `PYLON_TRUSTED_ORIGINS`.
 
 ### JSON flow (manual)
 
 For SPAs or native apps that want to control the redirect themselves:
 
 ```bash
-curl https://your-app/api/auth/login/google
+curl 'https://your-app/api/auth/login/google?callback=https://your-app/dashboard'
 # → { "redirect": "https://accounts.google.com/...", "state": "xyz" }
 ```
 
@@ -89,48 +165,6 @@ Response:
 }
 ```
 
-## From the SDKs
-
-<CodeGroup>
-```typescript TypeScript (manual flow)
-// 1. Get the redirect URL
-const { redirect, state } = await fetch("/api/auth/login/google").then(r => r.json());
-sessionStorage.setItem("oauth_state", state);
-window.location.href = redirect;
-
-// 2. Back from Google: extract code/state from URL
-const params = new URLSearchParams(window.location.search);
-const session = await fetch("/api/auth/callback/google", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    code: params.get("code"),
-    state: params.get("state"),
-  }),
-}).then(r => r.json());
-```
-
-```swift Swift
-import PylonClient
-import AuthenticationServices
-
-// Use ASWebAuthenticationSession for native OAuth
-let url = URL(string: "https://your-app/api/auth/login/google?redirect=1")!
-let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "yourapp") { callback, _ in
-    guard let callback else { return }
-    // Extract ?code= and ?state= from callback
-    let code = URLComponents(url: callback, resolvingAgainstBaseURL: false)?
-        .queryItems?.first { $0.name == "code" }?.value ?? ""
-    Task {
-        let resp = try await client.signInWithGoogle(idToken: code)
-        // session token is now stored
-    }
-}
-session.presentationContextProvider = self
-session.start()
-```
-</CodeGroup>
-
 ## CSRF protection
 
 Every OAuth start mints a random state token (256 bits, prefixed `pylon_`) that expires after 10 minutes and is single-use. The callback rejects the request if:
@@ -140,7 +174,7 @@ Every OAuth start mints a random state token (256 bits, prefixed `pylon_`) that 
 - The state was already used (replay)
 - The state was minted for a different provider (e.g. Google state on a GitHub callback)
 
-State storage defaults to in-memory but the runtime swaps in a SQLite-backed `OAuthStateBackend` so a server restart mid-handshake doesn't break in-flight sign-ins.
+State storage defaults to in-memory; the runtime swaps in a SQLite or Postgres backend so a server restart mid-handshake doesn't break in-flight sign-ins. PKCE verifiers ride along in the same record for providers that need them.
 
 ## What gets created
 
@@ -156,7 +190,7 @@ On first OAuth sign-in for a given email, Pylon creates a `User` row:
 }
 ```
 
-On subsequent sign-ins, Pylon looks up the user by email and mints a fresh session.
+On subsequent sign-ins, Pylon looks up the user by `(provider, provider_account_id)` — NOT by email — so a renamed-email user keeps their account.
 
 **Email verification is implicit** — the OAuth provider already verified the email, so Pylon stamps `emailVerified` immediately. Your `User` entity should have:
 
@@ -175,51 +209,22 @@ curl https://your-app/api/auth/providers
 
 ```json
 [
-  { "provider": "google", "auth_url": "https://accounts.google.com/o/oauth2/..." },
-  { "provider": "github", "auth_url": "https://github.com/login/oauth/authorize?..." }
+  { "provider": "google",    "auth_url": "https://accounts.google.com/o/oauth2/..." },
+  { "provider": "github",    "auth_url": "https://github.com/login/oauth/authorize?..." },
+  { "provider": "apple",     "auth_url": "https://appleid.apple.com/auth/authorize?..." }
 ]
 ```
 
 Use this in your sign-in UI to render only the buttons you've configured.
 
-## Provider-specific notes
-
-### Google
-
-- Scopes requested: `openid email profile`
-- Userinfo endpoint: `https://www.googleapis.com/oauth2/v3/userinfo`
-- Display name comes from `name` field
-
-### GitHub
-
-- Scopes requested: `user:email`
-- Userinfo endpoint: `https://api.github.com/user`
-- Display name comes from `name`, falls back to `login`
-- If the user's primary email is private, Pylon hits `/user/emails` to find a verified primary
-
-## Adding a new provider
-
-The two built-in providers cover most cases. To add another (Apple, Microsoft, Discord, etc.) you have two paths:
-
-**1. As a plugin** — register a custom OAuth handler in your app code (recommended for Cloud users):
-
-```typescript
-import { registerOAuthProvider } from "@pylonsync/sdk";
-
-registerOAuthProvider("apple", {
-  authUrl: "https://appleid.apple.com/auth/authorize",
-  tokenUrl: "https://appleid.apple.com/auth/token",
-  userinfoFn: async (token) => ({ email, name }),
-});
-```
-
-**2. Patch the Rust core** — extend `OAuthConfig` in `crates/auth/src/lib.rs` with the provider's URL constants. Ships with your binary; great if you're self-hosting.
-
 ## Error responses
 
 | Code | Status | Meaning |
 | --- | --- | --- |
-| `PROVIDER_NOT_FOUND` | 404 | `PYLON_OAUTH_<PROVIDER>_*` env vars not set |
-| `OAUTH_BAD_STATE` | 400 | State missing, expired, or replayed |
-| `OAUTH_PROVIDER_REJECTED` | 400 | Provider returned an error during code exchange |
-| `OAUTH_DASHBOARD_URL_MISSING` | 500 | `PYLON_DASHBOARD_URL` not set for the GET callback redirect |
+| `PROVIDER_NOT_FOUND` | 404 | `PYLON_OAUTH_<PROVIDER>_*` env vars not set, or unknown provider id |
+| `OAUTH_PROVIDER_BROKEN` | 500 | OIDC discovery failed or provider misconfigured |
+| `OAUTH_INVALID_STATE` | 403 | State missing, expired, or replayed |
+| `OAUTH_TOKEN_EXCHANGE_FAILED` | 502 | Provider rejected the code exchange — common when client secret is wrong, redirect URI doesn't match, or PKCE verifier mismatch |
+| `UNTRUSTED_REDIRECT` | 403 | `?callback=` origin is not in `PYLON_TRUSTED_ORIGINS` |
+
+Provider error messages are sanitized — `client_secret`, `code_verifier`, `refresh_token`, `id_token`, and `access_token` values are redacted before they end up in `oauth_error_message` redirect URLs or server logs.

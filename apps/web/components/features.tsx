@@ -24,7 +24,7 @@ const FEATURES: { lane: Lane; title: string; desc: string }[] = [
   {
     lane: "app",
     title: "Auth, included",
-    desc: "Magic-link email, OAuth (Google / GitHub / Apple), guest sessions, API keys. No separate service, no Auth0 line-item.",
+    desc: "Magic-link email, 25+ OAuth providers (Google, GitHub, Apple, Microsoft, Discord, Slack…), generic OIDC discovery for any IdP, guest sessions, API keys. No separate service, no Auth0 line-item.",
   },
   {
     lane: "app",
