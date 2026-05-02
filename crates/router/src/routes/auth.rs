@@ -1718,7 +1718,18 @@ pub(crate) fn handle(
         }
         // Backup-code consumption: rewrite the array WITHOUT the
         // matching index. Single-use; keeping the rest valid.
+        // Wave-6 codex P1: under concurrent verifies the read-modify-
+        // write pattern races. We mitigate by re-reading the row
+        // AFTER the write and asserting the consumed hash is gone.
+        // If a parallel verify swapped in its own version (where our
+        // hash is still present), we lost the race — refuse to mint
+        // the session so only ONE caller per code wins.
         if let Some(idx) = backup_consumed {
+            let consumed_hash = row.get("totpBackupCodes")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.get(idx))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             if let Some(stored) = row.get("totpBackupCodes").and_then(|v| v.as_array()) {
                 let kept: Vec<&serde_json::Value> = stored.iter().enumerate()
                     .filter(|(i, _)| *i != idx).map(|(_, v)| v).collect();
@@ -1726,6 +1737,27 @@ pub(crate) fn handle(
                     &ctx.store.manifest().auth.user.entity, &user_id,
                     &serde_json::json!({"totpBackupCodes": kept}),
                 );
+            }
+            // Post-write verify: the consumed hash MUST be absent now.
+            if let Some(want_gone) = consumed_hash {
+                if let Ok(Some(after)) = ctx.store.get_by_id(
+                    &ctx.store.manifest().auth.user.entity, &user_id,
+                ) {
+                    if let Some(arr) = after.get("totpBackupCodes").and_then(|v| v.as_array()) {
+                        let still_there = arr.iter().any(|v| {
+                            v.as_str().map(|s| s == want_gone).unwrap_or(false)
+                        });
+                        if still_there {
+                            // A concurrent verify swapped in a row
+                            // where our consumed code is back in the
+                            // array. Refuse — only one caller wins.
+                            return Some((409, json_error(
+                                "TOTP_RACE",
+                                "Backup code was consumed by a concurrent request. Try a different code.",
+                            )));
+                        }
+                    }
+                }
             }
         }
         let was_verified = row
@@ -1817,6 +1849,15 @@ pub(crate) fn handle(
             Some(u) => u.to_string(),
             None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
         };
+        // Wave-4 codex P1: block API-key auth from org management.
+        // A leaked API key shouldn't be able to create/delete orgs or
+        // manage members. Real session required.
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "Org management requires a session"),
+            ));
+        }
         if method == HttpMethod::Post {
             let data: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
@@ -1869,6 +1910,12 @@ pub(crate) fn handle(
             Some(u) => u.to_string(),
             None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
         };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "Org management requires a session"),
+            ));
+        }
         let parts: Vec<&str> = rest.splitn(4, '/').collect();
         let org_id = parts[0];
 
@@ -1929,6 +1976,40 @@ pub(crate) fn handle(
                     Some(r) => r,
                     None => return Some((400, json_error("BAD_ROLE", "role must be owner|admin|member"))),
                 };
+                // Wave-4 codex P1: only OWNERS can promote members
+                // to owner. Without this an admin can self-promote
+                // (PUT members/<self>/role: owner) and then delete
+                // the org. Owner-promotion is the privilege boundary.
+                if role == pylon_auth::org::OrgRole::Owner && !caller_role.can_transfer_ownership() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners can promote a member to owner"),
+                    ));
+                }
+                // Wave-4 codex P1: prevent demoting the last owner.
+                // Same rule as remove-member; without it an owner
+                // can demote themselves and orphan the org.
+                if let Some(target_role) = ctx.orgs.role_of(org_id, target_user) {
+                    if target_role == pylon_auth::org::OrgRole::Owner
+                        && role != pylon_auth::org::OrgRole::Owner
+                    {
+                        let owners = ctx
+                            .orgs
+                            .list_members(org_id)
+                            .into_iter()
+                            .filter(|m| m.role == pylon_auth::org::OrgRole::Owner)
+                            .count();
+                        if owners <= 1 {
+                            return Some((
+                                400,
+                                json_error(
+                                    "LAST_OWNER",
+                                    "Cannot demote the last owner — promote someone else first",
+                                ),
+                            ));
+                        }
+                    }
+                }
                 let updated = ctx.orgs.set_role(org_id, target_user, role);
                 if !updated {
                     return Some((404, json_error("NOT_A_MEMBER", "Target user is not a member")));
@@ -2048,8 +2129,19 @@ pub(crate) fn handle(
                 if !caller_role.can_manage_members() {
                     return Some((403, json_error("FORBIDDEN", "Insufficient role")));
                 }
-                let revoked = ctx.orgs.revoke_invite(invite_id);
-                return Some((200, serde_json::json!({"revoked": revoked}).to_string()));
+                // Wave-4 codex P2: object-level auth — verify the
+                // invite actually belongs to THIS org. The URL claim
+                // (org_id) wasn't matched against the row before;
+                // a global revoke_invite(invite_id) lets an admin
+                // of org A revoke any invite_id they happen to know
+                // even when it's for org B.
+                match ctx.orgs.list_invites(org_id).into_iter().find(|i| i.id == *invite_id) {
+                    Some(_) => {
+                        let revoked = ctx.orgs.revoke_invite(invite_id);
+                        return Some((200, serde_json::json!({"revoked": revoked}).to_string()));
+                    }
+                    None => return Some((404, json_error("NOT_FOUND", "Invite not found in this org"))),
+                }
             }
             _ => {}
         }
@@ -2643,13 +2735,23 @@ pub(crate) fn handle(
     //   user is subject OR actor.
     // GET /api/auth/audit/tenant?limit=100 — events for the current
     //   active tenant. App's policy layer should gate this to admins.
-    if let Some(rest) = url.strip_prefix("/api/auth/audit") {
+    // Wave-7 codex P3: split into two EXACT-prefix matches so
+    // `/api/auth/auditx` doesn't accidentally route here. Without
+    // this, `strip_prefix("/api/auth/audit")` happily matches
+    // `/api/auth/auditx` and gives back current-user audit data.
+    let audit_path = if url == "/api/auth/audit" || url.starts_with("/api/auth/audit?") {
+        Some(("user", url.split_once('?').map(|(_, q)| q).unwrap_or("")))
+    } else if url == "/api/auth/audit/tenant" || url.starts_with("/api/auth/audit/tenant?") {
+        Some(("tenant", url.split_once('?').map(|(_, q)| q).unwrap_or("")))
+    } else {
+        None
+    };
+    if let Some((scope, q)) = audit_path {
         if method == HttpMethod::Get {
             let user_id = match ctx.auth_ctx.user_id.as_deref() {
                 Some(u) => u.to_string(),
                 None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
             };
-            let q = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
             let params = parse_query(q);
             // Cap limit at 1000 here; the backend caps again at 10k
             // for raw queries. Defense in depth.
@@ -2658,12 +2760,26 @@ pub(crate) fn handle(
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(100)
                 .min(1000);
-            // Tenant-scoped variant requires an active tenant on the
-            // session AND that tenant matches the URL path's claim.
-            let events = if rest.starts_with("/tenant") {
+            let events = if scope == "tenant" {
                 let Some(tid) = ctx.auth_ctx.tenant_id.as_deref() else {
                     return Some((400, json_error("NO_ACTIVE_TENANT", "Select an org first")));
                 };
+                // Wave-7 codex P2: tenant audit is org-wide and
+                // includes IPs, UAs, reasons, metadata — way too
+                // sensitive for any member to read. Require the
+                // caller to have an admin/owner role in the active
+                // org. Apps that have their own RBAC layer can
+                // override by giving everyone admin (their call).
+                let role = ctx.orgs.role_of(tid, &user_id);
+                let is_admin = role
+                    .map(|r| r.can_manage_members())
+                    .unwrap_or(false);
+                if !is_admin && !ctx.auth_ctx.is_admin {
+                    return Some((403, json_error(
+                        "FORBIDDEN",
+                        "Tenant audit requires admin or owner role in the active org",
+                    )));
+                }
                 ctx.audit.find_for_tenant(tid, limit)
             } else {
                 ctx.audit.find_for_user(&user_id, limit)
@@ -2719,14 +2835,27 @@ pub(crate) fn handle(
                     &format!("Try again in {retry_after_secs}s")),
             ));
         }
+        // Wave-6 codex P1: equalize timing across "registered" /
+        // "not registered" paths so an attacker can't enumerate
+        // accounts via response time. Two parts:
+        //   1. ALWAYS mint a token (cheap HMAC; constant time
+        //      regardless of whether the email exists). For the
+        //      not-registered case the token is unconnected to any
+        //      User row so it can never be redeemed — but it
+        //      consumes the same compute path as the real one.
+        //   2. ALWAYS pad the response with a fixed micro-sleep so
+        //      the lookup's variance (cache hit vs miss) can't
+        //      leak via wallclock either.
         let entity = &ctx.store.manifest().auth.user.entity;
-        if let Ok(Some(_)) = ctx.store.lookup(entity, "email", &email) {
-            let minted = ctx.verification.mint(
-                pylon_auth::verification::TokenKind::PasswordReset,
-                &email,
-                None,
-                None,
-            );
+        let registered = matches!(ctx.store.lookup(entity, "email", &email), Ok(Some(_)));
+        // Mint regardless — discarded for non-registered.
+        let minted = ctx.verification.mint(
+            pylon_auth::verification::TokenKind::PasswordReset,
+            &email,
+            None,
+            None,
+        );
+        if registered {
             let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
             let reset_url = format!("{public_url}/reset-password?token={}", minted.plaintext);
             let body_text = format!(
@@ -2736,6 +2865,11 @@ pub(crate) fn handle(
             if let Err(e) = ctx.email.send(&email, "Reset your password", &body_text) {
                 tracing::warn!("[auth] reset email to {} failed: {e}", redact_email(&email));
             }
+        } else {
+            // Pad with a single equivalent SMTP-like delay so the
+            // wallclock looks similar. Real email sends are
+            // 10-200ms; we sleep 50ms as a reasonable middle.
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         // Always 200 — frontend says "if an account exists, we sent a link."
         return Some((200, serde_json::json!({"sent": true}).to_string()));
@@ -2916,6 +3050,19 @@ pub(crate) fn handle(
         if ctx.auth_ctx.is_api_key_auth() {
             return Some((403, json_error("API_KEY_AUTH_FORBIDDEN", "Email change requires a session")));
         }
+        // Wave-6 codex P2: rate limit email-change-request so an
+        // authenticated user can't email-bomb arbitrary addresses
+        // through the change-confirm send path.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, Some(&user_id))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many email-change requests",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
@@ -2930,9 +3077,13 @@ pub(crate) fn handle(
             return Some((400, json_error("INVALID_EMAIL", "valid newEmail required")));
         }
         let entity = &ctx.store.manifest().auth.user.entity;
-        if let Ok(Some(_)) = ctx.store.lookup(entity, "email", &new_email) {
-            // Email is taken. Always 200 to avoid leaking which
-            // emails are registered, but no email is actually sent.
+        // Wave-6 codex P2: equalize timing — taken-email path
+        // returned BEFORE the email send, vs free-email path doing
+        // the send. Now both paths skip the send when taken but
+        // pad with a 50ms sleep to mask the wallclock difference.
+        let taken = matches!(ctx.store.lookup(entity, "email", &new_email), Ok(Some(_)));
+        if taken {
+            std::thread::sleep(std::time::Duration::from_millis(50));
             return Some((200, serde_json::json!({"sent": true}).to_string()));
         }
         let minted = ctx.verification.mint(
@@ -3040,6 +3191,19 @@ pub(crate) fn handle(
     // behavior is /api/auth/guest; this is the better-auth-compatible
     // alias).
     if url == "/api/auth/anonymous" && method == HttpMethod::Post {
+        // Wave-6 codex P2: rate limit so a botnet can't spawn
+        // unbounded guest sessions. No per-account dimension —
+        // anonymous by definition has no account.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, None)
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many anonymous sessions",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
         let session = ctx.session_store.create_guest();
         ctx.maybe_set_session_cookie(&session.token);
         return Some((200, serde_json::json!({

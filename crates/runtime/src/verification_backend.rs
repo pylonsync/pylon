@@ -14,11 +14,17 @@ fn kind_to_str(k: TokenKind) -> &'static str {
     k.as_str()
 }
 
-fn kind_from_str(s: &str) -> TokenKind {
+/// Parse a kind value from the DB. Returns `Err` for unknown values
+/// rather than silently defaulting — Wave-6 codex P3: a corrupted
+/// row shouldn't be silently re-categorized as a magic-link token,
+/// because that would let a stale password-reset row bypass its
+/// kind check.
+fn kind_from_str(s: &str) -> Result<TokenKind, String> {
     match s {
-        "password_reset" => TokenKind::PasswordReset,
-        "email_change" => TokenKind::EmailChange,
-        _ => TokenKind::MagicLink,
+        "password_reset" => Ok(TokenKind::PasswordReset),
+        "email_change" => Ok(TokenKind::EmailChange),
+        "magic_link" => Ok(TokenKind::MagicLink),
+        other => Err(format!("verification: unknown kind '{other}'")),
     }
 }
 
@@ -155,10 +161,17 @@ impl VerificationBackend for SqliteVerificationBackend {
 }
 
 fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerificationToken> {
-    let kind: String = row.get(1)?;
+    let kind_raw: String = row.get(1)?;
+    let kind = kind_from_str(&kind_raw).map_err(|e| {
+        rusqlite::Error::InvalidColumnType(
+            1,
+            e,
+            rusqlite::types::Type::Text,
+        )
+    })?;
     Ok(VerificationToken {
         id: row.get(0)?,
-        kind: kind_from_str(&kind),
+        kind,
         email: row.get(2)?,
         user_id: row.get(3)?,
         payload: row.get(4)?,
@@ -250,7 +263,7 @@ mod pg {
                     &[&id],
                 )
                 .ok()??;
-            Some(pg_row_to_token(&row))
+            pg_row_to_token(&row)
         }
 
         fn by_prefix(&self, prefix: &str) -> Vec<VerificationToken> {
@@ -268,7 +281,7 @@ mod pg {
                 Ok(r) => r,
                 Err(_) => return vec![],
             };
-            rows.iter().map(pg_row_to_token).collect()
+            rows.iter().filter_map(pg_row_to_token).collect()
         }
 
         fn mark_consumed(&self, id: &str, now: u64) -> bool {
@@ -299,11 +312,12 @@ mod pg {
         }
     }
 
-    fn pg_row_to_token(row: &postgres::Row) -> VerificationToken {
-        let kind: String = row.get(1);
-        VerificationToken {
+    fn pg_row_to_token(row: &postgres::Row) -> Option<VerificationToken> {
+        let kind_raw: String = row.get(1);
+        let kind = kind_from_str(&kind_raw).ok()?;
+        Some(VerificationToken {
             id: row.get(0),
-            kind: kind_from_str(&kind),
+            kind,
             email: row.get(2),
             user_id: row.get(3),
             payload: row.get(4),
@@ -312,7 +326,7 @@ mod pg {
             created_at: row.get::<_, i64>(7) as u64,
             expires_at: row.get::<_, i64>(8) as u64,
             consumed_at: row.get::<_, Option<i64>>(9).map(|v| v as u64),
-        }
+        })
     }
 }
 

@@ -123,6 +123,12 @@ pub trait OrgBackend: Send + Sync {
     /// SELECT; the in-memory backend scans all invites. Argon2 verify
     /// then runs against the candidate set in `accept_invite`.
     fn invites_by_prefix(&self, prefix: &str) -> Vec<Invite>;
+    /// CAS — atomically stamp `accepted_at` ONLY when it's currently
+    /// NULL. Returns true if we won the race, false if another
+    /// concurrent verify got there first. Required so two parallel
+    /// accept calls with the same token can't BOTH create a
+    /// membership.
+    fn mark_invite_accepted(&self, id: &str, now: u64) -> bool;
 }
 
 pub struct InMemoryOrgBackend {
@@ -233,6 +239,17 @@ impl OrgBackend for InMemoryOrgBackend {
             .filter(|i| i.token_prefix == prefix)
             .cloned()
             .collect()
+    }
+    fn mark_invite_accepted(&self, id: &str, now: u64) -> bool {
+        let mut g = self.invites.lock().unwrap();
+        let Some(inv) = g.get_mut(id) else {
+            return false;
+        };
+        if inv.accepted_at.is_some() {
+            return false;
+        }
+        inv.accepted_at = Some(now);
+        true
     }
 }
 
@@ -432,6 +449,14 @@ impl OrgStore {
         {
             return Err(AcceptError::AlreadyMember);
         }
+        // Wave-4 codex P2: CAS the invite to accepted_at FIRST,
+        // BEFORE creating the membership. If two concurrent accepts
+        // arrive, only one wins the CAS and only one membership
+        // gets created. The loser sees AlreadyAccepted (the invite
+        // was just consumed by the winning request).
+        if !self.backend.mark_invite_accepted(&invite.id, now_secs()) {
+            return Err(AcceptError::AlreadyAccepted);
+        }
         let membership = Membership {
             org_id: invite.org_id.clone(),
             user_id: accepting_user_id.to_string(),
@@ -439,10 +464,6 @@ impl OrgStore {
             joined_at: now_secs(),
         };
         self.backend.put_membership(&membership);
-        // Stamp the invite as accepted (audit).
-        let mut updated = invite;
-        updated.accepted_at = Some(now_secs());
-        self.backend.put_invite(&updated);
         Ok(membership)
     }
 
@@ -581,6 +602,30 @@ mod tests {
             .unwrap();
         let second = store.accept_invite(&invited.token, "user-2", "a@b.com");
         assert_eq!(second.unwrap_err(), AcceptError::AlreadyAccepted);
+    }
+
+    /// Wave-4 codex P2 regression: concurrent accepts must not
+    /// both create a membership. The CAS via `mark_invite_accepted`
+    /// guarantees only one wins. Simulate by calling
+    /// `mark_invite_accepted` twice — the second call must return
+    /// false so the second accept_invite returns AlreadyAccepted.
+    #[test]
+    fn accept_invite_cas_blocks_concurrent_winners() {
+        let store = OrgStore::new();
+        let org = store.create("A", "owner");
+        let invited = store.create_invite(&org.id, "a@b.com", OrgRole::Member, "owner");
+
+        // Simulate: first request gets through to mark_invite_accepted
+        // and wins.
+        let won_first = store.backend.mark_invite_accepted(&invited.invite.id, 100);
+        assert!(won_first);
+        // Second concurrent request runs the same CAS and loses.
+        let won_second = store.backend.mark_invite_accepted(&invited.invite.id, 101);
+        assert!(!won_second);
+        // accept_invite called now would see consumed_at set and
+        // return AlreadyAccepted instead of double-creating.
+        let result = store.accept_invite(&invited.token, "user-x", "a@b.com");
+        assert_eq!(result.unwrap_err(), AcceptError::AlreadyAccepted);
     }
 
     #[test]

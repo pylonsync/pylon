@@ -137,6 +137,20 @@ impl NonceStore {
         map.remove(&key);
         Some(nonce)
     }
+
+    /// Peek at the pending nonce WITHOUT consuming it. Used by the
+    /// verify path so a wrong-nonce / bad-signature attempt doesn't
+    /// burn the legit nonce (Wave-5 codex P1: nonce-bombing DoS).
+    /// Returns `None` for unknown / expired entries.
+    pub fn peek(&self, address: &str) -> Option<String> {
+        let key = address.to_ascii_lowercase();
+        let map = self.nonces.lock().unwrap();
+        let (nonce, exp) = map.get(&key)?.clone();
+        if exp <= now_secs() {
+            return None;
+        }
+        Some(nonce)
+    }
 }
 
 /// Parse the EIP-4361 plaintext message format. Apps that need the
@@ -307,6 +321,13 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
 /// Validate the non-cryptographic parts of a SIWE message: domain,
 /// nonce, expiration, not-before. Use [`verify`] to also check the
 /// signature.
+///
+/// **Wave-5 codex P1 fix**: this function now PEEKS the nonce
+/// instead of consuming it. The caller (typically [`verify`]) must
+/// call [`NonceStore::take`] separately AFTER full success to
+/// actually consume. Otherwise an attacker who knows the victim's
+/// pending nonce can burn it by submitting any-old garbage to the
+/// verify endpoint, DoSing the legit user's sign-in.
 pub fn validate_message(
     nonces: &NonceStore,
     message: &SiweMessage,
@@ -316,7 +337,7 @@ pub fn validate_message(
         return Err(SiweError::DomainMismatch);
     }
     let issued = nonces
-        .take(&message.address)
+        .peek(&message.address)
         .ok_or(SiweError::NonceMissing)?;
     if issued != message.nonce {
         return Err(SiweError::NonceMismatch);
@@ -352,6 +373,11 @@ pub fn verify(
     if !recovered.eq_ignore_ascii_case(&message.address) {
         return Err(SiweError::AddressMismatch);
     }
+    // Consume the nonce ONLY now that everything else has passed.
+    // Wave-5 codex P1: previously validate_message consumed the
+    // nonce up-front, letting an attacker DoS a victim's sign-in
+    // by repeatedly submitting bad signatures.
+    let _ = nonces.take(&message.address);
     Ok(recovered)
 }
 
@@ -593,6 +619,36 @@ mod tests {
         };
         let err = validate_message(&store, &m, "good.com").unwrap_err();
         assert_eq!(err, SiweError::NonceMismatch);
+    }
+
+    /// Wave-5 codex P1 regression: a wrong-nonce or bad-signature
+    /// attempt must NOT burn the legit pending nonce. Otherwise
+    /// any attacker who knows the victim's address can DoS the
+    /// victim's sign-in by submitting bogus payloads.
+    #[test]
+    fn validate_message_does_not_consume_on_failure() {
+        let store = NonceStore::new();
+        let real_nonce = store.issue("0x1111222233334444555566667777888899990000");
+        let m = SiweMessage {
+            domain: "good.com".into(),
+            address: "0x1111222233334444555566667777888899990000".into(),
+            statement: None,
+            uri: "https://good.com".into(),
+            version: "1".into(),
+            chain_id: 1,
+            nonce: "wrong".into(), // attacker submits any-old garbage
+            issued_at: "2026-01-01T00:00:00Z".into(),
+            expiration_time: None,
+            not_before: None,
+            request_id: None,
+            resources: vec![],
+        };
+        let err = validate_message(&store, &m, "good.com").unwrap_err();
+        assert_eq!(err, SiweError::NonceMismatch);
+        // The legit nonce MUST still be retrievable for the real
+        // user's subsequent successful verify.
+        let still_there = store.peek("0x1111222233334444555566667777888899990000");
+        assert_eq!(still_there.as_deref(), Some(real_nonce.as_str()));
     }
 
     /// Codex-flagged P0-7: nonce-bombing. Posting an EXPIRED nonce

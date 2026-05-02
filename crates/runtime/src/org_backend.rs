@@ -331,6 +331,23 @@ impl OrgBackend for SqliteOrgBackend {
         };
         iter.filter_map(|r| r.ok()).collect()
     }
+
+    fn mark_invite_accepted(&self, id: &str, now: u64) -> bool {
+        let Ok(c) = self.conn.lock() else {
+            return false;
+        };
+        // CAS via SQL: only stamp when accepted_at IS NULL. The
+        // affected-row count tells us whether we won the race.
+        c.execute(
+            &format!(
+                "UPDATE {INVITES_TABLE} SET accepted_at = ?2
+                 WHERE id = ?1 AND accepted_at IS NULL"
+            ),
+            rusqlite::params![id, now as i64],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
 }
 
 fn row_to_invite(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invite> {
@@ -649,6 +666,21 @@ mod pg {
                 Err(_) => return vec![],
             };
             rows.iter().map(pg_row_to_invite).collect()
+        }
+
+        fn mark_invite_accepted(&self, id: &str, now: u64) -> bool {
+            let Ok(mut c) = self.client.lock() else {
+                return false;
+            };
+            c.execute(
+                &format!(
+                    "UPDATE {INVITES_TABLE} SET accepted_at = $2
+                     WHERE id = $1 AND accepted_at IS NULL"
+                ),
+                &[&id, &(now as i64)],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
         }
     }
 

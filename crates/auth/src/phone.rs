@@ -212,6 +212,12 @@ pub fn normalize(input: &str) -> Option<String> {
     if !out.starts_with('+') || out.len() < 8 || out.len() > 16 {
         return None;
     }
+    // Wave-5 codex P3: E.164 country codes can never start with 0.
+    // Reject `+0...` outright instead of accepting and routing to
+    // a phone number that doesn't exist on any carrier.
+    if out.as_bytes().get(1) == Some(&b'0') {
+        return None;
+    }
     Some(out)
 }
 
@@ -339,6 +345,15 @@ mod tests {
     fn normalize_length_bounds() {
         assert!(normalize("+1234").is_none()); // too short
         assert!(normalize("+12345678901234567").is_none()); // too long
+    }
+
+    /// Wave-5 codex P3 regression: E.164 country codes can never
+    /// start with 0. `+0...` should be rejected even though it
+    /// passes the length + plus checks.
+    #[test]
+    fn normalize_rejects_zero_country_code() {
+        assert!(normalize("+0123456789").is_none());
+        assert!(normalize("+0 12 345 6789").is_none());
     }
 
     #[test]
