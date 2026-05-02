@@ -266,6 +266,19 @@ pub(crate) fn handle(
             Some(e) => e.to_string(),
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
+        // Rate limit FIRST so an attacker who lacks a valid CAPTCHA
+        // token can't bypass the per-IP cap by intentionally tripping
+        // the CAPTCHA-fail path repeatedly.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, Some(&email))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many sign-in requests",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
         // Optional CAPTCHA gate. When PYLON_CAPTCHA_PROVIDER+SECRET
         // are set, the request must include `captchaToken`. Skipped
         // entirely when unconfigured so existing apps keep working.
@@ -714,6 +727,19 @@ pub(crate) fn handle(
             Some(p) => p,
             None => return Some((400, json_error("MISSING_PASSWORD", "password is required"))),
         };
+
+        // Rate limit BEFORE the password compare so we don't burn
+        // Argon2 cycles on a brute force attempt.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Login, ctx.peer_ip, Some(&email))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many login attempts",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
 
         let row = ctx
             .store
@@ -1595,8 +1621,57 @@ pub(crate) fn handle(
             Ok(s) => s,
             Err(_) => return Some((500, json_error("TOTP_BAD_SECRET", "Stored secret is corrupt"))),
         };
-        if !pylon_auth::totp::verify_now(&secret, &code) {
+        // Per-account rate limit on verify so backup-code brute
+        // force can't churn through 10 codes in a second.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Login, ctx.peer_ip, Some(&user_id))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many TOTP attempts",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
+        // Accept either the current 6-digit TOTP code OR one of the
+        // hashed backup codes (consumed on use). Backup codes are
+        // typically formatted XXXX-XXXX so they're easy to spot.
+        let mut backup_consumed: Option<usize> = None;
+        let totp_ok = pylon_auth::totp::verify_now(&secret, &code);
+        if !totp_ok {
+            // Try backup codes.
+            if let Some(stored) = row.get("totpBackupCodes").and_then(|v| v.as_array()) {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(code.as_bytes());
+                let candidate = h.finalize();
+                use std::fmt::Write;
+                let mut hex = String::with_capacity(64);
+                for b in candidate { let _ = write!(hex, "{b:02x}"); }
+                for (i, hash) in stored.iter().enumerate() {
+                    if let Some(s) = hash.as_str() {
+                        if pylon_auth::constant_time_eq(s.as_bytes(), hex.as_bytes()) {
+                            backup_consumed = Some(i);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !totp_ok && backup_consumed.is_none() {
             return Some((401, json_error("INVALID_TOTP_CODE", "Wrong code")));
+        }
+        // Backup-code consumption: rewrite the array WITHOUT the
+        // matching index. Single-use; keeping the rest valid.
+        if let Some(idx) = backup_consumed {
+            if let Some(stored) = row.get("totpBackupCodes").and_then(|v| v.as_array()) {
+                let kept: Vec<&serde_json::Value> = stored.iter().enumerate()
+                    .filter(|(i, _)| *i != idx).map(|(_, v)| v).collect();
+                let _ = ctx.store.update(
+                    &ctx.store.manifest().auth.user.entity, &user_id,
+                    &serde_json::json!({"totpBackupCodes": kept}),
+                );
+            }
         }
         let was_verified = row
             .get("totpVerified")
@@ -2507,6 +2582,356 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"received": true}).to_string()));
     }
 
+    // ─── Password reset (forgot password) ─────────────────────────────
+    //
+    // Two-step: request mints a token + emails a reset URL; complete
+    // verifies the token + sets the new password + revokes other
+    // sessions. Request always returns 200 — never reveal whether
+    // an email is registered (account-enumeration defense).
+    if url == "/api/auth/password/reset/request" && method == HttpMethod::Post {
+        let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let email = data
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if email.is_empty() {
+            return Some((400, json_error("MISSING_EMAIL", "email is required")));
+        }
+        // Rate limit BEFORE the lookup so we don't leak existence
+        // via response timing under load.
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, Some(&email))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many reset requests",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
+        let entity = &ctx.store.manifest().auth.user.entity;
+        if let Ok(Some(_)) = ctx.store.lookup(entity, "email", &email) {
+            let minted = ctx.verification.mint(
+                pylon_auth::verification::TokenKind::PasswordReset,
+                &email,
+                None,
+                None,
+            );
+            let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+            let reset_url = format!("{public_url}/reset-password?token={}", minted.plaintext);
+            let body_text = format!(
+                "Reset your password by visiting:\n\n{reset_url}\n\n\
+                 This link expires in 30 minutes. If you didn't request a reset, ignore this email."
+            );
+            if let Err(e) = ctx.email.send(&email, "Reset your password", &body_text) {
+                tracing::warn!("[auth] reset email to {} failed: {e}", redact_email(&email));
+            }
+        }
+        // Always 200 — frontend says "if an account exists, we sent a link."
+        return Some((200, serde_json::json!({"sent": true}).to_string()));
+    }
+    if url == "/api/auth/password/reset/complete" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let token = data.get("token").and_then(|v| v.as_str()).unwrap_or("");
+        let new_password = data
+            .get("newPassword")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if token.is_empty() || new_password.is_empty() {
+            return Some((400, json_error("MISSING_FIELD", "token + newPassword required")));
+        }
+        if let Err(e) = pylon_auth::password::validate_length(new_password) {
+            return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
+        }
+        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
+            if let Ok(n) = pylon_auth::password::check_pwned(new_password) {
+                if n > 0 {
+                    return Some((
+                        400,
+                        json_error_safe("PWNED_PASSWORD",
+                            "This password has appeared in known data breaches.",
+                            &format!("HIBP returned {n} occurrences")),
+                    ));
+                }
+            }
+        }
+        let consumed = match ctx.verification.consume(
+            token,
+            pylon_auth::verification::TokenKind::PasswordReset,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Some((401, json_error("INVALID_TOKEN", &e.to_string()))),
+        };
+        let entity = &ctx.store.manifest().auth.user.entity;
+        let row = match ctx.store.lookup(entity, "email", &consumed.email) {
+            Ok(Some(r)) => r,
+            _ => return Some((404, json_error("USER_NOT_FOUND", "Account no longer exists"))),
+        };
+        let user_id = row.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let new_hash = pylon_auth::password::hash_password(new_password);
+        if let Err(e) = ctx.store.update(entity, &user_id, &serde_json::json!({"passwordHash": new_hash})) {
+            return Some((400, json_error(&e.code, &e.message)));
+        }
+        // Revoke ALL existing sessions — same posture as password change.
+        let revoked = ctx.session_store.revoke_all_for_user(&user_id);
+        let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "reset": true, "revoked_sessions": revoked,
+            "token": session.token, "user_id": user_id, "expires_at": session.expires_at,
+        }).to_string()));
+    }
+    // ─── Magic links ──────────────────────────────────────────────────
+    //
+    // Like magic codes but the user clicks a URL instead of typing
+    // a 6-digit code. /send mints + emails; /verify takes the token
+    // (via either the GET `?token=` browser flow or POST JSON body)
+    // and mints a session.
+    if url == "/api/auth/magic-link/send" && method == HttpMethod::Post {
+        let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let email = data.get("email").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+        if email.is_empty() || !email.contains('@') {
+            return Some((400, json_error("INVALID_EMAIL", "valid email required")));
+        }
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } =
+            rl.check(pylon_auth::rate_limit::AuthBucket::Send, ctx.peer_ip, Some(&email))
+        {
+            return Some((
+                429,
+                json_error_with_hint("RATE_LIMITED", "Too many sign-in requests",
+                    &format!("Try again in {retry_after_secs}s")),
+            ));
+        }
+        // Optional CAPTCHA gate.
+        if let Some(cfg) = pylon_auth::captcha::CaptchaConfig::from_env() {
+            let token = data.get("captchaToken").and_then(|v| v.as_str()).unwrap_or("");
+            if cfg.verify(token, Some(ctx.peer_ip)).is_err() {
+                return Some((400, json_error("CAPTCHA_FAILED", "CAPTCHA failed")));
+            }
+        }
+        let minted = ctx.verification.mint(
+            pylon_auth::verification::TokenKind::MagicLink, &email, None, None);
+        let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+        let verify_url = format!("{public_url}/api/auth/magic-link/verify?token={}", minted.plaintext);
+        let body_text = format!(
+            "Click here to sign in:\n\n{verify_url}\n\n\
+             This link expires in 15 minutes. If you didn't request it, ignore this email."
+        );
+        if let Err(e) = ctx.email.send(&email, "Sign in to your account", &body_text) {
+            tracing::warn!("[auth] magic-link email to {} failed: {e}", redact_email(&email));
+            if !ctx.is_dev {
+                return Some((500, json_error("EMAIL_SEND_FAILED", "Could not send email")));
+            }
+        }
+        let mut response = serde_json::json!({"sent": true});
+        if ctx.is_dev {
+            response["dev_token"] = serde_json::Value::String(minted.plaintext);
+            response["dev_url"] = serde_json::Value::String(verify_url);
+        }
+        return Some((200, response.to_string()));
+    }
+    if let Some(rest) = url.strip_prefix("/api/auth/magic-link/verify") {
+        if method == HttpMethod::Get || method == HttpMethod::Post {
+            // Token can come from `?token=` (GET browser click) or body (POST SDK).
+            let token = if method == HttpMethod::Get {
+                let q = rest.trim_start_matches('?');
+                parse_query(q).get("token").cloned().unwrap_or_default()
+            } else {
+                let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+                data.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            if token.is_empty() {
+                return Some((400, json_error("MISSING_TOKEN", "token required")));
+            }
+            let consumed = match ctx.verification.consume(
+                &token, pylon_auth::verification::TokenKind::MagicLink,
+            ) {
+                Ok(t) => t,
+                Err(e) => return Some((401, json_error("INVALID_TOKEN", &e.to_string()))),
+            };
+            let entity = &ctx.store.manifest().auth.user.entity;
+            let user_id = match ctx.store.lookup(entity, "email", &consumed.email) {
+                Ok(Some(row)) => row.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                _ => {
+                    let now = format!("{}Z", std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+                    match ctx.store.insert(entity, &serde_json::json!({
+                        "email": consumed.email,
+                        "displayName": consumed.email,
+                        "emailVerified": now.clone(),
+                        "createdAt": now,
+                    })) {
+                        Ok(id) => id,
+                        Err(e) => return Some((400, json_error(&e.code, &e.message))),
+                    }
+                }
+            };
+            let session = ctx.session_store.create(user_id.clone());
+            ctx.maybe_set_session_cookie(&session.token);
+            // Browser flow → 302 to dashboard; SDK flow → JSON.
+            if method == HttpMethod::Get {
+                let dashboard = std::env::var("PYLON_DASHBOARD_URL").unwrap_or_else(|_| "/".into());
+                ctx.add_response_header("Location", dashboard);
+                return Some((302, String::new()));
+            }
+            return Some((200, serde_json::json!({
+                "token": session.token, "user_id": user_id, "expires_at": session.expires_at
+            }).to_string()));
+        }
+    }
+    // ─── Email change ─────────────────────────────────────────────────
+    //
+    // POST /api/auth/email/change/request {newEmail}  (auth required)
+    //   → mints a token bound to (currentUserId, newEmail), emails
+    //     the link to NEW email. New email isn't applied yet — the
+    //     verify step is what swaps it.
+    // POST /api/auth/email/change/confirm {token}
+    //   → applies the change, revokes other sessions.
+    if url == "/api/auth/email/change/request" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((403, json_error("API_KEY_AUTH_FORBIDDEN", "Email change requires a session")));
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let new_email = data
+            .get("newEmail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if new_email.is_empty() || !new_email.contains('@') {
+            return Some((400, json_error("INVALID_EMAIL", "valid newEmail required")));
+        }
+        let entity = &ctx.store.manifest().auth.user.entity;
+        if let Ok(Some(_)) = ctx.store.lookup(entity, "email", &new_email) {
+            // Email is taken. Always 200 to avoid leaking which
+            // emails are registered, but no email is actually sent.
+            return Some((200, serde_json::json!({"sent": true}).to_string()));
+        }
+        let minted = ctx.verification.mint(
+            pylon_auth::verification::TokenKind::EmailChange,
+            &new_email,
+            Some(user_id.clone()),
+            Some(new_email.clone()),
+        );
+        let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+        let confirm_url = format!("{public_url}/email-change/confirm?token={}", minted.plaintext);
+        let body_text = format!(
+            "Confirm your new email by visiting:\n\n{confirm_url}\n\n\
+             This link expires in 24 hours. If you didn't request this change, ignore the email."
+        );
+        if let Err(e) = ctx.email.send(&new_email, "Confirm your email change", &body_text) {
+            tracing::warn!("[auth] email-change confirm to {} failed: {e}", redact_email(&new_email));
+        }
+        return Some((200, serde_json::json!({"sent": true}).to_string()));
+    }
+    if url == "/api/auth/email/change/confirm" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let token = data.get("token").and_then(|v| v.as_str()).unwrap_or("");
+        if token.is_empty() {
+            return Some((400, json_error("MISSING_TOKEN", "token required")));
+        }
+        let consumed = match ctx.verification.consume(
+            token, pylon_auth::verification::TokenKind::EmailChange,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Some((401, json_error("INVALID_TOKEN", &e.to_string()))),
+        };
+        let user_id = consumed.user_id.unwrap_or_default();
+        let new_email = consumed.payload.unwrap_or_default();
+        if user_id.is_empty() || new_email.is_empty() {
+            return Some((400, json_error("INVALID_TOKEN", "token has no embedded user/email")));
+        }
+        let entity = &ctx.store.manifest().auth.user.entity;
+        let now = format!("{}Z", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+        if let Err(e) = ctx.store.update(entity, &user_id, &serde_json::json!({
+            "email": new_email, "emailVerified": now,
+        })) {
+            return Some((400, json_error(&e.code, &e.message)));
+        }
+        // Revoke other sessions on email change — same blast-radius
+        // posture as password change.
+        ctx.session_store.revoke_all_for_user(&user_id);
+        let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "changed": true, "email": new_email,
+            "token": session.token, "user_id": user_id, "expires_at": session.expires_at,
+        }).to_string()));
+    }
+    // ─── TOTP backup codes ────────────────────────────────────────────
+    //
+    // POST /api/auth/totp/backup-codes/regenerate (auth required)
+    //   → mints 10 codes, hashes them, returns plaintext exactly once.
+    //     Replaces any prior set.
+    // The /api/auth/totp/verify endpoint accepts EITHER a current
+    // 6-digit TOTP code OR one backup code (consumed on use).
+    if url == "/api/auth/totp/backup-codes/regenerate" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((403, json_error("API_KEY_AUTH_FORBIDDEN", "Backup codes require a session")));
+        }
+        // 10 random codes, formatted XXXX-XXXX (8 alphanumeric chars
+        // with a dash for readability — Google's standard).
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let codes: Vec<String> = (0..10).map(|_| {
+            let raw: String = (0..8).map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char).collect();
+            format!("{}-{}", &raw[..4], &raw[4..])
+        }).collect();
+        // Store the SHA-256 hashes (HMAC w/ pepper would be even
+        // better, but matching the existing api-key pattern).
+        use sha2::{Digest, Sha256};
+        let hashes: Vec<String> = codes.iter().map(|c| {
+            let mut h = Sha256::new();
+            h.update(c.as_bytes());
+            let out = h.finalize();
+            use std::fmt::Write;
+            let mut s = String::with_capacity(64);
+            for b in out { let _ = write!(s, "{b:02x}"); }
+            s
+        }).collect();
+        return match ctx.store.update(
+            &ctx.store.manifest().auth.user.entity, &user_id,
+            &serde_json::json!({"totpBackupCodes": hashes}),
+        ) {
+            Ok(_) => Some((200, serde_json::json!({"codes": codes}).to_string())),
+            Err(e) => Some((400, json_error(&e.code, &e.message))),
+        };
+    }
+    // ─── Anonymous → authenticated upgrade with cart merge ────────────
+    //
+    // POST /api/auth/anonymous → mint a guest session (existing
+    // behavior is /api/auth/guest; this is the better-auth-compatible
+    // alias).
+    if url == "/api/auth/anonymous" && method == HttpMethod::Post {
+        let session = ctx.session_store.create_guest();
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "token": session.token, "user_id": session.user_id,
+            "is_guest": true, "expires_at": session.expires_at,
+        }).to_string()));
+    }
     // ─── Account deletion ──────────────────────────────────────────────
     //
     // DELETE /api/auth/account — wipes the user row, revokes all

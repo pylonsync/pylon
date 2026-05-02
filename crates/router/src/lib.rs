@@ -491,6 +491,10 @@ pub struct RouterContext<'a> {
     /// WebAuthn / passkey credentials + per-user challenge stash.
     /// Endpoints under `/api/auth/passkey/...`.
     pub passkeys: &'a pylon_auth::webauthn::PasskeyStore,
+    /// Single-use email-delivered tokens (password reset, email
+    /// change, magic-link sign-in). Endpoints under
+    /// `/api/auth/{password/reset,email/change,magic-link}/...`.
+    pub verification: &'a pylon_auth::verification::VerificationStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -1833,6 +1837,7 @@ mod auth_gate_tests {
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1858,6 +1863,7 @@ mod auth_gate_tests {
             siwe: &siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
+            verification: &verification,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2279,6 +2285,7 @@ mod auth_gate_tests {
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2307,6 +2314,7 @@ mod auth_gate_tests {
             siwe: &siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
+            verification: &verification,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2801,6 +2809,7 @@ mod auth_gate_tests {
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2831,6 +2840,7 @@ mod auth_gate_tests {
             siwe: &siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
+            verification: &verification,
                 trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,

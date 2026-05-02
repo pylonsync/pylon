@@ -11,13 +11,13 @@ categories.workspace = true
 version.workspace = true
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.21" }
-pylon-http = { path = "../http", version = "0.3.21" }
-pylon-auth = { path = "../auth", version = "0.3.21" }
-pylon-policy = { path = "../policy", version = "0.3.21" }
-pylon-sync = { path = "../sync", version = "0.3.21" }
-pylon-functions = { path = "../functions", version = "0.3.21" }
-pylon-realtime = { path = "../realtime", version = "0.3.21" }
+pylon-kernel = { path = "../core", version = "0.3.22" }
+pylon-http = { path = "../http", version = "0.3.22" }
+pylon-auth = { path = "../auth", version = "0.3.22" }
+pylon-policy = { path = "../policy", version = "0.3.22" }
+pylon-sync = { path = "../sync", version = "0.3.22" }
+pylon-functions = { path = "../functions", version = "0.3.22" }
+pylon-realtime = { path = "../realtime", version = "0.3.22" }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,3 +25,7 @@ serde_json = { workspace = true }
 # the credentialId / authenticatorData / clientDataJSON / signature
 # bytes the WebAuthn frontend serializes.
 base64 = { workspace = true }
+# /api/auth/totp/verify hashes backup codes for compare; the
+# /backup-codes/regenerate endpoint uses rand to mint them.
+sha2 = { workspace = true }
+rand = { workspace = true }

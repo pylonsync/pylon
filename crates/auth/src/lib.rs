@@ -9,10 +9,12 @@ pub mod org;
 pub mod password;
 pub mod phone;
 pub mod provider;
+pub mod rate_limit;
 pub mod scim;
 pub mod siwe;
 pub mod stripe;
 pub mod totp;
+pub mod verification;
 pub mod webauthn;
 
 pub use cookie::{extract_token as extract_session_cookie, CookieConfig, SameSite};

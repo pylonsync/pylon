@@ -15,6 +15,7 @@ pub mod magic_code_backend;
 pub mod metrics;
 pub mod oauth_backend;
 pub mod org_backend;
+pub mod verification_backend;
 pub mod openapi;
 pub mod presence;
 pub mod pubsub;

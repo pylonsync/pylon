@@ -25,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.21";
+const PYLON_VERSION = "0.3.22";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
