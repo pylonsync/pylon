@@ -4,6 +4,8 @@
 
 Pylon is best for apps where two browsers need to see the same thing instantly: dashboards, CRMs, collaborative editors, multiplayer games, chat. Storage is pluggable: SQLite by default, Postgres via `DATABASE_URL`. Schema, policies, functions, and client APIs are identical across both adapters.
 
+Pylon Cloud is the managed path at <https://cloud.pylonsync.com>. It runs the same Pylon app model without requiring teams to operate the infrastructure themselves.
+
 The system has four primitives: entities (typed tables), policies (row-level access rules evaluated as expressions), functions (queries/mutations/actions authored in TypeScript and RPC-called by the client), and live queries (subscriptions that restream results when dependent rows change). All four live in one process.
 
 ## Docs

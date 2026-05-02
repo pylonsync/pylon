@@ -11,6 +11,7 @@ const STEPS = [
     title: "Pylon Cloud",
     meta: "managed",
     desc: "Start with hosted infra when you want the framework, not another operations project.",
+    href: "https://cloud.pylonsync.com",
     tag: { label: "managed", accent: true },
   },
   {
@@ -49,7 +50,15 @@ export function Scale() {
           {STEPS.map((s, i) => (
             <div className="step" key={i}>
               <div className="step-num">{s.num}</div>
-              <h3 className="step-title">{s.title}</h3>
+              <h3 className="step-title">
+                {"href" in s ? (
+                  <a href={s.href} target="_blank" rel="noopener noreferrer">
+                    {s.title}
+                  </a>
+                ) : (
+                  s.title
+                )}
+              </h3>
               <div className="step-meta">{s.meta}</div>
               <p className="step-desc">{s.desc}</p>
               <div className={`step-tag ${s.tag.accent ? "accent" : ""}`}>

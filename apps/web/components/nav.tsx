@@ -47,13 +47,21 @@ export function Nav() {
         <div className="nav-right">
           <a
             href="https://docs.pylonsync.com"
-            className="text-mono text-dim"
+            className="nav-docs-link text-mono text-dim"
             style={{ fontSize: 12, marginRight: 6 }}
           >
             docs
           </a>
           <a
-            className="inline-flex items-center gap-2 h-[30px] px-[11px] text-[12.5px] rounded-[5px] border border-[color:var(--border-2)] text-[color:var(--text)] hover:bg-[color:var(--bg-2)] hover:border-[#33333a] transition-colors font-medium"
+            className="nav-cloud-link inline-flex items-center h-[30px] px-[11px] text-[12.5px] rounded-[5px] border border-[color:var(--accent)] bg-[color:var(--accent)] text-white hover:bg-[color:var(--accent-hover)] hover:border-[color:var(--accent-hover)] transition-colors font-medium"
+            href="https://cloud.pylonsync.com"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Cloud
+          </a>
+          <a
+            className="nav-github-link inline-flex items-center gap-2 h-[30px] px-[11px] text-[12.5px] rounded-[5px] border border-[color:var(--border-2)] text-[color:var(--text)] hover:bg-[color:var(--bg-2)] hover:border-[#33333a] transition-colors font-medium"
             href="https://github.com/pylonsync/pylon"
             target="_blank"
             rel="noopener noreferrer"
@@ -108,6 +116,14 @@ export function Nav() {
         ))}
         <a href="https://docs.pylonsync.com" onClick={close}>
           Docs
+        </a>
+        <a
+          href="https://cloud.pylonsync.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={close}
+        >
+          Pylon Cloud
         </a>
         <a
           href="https://github.com/pylonsync/pylon"

@@ -116,6 +116,19 @@ function GithubButton() {
   );
 }
 
+function CloudButton() {
+  return (
+    <a
+      className="btn btn-primary"
+      href="https://cloud.pylonsync.com"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      Start on Pylon Cloud
+    </a>
+  );
+}
+
 const SEED_MESSAGES = [
   { name: "maya", color: "#F5B946", text: "shipping the v0.8 tick loop tonight" },
   { name: "jonas", color: "#7AB7FF", text: "pulled it — tests pass on my laptop" },
@@ -920,11 +933,6 @@ export function Hero() {
     <section className="hero">
       <div className="hero-grid-bg" />
       <div className="container-page hero-inner">
-        <div className="hero-eyebrow">
-          <span className="chip">pre-1.0</span>
-          <span>Integrated framework · realtime by default · deploy anywhere</span>
-        </div>
-
         <h1 className="hero-h1">
           The modern Rails for
           <br />
@@ -933,11 +941,13 @@ export function Hero() {
 
         <p className="hero-sub">
           Schema, auth, server functions, live queries, jobs, workflows, files,
-          and search in one framework. Start local or managed, then run the same
-          app on <code>SQLite</code>, <code>Postgres</code>, your VPS, or AWS.
+          and search in one framework. Start on Pylon Cloud or locally, then run
+          the same app on <code>SQLite</code>, <code>Postgres</code>, your VPS,
+          or AWS.
         </p>
 
         <div className="cta-row">
+          <CloudButton />
           <InstallCmd />
           <GithubButton />
         </div>

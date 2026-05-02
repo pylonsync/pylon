@@ -77,8 +77,8 @@ export function Quickstart() {
         <div className="section-label">Quickstart</div>
         <h2 className="section-title">Four commands to a running backend.</h2>
         <p className="section-sub">
-          Start with a local app in minutes. Move to managed or self-hosted
-          deployment later, without changing the programming model.
+          Start with a local app in minutes. Move to Pylon Cloud or your own
+          infrastructure later, without changing the programming model.
         </p>
 
         <div className="quickstart">

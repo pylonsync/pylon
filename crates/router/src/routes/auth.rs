@@ -731,17 +731,27 @@ pub(crate) fn handle(
     // GET /api/auth/providers
     if url == "/api/auth/providers" && method == HttpMethod::Get {
         let registry = pylon_auth::OAuthRegistry::from_env();
-        let providers: Vec<serde_json::Value> = ["google", "github"]
-            .iter()
-            .filter_map(|p| {
-                registry.get(p).map(|c| {
+        // Iterate the configured ids — order isn't stable across calls
+        // but the frontend doesn't need it to be (it sorts by display
+        // name). Sorting here would mask provider-list churn that's
+        // useful in logs, so keep it as-is.
+        let mut providers: Vec<serde_json::Value> = registry
+            .ids()
+            .filter_map(|id| {
+                registry.get(id).map(|c| {
                     serde_json::json!({
-                        "provider": p,
+                        "provider": id,
                         "auth_url": c.auth_url(),
                     })
                 })
             })
             .collect();
+        // Stable order in the response so the FE list doesn't reshuffle
+        // every login page hit (HashMap iteration is unspecified).
+        providers.sort_by(|a, b| {
+            a.get("provider").and_then(|v| v.as_str()).unwrap_or("")
+                .cmp(b.get("provider").and_then(|v| v.as_str()).unwrap_or(""))
+        });
         return Some((
             200,
             serde_json::to_string(&providers).unwrap_or_else(|_| "[]".into()),
@@ -767,7 +777,12 @@ pub(crate) fn handle(
                     json_error_with_hint(
                         "PROVIDER_NOT_FOUND",
                         &format!("OAuth provider \"{provider}\" is not configured"),
-                        "Set PYLON_OAUTH_GOOGLE_CLIENT_ID / PYLON_OAUTH_GITHUB_CLIENT_ID environment variables",
+                        &format!(
+                            "Set PYLON_OAUTH_{}_CLIENT_ID + PYLON_OAUTH_{}_CLIENT_SECRET (and _REDIRECT). For OIDC IdPs (Auth0, Okta, Keycloak) also set PYLON_OAUTH_{}_OIDC_ISSUER.",
+                            provider.to_ascii_uppercase(),
+                            provider.to_ascii_uppercase(),
+                            provider.to_ascii_uppercase(),
+                        ),
                     ),
                 ));
             };

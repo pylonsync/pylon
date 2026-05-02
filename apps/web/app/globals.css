@@ -319,34 +319,6 @@ pre,
   z-index: 1;
 }
 
-.hero-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
-  border: 1px solid var(--border-2);
-  background: var(--bg-1);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-2);
-  margin-bottom: 32px;
-  border-radius: 0;
-}
-
-.hero-eyebrow .chip {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: var(--accent);
-  padding-right: 10px;
-  border-right: 1px solid var(--border-2);
-}
-
-.hero-eyebrow .arrow {
-  color: var(--text-3);
-  margin-left: 2px;
-}
-
 .hero-h1 {
   /* Temporal calibration: light weight, tight tracking, generous line
      height. 68–80px reads sophisticated; 100+ feels shouty. */
@@ -1612,6 +1584,17 @@ pre,
   letter-spacing: -0.015em;
 }
 
+.step-title a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 4px;
+}
+
+.step-title a:hover {
+  color: var(--accent-hover);
+}
+
 .step-meta {
   font-size: 12px;
   color: var(--text-3);
@@ -2375,10 +2358,11 @@ pre,
   .nav-right {
     gap: 8px;
   }
-  .nav-right a[href*="github"] .text-dim {
+  .nav-docs-link,
+  .nav-github-link {
     display: none;
   }
-  .nav-right a[href*="github"] {
+  .nav-cloud-link {
     padding: 0 10px;
   }
   .nav-mobile-toggle {
@@ -2424,10 +2408,6 @@ pre,
   }
 
   /* ---- Hero ---- */
-  .hero-eyebrow {
-    font-size: 11px;
-    padding: 5px 10px;
-  }
   .hero-h1 {
     font-size: clamp(38px, 11vw, 52px) !important;
     line-height: 1.02;

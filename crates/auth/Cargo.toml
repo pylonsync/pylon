@@ -20,3 +20,8 @@ rand = { workspace = true }
 ureq = { workspace = true }
 tracing = { workspace = true }
 argon2 = { workspace = true }
+# Apple "Sign in with Apple" client_secret JWT signing — ES256 over
+# the developer's downloadable .p8 PKCS8 key. ring is already in the
+# tree via rustls so this adds no new transitive deps.
+base64 = { workspace = true }
+ring = { workspace = true }

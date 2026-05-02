@@ -1765,7 +1765,9 @@ name = "pylon-auth"
 version = "0.3.19"
 dependencies = [
  "argon2",
+ "base64",
  "rand 0.8.5",
+ "ring",
  "serde",
  "serde_json",
  "tracing",

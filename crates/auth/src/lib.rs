@@ -1,6 +1,8 @@
+pub mod apple_jwt;
 pub mod cookie;
 pub mod email;
 pub mod password;
+pub mod provider;
 
 pub use cookie::{extract_token as extract_session_cookie, CookieConfig, SameSite};
 
@@ -276,32 +278,84 @@ fn now_secs() -> u64 {
 // OAuth provider config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OAuthConfig {
     pub provider: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
+    /// Optional scope override — replaces the spec's default scope
+    /// when set. Use cases: requesting `repo` on GitHub for app
+    /// installation flows, requesting `https://www.googleapis.com/...`
+    /// scopes on Google for app-specific data access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes_override: Option<String>,
+    /// Tenant id for Microsoft/Entra. Defaults to `common`. Single-
+    /// tenant apps use a directory GUID; multi-tenant work-only apps
+    /// use `organizations`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Apple-specific extras (team id, key id, ES256 PEM). Required
+    /// for Sign in with Apple — ignored for any other provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple: Option<provider::AppleConfig>,
+    /// OIDC issuer URL when this config targets a generic-OIDC
+    /// provider (Auth0, Okta, Keycloak, Cognito, etc.). When set,
+    /// the runtime fetches `<issuer>/.well-known/openid-configuration`
+    /// and synthesizes a [`provider::ProviderSpec`] from the
+    /// discovered endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_issuer: Option<String>,
 }
 
 impl OAuthConfig {
+    /// Resolve the [`provider::ProviderSpec`] backing this config. For
+    /// `oidc_issuer`-configured providers, falls through to the OIDC
+    /// discovery cache. Returns `None` only for unknown ids without
+    /// an issuer URL.
+    fn resolved_spec(&self) -> Option<provider::ResolvedSpec> {
+        if let Some(issuer) = self.oidc_issuer.as_deref() {
+            return provider::oidc_cache::resolve(issuer).ok();
+        }
+        provider::find_spec(&self.provider).map(provider::ResolvedSpec::Static)
+    }
+
+    /// Build a [`provider::ProviderConfig`] view of `self` for the
+    /// helpers in [`provider`] that take the runtime config.
+    fn provider_cfg(&self) -> provider::ProviderConfig {
+        provider::ProviderConfig {
+            provider: self.provider.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            redirect_uri: self.redirect_uri.clone(),
+            scopes_override: self.scopes_override.clone(),
+            tenant: self.tenant.clone(),
+            apple: self.apple.clone(),
+            oidc_issuer: self.oidc_issuer.clone(),
+        }
+    }
+
     /// Generate the authorization URL for the provider.
     ///
     /// Callers MUST append a `&state=<random>` parameter and validate it in the
     /// callback to prevent CSRF attacks. See `OAuthStateStore` for a minimal
     /// implementation.
     pub fn auth_url(&self) -> String {
-        match self.provider.as_str() {
-            "google" => format!(
-                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile",
-                self.client_id, self.redirect_uri
-            ),
-            "github" => format!(
-                "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email",
-                self.client_id, self.redirect_uri
-            ),
-            _ => String::new(),
-        }
+        let Some(spec) = self.resolved_spec() else {
+            return String::new();
+        };
+        let cfg = self.provider_cfg();
+        let auth = provider::resolve_endpoint(spec.auth_url(), &cfg);
+        let scopes = self
+            .scopes_override
+            .as_deref()
+            .unwrap_or(spec.scopes());
+        format!(
+            "{auth}?client_id={cid}&redirect_uri={ruri}&response_type=code&scope={scope}",
+            cid = url_encode(&self.client_id),
+            ruri = url_encode(&self.redirect_uri),
+            scope = url_encode(scopes),
+        )
     }
 
     /// Generate the authorization URL with a CSRF state parameter attached.
@@ -310,99 +364,112 @@ impl OAuthConfig {
         if base.is_empty() {
             return base;
         }
-        format!("{}&state={}", base, state)
+        format!("{}&state={}", base, url_encode(state))
     }
 
     /// Generate the token exchange URL.
-    pub fn token_url(&self) -> &str {
-        match self.provider.as_str() {
-            "google" => "https://oauth2.googleapis.com/token",
-            "github" => "https://github.com/login/oauth/access_token",
-            _ => "",
-        }
+    pub fn token_url(&self) -> String {
+        let Some(spec) = self.resolved_spec() else {
+            return String::new();
+        };
+        provider::resolve_endpoint(spec.token_url(), &self.provider_cfg())
     }
 
     /// URL for the userinfo endpoint, which returns the authenticated user's profile.
-    pub fn userinfo_url(&self) -> &str {
-        match self.provider.as_str() {
-            "google" => "https://www.googleapis.com/oauth2/v3/userinfo",
-            "github" => "https://api.github.com/user",
-            _ => "",
+    pub fn userinfo_url(&self) -> String {
+        let Some(spec) = self.resolved_spec() else {
+            return String::new();
+        };
+        match spec.userinfo_url() {
+            Some(u) => provider::resolve_endpoint(u, &self.provider_cfg()),
+            None => String::new(),
         }
     }
 
     /// Exchange an authorization code for the full token set
     /// (`access_token`, optional `refresh_token`, optional `id_token`,
-    /// `expires_in`, `scope`). The longer struct is what the
-    /// account-store needs to persist; the legacy
-    /// [`OAuthConfig::exchange_code`] returns just the access token for
-    /// callers that don't care.
+    /// `expires_in`, `scope`).
     pub fn exchange_code_full(&self, code: &str) -> Result<TokenSet, String> {
-        let body = match self.provider.as_str() {
-            "google" => format!(
-                "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
-                url_encode(&self.client_id),
-                url_encode(&self.client_secret),
-                url_encode(&self.redirect_uri)
-            ),
-            "github" => format!(
-                "code={code}&client_id={}&client_secret={}&redirect_uri={}",
-                url_encode(&self.client_id),
-                url_encode(&self.client_secret),
-                url_encode(&self.redirect_uri)
-            ),
-            _ => return Err(format!("unknown OAuth provider: {}", self.provider)),
-        };
+        let spec = self
+            .resolved_spec()
+            .ok_or_else(|| format!("unknown OAuth provider: {}", self.provider))?;
+        let cfg = self.provider_cfg();
+        let token_url = provider::resolve_endpoint(spec.token_url(), &cfg);
 
-        let out = http_post_form(self.token_url(), &body, self.provider.as_str() == "github")?;
+        let out = match spec.token_exchange() {
+            provider::TokenExchangeShape::Standard => {
+                let body = format!(
+                    "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
+                    url_encode(&self.client_id),
+                    url_encode(&self.client_secret),
+                    url_encode(&self.redirect_uri)
+                );
+                http_post_form(&token_url, &body, true)?
+            }
+            provider::TokenExchangeShape::AppleJwt => {
+                let apple = self
+                    .apple
+                    .as_ref()
+                    .ok_or("apple provider requires `apple` config (team_id, key_id, private_key_pem)")?;
+                let signed_secret = apple_jwt::mint_client_secret(apple, &self.client_id)?;
+                let body = format!(
+                    "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
+                    url_encode(&self.client_id),
+                    url_encode(&signed_secret),
+                    url_encode(&self.redirect_uri)
+                );
+                http_post_form(&token_url, &body, true)?
+            }
+            provider::TokenExchangeShape::BasicAuth => {
+                let body = format!(
+                    "code={code}&redirect_uri={}&grant_type=authorization_code",
+                    url_encode(&self.redirect_uri)
+                );
+                http_post_form_basic(&token_url, &body, &self.client_id, &self.client_secret)?
+            }
+        };
         parse_token_response(&out)
     }
 
     /// Exchange an authorization code for an access token. Thin wrapper
     /// around [`OAuthConfig::exchange_code_full`] for callers that only
-    /// need the access token (existing pre-account-store call sites).
+    /// need the access token.
     pub fn exchange_code(&self, code: &str) -> Result<String, String> {
-        let body = match self.provider.as_str() {
-            "google" => format!(
-                "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
-                url_encode(&self.client_id),
-                url_encode(&self.client_secret),
-                url_encode(&self.redirect_uri)
-            ),
-            "github" => format!(
-                "code={code}&client_id={}&client_secret={}&redirect_uri={}",
-                url_encode(&self.client_id),
-                url_encode(&self.client_secret),
-                url_encode(&self.redirect_uri)
-            ),
-            _ => return Err(format!("unknown OAuth provider: {}", self.provider)),
-        };
-
-        let out = http_post_form(self.token_url(), &body, self.provider.as_str() == "github")?;
-        extract_access_token(&out)
+        Ok(self.exchange_code_full(code)?.access_token)
     }
 
     /// Fetch the authenticated user's email + display name using an access token.
-    /// Returns `(email, display_name)`. Use [`OAuthConfig::fetch_userinfo_full`]
-    /// when you also need the provider-stable account ID for account
-    /// linking — the (`provider`, `provider_account_id`) pair is what
-    /// keeps a renamed-email user matched to the same row.
     pub fn fetch_userinfo(&self, access_token: &str) -> Result<(String, Option<String>), String> {
         let info = self.fetch_userinfo_full(access_token)?;
         Ok((info.email, info.name))
     }
 
     /// Fetch the authenticated user's full identity info — email + name +
-    /// the provider-stable account ID (Google's `sub`, GitHub's `id`).
-    /// `provider_account_id` is what the account-store keys on, NOT the
-    /// email; otherwise a user changing their Google address would orphan
-    /// their existing pylon account.
+    /// the provider-stable account ID. Uses the spec's
+    /// [`provider::UserinfoParser`] so adding a new provider is a
+    /// table change, not a new branch.
     pub fn fetch_userinfo_full(&self, access_token: &str) -> Result<UserInfo, String> {
-        let out = http_get_bearer(self.userinfo_url(), access_token)?;
+        let spec = self
+            .resolved_spec()
+            .ok_or_else(|| format!("unknown OAuth provider: {}", self.provider))?;
+        let cfg = self.provider_cfg();
+
+        // Linear is GraphQL — the userinfo "GET" is actually a POST
+        // with a fixed query.
+        if matches!(spec.userinfo_parser(), provider::UserinfoParser::LinearGraphql) {
+            return fetch_linear_userinfo(&self.provider, access_token);
+        }
+
+        let url = match spec.userinfo_url() {
+            Some(u) => provider::resolve_endpoint(u, &cfg),
+            None => return Err(format!("provider {} has no userinfo endpoint", self.provider)),
+        };
+        let out = http_get_bearer(&url, access_token)?;
         let parsed: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| format!("userinfo not valid JSON: {e}"))?;
-        match self.provider.as_str() {
-            "google" => {
+
+        match spec.userinfo_parser() {
+            provider::UserinfoParser::Oidc => {
                 let email = parsed
                     .get("email")
                     .and_then(|v| v.as_str())
@@ -424,7 +491,7 @@ impl OAuthConfig {
                     name,
                 })
             }
-            "github" => {
+            provider::UserinfoParser::GitHub => {
                 let name = parsed
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -434,13 +501,9 @@ impl OAuthConfig {
                     .get("email")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                // GitHub may return a null email if the user hasn't published one;
-                // in that case the caller should hit /user/emails with the same token.
                 let email = email
                     .or_else(|| fetch_github_primary_email(access_token).ok())
                     .ok_or("no accessible email on GitHub account")?;
-                // GitHub's `id` field is a numeric user ID — the stable
-                // account identifier even if the user renames themselves.
                 let provider_account_id = parsed
                     .get("id")
                     .map(|v| {
@@ -458,9 +521,82 @@ impl OAuthConfig {
                     name,
                 })
             }
-            _ => Err(format!("unknown provider: {}", self.provider)),
+            provider::UserinfoParser::Custom {
+                id_path,
+                email_path,
+                name_path,
+            } => {
+                let provider_account_id = json_pointer_string(&parsed, id_path)
+                    .ok_or_else(|| format!("no id at {id_path} in userinfo"))?;
+                let email = json_pointer_string(&parsed, email_path)
+                    .ok_or_else(|| format!("no email at {email_path} in userinfo"))?;
+                let name = name_path.and_then(|p| json_pointer_string(&parsed, p));
+                Ok(UserInfo {
+                    provider: self.provider.clone(),
+                    provider_account_id,
+                    email,
+                    name,
+                })
+            }
+            provider::UserinfoParser::LinearGraphql => unreachable!("handled above"),
         }
     }
+}
+
+/// Linear's userinfo lives behind a GraphQL endpoint — the bearer
+/// token is the same OAuth access token, but the request is a POST
+/// with a fixed query. Kept as a separate fn so the main fetcher
+/// stays uniform across the other parsers.
+fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo, String> {
+    let body = r#"{"query":"query { viewer { id email name } }"}"#;
+    let agent = ureq_agent();
+    let resp = agent
+        .post("https://api.linear.app/graphql")
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .send_string(body)
+        .map_err(|e| format!("linear graphql: {e}"))?;
+    let out = resp.into_string().map_err(|e| format!("read body: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&out)
+        .map_err(|e| format!("linear graphql not JSON: {e}"))?;
+    let viewer = parsed
+        .pointer("/data/viewer")
+        .ok_or("linear graphql: no /data/viewer")?;
+    let provider_account_id = viewer
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("linear graphql: no id")?
+        .to_string();
+    let email = viewer
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or("linear graphql: no email")?
+        .to_string();
+    let name = viewer.get("name").and_then(|v| v.as_str()).map(String::from);
+    Ok(UserInfo {
+        provider: provider.to_string(),
+        provider_account_id,
+        email,
+        name,
+    })
+}
+
+/// JSON-pointer (RFC 6901) string extraction. Returns `None` for
+/// missing paths or non-string values. Numeric ids (Discord's `id`,
+/// Roblox's `sub`) are coerced to strings.
+fn json_pointer_string(v: &serde_json::Value, path: &str) -> Option<String> {
+    let node = v.pointer(path)?;
+    if let Some(s) = node.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(n) = node.as_i64() {
+        return Some(n.to_string());
+    }
+    if let Some(n) = node.as_u64() {
+        return Some(n.to_string());
+    }
+    None
 }
 
 /// Resolved identity returned by [`OAuthConfig::fetch_userinfo_full`].
@@ -579,6 +715,35 @@ fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, St
     }
 }
 
+/// POST a form body using HTTP Basic auth for the client credentials.
+/// Used by Spotify, Twitter, Notion, Reddit, Atlassian, Figma, Zoom,
+/// PayPal — providers that mandate Basic auth on the token endpoint.
+fn http_post_form_basic(
+    url: &str,
+    body: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let creds = format!("{client_id}:{client_secret}");
+    let basic = STANDARD.encode(creds.as_bytes());
+    let agent = ureq_agent();
+    match agent
+        .post(url)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Basic {basic}"))
+        .send_string(body)
+    {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {body}"))
+        }
+        Err(e) => Err(format!("HTTP error: {e}")),
+    }
+}
+
 fn http_get_bearer(url: &str, token: &str) -> Result<String, String> {
     let agent = ureq_agent();
     match agent
@@ -613,21 +778,6 @@ fn fetch_github_primary_email(token: &str) -> Result<String, String> {
         .ok_or_else(|| "no primary verified email on GitHub".into())
 }
 
-fn extract_access_token(body: &str) -> Result<String, String> {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(t) = json.get("access_token").and_then(|v| v.as_str()) {
-            return Ok(t.to_string());
-        }
-    }
-    // GitHub can return url-encoded: access_token=...&scope=...&token_type=bearer
-    for pair in body.split('&') {
-        if let Some(val) = pair.strip_prefix("access_token=") {
-            return Ok(val.to_string());
-        }
-    }
-    Err(format!("no access_token in token response: {body}"))
-}
-
 /// OAuth provider registry.
 pub struct OAuthRegistry {
     providers: std::collections::HashMap<String, OAuthConfig>,
@@ -655,39 +805,108 @@ impl OAuthRegistry {
     }
 
     /// Build from environment variables.
-    /// Looks for PYLON_OAUTH_GOOGLE_CLIENT_ID, etc.
+    ///
+    /// For each builtin provider (and any `oidc_issuer`-configured
+    /// IdP), looks for `PYLON_OAUTH_<PROVIDER>_CLIENT_ID` /
+    /// `_CLIENT_SECRET` / `_REDIRECT`. Apple additionally requires
+    /// `_TEAM_ID`, `_KEY_ID`, `_PRIVATE_KEY` (PEM contents or path).
+    /// Microsoft accepts an optional `_TENANT`.
+    ///
+    /// Generic OIDC: any env var matching
+    /// `PYLON_OAUTH_<NAME>_OIDC_ISSUER` registers a provider with id
+    /// `<name>` (lowercased) using the discovered endpoints. Useful
+    /// for Auth0, Okta, Keycloak, Cognito, Logto, Authentik, etc.
     pub fn from_env() -> Self {
         let mut reg = Self::new();
 
-        // Google
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("PYLON_OAUTH_GOOGLE_CLIENT_ID"),
-            std::env::var("PYLON_OAUTH_GOOGLE_CLIENT_SECRET"),
-        ) {
+        for spec in provider::builtin::all() {
+            let upper = spec.id.to_ascii_uppercase();
+            let prefix = format!("PYLON_OAUTH_{upper}");
+            let id = match std::env::var(format!("{prefix}_CLIENT_ID")) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let secret = match std::env::var(format!("{prefix}_CLIENT_SECRET")) {
+                Ok(v) => v,
+                // Apple's "client_secret" is synthesized — allow blank.
+                Err(_) if spec.id == "apple" => String::new(),
+                Err(_) => continue,
+            };
+            let redirect_uri = std::env::var(format!("{prefix}_REDIRECT")).unwrap_or_else(|_| {
+                format!("http://localhost:3000/api/auth/callback/{}", spec.id)
+            });
+            let scopes_override = std::env::var(format!("{prefix}_SCOPES")).ok();
+            let tenant = std::env::var(format!("{prefix}_TENANT")).ok();
+
+            let apple = if spec.id == "apple" {
+                match (
+                    std::env::var(format!("{prefix}_TEAM_ID")),
+                    std::env::var(format!("{prefix}_KEY_ID")),
+                    std::env::var(format!("{prefix}_PRIVATE_KEY")),
+                ) {
+                    (Ok(team_id), Ok(key_id), Ok(private_key_pem)) => Some(provider::AppleConfig {
+                        team_id,
+                        key_id,
+                        private_key_pem,
+                    }),
+                    _ => continue, // Apple requires the JWT material to function.
+                }
+            } else {
+                None
+            };
+
             reg.register(OAuthConfig {
-                provider: "google".into(),
+                provider: spec.id.to_string(),
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("PYLON_OAUTH_GOOGLE_REDIRECT")
-                    .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/google".into()),
+                redirect_uri,
+                scopes_override,
+                tenant,
+                apple,
+                oidc_issuer: None,
             });
         }
 
-        // GitHub
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("PYLON_OAUTH_GITHUB_CLIENT_ID"),
-            std::env::var("PYLON_OAUTH_GITHUB_CLIENT_SECRET"),
-        ) {
+        // Generic OIDC providers — scan PYLON_OAUTH_<NAME>_OIDC_ISSUER.
+        for (key, issuer) in std::env::vars() {
+            let Some(rest) = key.strip_prefix("PYLON_OAUTH_") else {
+                continue;
+            };
+            let Some(name_upper) = rest.strip_suffix("_OIDC_ISSUER") else {
+                continue;
+            };
+            let name = name_upper.to_ascii_lowercase();
+            if provider::find_spec(&name).is_some() {
+                continue; // already handled as a builtin
+            }
+            let prefix = format!("PYLON_OAUTH_{name_upper}");
+            let id = match std::env::var(format!("{prefix}_CLIENT_ID")) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let secret = std::env::var(format!("{prefix}_CLIENT_SECRET")).unwrap_or_default();
+            let redirect_uri = std::env::var(format!("{prefix}_REDIRECT"))
+                .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{name}"));
             reg.register(OAuthConfig {
-                provider: "github".into(),
+                provider: name,
                 client_id: id,
                 client_secret: secret,
-                redirect_uri: std::env::var("PYLON_OAUTH_GITHUB_REDIRECT")
-                    .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback/github".into()),
+                redirect_uri,
+                scopes_override: std::env::var(format!("{prefix}_SCOPES")).ok(),
+                tenant: None,
+                apple: None,
+                oidc_issuer: Some(issuer),
             });
         }
 
         reg
+    }
+
+    /// Iterate over registered provider ids — used by routes/auth.rs
+    /// to expose `/api/auth/providers` and to validate
+    /// `/api/auth/login/<id>` paths against the configured set.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.providers.keys().map(|s| s.as_str())
     }
 }
 
@@ -1864,10 +2083,169 @@ mod tests {
             client_id: "test-id".into(),
             client_secret: "test-secret".into(),
             redirect_uri: "http://localhost/callback".into(),
+            ..Default::default()
         });
         let config = reg.get("google").unwrap();
         assert_eq!(config.client_id, "test-id");
         assert!(config.auth_url().contains("accounts.google.com"));
+    }
+
+    // -- Spec-driven provider routing --
+
+    /// Every builtin provider must produce a non-empty auth_url +
+    /// token_url when wired with placeholder credentials. This is the
+    /// regression test for the table-driven refactor: a typo in any
+    /// `ProviderSpec` field that breaks URL formatting will trip here
+    /// before it reaches a user.
+    #[test]
+    fn every_builtin_provider_routes_through_oauth_config() {
+        for spec in provider::builtin::all() {
+            let cfg = OAuthConfig {
+                provider: spec.id.into(),
+                client_id: "cid".into(),
+                client_secret: "csecret".into(),
+                redirect_uri: "https://app/cb".into(),
+                tenant: if spec.id == "microsoft" {
+                    Some("contoso".into())
+                } else {
+                    None
+                },
+                apple: if spec.id == "apple" {
+                    Some(provider::AppleConfig {
+                        team_id: "T".into(),
+                        key_id: "K".into(),
+                        private_key_pem: "no".into(),
+                    })
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            let auth = cfg.auth_url();
+            assert!(!auth.is_empty(), "{}: empty auth_url", spec.id);
+            assert!(auth.contains("client_id=cid"), "{}: missing client_id", spec.id);
+            assert!(!cfg.token_url().is_empty(), "{}: empty token_url", spec.id);
+        }
+    }
+
+    /// Microsoft uses `{tenant}` placeholder substitution — the
+    /// configured tenant must end up in both auth + token URLs.
+    #[test]
+    fn microsoft_tenant_placeholder_resolves() {
+        let cfg = OAuthConfig {
+            provider: "microsoft".into(),
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            tenant: Some("contoso.onmicrosoft.com".into()),
+            ..Default::default()
+        };
+        assert!(cfg.auth_url().contains("/contoso.onmicrosoft.com/"));
+        assert!(cfg.token_url().contains("/contoso.onmicrosoft.com/"));
+    }
+
+    /// Microsoft without a tenant defaults to `common` (any account).
+    #[test]
+    fn microsoft_default_tenant_common() {
+        let cfg = OAuthConfig {
+            provider: "microsoft".into(),
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            ..Default::default()
+        };
+        assert!(cfg.auth_url().contains("/common/"));
+        assert!(cfg.token_url().contains("/common/"));
+    }
+
+    /// `scopes_override` replaces the spec default — used for GitHub
+    /// `repo` scope or Google calendar scopes.
+    #[test]
+    fn scopes_override_replaces_spec_default() {
+        let cfg = OAuthConfig {
+            provider: "github".into(),
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            scopes_override: Some("repo user:email".into()),
+            ..Default::default()
+        };
+        let auth = cfg.auth_url();
+        // url-encoded "repo user:email" → "repo%20user%3Aemail"
+        assert!(auth.contains("scope=repo%20user%3Aemail"), "got: {auth}");
+    }
+
+    /// Apple's `client_secret` is minted as a JWT — passing a bad PEM
+    /// must surface the signing error, not silently send the literal
+    /// string. The mint path is tested in `apple_jwt::tests`; this
+    /// asserts the wiring delegates to it.
+    #[test]
+    fn apple_exchange_requires_apple_config() {
+        let cfg = OAuthConfig {
+            provider: "apple".into(),
+            client_id: "com.example.app".into(),
+            client_secret: String::new(),
+            redirect_uri: "https://app/cb".into(),
+            apple: None, // missing!
+            ..Default::default()
+        };
+        let err = cfg.exchange_code_full("x").unwrap_err();
+        assert!(err.contains("apple provider requires"), "got: {err}");
+    }
+
+    /// OIDC discovery cache: priming with a synthetic spec lets us
+    /// route an issuer-configured provider without touching the
+    /// network. Validates that `oidc_issuer` short-circuits the
+    /// builtin lookup.
+    #[test]
+    fn oidc_issuer_uses_discovered_endpoints() {
+        let issuer = "https://acme.test.invalid";
+        provider::oidc_cache::insert_for_test(
+            issuer,
+            provider::DiscoveredSpec {
+                auth_url: "https://acme.test.invalid/authorize".into(),
+                token_url: "https://acme.test.invalid/oauth/token".into(),
+                userinfo_url: Some("https://acme.test.invalid/userinfo".into()),
+                scopes: "openid email profile".into(),
+                userinfo_parser: provider::UserinfoParser::Oidc,
+                token_exchange: provider::TokenExchangeShape::Standard,
+            },
+        );
+        let cfg = OAuthConfig {
+            provider: "auth0".into(), // not a builtin id
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            oidc_issuer: Some(issuer.into()),
+            ..Default::default()
+        };
+        assert!(cfg.auth_url().starts_with("https://acme.test.invalid/authorize?"));
+        assert_eq!(cfg.token_url(), "https://acme.test.invalid/oauth/token");
+        assert_eq!(cfg.userinfo_url(), "https://acme.test.invalid/userinfo");
+    }
+
+    /// `OAuthRegistry::from_env` must auto-discover every provider
+    /// whose env vars are set — not just google/github. Smoke-test
+    /// with Discord since it covers the simple-builtin path.
+    #[test]
+    fn from_env_picks_up_discord() {
+        // Use a unique prefix so this doesn't collide with a real
+        // dev environment variable. Set+restore in scope.
+        let key_id = "PYLON_OAUTH_DISCORD_CLIENT_ID";
+        let key_secret = "PYLON_OAUTH_DISCORD_CLIENT_SECRET";
+        // SAFETY: tests run single-threaded for env mutation isn't
+        // strictly true, but this provider is unique enough that
+        // contention is unlikely. Cleanup happens at end.
+        std::env::set_var(key_id, "discord-test-id");
+        std::env::set_var(key_secret, "discord-test-secret");
+
+        let reg = OAuthRegistry::from_env();
+        let discord = reg.get("discord").expect("discord registered");
+        assert_eq!(discord.client_id, "discord-test-id");
+        assert!(discord.auth_url().contains("discord.com"));
+
+        std::env::remove_var(key_id);
+        std::env::remove_var(key_secret);
     }
 
     // -- Guest auth --
@@ -1924,6 +2302,7 @@ mod tests {
             client_id: "x".into(),
             client_secret: "x".into(),
             redirect_uri: "x".into(),
+            ..Default::default()
         };
         assert_eq!(google.token_url(), "https://oauth2.googleapis.com/token");
         let github = OAuthConfig {
@@ -1931,6 +2310,7 @@ mod tests {
             client_id: "x".into(),
             client_secret: "x".into(),
             redirect_uri: "x".into(),
+            ..Default::default()
         };
         assert_eq!(
             github.token_url(),
@@ -1941,6 +2321,7 @@ mod tests {
             client_id: "x".into(),
             client_secret: "x".into(),
             redirect_uri: "x".into(),
+            ..Default::default()
         };
         assert_eq!(unknown.token_url(), "");
         assert!(unknown.auth_url().is_empty());
@@ -1953,6 +2334,7 @@ mod tests {
             client_id: "gh-id".into(),
             client_secret: "gh-secret".into(),
             redirect_uri: "http://localhost/cb".into(),
+            ..Default::default()
         };
         assert!(config.auth_url().contains("github.com"));
         assert!(config.auth_url().contains("gh-id"));
@@ -1965,6 +2347,7 @@ mod tests {
             client_id: "test-id".into(),
             client_secret: "test-secret".into(),
             redirect_uri: "http://localhost/cb".into(),
+            ..Default::default()
         };
         let url = config.auth_url_with_state("random_state_123");
         assert!(url.contains("&state=random_state_123"));

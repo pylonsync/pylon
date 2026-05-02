@@ -63,6 +63,7 @@ export function Footer() {
             <h5>Project</h5>
             <ul>
               <li><a href="https://github.com/pylonsync/pylon">GitHub</a></li>
+              <li><a href="https://cloud.pylonsync.com">Pylon Cloud</a></li>
               <li><a href="https://github.com/pylonsync/pylon/releases">Changelog</a></li>
               <li><a href="https://github.com/pylonsync/pylon/blob/main/SECURITY.md">SECURITY.md</a></li>
             </ul>
