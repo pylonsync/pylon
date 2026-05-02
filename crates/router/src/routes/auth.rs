@@ -1971,6 +1971,396 @@ pub(crate) fn handle(
         }
     }
 
+    // ─── Phone / SMS sign-in ──────────────────────────────────────────
+    if url == "/api/auth/phone/send-code" && method == HttpMethod::Post {
+        let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let phone = data.get("phone").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(cfg) = pylon_auth::captcha::CaptchaConfig::from_env() {
+            let token = data.get("captchaToken").and_then(|v| v.as_str()).unwrap_or("");
+            if cfg.verify(token, Some(ctx.peer_ip)).is_err() {
+                return Some((400, json_error("CAPTCHA_FAILED", "CAPTCHA failed")));
+            }
+        }
+        let code = match ctx.phone_codes.try_create(phone) {
+            Ok(c) => c,
+            Err(pylon_auth::phone::PhoneCodeError::Throttled { retry_after_secs }) => {
+                return Some((
+                    429,
+                    json_error_with_hint("RATE_LIMITED", "Code requested too recently",
+                        &format!("Try again in {retry_after_secs}s")),
+                ));
+            }
+            Err(pylon_auth::phone::PhoneCodeError::InvalidPhone) => {
+                return Some((400, json_error("INVALID_PHONE", "Phone must be E.164 (+15551234567)")));
+            }
+            Err(e) => return Some((500, json_error("PHONE_CODE_FAILED", &e.to_string()))),
+        };
+        let mut sent = false;
+        if let Some(twilio) = pylon_auth::phone::TwilioSmsTransport::from_env() {
+            use pylon_auth::phone::SmsSender;
+            let body_text = format!("Your sign-in code is: {code}\nExpires in 10 minutes.");
+            if let Err(e) = twilio.send_sms(phone, &body_text) {
+                tracing::warn!("[phone] twilio send failed: {e}");
+            } else {
+                sent = true;
+            }
+        }
+        let mut response = serde_json::json!({"sent": sent, "phone": phone});
+        if ctx.is_dev || !sent {
+            response["dev_code"] = serde_json::Value::String(code);
+        }
+        return Some((200, response.to_string()));
+    }
+
+    if url == "/api/auth/phone/verify" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")))),
+        };
+        let phone = data.get("phone").and_then(|v| v.as_str()).unwrap_or("");
+        let code = data.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        let display_name = data.get("displayName").and_then(|v| v.as_str()).map(String::from);
+        if let Err(e) = ctx.phone_codes.try_verify(phone, code) {
+            let http_code = match e {
+                pylon_auth::phone::PhoneCodeError::TooManyAttempts => 429,
+                pylon_auth::phone::PhoneCodeError::InvalidPhone => 400,
+                _ => 401,
+            };
+            return Some((http_code, json_error("INVALID_CODE", &e.to_string())));
+        }
+        let normalized = pylon_auth::phone::normalize(phone).expect("verified above");
+        let entity = &ctx.store.manifest().auth.user.entity;
+        let user_id = match ctx.store.lookup(entity, "phone", &normalized) {
+            Ok(Some(row)) => row.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            _ => {
+                let now = format!("{}Z", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+                let dn = display_name.unwrap_or_else(|| normalized.clone());
+                match ctx.store.insert(entity, &serde_json::json!({
+                    "phone": normalized,
+                    "displayName": dn,
+                    "phoneVerified": now.clone(),
+                    "createdAt": now,
+                })) {
+                    Ok(id) => id,
+                    Err(e) => return Some((400, json_error(&e.code, &e.message))),
+                }
+            }
+        };
+        let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "token": session.token, "user_id": user_id, "expires_at": session.expires_at
+        }).to_string()));
+    }
+
+    // ─── SIWE — Sign-In With Ethereum ─────────────────────────────────
+    if let Some(rest) = url.strip_prefix("/api/auth/siwe/nonce") {
+        if method == HttpMethod::Get {
+            let q = rest.trim_start_matches('?');
+            let params = parse_query(q);
+            let addr = params.get("address").map(|s| s.as_str()).unwrap_or("");
+            if !addr.starts_with("0x") || addr.len() != 42 {
+                return Some((400, json_error("INVALID_ADDRESS", "address must be 0x + 40 hex chars")));
+            }
+            let nonce = ctx.siwe.issue(addr);
+            return Some((200, serde_json::json!({"nonce": nonce}).to_string()));
+        }
+    }
+    if url == "/api/auth/siwe/verify" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let message_text = data.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let sig_hex = data.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+        let display_name = data.get("displayName").and_then(|v| v.as_str()).map(String::from);
+        let parsed = match pylon_auth::siwe::parse_message(message_text) {
+            Ok(m) => m,
+            Err(e) => return Some((400, json_error("SIWE_BAD_MESSAGE", &e.to_string()))),
+        };
+        let expected_domain = ctx.request_headers.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+            .map(|(_, v)| v.split(':').next().unwrap_or(v).to_string())
+            .unwrap_or_else(|| parsed.domain.clone());
+        let recovered = match pylon_auth::siwe::verify(ctx.siwe, &parsed, sig_hex, &expected_domain) {
+            Ok(addr) => addr,
+            Err(e) => return Some((401, json_error("SIWE_VERIFY_FAILED", &e.to_string()))),
+        };
+        let entity = &ctx.store.manifest().auth.user.entity;
+        let user_id = match ctx.store.lookup(entity, "walletAddress", &recovered) {
+            Ok(Some(row)) => row.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            _ => {
+                let now = format!("{}Z", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+                let dn = display_name.unwrap_or_else(|| {
+                    format!("{}…{}", &recovered[..6], &recovered[recovered.len() - 4..])
+                });
+                match ctx.store.insert(entity, &serde_json::json!({
+                    "walletAddress": recovered,
+                    "displayName": dn,
+                    "createdAt": now,
+                })) {
+                    Ok(id) => id,
+                    Err(e) => return Some((400, json_error(&e.code, &e.message))),
+                }
+            }
+        };
+        let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "token": session.token, "user_id": user_id, "address": recovered,
+            "expires_at": session.expires_at
+        }).to_string()));
+    }
+
+    // ─── WebAuthn / passkeys ──────────────────────────────────────────
+    if url == "/api/auth/passkey/register/begin" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let row = ctx.store.get_by_id(&ctx.store.manifest().auth.user.entity, &user_id).ok().flatten();
+        let user_name = row.as_ref().and_then(|r| r.get("email")).and_then(|v| v.as_str())
+            .unwrap_or(&user_id).to_string();
+        let challenge = ctx.passkeys.mint_challenge(user_id.clone(),
+            pylon_auth::webauthn::ChallengeKind::Registration);
+        let rp_id = std::env::var("PYLON_WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into());
+        return Some((200, serde_json::json!({
+            "challenge": challenge, "rpId": rp_id, "userId": user_id, "userName": user_name
+        }).to_string()));
+    }
+    if url == "/api/auth/passkey/register/finish" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let challenge = data.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
+        let cred_id = data.get("credentialId").and_then(|v| v.as_str()).unwrap_or("");
+        let public_key_b64 = data.get("publicKey").and_then(|v| v.as_str()).unwrap_or("");
+        let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("passkey").to_string();
+        if cred_id.is_empty() || public_key_b64.is_empty() {
+            return Some((400, json_error("MISSING_FIELD", "credentialId + publicKey required")));
+        }
+        if ctx.passkeys.take_challenge(challenge,
+            pylon_auth::webauthn::ChallengeKind::Registration).is_none() {
+            return Some((401, json_error("BAD_CHALLENGE", "Challenge missing or expired")));
+        }
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let public_key = match URL_SAFE_NO_PAD.decode(public_key_b64) {
+            Ok(b) => b,
+            Err(e) => return Some((400, json_error("BAD_PUBKEY", &format!("not base64url: {e}")))),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        ctx.passkeys.store_passkey(pylon_auth::webauthn::Passkey {
+            id: cred_id.to_string(), user_id, public_key, sign_count: 0,
+            name, created_at: now, last_used_at: None,
+        });
+        return Some((200, serde_json::json!({"registered": true, "id": cred_id}).to_string()));
+    }
+    if url == "/api/auth/passkey/login/begin" && method == HttpMethod::Post {
+        let challenge = ctx.passkeys.mint_challenge(String::new(),
+            pylon_auth::webauthn::ChallengeKind::Assertion);
+        let rp_id = std::env::var("PYLON_WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into());
+        return Some((200, serde_json::json!({"challenge": challenge, "rpId": rp_id}).to_string()));
+    }
+    if url == "/api/auth/passkey/login/finish" && method == HttpMethod::Post {
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => return Some((400, json_error_safe("INVALID_JSON", "Invalid body", &format!("{e}")))),
+        };
+        let cred_id = data.get("credentialId").and_then(|v| v.as_str()).unwrap_or("");
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let auth_data = URL_SAFE_NO_PAD.decode(
+            data.get("authenticatorData").and_then(|v| v.as_str()).unwrap_or("")).unwrap_or_default();
+        let client_data = URL_SAFE_NO_PAD.decode(
+            data.get("clientDataJSON").and_then(|v| v.as_str()).unwrap_or("")).unwrap_or_default();
+        let sig = URL_SAFE_NO_PAD.decode(
+            data.get("signature").and_then(|v| v.as_str()).unwrap_or("")).unwrap_or_default();
+        let expected_origin = std::env::var("PYLON_WEBAUTHN_ORIGIN")
+            .unwrap_or_else(|_| "https://localhost".into());
+        let expected_rp_id = std::env::var("PYLON_WEBAUTHN_RP_ID")
+            .unwrap_or_else(|_| "localhost".into());
+        let input = pylon_auth::webauthn::AssertionInput {
+            credential_id: cred_id, authenticator_data: &auth_data,
+            client_data_json: &client_data, signature: &sig, user_handle: None,
+        };
+        let key = match pylon_auth::webauthn::verify_assertion(
+            ctx.passkeys, &input, &expected_origin, &expected_rp_id, None) {
+            Ok(k) => k,
+            Err(e) => return Some((401, json_error("PASSKEY_VERIFY_FAILED", &e.to_string()))),
+        };
+        let session = ctx.session_store.create(key.user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((200, serde_json::json!({
+            "token": session.token, "user_id": key.user_id, "expires_at": session.expires_at
+        }).to_string()));
+    }
+    if url == "/api/auth/passkey/keys" && method == HttpMethod::Get {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let payload: Vec<serde_json::Value> = ctx.passkeys.list_for_user(&user_id).iter()
+            .map(|k| serde_json::json!({
+                "id": k.id, "name": k.name, "created_at": k.created_at,
+                "last_used_at": k.last_used_at,
+            })).collect();
+        return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+    }
+    if let Some(id) = url.strip_prefix("/api/auth/passkey/keys/") {
+        if method == HttpMethod::Delete {
+            let user_id = match ctx.auth_ctx.user_id.as_deref() {
+                Some(u) => u.to_string(),
+                None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+            };
+            match ctx.passkeys.get_passkey(id) {
+                Some(k) if k.user_id == user_id => {
+                    let removed = ctx.passkeys.delete(id);
+                    return Some((200, serde_json::json!({"deleted": removed}).to_string()));
+                }
+                _ => return Some((404, json_error("NOT_FOUND", "Passkey not found"))),
+            }
+        }
+    }
+
+    // ─── SCIM 2.0 ─────────────────────────────────────────────────────
+    // Bearer-token gated via PYLON_SCIM_TOKEN. Apps that don't
+    // configure this env var get a 503 — refusing silently would
+    // leave the surface looking broken.
+    if let Some(rest) = url.strip_prefix("/scim/v2/") {
+        let auth = ctx.request_headers.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        if !pylon_auth::scim::check_bearer(auth) {
+            return Some((401, serde_json::to_string(
+                &pylon_auth::scim::ScimError::new(401, "missing or invalid SCIM bearer token")
+            ).unwrap_or_default()));
+        }
+        let entity = &ctx.store.manifest().auth.user.entity;
+        let parts: Vec<&str> = rest.splitn(2, '/').collect();
+        match (parts.as_slice(), method) {
+            // POST /scim/v2/Users
+            (["Users"], HttpMethod::Post) => {
+                let scim_user: pylon_auth::scim::ScimUser = match serde_json::from_str(body) {
+                    Ok(u) => u,
+                    Err(e) => return Some((400, serde_json::to_string(
+                        &pylon_auth::scim::ScimError::new(400, &format!("invalid SCIM JSON: {e}"))
+                    ).unwrap_or_default())),
+                };
+                let now = format!("{}Z", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs());
+                let row = serde_json::json!({
+                    "email": scim_user.primary_email(),
+                    "displayName": scim_user.pretty_display_name(),
+                    "scimId": scim_user.id,
+                    "scimActive": scim_user.active,
+                    "createdAt": now,
+                });
+                match ctx.store.insert(entity, &row) {
+                    Ok(id) => {
+                        let mut response = scim_user;
+                        response.id = Some(id);
+                        return Some((201, serde_json::to_string(&response).unwrap_or_default()));
+                    }
+                    Err(e) => return Some((409, serde_json::to_string(
+                        &pylon_auth::scim::ScimError::new(409, &e.message)
+                    ).unwrap_or_default())),
+                }
+            }
+            (["Users"], HttpMethod::Get) => {
+                let list = ctx.store.list(entity).unwrap_or_default();
+                let users: Vec<pylon_auth::scim::ScimUser> = list.iter().filter_map(|row| {
+                    let email = row.get("email").and_then(|v| v.as_str())?.to_string();
+                    let id = row.get("id").and_then(|v| v.as_str()).map(String::from);
+                    let active = row.get("scimActive").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let display_name = row.get("displayName").and_then(|v| v.as_str()).map(String::from);
+                    Some(pylon_auth::scim::ScimUser {
+                        id, user_name: email.clone(), active,
+                        name: None,
+                        emails: vec![pylon_auth::scim::ScimEmail {
+                            value: email, primary: Some(true), kind: Some("work".into()),
+                        }],
+                        display_name,
+                        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".into()],
+                    })
+                }).collect();
+                return Some((200, serde_json::to_string(
+                    &pylon_auth::scim::ScimListResponse::new(users)
+                ).unwrap_or_default()));
+            }
+            (["Users", id], HttpMethod::Get) => {
+                let row = match ctx.store.get_by_id(entity, id) {
+                    Ok(Some(r)) => r,
+                    _ => return Some((404, serde_json::to_string(
+                        &pylon_auth::scim::ScimError::new(404, "user not found")
+                    ).unwrap_or_default())),
+                };
+                let email = row.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let user = pylon_auth::scim::ScimUser {
+                    id: Some(id.to_string()),
+                    user_name: email.clone(),
+                    active: row.get("scimActive").and_then(|v| v.as_bool()).unwrap_or(true),
+                    name: None,
+                    emails: vec![pylon_auth::scim::ScimEmail {
+                        value: email, primary: Some(true), kind: Some("work".into()),
+                    }],
+                    display_name: row.get("displayName").and_then(|v| v.as_str()).map(String::from),
+                    schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".into()],
+                };
+                return Some((200, serde_json::to_string(&user).unwrap_or_default()));
+            }
+            (["Users", id], HttpMethod::Delete) => {
+                // SCIM DELETE = soft delete (set scimActive=false). Hard
+                // delete left to the host app's account-deletion flow.
+                let _ = ctx.store.update(entity, id, &serde_json::json!({"scimActive": false}));
+                return Some((204, String::new()));
+            }
+            _ => {}
+        }
+    }
+
+    // ─── OIDC Provider — discovery + JWKS only (auth-code flow Wave 6) ─
+    // Apps that want pylon as their IdP get the discovery doc + JWKS
+    // for free. Token issuance reuses the existing JWT mint.
+    if url == "/.well-known/openid-configuration" && method == HttpMethod::Get {
+        let issuer = std::env::var("PYLON_OIDC_ISSUER").unwrap_or_else(|_| {
+            ctx.request_headers.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+                .map(|(_, v)| format!("https://{v}"))
+                .unwrap_or_else(|| "http://localhost:4321".into())
+        });
+        let doc = pylon_auth::oidc_provider::DiscoveryDoc::for_issuer(&issuer);
+        return Some((200, serde_json::to_string(&doc).unwrap_or_default()));
+    }
+    if url == "/oidc/jwks" && method == HttpMethod::Get {
+        // We mint HS256 JWTs (Wave 3); HS256 doesn't publish a public
+        // key (symmetric). When PYLON_OIDC_JWKS_RSA_N + _E are set,
+        // we publish them — apps that have rotated to RSA can drop the
+        // PEM-encoded modulus + exponent into env at deploy.
+        let n = std::env::var("PYLON_OIDC_JWKS_RSA_N").unwrap_or_default();
+        let e = std::env::var("PYLON_OIDC_JWKS_RSA_E").unwrap_or_else(|_| "AQAB".into());
+        let kid = std::env::var("PYLON_OIDC_JWKS_KID").unwrap_or_else(|_| "pylon-default".into());
+        let keys = if n.is_empty() {
+            // No RSA key configured → empty JWKS (correct OIDC response;
+            // means "no asymmetric verification keys published").
+            vec![]
+        } else {
+            vec![pylon_auth::oidc_provider::Jwk {
+                kty: "RSA".into(), alg: "RS256".into(), use_: "sig".into(),
+                kid, n, e,
+            }]
+        };
+        return Some((200, serde_json::to_string(
+            &pylon_auth::oidc_provider::Jwks { keys }
+        ).unwrap_or_default()));
+    }
+
     // ─── Stripe billing ────────────────────────────────────────────────
     //
     // POST /api/billing/checkout — mint a Stripe Checkout Session for

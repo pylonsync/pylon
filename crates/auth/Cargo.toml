@@ -35,3 +35,6 @@ sha1 = { workspace = true }
 hmac = { workspace = true }
 # RFC 3339 timestamp parser for SIWE expiration_time / not_before fields.
 chrono = { workspace = true }
+# secp256k1 ECDSA recovery + keccak256 — SIWE signature verification.
+k256 = { workspace = true }
+sha3 = { workspace = true }

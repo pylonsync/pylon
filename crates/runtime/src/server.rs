@@ -256,6 +256,9 @@ fn start_server(
     let account_store = auth_stores.account_store;
     let api_keys = auth_stores.api_keys;
     let orgs = auth_stores.orgs;
+    let siwe = auth_stores.siwe;
+    let phone_codes = auth_stores.phone_codes;
+    let passkeys = auth_stores.passkeys;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -735,6 +738,9 @@ fn start_server(
         let acc = Arc::clone(&account_store);
         let ak = Arc::clone(&api_keys);
         let og = Arc::clone(&orgs);
+        let sw = Arc::clone(&siwe);
+        let pcd = Arc::clone(&phone_codes);
+        let pks = Arc::clone(&passkeys);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -2023,6 +2029,9 @@ fn start_server(
                     account_store: &acc,
                     api_keys: &ak,
                     orgs: &og,
+                    siwe: &sw,
+                    phone_codes: &pcd,
+                    passkeys: &pks,
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2200,6 +2209,9 @@ struct AuthStores {
     account_store: Arc<pylon_auth::AccountStore>,
     api_keys: Arc<pylon_auth::api_key::ApiKeyStore>,
     orgs: Arc<pylon_auth::org::OrgStore>,
+    siwe: Arc<pylon_auth::siwe::NonceStore>,
+    phone_codes: Arc<pylon_auth::phone::PhoneCodeStore>,
+    passkeys: Arc<pylon_auth::webauthn::PasskeyStore>,
 }
 
 // Memoized env reads — auth resolver runs PER REQUEST so we can't
@@ -2258,6 +2270,9 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         account_store: Arc::new(pylon_auth::AccountStore::new()),
         api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
         orgs: Arc::new(pylon_auth::org::OrgStore::new()),
+        siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
     }
 }
 
@@ -2314,6 +2329,9 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         orgs: Arc::new(orgs),
+        siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
     }
 }
 
@@ -2374,6 +2392,9 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         orgs: Arc::new(orgs),
+        siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
+        phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
+        passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
     }
 }
 

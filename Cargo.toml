@@ -27,7 +27,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-version = "0.3.19"  # x-release-please-version
+version = "0.3.20"  # x-release-please-version
 description = "Pylon — realtime backend as a single Rust binary. Schema, policies, server functions, live queries, auth — one process."
 homepage = "https://pylonsync.com"
 repository = "https://github.com/pylonsync/pylon"
@@ -68,6 +68,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # rely on the same data structure. Storing per-(entity, facet, value)
 # match-sets as bitmaps makes facet counts O(popcount), not O(matches).
 roaring = "0.10"
+# secp256k1 + keccak256 for SIWE (Sign-In With Ethereum, EIP-4361).
+# k256 is the pure-Rust ECDSA on secp256k1 used by every Ethereum
+# tool. sha3 provides Keccak-256 (Ethereum's variant, NOT SHA-3).
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+sha3 = "0.10"
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

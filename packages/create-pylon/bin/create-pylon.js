@@ -25,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.19";
+const PYLON_VERSION = "0.3.20";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
@@ -604,7 +604,20 @@ write(
  * Pylon's typed client + functions packages re-export across the
  * server/client boundary AND the workspace UI package ships TSX.
  * \`transpilePackages\` makes Next bundle them cleanly.
+ *
+ * \`rewrites\` proxies every Pylon-owned path (\`/api/fn/*\`,
+ * \`/api/auth/*\`, \`/api/sync/*\`, …) to the Pylon binary running
+ * on \`PYLON_API_URL\` (default http://localhost:4321). Without this,
+ * Next.js sees \`/api/fn/addTodo\` as a missing route and 404s before
+ * the request ever reaches Pylon.
+ *
+ * In production set \`PYLON_API_URL\` to wherever you've deployed the
+ * Pylon binary (Fly, Render, Railway, your own box). The browser
+ * still hits same-origin paths under your Next deployment, and Next
+ * forwards them server-side — no CORS, no extra DNS.
  */
+const PYLON_API_URL = process.env.PYLON_API_URL ?? "http://localhost:4321";
+
 const config: NextConfig = {
 \ttranspilePackages: [
 \t\t"@${projectName}/ui",
@@ -614,6 +627,14 @@ const config: NextConfig = {
 \t\t"@pylonsync/functions",
 \t\t"@pylonsync/sync",
 \t],
+\tasync rewrites() {
+\t\treturn [
+\t\t\t{ source: "/api/fn/:path*", destination: \`\${PYLON_API_URL}/api/fn/:path*\` },
+\t\t\t{ source: "/api/auth/:path*", destination: \`\${PYLON_API_URL}/api/auth/:path*\` },
+\t\t\t{ source: "/api/sync/:path*", destination: \`\${PYLON_API_URL}/api/sync/:path*\` },
+\t\t\t{ source: "/api/:path*", destination: \`\${PYLON_API_URL}/api/:path*\` },
+\t\t];
+\t},
 };
 
 export default config;

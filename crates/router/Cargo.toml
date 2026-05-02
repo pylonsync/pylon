@@ -11,13 +11,17 @@ categories.workspace = true
 version.workspace = true
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.19" }
-pylon-http = { path = "../http", version = "0.3.19" }
-pylon-auth = { path = "../auth", version = "0.3.19" }
-pylon-policy = { path = "../policy", version = "0.3.19" }
-pylon-sync = { path = "../sync", version = "0.3.19" }
-pylon-functions = { path = "../functions", version = "0.3.19" }
-pylon-realtime = { path = "../realtime", version = "0.3.19" }
+pylon-kernel = { path = "../core", version = "0.3.20" }
+pylon-http = { path = "../http", version = "0.3.20" }
+pylon-auth = { path = "../auth", version = "0.3.20" }
+pylon-policy = { path = "../policy", version = "0.3.20" }
+pylon-sync = { path = "../sync", version = "0.3.20" }
+pylon-functions = { path = "../functions", version = "0.3.20" }
+pylon-realtime = { path = "../realtime", version = "0.3.20" }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Used by /api/auth/passkey/* endpoints to base64url-decode
+# the credentialId / authenticatorData / clientDataJSON / signature
+# bytes the WebAuthn frontend serializes.
+base64 = { workspace = true }

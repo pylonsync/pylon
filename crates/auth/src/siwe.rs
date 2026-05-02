@@ -305,19 +305,8 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
 }
 
 /// Validate the non-cryptographic parts of a SIWE message: domain,
-/// nonce, expiration, not-before. Does NOT verify the signature —
-/// that requires a real secp256k1 + keccak256 verifier which pylon
-/// doesn't ship today (Wave 6).
-///
-/// Apps that need full SIWE auth wire a `SiweSignatureVerifier`
-/// trait impl (k256-backed) at server start; pylon then composes
-/// `validate_message` + the app's verifier in
-/// `routes/auth.rs::siwe_finish`.
-///
-/// **Why no built-in verifier?** Bringing in `k256` adds a
-/// significant compile-time + binary-size hit to every pylon
-/// install — most teams that don't use SIWE shouldn't pay it.
-/// Crypto stays opt-in via the trait below.
+/// nonce, expiration, not-before. Use [`verify`] to also check the
+/// signature.
 pub fn validate_message(
     nonces: &NonceStore,
     message: &SiweMessage,
@@ -345,36 +334,108 @@ pub fn validate_message(
     Ok(())
 }
 
-/// Trait apps implement to plug in k256-based ECDSA recovery +
-/// keccak256. `serialize_for_signing(message)` gives the canonical
-/// bytes the wallet hashed; the impl recovers the signer address
-/// from the 65-byte (r||s||v) signature.
-pub trait SiweSignatureVerifier: Send + Sync {
-    /// Returns the lowercased 0x-prefixed Ethereum address that
-    /// signed the canonical message bytes.
-    fn recover_address(
-        &self,
-        signed_text: &str,
-        signature_hex: &str,
-    ) -> Result<String, SiweError>;
-}
-
-/// Compose `validate_message` + an app-supplied signature verifier.
-/// Returns the lowercased recovered address on success.
-pub fn verify_with(
+/// Validate the message + verify the signature, returning the
+/// recovered lowercased Ethereum address on success.
+///
+/// Signature is the standard 65-byte (r||s||v) hex form wallets
+/// produce, with `v ∈ {0, 1, 27, 28}` (both pre- and post-EIP-155
+/// recovery ids). Recovery uses k256 ECDSA + Keccak-256 (Ethereum's
+/// variant, not SHA-3) over the EIP-191 personal_sign envelope.
+pub fn verify(
     nonces: &NonceStore,
     message: &SiweMessage,
     signature_hex: &str,
     expected_domain: &str,
-    verifier: &dyn SiweSignatureVerifier,
 ) -> Result<String, SiweError> {
     validate_message(nonces, message, expected_domain)?;
-    let signed = serialize_for_signing(message);
-    let recovered = verifier.recover_address(&signed, signature_hex)?;
+    let recovered = recover_address(message, signature_hex)?;
     if !recovered.eq_ignore_ascii_case(&message.address) {
         return Err(SiweError::AddressMismatch);
     }
-    Ok(recovered.to_ascii_lowercase())
+    Ok(recovered)
+}
+
+/// Recover the Ethereum address that signed `message`. Returns the
+/// lowercase 0x-prefixed form. Standalone for callers that want to
+/// compose their own validation pipeline.
+pub fn recover_address(message: &SiweMessage, signature_hex: &str) -> Result<String, SiweError> {
+    let signed_text = serialize_for_signing(message);
+    // EIP-191 personal_sign envelope: "\x19Ethereum Signed Message:\n<len><msg>".
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", signed_text.len());
+    let mut to_hash = Vec::with_capacity(prefix.len() + signed_text.len());
+    to_hash.extend_from_slice(prefix.as_bytes());
+    to_hash.extend_from_slice(signed_text.as_bytes());
+    let digest = keccak256(&to_hash);
+
+    let sig_bytes = decode_hex(signature_hex.trim_start_matches("0x"))
+        .map_err(|_| SiweError::BadSignature)?;
+    if sig_bytes.len() != 65 {
+        return Err(SiweError::BadSignature);
+    }
+    // v: pre-EIP-155 = {27, 28}, post-EIP-155 = {0, 1}. Map to {0, 1}.
+    let v = sig_bytes[64];
+    let recovery_id = match v {
+        0 | 27 => 0u8,
+        1 | 28 => 1u8,
+        _ => return Err(SiweError::BadSignature),
+    };
+
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    let sig = Signature::from_slice(&sig_bytes[..64]).map_err(|_| SiweError::BadSignature)?;
+    let rec_id = RecoveryId::from_byte(recovery_id).ok_or(SiweError::BadSignature)?;
+    let vk = VerifyingKey::recover_from_prehash(&digest, &sig, rec_id)
+        .map_err(|_| SiweError::BadSignature)?;
+    // Public key in uncompressed SEC1 (65 bytes: 0x04 || X || Y).
+    // Ethereum address = last 20 bytes of keccak256(X||Y).
+    let pubkey_point = vk.to_encoded_point(false);
+    let pubkey_xy = &pubkey_point.as_bytes()[1..]; // strip 0x04 prefix
+    let h = keccak256(pubkey_xy);
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&h[12..]);
+    Ok(format!("0x{}", bytes_to_hex(&addr)))
+}
+
+/// Keccak-256 (Ethereum's variant — NOT NIST SHA-3). The two have
+/// different padding bytes (0x01 vs 0x06).
+fn keccak256(input: &[u8]) -> [u8; 32] {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    hasher.update(input);
+    let out = hasher.finalize();
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&out);
+    buf
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
+    if s.len() % 2 != 0 {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hi = hex_digit(chunk[0])?;
+        let lo = hex_digit(chunk[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_digit(b: u8) -> Result<u8, ()> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(()),
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Serialize a SIWE message back into its canonical wire form for
@@ -552,6 +613,64 @@ mod tests {
         assert!(store.take("0xabc").is_none());
         // Slot still present (the test would also trip if we did remove it).
         assert!(store.nonces.lock().unwrap().contains_key("0xabc"));
+    }
+
+    /// End-to-end with REAL crypto: mint a key, sign a SIWE
+    /// message, recover the address, verify it matches the
+    /// signing key's address. Locks in the EIP-191 envelope +
+    /// keccak256 + ECDSA-recover wiring.
+    #[test]
+    fn verify_real_signature_round_trip() {
+        use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+        use sha3::{Digest, Keccak256};
+
+        // 1. Random signing key + derived Ethereum address.
+        let mut rng_bytes = [0u8; 32];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut rng_bytes);
+        let signing_key = SigningKey::from_slice(&rng_bytes).expect("valid scalar");
+        let verifying = signing_key.verifying_key();
+        let pk_point = verifying.to_encoded_point(false);
+        let pk_xy = &pk_point.as_bytes()[1..];
+        let mut h = Keccak256::new();
+        h.update(pk_xy);
+        let pk_hash = h.finalize();
+        let address = format!("0x{}", bytes_to_hex(&pk_hash[12..]));
+
+        // 2. Build + issue a SIWE message for that address.
+        let store = NonceStore::new();
+        let nonce = store.issue(&address);
+        let m = SiweMessage {
+            domain: "example.com".into(),
+            address: address.clone(),
+            statement: Some("Sign in to Example".into()),
+            uri: "https://example.com".into(),
+            version: "1".into(),
+            chain_id: 1,
+            nonce,
+            issued_at: "2026-01-01T00:00:00Z".into(),
+            expiration_time: None,
+            not_before: None,
+            request_id: None,
+            resources: vec![],
+        };
+
+        // 3. Sign the EIP-191 personal_sign envelope.
+        let signed_text = serialize_for_signing(&m);
+        let envelope = format!("\x19Ethereum Signed Message:\n{}{}", signed_text.len(), signed_text);
+        let mut h = Keccak256::new();
+        h.update(envelope.as_bytes());
+        let digest = h.finalize();
+        let (sig, rec_id): (Signature, RecoveryId) =
+            signing_key.sign_prehash(&digest).expect("sign");
+        let mut sig_bytes = sig.to_bytes().to_vec();
+        sig_bytes.push(rec_id.to_byte() + 27); // pre-EIP-155 v
+        let sig_hex = format!("0x{}", bytes_to_hex(&sig_bytes));
+
+        // 4. Verify recovers the same address.
+        let recovered =
+            verify(&store, &m, &sig_hex, "example.com").expect("real-sig verify");
+        assert_eq!(recovered, address.to_ascii_lowercase());
     }
 
     /// Multi-line statements per spec are real (any printable
