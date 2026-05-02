@@ -255,6 +255,7 @@ fn start_server(
     let oauth_state = auth_stores.oauth_state;
     let account_store = auth_stores.account_store;
     let api_keys = auth_stores.api_keys;
+    let orgs = auth_stores.orgs;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -733,6 +734,7 @@ fn start_server(
         let os = Arc::clone(&oauth_state);
         let acc = Arc::clone(&account_store);
         let ak = Arc::clone(&api_keys);
+        let og = Arc::clone(&orgs);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -2011,6 +2013,7 @@ fn start_server(
                     oauth_state: &os,
                     account_store: &acc,
                     api_keys: &ak,
+                    orgs: &og,
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2187,6 +2190,7 @@ struct AuthStores {
     oauth_state: Arc<pylon_auth::OAuthStateStore>,
     account_store: Arc<pylon_auth::AccountStore>,
     api_keys: Arc<pylon_auth::api_key::ApiKeyStore>,
+    orgs: Arc<pylon_auth::org::OrgStore>,
 }
 
 fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
@@ -2228,6 +2232,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
         api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
+        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
     }
 }
 
@@ -2276,6 +2281,11 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
+        // SQL backend for orgs lands when the schema's wired in;
+        // until then we use in-memory even for SQLite-backed apps.
+        // Apps that need persistence across restarts can register
+        // their own backend via OrgStore::with_backend at startup.
+        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
     }
 }
 
@@ -2328,6 +2338,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
+        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
     }
 }
 

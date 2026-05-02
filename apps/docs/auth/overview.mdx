@@ -23,6 +23,8 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | WebAuthn / passkeys | ES256 + Ed25519 — Touch ID, Face ID, Windows Hello, Yubikeys. Counter-regression detection |
 | JWT sessions | Optional stateless `Authorization: Bearer <jwt>` mode. Set `PYLON_JWT_SECRET` to enable; `/api/auth/jwt` mints from a session |
 | CAPTCHA | hCaptcha + Turnstile + reCAPTCHA. Set `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` to gate magic-code send + password register |
+| Organizations | Multi-tenant orgs + RBAC (owner/admin/member) + email invites with single-use tokens. Endpoints under `/api/auth/orgs/...` |
+| Stripe billing | Hosted Checkout sessions + signed webhook verification. Set `PYLON_STRIPE_API_KEY` + `PYLON_STRIPE_WEBHOOK_SECRET` |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
@@ -71,6 +73,16 @@ All under `/api/auth/`:
 | `/totp/verify` | POST | Confirm a TOTP code; finalizes enrollment on first success |
 | `/totp/disable` | POST | Remove TOTP (requires a current code) |
 | `/jwt` | POST | Exchange the current session for a JWT-shaped token (requires `PYLON_JWT_SECRET`) |
+| `/orgs` | POST | Create an org (caller becomes owner) |
+| `/orgs` | GET | List orgs the caller belongs to |
+| `/orgs/:id` | GET, DELETE | Org details / delete (owner only) |
+| `/orgs/:id/members` | GET | List members |
+| `/orgs/:id/members/:user_id` | PUT, DELETE | Change role / remove (admin+) |
+| `/orgs/:id/invites` | POST, GET | Send invite by email / list pending |
+| `/orgs/:id/invites/:invite_id` | DELETE | Revoke pending invite |
+| `/invites/:token/accept` | POST | Accept an invite (must be logged in with the invited email) |
+| `/billing/checkout` (under `/api/`) | POST | Mint a Stripe Checkout Session for the current user |
+| `/billing/webhook` (under `/api/`) | POST | Stripe webhook target (verifies signature) |
 
 ## Sessions vs cookies vs bearer tokens
 

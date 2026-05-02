@@ -4,8 +4,10 @@ pub mod captcha;
 pub mod cookie;
 pub mod email;
 pub mod jwt;
+pub mod org;
 pub mod password;
 pub mod provider;
+pub mod stripe;
 pub mod totp;
 pub mod webauthn;
 

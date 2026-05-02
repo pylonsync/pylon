@@ -480,6 +480,9 @@ pub struct RouterContext<'a> {
     /// resolve to a user_id with optional scopes/expiry. Created via
     /// `POST /api/auth/api-keys`, listed/revoked from the same path.
     pub api_keys: &'a pylon_auth::api_key::ApiKeyStore,
+    /// Organizations + memberships + invites — multi-tenant team
+    /// management. Endpoints under `/api/auth/orgs/...`.
+    pub orgs: &'a pylon_auth::org::OrgStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -1818,6 +1821,7 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs = pylon_auth::org::OrgStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1839,6 +1843,7 @@ mod auth_gate_tests {
             oauth_state: &oauth_state,
             account_store: &account_store,
             api_keys: &api_keys,
+            orgs: &orgs,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2256,6 +2261,7 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs = pylon_auth::org::OrgStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2280,6 +2286,7 @@ mod auth_gate_tests {
             oauth_state: &oauth_state,
             account_store: &account_store,
             api_keys: &api_keys,
+            orgs: &orgs,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2770,6 +2777,7 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs = pylon_auth::org::OrgStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2796,6 +2804,7 @@ mod auth_gate_tests {
                 oauth_state: &oauth_state,
                 account_store: &account_store,
             api_keys: &api_keys,
+            orgs: &orgs,
                 trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,

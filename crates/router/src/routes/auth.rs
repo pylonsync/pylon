@@ -1657,6 +1657,449 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"disabled": true}).to_string()));
     }
 
+    // ─── Organizations + invites ───────────────────────────────────────
+    //
+    // POST   /api/auth/orgs                          create org
+    // GET    /api/auth/orgs                          list user's orgs
+    // GET    /api/auth/orgs/:id                      org details
+    // DELETE /api/auth/orgs/:id                      delete (owner only)
+    // GET    /api/auth/orgs/:id/members              list members
+    // PUT    /api/auth/orgs/:id/members/:user_id     change role (admin+)
+    // DELETE /api/auth/orgs/:id/members/:user_id     remove member (admin+)
+    // POST   /api/auth/orgs/:id/invites              send email invite
+    // GET    /api/auth/orgs/:id/invites              list pending invites
+    // DELETE /api/auth/orgs/:id/invites/:invite_id   revoke invite
+    // POST   /api/auth/invites/:token/accept         accept (sets membership)
+    if url == "/api/auth/orgs" {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if method == HttpMethod::Post {
+            let data: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some((
+                        400,
+                        json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                    ));
+                }
+            };
+            let name = data
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                return Some((400, json_error("MISSING_NAME", "name is required")));
+            }
+            let org = ctx.orgs.create(name, &user_id);
+            return Some((
+                200,
+                serde_json::json!({
+                    "id": org.id,
+                    "name": org.name,
+                    "created_at": org.created_at,
+                    "role": "owner",
+                })
+                .to_string(),
+            ));
+        }
+        if method == HttpMethod::Get {
+            let list = ctx.orgs.list_for_user(&user_id);
+            let payload: Vec<serde_json::Value> = list
+                .iter()
+                .map(|(o, role)| {
+                    serde_json::json!({
+                        "id": o.id,
+                        "name": o.name,
+                        "role": role.as_str(),
+                        "created_at": o.created_at,
+                    })
+                })
+                .collect();
+            return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+        }
+    }
+
+    if let Some(rest) = url.strip_prefix("/api/auth/orgs/") {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        let org_id = parts[0];
+
+        // Caller must be a member to do anything below.
+        let caller_role = match ctx.orgs.role_of(org_id, &user_id) {
+            Some(r) => r,
+            None => return Some((404, json_error("ORG_NOT_FOUND", "Org not found"))),
+        };
+
+        match parts.as_slice() {
+            // /api/auth/orgs/:id
+            [_id] if method == HttpMethod::Get => {
+                let org = ctx.orgs.get(org_id).expect("role implies org exists");
+                return Some((
+                    200,
+                    serde_json::json!({
+                        "id": org.id,
+                        "name": org.name,
+                        "created_at": org.created_at,
+                        "role": caller_role.as_str(),
+                    })
+                    .to_string(),
+                ));
+            }
+            [_id] if method == HttpMethod::Delete => {
+                if !caller_role.can_delete_org() {
+                    return Some((403, json_error("FORBIDDEN", "Only owners can delete an org")));
+                }
+                let removed = ctx.orgs.delete(org_id);
+                return Some((200, serde_json::json!({"deleted": removed}).to_string()));
+            }
+            // /api/auth/orgs/:id/members
+            [_id, "members"] if method == HttpMethod::Get => {
+                let list = ctx.orgs.list_members(org_id);
+                let payload: Vec<serde_json::Value> = list
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "user_id": m.user_id,
+                            "role": m.role.as_str(),
+                            "joined_at": m.joined_at,
+                        })
+                    })
+                    .collect();
+                return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+            }
+            // /api/auth/orgs/:id/members/:user_id
+            [_id, "members", target_user] if method == HttpMethod::Put => {
+                if !caller_role.can_manage_members() {
+                    return Some((403, json_error("FORBIDDEN", "Insufficient role")));
+                }
+                let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+                let role_str = data
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let role = match pylon_auth::org::OrgRole::from_str(role_str) {
+                    Some(r) => r,
+                    None => return Some((400, json_error("BAD_ROLE", "role must be owner|admin|member"))),
+                };
+                let updated = ctx.orgs.set_role(org_id, target_user, role);
+                if !updated {
+                    return Some((404, json_error("NOT_A_MEMBER", "Target user is not a member")));
+                }
+                return Some((200, serde_json::json!({"updated": true}).to_string()));
+            }
+            [_id, "members", target_user] if method == HttpMethod::Delete => {
+                if !caller_role.can_manage_members() && target_user != &user_id.as_str() {
+                    return Some((403, json_error("FORBIDDEN", "Insufficient role")));
+                }
+                // Prevent removing the LAST owner — would orphan the org.
+                if let Some(target_role) = ctx.orgs.role_of(org_id, target_user) {
+                    if target_role == pylon_auth::org::OrgRole::Owner {
+                        let owners = ctx
+                            .orgs
+                            .list_members(org_id)
+                            .into_iter()
+                            .filter(|m| m.role == pylon_auth::org::OrgRole::Owner)
+                            .count();
+                        if owners <= 1 {
+                            return Some((
+                                400,
+                                json_error(
+                                    "LAST_OWNER",
+                                    "Cannot remove the last owner — promote someone else first",
+                                ),
+                            ));
+                        }
+                    }
+                }
+                let removed = ctx.orgs.remove_member(org_id, target_user);
+                return Some((200, serde_json::json!({"removed": removed}).to_string()));
+            }
+            // /api/auth/orgs/:id/invites
+            [_id, "invites"] if method == HttpMethod::Post => {
+                if !caller_role.can_manage_members() {
+                    return Some((403, json_error("FORBIDDEN", "Insufficient role")));
+                }
+                let data: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                        ));
+                    }
+                };
+                let email = data
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if email.is_empty() || !email.contains('@') {
+                    return Some((400, json_error("INVALID_EMAIL", "valid email required")));
+                }
+                let role_str = data
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("member");
+                let role = pylon_auth::org::OrgRole::from_str(role_str)
+                    .unwrap_or(pylon_auth::org::OrgRole::Member);
+                let invited = ctx.orgs.create_invite(org_id, email, role, &user_id);
+                // Best-effort email — failure to send still returns
+                // success because the inviter can copy the link from
+                // the response (apps can hide it in production).
+                let org = ctx.orgs.get(org_id).expect("role implies exists");
+                let accept_url = format!(
+                    "{}/api/auth/invites/{}/accept",
+                    std::env::var("PYLON_PUBLIC_URL").unwrap_or_else(|_| String::new()),
+                    invited.token
+                );
+                let subject = format!("You've been invited to {}", org.name);
+                let body_text = format!(
+                    "You've been invited to join {} on Pylon.\n\nAccept here: {}\n\nThis link expires in 7 days.",
+                    org.name, accept_url
+                );
+                if let Err(e) = ctx.email.send(email, &subject, &body_text) {
+                    tracing::warn!("[org] invite email to {} failed: {e}", redact_email(email));
+                }
+                return Some((
+                    200,
+                    serde_json::json!({
+                        "id": invited.invite.id,
+                        "email": invited.invite.email,
+                        "role": invited.invite.role.as_str(),
+                        "expires_at": invited.invite.expires_at,
+                        "accept_url": accept_url,
+                        // Plaintext token so the inviter can copy/paste
+                        // when email isn't configured (dev mode).
+                        "token": if ctx.is_dev { Some(&invited.token) } else { None },
+                    })
+                    .to_string(),
+                ));
+            }
+            [_id, "invites"] if method == HttpMethod::Get => {
+                if !caller_role.can_manage_members() {
+                    return Some((403, json_error("FORBIDDEN", "Insufficient role")));
+                }
+                let list = ctx.orgs.list_invites(org_id);
+                let payload: Vec<serde_json::Value> = list
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "id": i.id,
+                            "email": i.email,
+                            "role": i.role.as_str(),
+                            "token_prefix": i.token_prefix,
+                            "invited_by": i.invited_by,
+                            "created_at": i.created_at,
+                            "expires_at": i.expires_at,
+                        })
+                    })
+                    .collect();
+                return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+            }
+            [_id, "invites", invite_id] if method == HttpMethod::Delete => {
+                if !caller_role.can_manage_members() {
+                    return Some((403, json_error("FORBIDDEN", "Insufficient role")));
+                }
+                let revoked = ctx.orgs.revoke_invite(invite_id);
+                return Some((200, serde_json::json!({"revoked": revoked}).to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    // POST /api/auth/invites/:token/accept
+    if let Some(rest) = url.strip_prefix("/api/auth/invites/") {
+        if let Some(token) = rest.strip_suffix("/accept") {
+            if method == HttpMethod::Post {
+                let user_id = match ctx.auth_ctx.user_id.as_deref() {
+                    Some(u) => u.to_string(),
+                    None => return Some((401, json_error("AUTH_REQUIRED", "Login required to accept an invite"))),
+                };
+                // Pull the user's email from their row to verify the invite.
+                let row = match ctx
+                    .store
+                    .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+                {
+                    Ok(Some(r)) => r,
+                    _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+                };
+                let email = match row.get("email").and_then(|v| v.as_str()) {
+                    Some(e) => e,
+                    None => return Some((400, json_error("NO_EMAIL", "Account has no email"))),
+                };
+                match ctx.orgs.accept_invite(token, &user_id, email) {
+                    Ok(m) => {
+                        return Some((
+                            200,
+                            serde_json::json!({
+                                "org_id": m.org_id,
+                                "role": m.role.as_str(),
+                            })
+                            .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        let code = match e {
+                            pylon_auth::org::AcceptError::NotFound => "INVITE_NOT_FOUND",
+                            pylon_auth::org::AcceptError::Expired => "INVITE_EXPIRED",
+                            pylon_auth::org::AcceptError::AlreadyAccepted => "ALREADY_ACCEPTED",
+                            pylon_auth::org::AcceptError::EmailMismatch => "WRONG_EMAIL",
+                            pylon_auth::org::AcceptError::AlreadyMember => "ALREADY_MEMBER",
+                        };
+                        return Some((400, json_error(code, &e.to_string())));
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Stripe billing ────────────────────────────────────────────────
+    //
+    // POST /api/billing/checkout — mint a Stripe Checkout Session for
+    //   the authenticated user. Body: `{ priceIds: [...], mode:
+    //   "subscription"|"payment", successUrl, cancelUrl }`.
+    // POST /api/billing/webhook — Stripe sends events here. Pylon
+    //   verifies signature; an app-defined plugin hook
+    //   (`plugin_hooks.on_billing_event`) handles the parsed event.
+    if url == "/api/billing/checkout" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let cfg = match pylon_auth::stripe::StripeConfig::from_env() {
+            Some(c) => c,
+            None => {
+                return Some((
+                    501,
+                    json_error_with_hint(
+                        "STRIPE_NOT_CONFIGURED",
+                        "Stripe billing is disabled",
+                        "Set PYLON_STRIPE_API_KEY (sk_test_… or sk_live_…) to enable",
+                    ),
+                ));
+            }
+        };
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                ));
+            }
+        };
+        let price_ids: Vec<&str> = data
+            .get("priceIds")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        if price_ids.is_empty() {
+            return Some((400, json_error("MISSING_PRICES", "priceIds is required")));
+        }
+        let mode = match data.get("mode").and_then(|v| v.as_str()).unwrap_or("subscription") {
+            "payment" => pylon_auth::stripe::CheckoutMode::Payment,
+            _ => pylon_auth::stripe::CheckoutMode::Subscription,
+        };
+        let success_url = data
+            .get("successUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/billing/success");
+        let cancel_url = data
+            .get("cancelUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/billing/cancel");
+        // Pull existing customer id from the user row (or create
+        // one). Apps should add `stripeCustomerId: string?` to their
+        // User entity.
+        let row = ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+            .ok()
+            .flatten();
+        let mut customer_id = row
+            .as_ref()
+            .and_then(|r| r.get("stripeCustomerId"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if customer_id.is_none() {
+            let email = row
+                .as_ref()
+                .and_then(|r| r.get("email"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match cfg.create_customer(email, None) {
+                Ok(c) => {
+                    let _ = ctx.store.update(
+                        &ctx.store.manifest().auth.user.entity,
+                        &user_id,
+                        &serde_json::json!({"stripeCustomerId": c.id}),
+                    );
+                    customer_id = Some(c.id);
+                }
+                Err(e) => {
+                    tracing::warn!("[stripe] customer create failed: {e}");
+                    return Some((
+                        502,
+                        json_error("STRIPE_FAILED", "Could not create Stripe customer"),
+                    ));
+                }
+            }
+        }
+        match cfg.create_checkout(
+            customer_id.as_deref(),
+            &price_ids,
+            mode,
+            success_url,
+            cancel_url,
+        ) {
+            Ok(s) => return Some((
+                200,
+                serde_json::json!({"url": s.url, "id": s.id}).to_string(),
+            )),
+            Err(e) => {
+                tracing::warn!("[stripe] checkout create failed: {e}");
+                return Some((502, json_error("STRIPE_FAILED", "Could not create checkout session")));
+            }
+        }
+    }
+    if url == "/api/billing/webhook" && method == HttpMethod::Post {
+        let cfg = match pylon_auth::stripe::StripeConfig::from_env() {
+            Some(c) => c,
+            None => return Some((501, json_error("STRIPE_NOT_CONFIGURED", "Stripe disabled"))),
+        };
+        let secret = match cfg.webhook_secret {
+            Some(s) => s,
+            None => return Some((501, json_error("WEBHOOK_NOT_CONFIGURED", "Set PYLON_STRIPE_WEBHOOK_SECRET"))),
+        };
+        let sig_header = ctx
+            .request_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("stripe-signature"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let event = match pylon_auth::stripe::verify_webhook(&secret, body.as_bytes(), sig_header, now) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("[stripe] webhook verify failed: {e}");
+                return Some((400, json_error("WEBHOOK_INVALID", &e.to_string())));
+            }
+        };
+        // For now we just log + return 200. A future hook lets apps
+        // react via plugin (`plugin_hooks.on_billing_event`).
+        tracing::info!("[stripe] event: {event:?}");
+        return Some((200, serde_json::json!({"received": true}).to_string()));
+    }
+
     // ─── Account deletion ──────────────────────────────────────────────
     //
     // DELETE /api/auth/account — wipes the user row, revokes all
