@@ -572,6 +572,24 @@ pub(crate) struct OAuthError {
 }
 
 /// Shared OAuth code-for-session exchange. Returns the user_id + minted
+/// Truncate (and elide) error strings before they end up in
+/// `oauth_error_message` redirect URLs. Provider error bodies can be
+/// huge or contain echoed-back request fields — keep the redirect
+/// short and safe to log.
+fn truncate_for_redirect(s: &str) -> String {
+    const MAX: usize = 240;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        // Be careful with multi-byte UTF-8 boundaries.
+        let mut end = MAX;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
 /// session, or a structured error suitable for both JSON (POST) and
 /// 302-redirect-with-error-param (GET) responses.
 /// Complete an OAuth login. Caller must have ALREADY validated the
@@ -582,19 +600,14 @@ pub(crate) struct OAuthError {
 /// the validated record's callback URLs to know where to redirect on
 /// both success and failure — and validate is single-use, so it can
 /// only be called once per token.
-pub(crate) fn complete_oauth_login(
+pub(crate) fn complete_oauth_login_pkce(
     ctx: &RouterContext,
     provider: &str,
     code: Option<&str>,
+    pkce_verifier: Option<&str>,
     dev_email: Option<&str>,
     dev_name: Option<&str>,
 ) -> Result<(String, pylon_auth::Session), OAuthError> {
-    // Resolve (UserInfo, TokenSet): real OAuth code, or dev-mode shortcut.
-    // The dev shortcut exists so integration tests don't need to spin up a
-    // real provider — gated on PYLON_DEV_MODE so prod can never mint a
-    // session from a caller-supplied email. Dev mode synthesizes a
-    // provider_account_id from the email so account-store lookups still
-    // round-trip.
     let (userinfo, tokens) = if let Some(code) = code {
         let registry = pylon_auth::OAuthRegistry::from_env();
         let config = registry.get(provider).cloned().ok_or_else(|| OAuthError {
@@ -602,17 +615,25 @@ pub(crate) fn complete_oauth_login(
             code: "PROVIDER_NOT_FOUND",
             message: format!("OAuth provider \"{provider}\" not configured"),
         })?;
-        let tokens = config.exchange_code_full(code).map_err(|err| OAuthError {
-            status: 502,
-            code: "OAUTH_TOKEN_EXCHANGE_FAILED",
-            message: format!("token exchange failed: {err}"),
-        })?;
-        let info = config
-            .fetch_userinfo_full(&tokens.access_token)
+        let tokens = config
+            .exchange_code_full_pkce(code, pkce_verifier)
             .map_err(|err| OAuthError {
                 status: 502,
                 code: "OAUTH_TOKEN_EXCHANGE_FAILED",
-                message: format!("userinfo fetch failed: {err}"),
+                // Sanitize: providers like to echo back the request body
+                // on auth failures. The auth layer already redacts known
+                // sensitive fields, but cap the length to keep stray
+                // tokens out of redirect URLs.
+                message: truncate_for_redirect(&format!("token exchange failed: {err}")),
+            })?;
+        // Apple identity lives in id_token, not a userinfo endpoint.
+        // Pass both — the auth layer routes by spec.
+        let info = config
+            .fetch_userinfo_with_id_token(&tokens.access_token, tokens.id_token.as_deref())
+            .map_err(|err| OAuthError {
+                status: 502,
+                code: "OAUTH_TOKEN_EXCHANGE_FAILED",
+                message: truncate_for_redirect(&format!("userinfo fetch failed: {err}")),
             })?;
         (info, tokens)
     } else if ctx.is_dev {

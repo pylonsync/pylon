@@ -25,3 +25,5 @@ argon2 = { workspace = true }
 # tree via rustls so this adds no new transitive deps.
 base64 = { workspace = true }
 ring = { workspace = true }
+# SHA-256 used for PKCE code_challenge derivation (RFC 7636 §4.2).
+sha2 = { workspace = true }

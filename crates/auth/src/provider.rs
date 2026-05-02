@@ -55,12 +55,34 @@ pub struct ProviderSpec {
 
     /// Userinfo endpoint — GET'd with the access token to pull the
     /// authed user's profile. `None` for providers that put the
-    /// identity inside the `id_token` JWT only (some pure-OIDC).
+    /// identity inside the `id_token` JWT only (Apple).
     pub userinfo_url: Option<&'static str>,
 
-    /// OAuth scope string the spec asks for. Space-separated per
-    /// RFC 6749. Defaults to the minimum needed to ID the user.
+    /// OAuth scope string the spec asks for. Defaults to the minimum
+    /// needed to ID the user. Separator is [`Self::scope_separator`].
     pub scopes: &'static str,
+
+    /// Scope separator. RFC 6749 says space; TikTok uses comma.
+    pub scope_separator: &'static str,
+
+    /// Form-field name for the OAuth `client_id`. RFC 6749 says
+    /// `client_id`; TikTok says `client_key`.
+    pub client_id_param: &'static str,
+
+    /// Extra query parameters appended to the auth URL (already
+    /// URL-encoded, no leading `&`). Apple needs `response_mode=form_post`
+    /// when name/email scopes are requested; this is the hook for it.
+    pub auth_query_extra: &'static str,
+
+    /// PKCE — when true, pylon generates `code_verifier` /
+    /// `code_challenge` (SHA-256, S256), sends the challenge on the
+    /// auth request, and replays the verifier on token exchange.
+    /// Twitter/X *requires* it; Google/Microsoft *recommend* it.
+    pub requires_pkce: bool,
+
+    /// HTTP method used for the userinfo fetch. Most providers use
+    /// GET; Dropbox uses POST.
+    pub userinfo_method: UserinfoMethod,
 
     /// How to extract `(provider_account_id, email, display_name)`
     /// from the provider's userinfo response. Provider-stable id
@@ -78,6 +100,14 @@ pub struct ProviderSpec {
     pub token_response_json: bool,
 }
 
+/// Userinfo fetch HTTP verb. Dropbox uses POST with an empty body;
+/// every other supported provider uses GET.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserinfoMethod {
+    Get,
+    Post,
+}
+
 /// Where + how to read identity fields out of a userinfo response.
 #[derive(Debug, Clone)]
 pub enum UserinfoParser {
@@ -90,6 +120,10 @@ pub enum UserinfoParser {
 
     /// Linear's `{ viewer: { id, email, name } }` GraphQL response.
     LinearGraphql,
+
+    /// Apple — identity lives in the `id_token` JWT returned by the
+    /// token endpoint, not a userinfo endpoint. Decoded inline.
+    AppleIdToken,
 
     /// Custom JSON pointers — for one-off providers whose responses
     /// don't match any standard shape. JSON-pointer paths into the
@@ -115,9 +149,21 @@ pub enum TokenExchangeShape {
     AppleJwt,
 
     /// HTTP Basic auth instead of form fields for client_id /
-    /// client_secret. Used by some pure-OIDC providers. Body still
-    /// carries `grant_type=authorization_code&code=…&redirect_uri=…`.
+    /// client_secret. Body still carries
+    /// `grant_type=authorization_code&code=…&redirect_uri=…`.
+    /// OIDC's default per the discovery spec when
+    /// `token_endpoint_auth_methods_supported` is omitted.
     BasicAuth,
+
+    /// JSON body — `{ "grant_type": "authorization_code", "code": …,
+    /// "redirect_uri": …, "client_id": …, "client_secret": … }`.
+    /// Atlassian 3LO requires this.
+    JsonBody,
+
+    /// JSON body + HTTP Basic auth header. Notion uses this:
+    /// the body carries `grant_type` + `code` + `redirect_uri`,
+    /// the credentials live in the Authorization header.
+    BasicAuthJsonBody,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +270,11 @@ pub mod builtin {
         token_url: "https://oauth2.googleapis.com/token",
         userinfo_url: Some("https://www.googleapis.com/oauth2/v3/userinfo"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -236,6 +287,11 @@ pub mod builtin {
         token_url: "https://github.com/login/oauth/access_token",
         userinfo_url: Some("https://api.github.com/user"),
         scopes: "user:email",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::GitHub,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -244,17 +300,24 @@ pub mod builtin {
     /// Apple — uses `name` in scope to get the user's name on
     /// first-time signup (Apple ONLY returns name on the first
     /// authorization; subsequent logins don't include it).
+    /// `response_mode=form_post` is REQUIRED by Apple when name/email
+    /// scopes are requested — Apple POSTs the callback to the
+    /// redirect URL with `code` + `id_token` in the form body.
     pub static APPLE: ProviderSpec = ProviderSpec {
         id: "apple",
         display_name: "Apple",
         auth_url: "https://appleid.apple.com/auth/authorize",
         token_url: "https://appleid.apple.com/auth/token",
         // No standalone userinfo endpoint — identity comes from the
-        // id_token JWT in the token response. The runtime layer
-        // decodes the id_token to populate UserInfo.
+        // id_token JWT in the token response. Decoded inline.
         userinfo_url: None,
-        scopes: "openid email name",
-        userinfo_parser: UserinfoParser::Oidc, // applied to id_token claims
+        scopes: "name email",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "response_mode=form_post",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
+        userinfo_parser: UserinfoParser::AppleIdToken,
         token_exchange: TokenExchangeShape::AppleJwt,
         token_response_json: true,
     };
@@ -269,6 +332,11 @@ pub mod builtin {
         token_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
         userinfo_url: Some("https://graph.microsoft.com/oidc/userinfo"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -281,6 +349,11 @@ pub mod builtin {
         token_url: "https://discord.com/api/oauth2/token",
         userinfo_url: Some("https://discord.com/api/users/@me"),
         scopes: "identify email",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             email_path: "/email",
@@ -297,6 +370,11 @@ pub mod builtin {
         token_url: "https://slack.com/api/openid.connect.token",
         userinfo_url: Some("https://slack.com/api/openid.connect.userInfo"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -309,6 +387,11 @@ pub mod builtin {
         token_url: "https://accounts.spotify.com/api/token",
         userinfo_url: Some("https://api.spotify.com/v1/me"),
         scopes: "user-read-email user-read-private",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             email_path: "/email",
@@ -325,17 +408,23 @@ pub mod builtin {
         token_url: "https://id.twitch.tv/oauth2/token",
         userinfo_url: Some("https://id.twitch.tv/oauth2/userinfo"),
         scopes: "openid user:read:email",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
     };
 
-    /// Twitter / X. Uses OAuth 2.0 (PKCE-only) — pylon emits the
-    /// code_verifier and stores it in the OAuth state record alongside
-    /// the redirect URLs. Twitter's userinfo doesn't include email
-    /// without an extra approval; users with email-disabled accounts
-    /// fall back to `<username>@x.invalid` (caller decides whether to
-    /// accept). Returned `id` is the Twitter snowflake.
+    /// Twitter / X. OAuth 2.0 PKCE-only — pylon generates
+    /// code_verifier/challenge and stores them in the OAuth state
+    /// record alongside the redirect URLs. Twitter's userinfo
+    /// doesn't include email without an extra approval; users with
+    /// email-disabled accounts fall back to `<username>@x.invalid`
+    /// (caller decides whether to accept). Returned `id` is the
+    /// Twitter snowflake.
     pub static TWITTER: ProviderSpec = ProviderSpec {
         id: "twitter",
         display_name: "Twitter / X",
@@ -343,6 +432,11 @@ pub mod builtin {
         token_url: "https://api.twitter.com/2/oauth2/token",
         userinfo_url: Some("https://api.twitter.com/2/users/me?user.fields=id,name,username"),
         scopes: "users.read tweet.read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: true,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/data/id",
             email_path: "/data/username",
@@ -359,6 +453,11 @@ pub mod builtin {
         token_url: "https://www.linkedin.com/oauth/v2/accessToken",
         userinfo_url: Some("https://api.linkedin.com/v2/userinfo"),
         scopes: "openid profile email",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -371,6 +470,11 @@ pub mod builtin {
         token_url: "https://graph.facebook.com/v18.0/oauth/access_token",
         userinfo_url: Some("https://graph.facebook.com/me?fields=id,email,name"),
         scopes: "email public_profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             email_path: "/email",
@@ -387,6 +491,11 @@ pub mod builtin {
         token_url: "https://gitlab.com/oauth/token",
         userinfo_url: Some("https://gitlab.com/oauth/userinfo"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -399,6 +508,11 @@ pub mod builtin {
         token_url: "https://www.reddit.com/api/v1/access_token",
         userinfo_url: Some("https://oauth.reddit.com/api/v1/me"),
         scopes: "identity",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             // Reddit doesn't expose email — fall back to a synthesized
@@ -411,6 +525,8 @@ pub mod builtin {
         token_response_json: true,
     };
 
+    /// Notion uses Basic auth + JSON body for token exchange (per
+    /// their docs at https://developers.notion.com/guides/get-started/authorization).
     pub static NOTION: ProviderSpec = ProviderSpec {
         id: "notion",
         display_name: "Notion",
@@ -418,12 +534,17 @@ pub mod builtin {
         token_url: "https://api.notion.com/v1/oauth/token",
         userinfo_url: Some("https://api.notion.com/v1/users/me"),
         scopes: "",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "owner=user",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/bot/owner/user/id",
             email_path: "/bot/owner/user/person/email",
             name_path: Some("/bot/owner/user/name"),
         },
-        token_exchange: TokenExchangeShape::BasicAuth,
+        token_exchange: TokenExchangeShape::BasicAuthJsonBody,
         token_response_json: true,
     };
 
@@ -436,6 +557,11 @@ pub mod builtin {
         // time. The fetcher special-cases this id (see runtime layer).
         userinfo_url: Some("https://api.linear.app/graphql"),
         scopes: "read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Post,
         userinfo_parser: UserinfoParser::LinearGraphql,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -448,6 +574,11 @@ pub mod builtin {
         token_url: "https://api.vercel.com/v2/oauth/access_token",
         userinfo_url: Some("https://api.vercel.com/v2/user"),
         scopes: "",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/user/id",
             email_path: "/user/email",
@@ -464,6 +595,11 @@ pub mod builtin {
         token_url: "https://zoom.us/oauth/token",
         userinfo_url: Some("https://api.zoom.us/v2/users/me"),
         scopes: "user:read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             email_path: "/email",
@@ -480,11 +616,18 @@ pub mod builtin {
         token_url: "https://login.salesforce.com/services/oauth2/token",
         userinfo_url: Some("https://login.salesforce.com/services/oauth2/userinfo"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
     };
 
+    /// Atlassian 3LO uses JSON body for token exchange. Without the
+    /// JSON content type they reject with a parser error.
     pub static ATLASSIAN: ProviderSpec = ProviderSpec {
         id: "atlassian",
         display_name: "Atlassian",
@@ -492,12 +635,17 @@ pub mod builtin {
         token_url: "https://auth.atlassian.com/oauth/token",
         userinfo_url: Some("https://api.atlassian.com/me"),
         scopes: "read:me",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "audience=api.atlassian.com&prompt=consent",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/account_id",
             email_path: "/email",
             name_path: Some("/name"),
         },
-        token_exchange: TokenExchangeShape::Standard,
+        token_exchange: TokenExchangeShape::JsonBody,
         token_response_json: true,
     };
 
@@ -508,6 +656,11 @@ pub mod builtin {
         token_url: "https://api.figma.com/v1/oauth/token",
         userinfo_url: Some("https://api.figma.com/v1/me"),
         scopes: "files:read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/id",
             email_path: "/email",
@@ -517,6 +670,8 @@ pub mod builtin {
         token_response_json: true,
     };
 
+    /// Dropbox userinfo is a POST RPC endpoint with an empty body
+    /// — they don't follow the GET-userinfo convention.
     pub static DROPBOX: ProviderSpec = ProviderSpec {
         id: "dropbox",
         display_name: "Dropbox",
@@ -524,6 +679,11 @@ pub mod builtin {
         token_url: "https://api.dropboxapi.com/oauth2/token",
         userinfo_url: Some("https://api.dropboxapi.com/2/users/get_current_account"),
         scopes: "account_info.read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Post,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/account_id",
             email_path: "/email",
@@ -533,6 +693,8 @@ pub mod builtin {
         token_response_json: true,
     };
 
+    /// TikTok deviates from RFC 6749: form field is `client_key`
+    /// (not `client_id`) and scopes are comma-separated.
     pub static TIKTOK: ProviderSpec = ProviderSpec {
         id: "tiktok",
         display_name: "TikTok",
@@ -542,6 +704,11 @@ pub mod builtin {
             "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name,username",
         ),
         scopes: "user.info.basic",
+        scope_separator: ",",
+        client_id_param: "client_key",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/data/user/open_id",
             email_path: "/data/user/username",
@@ -558,6 +725,11 @@ pub mod builtin {
         token_url: "https://api-m.paypal.com/v1/oauth2/token",
         userinfo_url: Some("https://api-m.paypal.com/v1/identity/openidconnect/userinfo?schema=openid"),
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::BasicAuth,
         token_response_json: true,
@@ -570,6 +742,11 @@ pub mod builtin {
         token_url: "https://id.kick.com/oauth/token",
         userinfo_url: Some("https://api.kick.com/public/v1/users"),
         scopes: "user:read",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: true, // Kick requires PKCE per their docs
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Custom {
             id_path: "/data/0/user_id",
             email_path: "/data/0/email",
@@ -586,6 +763,11 @@ pub mod builtin {
         token_url: "https://apis.roblox.com/oauth/v1/token",
         userinfo_url: Some("https://apis.roblox.com/oauth/v1/userinfo"),
         scopes: "openid profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -603,6 +785,11 @@ pub mod builtin {
         token_url: "",
         userinfo_url: None,
         scopes: "openid email profile",
+        scope_separator: " ",
+        client_id_param: "client_id",
+        auth_query_extra: "",
+        requires_pkce: false,
+        userinfo_method: UserinfoMethod::Get,
         userinfo_parser: UserinfoParser::Oidc,
         token_exchange: TokenExchangeShape::Standard,
         token_response_json: true,
@@ -665,6 +852,36 @@ impl ResolvedSpec {
             ResolvedSpec::Oidc(d) => &d.scopes,
         }
     }
+    pub fn scope_separator(&self) -> &str {
+        match self {
+            ResolvedSpec::Static(s) => s.scope_separator,
+            ResolvedSpec::Oidc(_) => " ",
+        }
+    }
+    pub fn client_id_param(&self) -> &str {
+        match self {
+            ResolvedSpec::Static(s) => s.client_id_param,
+            ResolvedSpec::Oidc(_) => "client_id",
+        }
+    }
+    pub fn auth_query_extra(&self) -> &str {
+        match self {
+            ResolvedSpec::Static(s) => s.auth_query_extra,
+            ResolvedSpec::Oidc(_) => "",
+        }
+    }
+    pub fn requires_pkce(&self) -> bool {
+        match self {
+            ResolvedSpec::Static(s) => s.requires_pkce,
+            ResolvedSpec::Oidc(_) => false,
+        }
+    }
+    pub fn userinfo_method(&self) -> UserinfoMethod {
+        match self {
+            ResolvedSpec::Static(s) => s.userinfo_method,
+            ResolvedSpec::Oidc(_) => UserinfoMethod::Get,
+        }
+    }
     pub fn userinfo_parser(&self) -> UserinfoParser {
         match self {
             ResolvedSpec::Static(s) => s.userinfo_parser.clone(),
@@ -702,25 +919,52 @@ pub struct OidcDiscoveryDoc {
     pub userinfo_endpoint: Option<String>,
     pub jwks_uri: Option<String>,
     pub issuer: String,
+    /// Per OIDC Discovery: when present, lists the auth methods the
+    /// token endpoint accepts. When omitted the OIDC default is
+    /// `client_secret_basic` (NOT `client_secret_post`!) — getting
+    /// this wrong silently breaks every IdP that follows the spec.
+    #[serde(default)]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
 }
 
 impl OidcDiscoveryDoc {
     /// Parse a discovery JSON blob. Returns the relevant fields or
     /// an error if the doc is missing required endpoints.
     pub fn parse(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| format!("OIDC discovery doc not valid JSON: {e}"))
+        let doc: Self = serde_json::from_str(json)
+            .map_err(|e| format!("OIDC discovery doc not valid JSON: {e}"))?;
+        if doc.authorization_endpoint.is_empty() {
+            return Err("OIDC discovery doc missing authorization_endpoint".into());
+        }
+        if doc.token_endpoint.is_empty() {
+            return Err("OIDC discovery doc missing token_endpoint".into());
+        }
+        Ok(doc)
     }
 
     /// Convert into a runtime [`DiscoveredSpec`] using OIDC-standard
-    /// scopes + parser. Endpoints already validated at parse time.
+    /// scopes + parser. Token-exchange shape is selected from the
+    /// discovered `token_endpoint_auth_methods_supported`:
+    ///   - `client_secret_post` → [`TokenExchangeShape::Standard`]
+    ///   - everything else (including the spec default of
+    ///     `client_secret_basic`) → [`TokenExchangeShape::BasicAuth`]
     pub fn into_spec(self) -> DiscoveredSpec {
+        let prefers_post = self
+            .token_endpoint_auth_methods_supported
+            .iter()
+            .any(|m| m == "client_secret_post");
+        let token_exchange = if prefers_post {
+            TokenExchangeShape::Standard
+        } else {
+            TokenExchangeShape::BasicAuth
+        };
         DiscoveredSpec {
             auth_url: self.authorization_endpoint,
             token_url: self.token_endpoint,
             userinfo_url: self.userinfo_endpoint,
             scopes: "openid email profile".to_string(),
             userinfo_parser: UserinfoParser::Oidc,
-            token_exchange: TokenExchangeShape::Standard,
+            token_exchange,
         }
     }
 }

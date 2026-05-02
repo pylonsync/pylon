@@ -7,7 +7,7 @@
 //! mechanical extraction so security audits can scope to one file.
 
 use crate::{
-    complete_oauth_login, json_error, json_error_safe, json_error_with_hint, parse_query,
+    complete_oauth_login_pkce, json_error, json_error_safe, json_error_with_hint, parse_query,
     redact_email, url_encode, RouterContext,
 };
 use pylon_http::HttpMethod;
@@ -832,8 +832,25 @@ pub(crate) fn handle(
                 }
             }
 
-            let state = ctx.oauth_state.create(provider, &callback, &error_callback);
-            let auth_url = config.auth_url_with_state(&state);
+            // PKCE: when the provider requires it (Twitter/X, Kick), the
+            // auth helper mints a verifier; we stash it on the state
+            // record so the callback can replay it on token exchange.
+            let (auth_url, pkce_verifier) = match config.auth_url_with_pkce("") {
+                Ok((u, v)) => (u, v),
+                Err(e) => {
+                    return Some((
+                        500,
+                        json_error("OAUTH_PROVIDER_BROKEN", &format!("provider {provider} misconfigured: {e}")),
+                    ));
+                }
+            };
+            let state = ctx
+                .oauth_state
+                .create_with_pkce(provider, &callback, &error_callback, pkce_verifier);
+            // auth_url_with_pkce was given an empty state placeholder
+            // because we mint the random state token AFTER the URL.
+            // Append it now.
+            let auth_url = format!("{auth_url}&state={}", url_encode(&state));
             let want_redirect = params
                 .get("redirect")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -853,59 +870,126 @@ pub(crate) fn handle(
     if let Some(provider_raw) = url.strip_prefix("/api/auth/callback/") {
         let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
 
-        // POST: SDK / programmatic flow. Returns JSON. State is
-        // validated here (single-use take); we don't need the
-        // callback URLs from the state record because the caller is
-        // parsing the response body.
+        // POST: SDK / programmatic flow OR Apple's `response_mode=form_post`
+        // browser callback (Apple POSTs the redirect URL with a
+        // form-encoded body when name/email scopes are requested).
+        // Detect Apple by Content-Type header — the SDK flow always
+        // sends JSON, the Apple flow sends form-urlencoded.
         if method == HttpMethod::Post {
-            let data: serde_json::Value = match serde_json::from_str(body) {
-                Ok(v) => v,
-                Err(e) => {
+            let is_form_post = ctx
+                .request_headers
+                .iter()
+                .any(|(k, v)| {
+                    k.eq_ignore_ascii_case("content-type")
+                        && v.to_ascii_lowercase()
+                            .starts_with("application/x-www-form-urlencoded")
+                });
+
+            let (state, code, dev_email, dev_name, is_browser) = if is_form_post {
+                // Apple form-post callback. Body is
+                // `state=…&code=…&id_token=…[&user=…]`.
+                let params = parse_query(body);
+                let state = params.get("state").map(|s| s.as_str().to_string());
+                let code = params.get("code").map(|s| s.as_str().to_string());
+                (state, code, None, None, true)
+            } else {
+                let data: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe(
+                                "INVALID_JSON",
+                                "Invalid request body",
+                                &format!("Invalid JSON: {e}"),
+                            ),
+                        ));
+                    }
+                };
+                let state = data.get("state").and_then(|v| v.as_str()).map(String::from);
+                let code = data.get("code").and_then(|v| v.as_str()).map(String::from);
+                let dev_email = data.get("email").and_then(|v| v.as_str()).map(String::from);
+                let dev_name = data.get("name").and_then(|v| v.as_str()).map(String::from);
+                (state, code, dev_email, dev_name, false)
+            };
+
+            let state_record = match state
+                .as_deref()
+                .and_then(|s| ctx.oauth_state.validate(s, provider))
+            {
+                Some(r) => r,
+                None => {
                     return Some((
-                        400,
-                        json_error_safe(
-                            "INVALID_JSON",
-                            "Invalid request body",
-                            &format!("Invalid JSON: {e}"),
+                        403,
+                        json_error(
+                            "OAUTH_INVALID_STATE",
+                            "Invalid or missing OAuth state parameter",
                         ),
                     ));
                 }
             };
-            let state = data.get("state").and_then(|v| v.as_str());
-            let code = data.get("code").and_then(|v| v.as_str());
-            let dev_email = data.get("email").and_then(|v| v.as_str());
-            let dev_name = data.get("name").and_then(|v| v.as_str());
 
-            if state
-                .and_then(|s| ctx.oauth_state.validate(s, provider))
-                .is_none()
-            {
-                return Some((
-                    403,
-                    json_error(
-                        "OAUTH_INVALID_STATE",
-                        "Invalid or missing OAuth state parameter",
-                    ),
-                ));
-            }
-            return Some(
-                match complete_oauth_login(ctx, provider, code, dev_email, dev_name) {
-                    Ok((user_id, session)) => {
-                        ctx.maybe_set_session_cookie(&session.token);
-                        (
-                            200,
-                            serde_json::json!({
-                                "token": session.token,
-                                "user_id": user_id,
-                                "provider": provider,
-                                "expires_at": session.expires_at,
-                            })
-                            .to_string(),
-                        )
-                    }
-                    Err(err) => (err.status, json_error(err.code, &err.message)),
-                },
+            let result = complete_oauth_login_pkce(
+                ctx,
+                provider,
+                code.as_deref(),
+                state_record.pkce_verifier.as_deref(),
+                dev_email.as_deref(),
+                dev_name.as_deref(),
             );
+
+            // Browser-flow form_post callbacks (Apple) need to land
+            // back on the user-supplied callback URL with a session
+            // cookie set, just like the GET browser callback path.
+            if is_browser {
+                return Some(match result {
+                    Ok((_user_id, session)) => {
+                        let cookie_value = ctx.cookie_config.set_value(&session.token);
+                        ctx.add_response_header("Set-Cookie", cookie_value);
+                        ctx.add_response_header("Location", state_record.callback_url);
+                        (302, String::new())
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "[oauth] form_post callback {} failed: {} {}",
+                            provider,
+                            err.code,
+                            err.message
+                        );
+                        let sep = if state_record.error_callback_url.contains('?') {
+                            '&'
+                        } else {
+                            '?'
+                        };
+                        let target = format!(
+                            "{}{}oauth_error={}&oauth_error_message={}",
+                            state_record.error_callback_url,
+                            sep,
+                            url_encode(err.code),
+                            url_encode(&err.message)
+                        );
+                        ctx.add_response_header("Location", target);
+                        (302, String::new())
+                    }
+                });
+            }
+
+            return Some(match result {
+                Ok((user_id, session)) => {
+                    ctx.maybe_set_session_cookie(&session.token);
+                    (
+                        200,
+                        serde_json::json!({
+                            "token": session.token,
+                            "user_id": user_id,
+                            "provider": provider,
+                            "expires_at": session.expires_at,
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(err) => (err.status, json_error(err.code, &err.message)),
+            });
         }
 
         // GET: browser flow. State validation gives us the callback
@@ -941,7 +1025,14 @@ pub(crate) fn handle(
                 }
             };
 
-            match complete_oauth_login(ctx, provider, code, None, None) {
+            match complete_oauth_login_pkce(
+                ctx,
+                provider,
+                code,
+                state_record.pkce_verifier.as_deref(),
+                None,
+                None,
+            ) {
                 Ok((_user_id, session)) => {
                     let cookie_value = ctx.cookie_config.set_value(&session.token);
                     ctx.add_response_header("Set-Cookie", cookie_value);

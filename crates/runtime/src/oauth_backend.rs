@@ -51,6 +51,7 @@ impl SqliteOAuthBackend {
                 provider TEXT NOT NULL,
                 callback_url TEXT NOT NULL DEFAULT '',
                 error_callback_url TEXT NOT NULL DEFAULT '',
+                pkce_verifier TEXT,
                 expires_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS {TABLE}_exp_idx ON {TABLE}(expires_at);"
@@ -64,6 +65,12 @@ impl SqliteOAuthBackend {
             &format!("ALTER TABLE {TABLE} ADD COLUMN error_callback_url TEXT NOT NULL DEFAULT ''"),
             [],
         );
+        // PKCE column was added when Twitter/X support landed. Existing
+        // installs need an idempotent ADD COLUMN.
+        let _ = conn.execute(
+            &format!("ALTER TABLE {TABLE} ADD COLUMN pkce_verifier TEXT"),
+            [],
+        );
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -75,12 +82,13 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         if let Ok(guard) = self.conn.lock() {
             let _ = guard.execute(
                 &format!(
-                    "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(token) DO UPDATE SET
                        provider = excluded.provider,
                        callback_url = excluded.callback_url,
                        error_callback_url = excluded.error_callback_url,
+                       pkce_verifier = excluded.pkce_verifier,
                        expires_at = excluded.expires_at"
                 ),
                 rusqlite::params![
@@ -88,6 +96,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
                     state.provider,
                     state.callback_url,
                     state.error_callback_url,
+                    state.pkce_verifier,
                     state.expires_at as i64,
                 ],
             );
@@ -99,14 +108,14 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         // Read first, then delete — must be a transaction so concurrent
         // callbacks can't both succeed with the same token.
         let tx = guard.unchecked_transaction().ok()?;
-        let row: Option<(String, String, String, i64)> = tx
+        let row: Option<(String, String, String, Option<String>, i64)> = tx
             .query_row(
                 &format!(
-                    "SELECT provider, callback_url, error_callback_url, expires_at
+                    "SELECT provider, callback_url, error_callback_url, pkce_verifier, expires_at
                      FROM {TABLE} WHERE token = ?1"
                 ),
                 rusqlite::params![token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .ok();
         // Always delete what we read — single-use even if expired.
@@ -118,7 +127,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         }
         let _ = tx.commit();
 
-        let (provider, callback_url, error_callback_url, expires_at) = row?;
+        let (provider, callback_url, error_callback_url, pkce_verifier, expires_at) = row?;
         if (expires_at as u64) <= now_unix_secs {
             return None;
         }
@@ -126,6 +135,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
             provider,
             callback_url,
             error_callback_url,
+            pkce_verifier,
             expires_at: expires_at as u64,
         })
     }
@@ -163,10 +173,12 @@ mod pg {
                         provider TEXT NOT NULL,
                         callback_url TEXT NOT NULL DEFAULT '',
                         error_callback_url TEXT NOT NULL DEFAULT '',
+                        pkce_verifier TEXT,
                         expires_at BIGINT NOT NULL
                     );
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS callback_url TEXT NOT NULL DEFAULT '';
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS error_callback_url TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS pkce_verifier TEXT;
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
                 .map_err(|e| format!("PG init schema: {e}"))?;
@@ -181,12 +193,13 @@ mod pg {
             if let Ok(mut c) = self.client.lock() {
                 let _ = c.execute(
                     &format!(
-                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, expires_at)
-                         VALUES ($1, $2, $3, $4, $5)
+                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
+                         VALUES ($1, $2, $3, $4, $5, $6)
                          ON CONFLICT (token) DO UPDATE SET
                            provider = EXCLUDED.provider,
                            callback_url = EXCLUDED.callback_url,
                            error_callback_url = EXCLUDED.error_callback_url,
+                           pkce_verifier = EXCLUDED.pkce_verifier,
                            expires_at = EXCLUDED.expires_at"
                     ),
                     &[
@@ -194,6 +207,7 @@ mod pg {
                         &state.provider,
                         &state.callback_url,
                         &state.error_callback_url,
+                        &state.pkce_verifier,
                         &(state.expires_at as i64),
                     ],
                 );
@@ -211,7 +225,7 @@ mod pg {
                 .query_opt(
                     &format!(
                         "DELETE FROM {PG_TABLE} WHERE token = $1
-                         RETURNING provider, callback_url, error_callback_url, expires_at"
+                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, expires_at"
                     ),
                     &[&token],
                 )
@@ -219,7 +233,8 @@ mod pg {
             let provider: String = row.get(0);
             let callback_url: String = row.get(1);
             let error_callback_url: String = row.get(2);
-            let expires_at: i64 = row.get(3);
+            let pkce_verifier: Option<String> = row.get(3);
+            let expires_at: i64 = row.get(4);
             if (expires_at as u64) <= now_unix_secs {
                 return None;
             }
@@ -227,6 +242,7 @@ mod pg {
                 provider,
                 callback_url,
                 error_callback_url,
+                pkce_verifier,
                 expires_at: expires_at as u64,
             })
         }
@@ -242,6 +258,7 @@ mod tests {
             provider: provider.to_string(),
             callback_url: callback.to_string(),
             error_callback_url: callback.to_string(),
+            pkce_verifier: None,
             expires_at: 9_999_999_999,
         }
     }

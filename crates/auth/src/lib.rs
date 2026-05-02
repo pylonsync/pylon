@@ -311,13 +311,15 @@ pub struct OAuthConfig {
 impl OAuthConfig {
     /// Resolve the [`provider::ProviderSpec`] backing this config. For
     /// `oidc_issuer`-configured providers, falls through to the OIDC
-    /// discovery cache. Returns `None` only for unknown ids without
-    /// an issuer URL.
-    fn resolved_spec(&self) -> Option<provider::ResolvedSpec> {
+    /// discovery cache. Errors propagate so misconfigured providers
+    /// fail loudly at first use rather than silently 404'ing later.
+    fn resolved_spec(&self) -> Result<provider::ResolvedSpec, String> {
         if let Some(issuer) = self.oidc_issuer.as_deref() {
-            return provider::oidc_cache::resolve(issuer).ok();
+            return provider::oidc_cache::resolve(issuer);
         }
-        provider::find_spec(&self.provider).map(provider::ResolvedSpec::Static)
+        provider::find_spec(&self.provider)
+            .map(provider::ResolvedSpec::Static)
+            .ok_or_else(|| format!("unknown OAuth provider: {}", self.provider))
     }
 
     /// Build a [`provider::ProviderConfig`] view of `self` for the
@@ -340,22 +342,15 @@ impl OAuthConfig {
     /// Callers MUST append a `&state=<random>` parameter and validate it in the
     /// callback to prevent CSRF attacks. See `OAuthStateStore` for a minimal
     /// implementation.
+    ///
+    /// For PKCE-required providers (Twitter/X, Kick), callers should
+    /// prefer [`Self::auth_url_with_pkce`] so the `code_challenge`
+    /// pair survives to the callback.
     pub fn auth_url(&self) -> String {
-        let Some(spec) = self.resolved_spec() else {
-            return String::new();
-        };
-        let cfg = self.provider_cfg();
-        let auth = provider::resolve_endpoint(spec.auth_url(), &cfg);
-        let scopes = self
-            .scopes_override
-            .as_deref()
-            .unwrap_or(spec.scopes());
-        format!(
-            "{auth}?client_id={cid}&redirect_uri={ruri}&response_type=code&scope={scope}",
-            cid = url_encode(&self.client_id),
-            ruri = url_encode(&self.redirect_uri),
-            scope = url_encode(scopes),
-        )
+        match self.build_auth_url(None) {
+            Ok(u) => u,
+            Err(_) => String::new(),
+        }
     }
 
     /// Generate the authorization URL with a CSRF state parameter attached.
@@ -367,65 +362,170 @@ impl OAuthConfig {
         format!("{}&state={}", base, url_encode(state))
     }
 
+    /// Generate the authorization URL with state + a freshly minted
+    /// PKCE pair when the provider requires it. Returns
+    /// `(url, code_verifier)` — the verifier MUST be persisted in
+    /// the OAuth state record and replayed in the token exchange.
+    pub fn auth_url_with_pkce(&self, state: &str) -> Result<(String, Option<String>), String> {
+        let spec = self.resolved_spec()?;
+        let pkce = if spec.requires_pkce() {
+            Some(generate_pkce())
+        } else {
+            None
+        };
+        let challenge = pkce.as_ref().map(|p| p.code_challenge.as_str());
+        let mut url = self.build_auth_url(challenge)?;
+        if !state.is_empty() {
+            url.push_str(&format!("&state={}", url_encode(state)));
+        }
+        Ok((url, pkce.map(|p| p.code_verifier)))
+    }
+
+    fn build_auth_url(&self, pkce_challenge: Option<&str>) -> Result<String, String> {
+        let spec = self.resolved_spec()?;
+        let cfg = self.provider_cfg();
+        let auth = provider::resolve_endpoint(spec.auth_url(), &cfg);
+        if auth.is_empty() {
+            return Err(format!(
+                "provider {} has no authorization endpoint",
+                self.provider
+            ));
+        }
+        let scopes_default = spec.scopes().to_string();
+        let scopes_raw = self.scopes_override.as_deref().unwrap_or(&scopes_default);
+        // Re-join scopes with the provider's separator (TikTok uses
+        // commas, everyone else uses spaces). Splitting on whitespace
+        // first lets developers always specify scopes the human way.
+        let scopes_joined = scopes_raw
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(spec.scope_separator());
+
+        let mut url = format!(
+            "{auth}?{cid_param}={cid}&redirect_uri={ruri}&response_type=code&scope={scope}",
+            cid_param = spec.client_id_param(),
+            cid = url_encode(&self.client_id),
+            ruri = url_encode(&self.redirect_uri),
+            scope = url_encode(&scopes_joined),
+        );
+        if !spec.auth_query_extra().is_empty() {
+            url.push('&');
+            url.push_str(spec.auth_query_extra());
+        }
+        if let Some(challenge) = pkce_challenge {
+            url.push_str("&code_challenge=");
+            url.push_str(challenge);
+            url.push_str("&code_challenge_method=S256");
+        }
+        Ok(url)
+    }
+
     /// Generate the token exchange URL.
     pub fn token_url(&self) -> String {
-        let Some(spec) = self.resolved_spec() else {
-            return String::new();
-        };
-        provider::resolve_endpoint(spec.token_url(), &self.provider_cfg())
+        match self.resolved_spec() {
+            Ok(spec) => provider::resolve_endpoint(spec.token_url(), &self.provider_cfg()),
+            Err(_) => String::new(),
+        }
     }
 
     /// URL for the userinfo endpoint, which returns the authenticated user's profile.
     pub fn userinfo_url(&self) -> String {
-        let Some(spec) = self.resolved_spec() else {
-            return String::new();
-        };
-        match spec.userinfo_url() {
-            Some(u) => provider::resolve_endpoint(u, &self.provider_cfg()),
-            None => String::new(),
+        match self.resolved_spec() {
+            Ok(spec) => match spec.userinfo_url() {
+                Some(u) => provider::resolve_endpoint(u, &self.provider_cfg()),
+                None => String::new(),
+            },
+            Err(_) => String::new(),
         }
     }
 
     /// Exchange an authorization code for the full token set
     /// (`access_token`, optional `refresh_token`, optional `id_token`,
-    /// `expires_in`, `scope`).
+    /// `expires_in`, `scope`). When the provider uses PKCE,
+    /// `code_verifier` MUST be supplied (the value previously returned
+    /// from [`Self::auth_url_with_pkce`]).
     pub fn exchange_code_full(&self, code: &str) -> Result<TokenSet, String> {
-        let spec = self
-            .resolved_spec()
-            .ok_or_else(|| format!("unknown OAuth provider: {}", self.provider))?;
+        self.exchange_code_full_pkce(code, None)
+    }
+
+    pub fn exchange_code_full_pkce(
+        &self,
+        code: &str,
+        code_verifier: Option<&str>,
+    ) -> Result<TokenSet, String> {
+        let spec = self.resolved_spec()?;
         let cfg = self.provider_cfg();
         let token_url = provider::resolve_endpoint(spec.token_url(), &cfg);
+        let pkce_field = code_verifier
+            .map(|v| format!("&code_verifier={}", url_encode(v)))
+            .unwrap_or_default();
 
         let out = match spec.token_exchange() {
             provider::TokenExchangeShape::Standard => {
                 let body = format!(
-                    "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
-                    url_encode(&self.client_id),
-                    url_encode(&self.client_secret),
-                    url_encode(&self.redirect_uri)
+                    "code={code}&{cid_param}={cid}&client_secret={secret}&redirect_uri={ruri}&grant_type=authorization_code{pkce}",
+                    code = url_encode(code),
+                    cid_param = spec.client_id_param(),
+                    cid = url_encode(&self.client_id),
+                    secret = url_encode(&self.client_secret),
+                    ruri = url_encode(&self.redirect_uri),
+                    pkce = pkce_field,
                 );
-                http_post_form(&token_url, &body, true)?
+                http_post_form(&token_url, &body, true).map_err(sanitize_token_error)?
             }
             provider::TokenExchangeShape::AppleJwt => {
-                let apple = self
-                    .apple
-                    .as_ref()
-                    .ok_or("apple provider requires `apple` config (team_id, key_id, private_key_pem)")?;
+                let apple = self.apple.as_ref().ok_or(
+                    "apple provider requires `apple` config (team_id, key_id, private_key_pem)",
+                )?;
                 let signed_secret = apple_jwt::mint_client_secret(apple, &self.client_id)?;
                 let body = format!(
-                    "code={code}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
-                    url_encode(&self.client_id),
-                    url_encode(&signed_secret),
-                    url_encode(&self.redirect_uri)
+                    "code={code}&client_id={cid}&client_secret={secret}&redirect_uri={ruri}&grant_type=authorization_code{pkce}",
+                    code = url_encode(code),
+                    cid = url_encode(&self.client_id),
+                    secret = url_encode(&signed_secret),
+                    ruri = url_encode(&self.redirect_uri),
+                    pkce = pkce_field,
                 );
-                http_post_form(&token_url, &body, true)?
+                http_post_form(&token_url, &body, true).map_err(sanitize_token_error)?
             }
             provider::TokenExchangeShape::BasicAuth => {
                 let body = format!(
-                    "code={code}&redirect_uri={}&grant_type=authorization_code",
-                    url_encode(&self.redirect_uri)
+                    "code={code}&redirect_uri={ruri}&grant_type=authorization_code{pkce}",
+                    code = url_encode(code),
+                    ruri = url_encode(&self.redirect_uri),
+                    pkce = pkce_field,
                 );
-                http_post_form_basic(&token_url, &body, &self.client_id, &self.client_secret)?
+                http_post_form_basic(&token_url, &body, &self.client_id, &self.client_secret)
+                    .map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::JsonBody => {
+                let mut json = serde_json::Map::new();
+                json.insert("grant_type".into(), "authorization_code".into());
+                json.insert("code".into(), code.into());
+                json.insert("redirect_uri".into(), self.redirect_uri.clone().into());
+                json.insert("client_id".into(), self.client_id.clone().into());
+                json.insert("client_secret".into(), self.client_secret.clone().into());
+                if let Some(v) = code_verifier {
+                    json.insert("code_verifier".into(), v.to_string().into());
+                }
+                let body = serde_json::Value::Object(json).to_string();
+                http_post_json(&token_url, &body, None).map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::BasicAuthJsonBody => {
+                let mut json = serde_json::Map::new();
+                json.insert("grant_type".into(), "authorization_code".into());
+                json.insert("code".into(), code.into());
+                json.insert("redirect_uri".into(), self.redirect_uri.clone().into());
+                if let Some(v) = code_verifier {
+                    json.insert("code_verifier".into(), v.to_string().into());
+                }
+                let body = serde_json::Value::Object(json).to_string();
+                http_post_json(
+                    &token_url,
+                    &body,
+                    Some((&self.client_id, &self.client_secret)),
+                )
+                .map_err(sanitize_token_error)?
             }
         };
         parse_token_response(&out)
@@ -449,10 +549,30 @@ impl OAuthConfig {
     /// [`provider::UserinfoParser`] so adding a new provider is a
     /// table change, not a new branch.
     pub fn fetch_userinfo_full(&self, access_token: &str) -> Result<UserInfo, String> {
-        let spec = self
-            .resolved_spec()
-            .ok_or_else(|| format!("unknown OAuth provider: {}", self.provider))?;
+        // The id_token from the token response carries the identity
+        // for Apple and similar; route to the dedicated entry point.
+        // Apple's userinfo_url is None — this is the supported path.
+        self.fetch_userinfo_with_id_token(access_token, None)
+    }
+
+    /// Fetch userinfo, falling back to the supplied id_token JWT when
+    /// the provider has no userinfo endpoint (Apple). The id_token
+    /// is the one returned by [`Self::exchange_code_full`] in
+    /// [`TokenSet::id_token`].
+    pub fn fetch_userinfo_with_id_token(
+        &self,
+        access_token: &str,
+        id_token: Option<&str>,
+    ) -> Result<UserInfo, String> {
+        let spec = self.resolved_spec()?;
         let cfg = self.provider_cfg();
+
+        // Apple — identity lives in the id_token, not a userinfo endpoint.
+        if matches!(spec.userinfo_parser(), provider::UserinfoParser::AppleIdToken) {
+            let token = id_token
+                .ok_or("apple login requires the id_token from the token response")?;
+            return parse_apple_id_token(token, &self.provider);
+        }
 
         // Linear is GraphQL — the userinfo "GET" is actually a POST
         // with a fixed query.
@@ -464,7 +584,11 @@ impl OAuthConfig {
             Some(u) => provider::resolve_endpoint(u, &cfg),
             None => return Err(format!("provider {} has no userinfo endpoint", self.provider)),
         };
-        let out = http_get_bearer(&url, access_token)?;
+        let out = match spec.userinfo_method() {
+            provider::UserinfoMethod::Get => http_get_bearer(&url, access_token),
+            provider::UserinfoMethod::Post => http_post_bearer(&url, access_token),
+        }
+        .map_err(sanitize_token_error)?;
         let parsed: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| format!("userinfo not valid JSON: {e}"))?;
 
@@ -538,9 +662,123 @@ impl OAuthConfig {
                     name,
                 })
             }
+            provider::UserinfoParser::AppleIdToken => unreachable!("handled above"),
             provider::UserinfoParser::LinearGraphql => unreachable!("handled above"),
         }
     }
+}
+
+/// PKCE pair — the verifier stays server-side until token exchange,
+/// the (S256-hashed) challenge goes on the auth URL.
+struct PkcePair {
+    code_verifier: String,
+    code_challenge: String,
+}
+
+/// Generate a PKCE pair: random 43-char verifier + S256 challenge.
+/// RFC 7636 §4.1 permits 43–128 chars from `[A-Za-z0-9-._~]`. 32
+/// random bytes URL-base64-encoded comes out to exactly 43 chars.
+fn generate_pkce() -> PkcePair {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let code_verifier = apple_jwt::base64_url(bytes);
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let code_challenge = apple_jwt::base64_url(hasher.finalize());
+    PkcePair {
+        code_verifier,
+        code_challenge,
+    }
+}
+
+/// Decode an Apple id_token JWT and pull the identity claims. We
+/// trust the token because it just came back from Apple over a
+/// TLS-validated channel as the body of the token-exchange
+/// response — no third party touched it. (For pure-frontend Apple
+/// flows that POST the id_token to us, we'd need to verify
+/// `aud/iss/exp` plus the signature against Apple's JWKS; that
+/// hardening lives in the Wave 3 passkey/JWT-session work.)
+fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, String> {
+    let mut parts = id_token.split('.');
+    let _header = parts.next().ok_or("apple id_token: missing header")?;
+    let claims_b64 = parts.next().ok_or("apple id_token: missing claims")?;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(claims_b64)
+        .map_err(|e| format!("apple id_token claims not base64: {e}"))?;
+    let claims: serde_json::Value = serde_json::from_slice(&claims_bytes)
+        .map_err(|e| format!("apple id_token claims not JSON: {e}"))?;
+    let provider_account_id = claims
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .ok_or("apple id_token: missing sub")?
+        .to_string();
+    let email = claims
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or("apple id_token: missing email (was the `email` scope requested?)")?
+        .to_string();
+    Ok(UserInfo {
+        provider: provider.to_string(),
+        provider_account_id,
+        email,
+        name: None, // Apple sends `name` as a separate form field on FIRST signup only.
+    })
+}
+
+/// Strip provider error bodies of secrets before they propagate to
+/// logs / `oauth_error_message` redirect URLs.
+///
+/// **Why:** Several token endpoints echo the request body (or pieces
+/// of it) on auth failure. Without this, a misconfigured deployment
+/// can leak `client_secret`, the Apple JWT, or even the auth `code`
+/// into the user's browser history and CDN logs.
+fn sanitize_token_error(err: String) -> String {
+    let mut out = err;
+    for sensitive in [
+        "client_secret",
+        "code_verifier",
+        "client_assertion",
+        "refresh_token",
+        "access_token",
+    ] {
+        // Replace `&client_secret=…&` (or trailing) with redacted
+        // marker. Conservative pattern — collapses any value, even
+        // url-encoded ones.
+        out = redact_param(&out, sensitive);
+    }
+    out
+}
+
+/// Replace the value of `key=…` (form or query string) with `***`,
+/// terminating at `&`, `\n`, `"`, or end-of-string. Case-sensitive
+/// match for the key prefix; case-insensitive value handling isn't
+/// needed since we only redact known sensitive parameter names.
+fn redact_param(input: &str, key: &str) -> String {
+    let needle_eq = format!("{key}=");
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let bytes = input.as_bytes();
+    while i < bytes.len() {
+        if input[i..].starts_with(&needle_eq) {
+            out.push_str(&needle_eq);
+            out.push_str("***");
+            i += needle_eq.len();
+            // Skip until terminator.
+            while i < bytes.len() && !matches!(bytes[i], b'&' | b'\n' | b'"' | b' ') {
+                i += 1;
+            }
+        } else {
+            // Push one UTF-8 char's worth — input.is_char_boundary
+            // walking would be cleaner, but errors are ASCII-ish
+            // in practice, so byte-by-byte is safe enough.
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Linear's userinfo lives behind a GraphQL endpoint — the bearer
@@ -716,8 +954,8 @@ fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, St
 }
 
 /// POST a form body using HTTP Basic auth for the client credentials.
-/// Used by Spotify, Twitter, Notion, Reddit, Atlassian, Figma, Zoom,
-/// PayPal — providers that mandate Basic auth on the token endpoint.
+/// Used by Spotify, Reddit, Figma, Zoom, PayPal — providers that
+/// mandate Basic auth on the token endpoint.
 fn http_post_form_basic(
     url: &str,
     body: &str,
@@ -734,6 +972,56 @@ fn http_post_form_basic(
         .set("Accept", "application/json")
         .set("Authorization", &format!("Basic {basic}"))
         .send_string(body)
+    {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {body}"))
+        }
+        Err(e) => Err(format!("HTTP error: {e}")),
+    }
+}
+
+/// POST a JSON body, optionally with HTTP Basic auth. Used by
+/// Notion (Basic + JSON) and Atlassian (JSON only) — both reject
+/// form-encoded bodies on their token endpoints.
+fn http_post_json(
+    url: &str,
+    body: &str,
+    basic_creds: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let agent = ureq_agent();
+    let mut req = agent
+        .post(url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json");
+    if let Some((id, secret)) = basic_creds {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let creds = STANDARD.encode(format!("{id}:{secret}").as_bytes());
+        req = req.set("Authorization", &format!("Basic {creds}"));
+    }
+    // Notion requires the API version header on every call, even the
+    // token exchange. Using a recent stable version.
+    req = req.set("Notion-Version", "2022-06-28");
+    match req.send_string(body) {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("HTTP {code}: {body}"))
+        }
+        Err(e) => Err(format!("HTTP error: {e}")),
+    }
+}
+
+/// POST with empty body + bearer auth. Used for Dropbox userinfo
+/// (an RPC-style endpoint that requires POST instead of GET).
+fn http_post_bearer(url: &str, token: &str) -> Result<String, String> {
+    let agent = ureq_agent();
+    match agent
+        .post(url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .call()
     {
         Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
@@ -930,6 +1218,11 @@ pub struct OAuthState {
     /// `?error_callback=`. The error code + message ride along as
     /// query params (`?oauth_error=X&oauth_error_message=Y`).
     pub error_callback_url: String,
+    /// PKCE code_verifier when the provider requires PKCE. Set by the
+    /// `/api/auth/login/<provider>` start route via
+    /// [`OAuthConfig::auth_url_with_pkce`]; replayed on token exchange
+    /// in the callback. `None` for non-PKCE providers.
+    pub pkce_verifier: Option<String>,
     pub expires_at: u64,
 }
 
@@ -1018,6 +1311,19 @@ impl OAuthStateStore {
     /// `error_callback_url` against the trusted-origins allowlist
     /// BEFORE calling this — the store trusts what it's given.
     pub fn create(&self, provider: &str, callback_url: &str, error_callback_url: &str) -> String {
+        self.create_with_pkce(provider, callback_url, error_callback_url, None)
+    }
+
+    /// Same as [`Self::create`] but accepts a PKCE verifier to stash
+    /// alongside the state record. The callback handler reads it back
+    /// out and replays it in the token exchange.
+    pub fn create_with_pkce(
+        &self,
+        provider: &str,
+        callback_url: &str,
+        error_callback_url: &str,
+        pkce_verifier: Option<String>,
+    ) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let token = generate_token();
         let now = SystemTime::now()
@@ -1028,6 +1334,7 @@ impl OAuthStateStore {
             provider: provider.to_string(),
             callback_url: callback_url.to_string(),
             error_callback_url: error_callback_url.to_string(),
+            pkce_verifier,
             expires_at: now + 600,
         };
         self.backend.put(&token, &state);
@@ -2123,8 +2430,23 @@ mod tests {
             };
             let auth = cfg.auth_url();
             assert!(!auth.is_empty(), "{}: empty auth_url", spec.id);
-            assert!(auth.contains("client_id=cid"), "{}: missing client_id", spec.id);
+            // TikTok uses `client_key`; everyone else uses `client_id`.
+            let expected_param = format!("{}=cid", spec.client_id_param);
+            assert!(
+                auth.contains(&expected_param),
+                "{}: missing {}; got auth_url: {}",
+                spec.id,
+                expected_param,
+                auth,
+            );
             assert!(!cfg.token_url().is_empty(), "{}: empty token_url", spec.id);
+            // Apple requires response_mode=form_post in the auth URL.
+            if spec.id == "apple" {
+                assert!(
+                    auth.contains("response_mode=form_post"),
+                    "apple auth_url must include response_mode=form_post; got {auth}"
+                );
+            }
         }
     }
 
@@ -2222,6 +2544,208 @@ mod tests {
         assert!(cfg.auth_url().starts_with("https://acme.test.invalid/authorize?"));
         assert_eq!(cfg.token_url(), "https://acme.test.invalid/oauth/token");
         assert_eq!(cfg.userinfo_url(), "https://acme.test.invalid/userinfo");
+    }
+
+    // -- Codex review regression tests (P1/P2 from Wave 1 review) --
+
+    /// P1: Apple's auth URL MUST include response_mode=form_post when
+    /// requesting name/email scopes, otherwise Apple rejects with
+    /// "invalid_request".
+    #[test]
+    fn apple_auth_url_includes_form_post() {
+        let cfg = OAuthConfig {
+            provider: "apple".into(),
+            client_id: "com.example.app".into(),
+            client_secret: String::new(),
+            redirect_uri: "https://app/cb".into(),
+            apple: Some(provider::AppleConfig {
+                team_id: "T".into(),
+                key_id: "K".into(),
+                private_key_pem: "no".into(),
+            }),
+            ..Default::default()
+        };
+        let auth = cfg.auth_url();
+        assert!(auth.contains("response_mode=form_post"), "got: {auth}");
+        // Apple identity comes from id_token, so userinfo_url is empty.
+        assert_eq!(cfg.userinfo_url(), "");
+    }
+
+    /// P1: Apple identity is extracted from the id_token JWT
+    /// (Apple has no userinfo endpoint). `fetch_userinfo_with_id_token`
+    /// must decode the claims; `fetch_userinfo_full` (no id_token)
+    /// must surface a clear error.
+    #[test]
+    fn apple_id_token_decode_extracts_identity() {
+        // Synthesize an unsigned JWT with realistic Apple claims.
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        use base64::Engine;
+        let claims = serde_json::json!({
+            "iss": "https://appleid.apple.com",
+            "sub": "001234.abc.def",
+            "aud": "com.example.app",
+            "email": "user@privaterelay.appleid.com",
+            "email_verified": "true",
+        });
+        let claims_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(claims.to_string().as_bytes());
+        let id_token = format!("{header}.{claims_b64}.signature_ignored");
+
+        let cfg = OAuthConfig {
+            provider: "apple".into(),
+            client_id: "com.example.app".into(),
+            client_secret: String::new(),
+            redirect_uri: "https://app/cb".into(),
+            apple: Some(provider::AppleConfig {
+                team_id: "T".into(),
+                key_id: "K".into(),
+                private_key_pem: "no".into(),
+            }),
+            ..Default::default()
+        };
+        let info = cfg
+            .fetch_userinfo_with_id_token("ignored", Some(&id_token))
+            .expect("apple id_token decode");
+        assert_eq!(info.provider_account_id, "001234.abc.def");
+        assert_eq!(info.email, "user@privaterelay.appleid.com");
+
+        // Without an id_token the call must fail loud, not silently
+        // try to hit a non-existent userinfo endpoint.
+        let err = cfg.fetch_userinfo_full("token").unwrap_err();
+        assert!(err.contains("apple login requires"), "got: {err}");
+    }
+
+    /// P1: Twitter/X requires PKCE — `auth_url_with_pkce` must mint a
+    /// verifier, embed the SHA-256 challenge in the auth URL, and
+    /// return the verifier for the callback to replay.
+    #[test]
+    fn twitter_auth_url_includes_pkce() {
+        let cfg = OAuthConfig {
+            provider: "twitter".into(),
+            client_id: "tw_client".into(),
+            client_secret: "tw_secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            ..Default::default()
+        };
+        let (url, verifier) = cfg.auth_url_with_pkce("state123").expect("twitter pkce");
+        let v = verifier.expect("twitter must produce verifier");
+        assert!(v.len() >= 43, "PKCE verifier must be 43+ chars: got {v}");
+        assert!(url.contains("code_challenge="), "got: {url}");
+        assert!(url.contains("code_challenge_method=S256"), "got: {url}");
+
+        // Non-PKCE provider must NOT add a code_challenge.
+        let google = OAuthConfig {
+            provider: "google".into(),
+            client_id: "g".into(),
+            client_secret: "g".into(),
+            redirect_uri: "https://app/cb".into(),
+            ..Default::default()
+        };
+        let (gurl, gverifier) = google.auth_url_with_pkce("st").expect("google");
+        assert!(gverifier.is_none(), "google should not add PKCE");
+        assert!(!gurl.contains("code_challenge"), "got: {gurl}");
+    }
+
+    /// P2: TikTok uses `client_key` (not `client_id`) and joins
+    /// scopes with commas (not spaces).
+    #[test]
+    fn tiktok_uses_client_key_and_comma_scopes() {
+        let cfg = OAuthConfig {
+            provider: "tiktok".into(),
+            client_id: "tk_client".into(),
+            client_secret: "tk_secret".into(),
+            redirect_uri: "https://app/cb".into(),
+            scopes_override: Some("user.info.basic video.list".into()),
+            ..Default::default()
+        };
+        let auth = cfg.auth_url();
+        assert!(auth.contains("client_key=tk_client"), "got: {auth}");
+        // Comma-separated, url-encoded → "user.info.basic%2Cvideo.list"
+        assert!(auth.contains("user.info.basic%2Cvideo.list"), "got: {auth}");
+        // Should NOT use the standard space separator.
+        assert!(!auth.contains("user.info.basic%20video.list"), "got: {auth}");
+    }
+
+    /// P2: `code` MUST be url-encoded in the token-exchange body.
+    /// Auth codes can contain reserved characters (`+`, `=`, `/`) that
+    /// would otherwise corrupt the form body.
+    #[test]
+    fn token_exchange_url_encodes_code() {
+        // We can't hit the network in a unit test, so this asserts
+        // via the `apple_exchange_requires_apple_config` shape — if
+        // we DID have a working apple config, encoding would happen
+        // before the network call. Instead, verify by calling the
+        // helper used internally:
+        let raw = "code+with/special=chars";
+        let encoded = url_encode(raw);
+        assert!(!encoded.contains('+'));
+        assert!(!encoded.contains('/'));
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%2B"));
+        assert!(encoded.contains("%2F"));
+        assert!(encoded.contains("%3D"));
+    }
+
+    /// P1: Token-endpoint error bodies must NOT propagate
+    /// `client_secret`, `code_verifier`, or other sensitive form
+    /// fields that providers sometimes echo back on auth failure.
+    #[test]
+    fn sanitize_token_error_redacts_secrets() {
+        let raw = "HTTP 400: error=invalid_grant&client_secret=sk_real_secret_value&code_verifier=verifierxyz&hint=check%20your%20code";
+        let scrubbed = sanitize_token_error(raw.into());
+        assert!(!scrubbed.contains("sk_real_secret_value"));
+        assert!(!scrubbed.contains("verifierxyz"));
+        assert!(scrubbed.contains("client_secret=***"));
+        assert!(scrubbed.contains("code_verifier=***"));
+        // Non-sensitive context preserved.
+        assert!(scrubbed.contains("invalid_grant"));
+        assert!(scrubbed.contains("hint=check%20your%20code"));
+    }
+
+    /// P2: OIDC discovery must respect
+    /// `token_endpoint_auth_methods_supported`. When the IdP
+    /// publishes `client_secret_post`, use Standard form bodies.
+    /// When omitted (the spec default), use BasicAuth.
+    #[test]
+    fn oidc_discovery_picks_token_auth_method() {
+        let json_post = r#"{
+            "issuer": "https://acme.test/",
+            "authorization_endpoint": "https://acme.test/auth",
+            "token_endpoint": "https://acme.test/token",
+            "token_endpoint_auth_methods_supported": ["client_secret_post"]
+        }"#;
+        let spec = provider::OidcDiscoveryDoc::parse(json_post).unwrap().into_spec();
+        assert!(matches!(
+            spec.token_exchange,
+            provider::TokenExchangeShape::Standard
+        ));
+
+        // Default (omitted) → BasicAuth.
+        let json_default = r#"{
+            "issuer": "https://acme.test/",
+            "authorization_endpoint": "https://acme.test/auth",
+            "token_endpoint": "https://acme.test/token"
+        }"#;
+        let spec = provider::OidcDiscoveryDoc::parse(json_default)
+            .unwrap()
+            .into_spec();
+        assert!(matches!(
+            spec.token_exchange,
+            provider::TokenExchangeShape::BasicAuth
+        ));
+    }
+
+    /// P2: OIDC discovery missing required endpoints must fail loud,
+    /// not silently produce empty URLs that would 404 every login.
+    #[test]
+    fn oidc_discovery_rejects_incomplete_doc() {
+        // Missing token_endpoint.
+        let json = r#"{
+            "issuer": "https://acme.test/",
+            "authorization_endpoint": "https://acme.test/auth"
+        }"#;
+        let err = provider::OidcDiscoveryDoc::parse(json).unwrap_err();
+        assert!(err.contains("token_endpoint"), "got: {err}");
     }
 
     /// `OAuthRegistry::from_env` must auto-discover every provider
