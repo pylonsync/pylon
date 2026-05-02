@@ -697,11 +697,43 @@ pub mod live {
         ColumnSnapshot, IndexSnapshot, SchemaSnapshot, StorageAdapter, StorageError, TableSnapshot,
     };
 
+    /// Connect to Postgres with the same TLS handling the entity
+    /// store uses. Strips libpq-only URL params (`sslmode=verify-full`,
+    /// `sslrootcert=system`) and uses rustls + native CA store when
+    /// the URL asks for TLS. Used by the auxiliary auth backends
+    /// (sessions, OAuth state, magic codes, accounts, API keys, orgs)
+    /// so they all behave identically to the entity store on managed
+    /// providers (Fly Postgres, PlanetScale, Neon, Supabase).
+    pub fn connect_pg(url: &str) -> Result<postgres::Client, String> {
+        let (cleaned, ssl) = parse_pg_url_ssl(url);
+        if ssl.use_tls {
+            let mut roots = rustls::RootCertStore::empty();
+            let native_certs = rustls_native_certs::load_native_certs();
+            for cert in native_certs.certs {
+                let _ = roots.add(cert);
+            }
+            if !native_certs.errors.is_empty() {
+                tracing::warn!(
+                    "[pg] rustls native cert load reported {} non-fatal errors",
+                    native_certs.errors.len()
+                );
+            }
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
+            postgres::Client::connect(&cleaned, tls).map_err(|e| format!("PG connect: {e}"))
+        } else {
+            postgres::Client::connect(&cleaned, postgres::NoTls)
+                .map_err(|e| format!("PG connect: {e}"))
+        }
+    }
+
     /// SSL parsing result for `parse_pg_url_ssl`. We need both the
     /// cleaned-up URL (libpq-only params stripped) and the boolean
     /// "should we use TLS for this connection" so the connect path
     /// can pick between `NoTls` and `MakeTlsConnector`.
-    pub(super) struct PgUrlSsl {
+    pub struct PgUrlSsl {
         pub use_tls: bool,
     }
 
@@ -720,7 +752,7 @@ pub mod live {
     ///
     /// Anything we don't understand is dropped from the URL silently
     /// (defense against future libpq additions confusing the parser).
-    pub(super) fn parse_pg_url_ssl(url: &str) -> (String, PgUrlSsl) {
+    pub fn parse_pg_url_ssl(url: &str) -> (String, PgUrlSsl) {
         let (base, query) = match url.find('?') {
             Some(idx) => (&url[..idx], &url[idx + 1..]),
             None => return (url.to_string(), PgUrlSsl { use_tls: false }),
@@ -882,28 +914,7 @@ pub mod live {
         /// cross-compile cleanly on musl + arm64 without needing
         /// OPENSSL_DIR. Pure Rust all the way down.
         pub fn connect(url: &str) -> Result<Self, StorageError> {
-            let (cleaned, ssl) = parse_pg_url_ssl(url);
-            let result = if ssl.use_tls {
-                let mut roots = rustls::RootCertStore::empty();
-                let native_certs = rustls_native_certs::load_native_certs();
-                for cert in native_certs.certs {
-                    let _ = roots.add(cert);
-                }
-                if !native_certs.errors.is_empty() {
-                    tracing::warn!(
-                        "[pg] rustls native cert load reported {} non-fatal errors",
-                        native_certs.errors.len()
-                    );
-                }
-                let config = rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
-                postgres::Client::connect(&cleaned, tls)
-            } else {
-                postgres::Client::connect(&cleaned, postgres::NoTls)
-            };
-            let client = result.map_err(|e| StorageError {
+            let client = connect_pg(url).map_err(|e| StorageError {
                 code: "PG_CONNECT_FAILED".into(),
                 message: format!("Failed to connect to Postgres: {e}"),
             })?;

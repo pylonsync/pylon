@@ -25,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.20";
+const PYLON_VERSION = "0.3.21";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
@@ -268,8 +268,8 @@ write(
 
 const Todo = entity("Todo", {
 \ttitle: field.string(),
-\tdone: field.bool().default(false),
-\tcreatedAt: field.datetime().default("now"),
+\tdone: field.bool(),
+\tcreatedAt: field.datetime(),
 });
 
 // ---------------------------------------------------------------------------
@@ -300,7 +300,10 @@ const todoPolicy = policy({
 // Manifest — pylon codegen reads this and emits pylon.manifest.json
 // ---------------------------------------------------------------------------
 
-export default buildManifest({
+// pylon dev / pylon codegen run \`bun run schema.ts\` and read the
+// manifest off stdout. The framework expects JSON, not the JS object —
+// every Pylon entry file ends with this console.log line.
+const manifest = buildManifest({
 \tname: "${projectName}",
 \tversion: "0.0.1",
 \tentities: [Todo],
@@ -309,6 +312,8 @@ export default buildManifest({
 \tpolicies: [todoPolicy],
 \troutes: [],
 });
+
+console.log(JSON.stringify(manifest));
 `,
 );
 

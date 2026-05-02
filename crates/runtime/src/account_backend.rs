@@ -288,8 +288,7 @@ mod pg {
 
     impl PostgresAccountBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client =
-                Client::connect(url, postgres::NoTls).map_err(|e| format!("PG connect: {e}"))?;
+            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
             client
                 .batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (

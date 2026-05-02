@@ -160,8 +160,7 @@ mod pg {
 
     impl PostgresOAuthBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client =
-                Client::connect(url, postgres::NoTls).map_err(|e| format!("PG connect: {e}"))?;
+            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
             // Same shape as the SQLite version — declare the columns
             // up front for new installs, and idempotent ALTER TABLEs
             // for ones that predate the callback URL fields. Postgres'
