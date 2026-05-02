@@ -20,15 +20,15 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Password change/reset | `/api/auth/password/change` (requires current password); reset flow rides on magic codes |
 | Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
 | TOTP / 2FA | RFC 6238 6-digit codes. `/api/auth/totp/enroll` + `/verify` + `/disable`. Compatible with every authenticator app |
-| WebAuthn / passkeys | ES256 + Ed25519 verification primitives in `pylon_auth::webauthn`. **HTTP endpoints not yet wired** — apps compose their own register/login routes from `verify_assertion` + `PasskeyStore`. |
+| WebAuthn / passkeys | ES256 + Ed25519. Counter-regression detection. Endpoints: `/api/auth/passkey/{register,login}/{begin,finish}` + key management. Compose `verify_assertion` directly for custom flows. |
 | JWT sessions | Optional stateless `Authorization: Bearer <jwt>` mode. Set `PYLON_JWT_SECRET` to enable; `/api/auth/jwt` mints from a session |
 | CAPTCHA | hCaptcha + Turnstile + reCAPTCHA. Set `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` to gate magic-code send + password register |
 | Organizations | Multi-tenant orgs + RBAC (owner/admin/member) + email invites with single-use tokens. Endpoints under `/api/auth/orgs/...` |
 | Stripe billing | Hosted Checkout sessions + signed webhook verification. Set `PYLON_STRIPE_API_KEY` + `PYLON_STRIPE_WEBHOOK_SECRET` |
 | Phone / SMS sign-in | E.164-normalized magic codes via Twilio (or any SmsSender). Endpoints under `/api/auth/phone/...` |
-| SIWE (Sign-In With Ethereum) | EIP-4361 message validation + nonce stash. **Signature verification is opt-in** via `SiweSignatureVerifier` trait — apps wire k256 themselves to keep crypto opt-in. |
-| OIDC Provider | Discovery doc / JWKS / AuthCode types in `pylon_auth::oidc_provider`. **HTTP endpoints not yet wired**. |
-| SCIM 2.0 | Schema types + bearer auth helper in `pylon_auth::scim`. **HTTP endpoints not yet wired**. |
+| SIWE (Sign-In With Ethereum) | EIP-4361 + k256 ECDSA recovery + Keccak-256. Endpoints: `GET /api/auth/siwe/nonce`, `POST /api/auth/siwe/verify`. |
+| OIDC Provider | Discovery doc + JWKS endpoints (`/.well-known/openid-configuration`, `/oidc/jwks`) — `PYLON_OIDC_JWKS_RSA_N/_E` to publish RSA public key. |
+| SCIM 2.0 | `/scim/v2/Users` (POST/GET/DELETE) — bearer auth via `PYLON_SCIM_TOKEN`. SCIM `active=false` → soft delete. |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
@@ -87,6 +87,18 @@ All under `/api/auth/`:
 | `/invites/:token/accept` | POST | Accept an invite (must be logged in with the invited email) |
 | `/billing/checkout` (under `/api/`) | POST | Mint a Stripe Checkout Session for the current user |
 | `/billing/webhook` (under `/api/`) | POST | Stripe webhook target (verifies signature) |
+| `/phone/send-code` | POST | Send a 6-digit code via SMS (Twilio, configurable transport) |
+| `/phone/verify` | POST | Verify the code; mints session, creates user if new |
+| `/siwe/nonce` | GET | Mint a SIWE nonce for `?address=0x…` (EIP-4361 step 1) |
+| `/siwe/verify` | POST | Verify EIP-191 signature; mints session keyed on wallet address |
+| `/passkey/register/begin` | POST | Issue a registration challenge (auth required) |
+| `/passkey/register/finish` | POST | Persist a new credential after the authenticator signs |
+| `/passkey/login/begin` | POST | Issue an assertion challenge (no auth needed) |
+| `/passkey/login/finish` | POST | Verify assertion → mint session |
+| `/passkey/keys` | GET, DELETE | List / revoke the user's passkeys |
+| `/.well-known/openid-configuration` | GET | OIDC discovery doc (root path, no `/api/` prefix) |
+| `/oidc/jwks` | GET | JWKS for verifying pylon-issued OIDC tokens |
+| `/scim/v2/Users` | POST, GET, DELETE | SCIM 2.0 user provisioning (Bearer `PYLON_SCIM_TOKEN`) |
 
 ## Sessions vs cookies vs bearer tokens
 
