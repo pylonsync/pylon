@@ -25,6 +25,10 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | CAPTCHA | hCaptcha + Turnstile + reCAPTCHA. Set `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` to gate magic-code send + password register |
 | Organizations | Multi-tenant orgs + RBAC (owner/admin/member) + email invites with single-use tokens. Endpoints under `/api/auth/orgs/...` |
 | Stripe billing | Hosted Checkout sessions + signed webhook verification. Set `PYLON_STRIPE_API_KEY` + `PYLON_STRIPE_WEBHOOK_SECRET` |
+| Phone / SMS sign-in | E.164-normalized magic codes via Twilio (or any SmsSender). Endpoints under `/api/auth/phone/...` |
+| SIWE (Sign-In With Ethereum) | EIP-4361 message verification with per-address nonce stash; wallet-native passwordless |
+| OIDC Provider | Run pylon as the IdP — discovery doc + JWKS + auth-code flow at `/.well-known/openid-configuration` and `/oidc/...` |
+| SCIM 2.0 | Auto-provision users from Okta / Azure AD / Workday at `/scim/v2/Users` (bearer auth via `PYLON_SCIM_TOKEN`) |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
