@@ -355,10 +355,11 @@ pub(crate) fn handle(
                 ));
             }
         };
-        let subject = "Your sign-in code";
-        let body_text =
-            format!("Your sign-in code is: {code}\n\nThis code will expire in 10 minutes.");
-        if let Err(e) = ctx.email.send(&email, subject, &body_text) {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("code", code.as_str());
+        let (subject, body_text) = pylon_auth::email_templates::render(
+            pylon_auth::email_templates::EmailTemplate::MagicCode, &vars);
+        if let Err(e) = ctx.email.send(&email, &subject, &body_text) {
             if !ctx.is_dev {
                 tracing::warn!(
                     "[email] Failed to send magic code to {}: {e}",
@@ -2081,11 +2082,11 @@ pub(crate) fn handle(
                     std::env::var("PYLON_PUBLIC_URL").unwrap_or_else(|_| String::new()),
                     invited.token
                 );
-                let subject = format!("You've been invited to {}", org.name);
-                let body_text = format!(
-                    "You've been invited to join {} on Pylon.\n\nAccept here: {}\n\nThis link expires in 7 days.",
-                    org.name, accept_url
-                );
+                let mut vars = std::collections::HashMap::new();
+                vars.insert("org_name", org.name.as_str());
+                vars.insert("url", accept_url.as_str());
+                let (subject, body_text) = pylon_auth::email_templates::render(
+                    pylon_auth::email_templates::EmailTemplate::OrgInvite, &vars);
                 if let Err(e) = ctx.email.send(email, &subject, &body_text) {
                     tracing::warn!("[org] invite email to {} failed: {e}", redact_email(email));
                 }
@@ -2858,11 +2859,11 @@ pub(crate) fn handle(
         if registered {
             let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
             let reset_url = format!("{public_url}/reset-password?token={}", minted.plaintext);
-            let body_text = format!(
-                "Reset your password by visiting:\n\n{reset_url}\n\n\
-                 This link expires in 30 minutes. If you didn't request a reset, ignore this email."
-            );
-            if let Err(e) = ctx.email.send(&email, "Reset your password", &body_text) {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert("url", reset_url.as_str());
+            let (subject, body_text) = pylon_auth::email_templates::render(
+                pylon_auth::email_templates::EmailTemplate::PasswordReset, &vars);
+            if let Err(e) = ctx.email.send(&email, &subject, &body_text) {
                 tracing::warn!("[auth] reset email to {} failed: {e}", redact_email(&email));
             }
         } else {
@@ -2968,11 +2969,11 @@ pub(crate) fn handle(
             pylon_auth::verification::TokenKind::MagicLink, &email, None, None);
         let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
         let verify_url = format!("{public_url}/api/auth/magic-link/verify?token={}", minted.plaintext);
-        let body_text = format!(
-            "Click here to sign in:\n\n{verify_url}\n\n\
-             This link expires in 15 minutes. If you didn't request it, ignore this email."
-        );
-        if let Err(e) = ctx.email.send(&email, "Sign in to your account", &body_text) {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("url", verify_url.as_str());
+        let (subject, body_text) = pylon_auth::email_templates::render(
+            pylon_auth::email_templates::EmailTemplate::MagicLink, &vars);
+        if let Err(e) = ctx.email.send(&email, &subject, &body_text) {
             tracing::warn!("[auth] magic-link email to {} failed: {e}", redact_email(&email));
             if !ctx.is_dev {
                 return Some((500, json_error("EMAIL_SEND_FAILED", "Could not send email")));
@@ -3094,11 +3095,11 @@ pub(crate) fn handle(
         );
         let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
         let confirm_url = format!("{public_url}/email-change/confirm?token={}", minted.plaintext);
-        let body_text = format!(
-            "Confirm your new email by visiting:\n\n{confirm_url}\n\n\
-             This link expires in 24 hours. If you didn't request this change, ignore the email."
-        );
-        if let Err(e) = ctx.email.send(&new_email, "Confirm your email change", &body_text) {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("url", confirm_url.as_str());
+        let (subject, body_text) = pylon_auth::email_templates::render(
+            pylon_auth::email_templates::EmailTemplate::EmailChangeConfirm, &vars);
+        if let Err(e) = ctx.email.send(&new_email, &subject, &body_text) {
             tracing::warn!("[auth] email-change confirm to {} failed: {e}", redact_email(&new_email));
         }
         return Some((200, serde_json::json!({"sent": true}).to_string()));

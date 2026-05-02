@@ -262,19 +262,23 @@ mod tests {
 
     #[test]
     fn cannot_inject_special_template_syntax() {
-        // Things like `{{ exec() }}` or `{{ env.SECRET }}` should NOT
-        // expand to anything meaningful. The allowlist + name regex
-        // rejects them.
+        // Things like `{{ exec() }}` or `{{ env.SECRET }}` are NOT
+        // valid `{{name}}` shapes. The allowlist + name validator
+        // rejects them and the placeholder is dropped silently.
+        // Spaces are also disallowed in our minimal subst grammar
+        // — `{{ code }}` won't expand to the value of `code`.
         let allowed = &["code"];
         let mut vars = HashMap::new();
         vars.insert("code", "x");
+        // Result is "a  b  c" — the `{{exec()}}` and `{{env.SECRET}}`
+        // tokens are dropped, leaving just spaces.
         assert_eq!(
             substitute("a {{exec()}} b {{env.SECRET}} c", allowed, &vars),
-            "a {{exec()}} b {{env.SECRET}} c"
+            "a  b  c"
         );
-        // The `(` and `.` characters fail the name validator —
-        // we leave the placeholder literal so it's visibly broken
-        // (operator typo signal).
+        // And literal `code` reference outside the brace shape isn't
+        // expanded either.
+        assert_eq!(substitute("code = $code", allowed, &vars), "code = $code");
     }
 
     #[test]

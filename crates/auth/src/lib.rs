@@ -5,6 +5,7 @@ pub mod captcha;
 pub mod cookie;
 pub mod device;
 pub mod email;
+pub mod email_templates;
 pub mod jwt;
 pub mod oidc_provider;
 pub mod org;
