@@ -27,3 +27,7 @@ base64 = { workspace = true }
 ring = { workspace = true }
 # SHA-256 used for PKCE code_challenge derivation (RFC 7636 §4.2).
 sha2 = { workspace = true }
+# SHA-1 ONLY for HIBP Pwned Passwords range check (k-anonymity).
+# SHA-1 is broken for collisions but the HIBP corpus uses it as the
+# stable index so we have no choice. Not used for any real security.
+sha1 = { workspace = true }

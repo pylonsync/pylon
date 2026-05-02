@@ -254,6 +254,7 @@ fn start_server(
     let magic_codes = auth_stores.magic_codes;
     let oauth_state = auth_stores.oauth_state;
     let account_store = auth_stores.account_store;
+    let api_keys = auth_stores.api_keys;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -731,6 +732,7 @@ fn start_server(
         let mt = Arc::clone(&metrics);
         let os = Arc::clone(&oauth_state);
         let acc = Arc::clone(&account_store);
+        let ak = Arc::clone(&api_keys);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -1000,15 +1002,50 @@ fn start_server(
                 })
         };
         let auth_token: Option<String> = bearer_token.or(cookie_token);
-        let auth_ctx = if admin_token.is_some()
+        // API key tokens (`pk.…`) resolve to a key-flavored
+        // AuthContext (carrying `api_key_id` + scopes so policies can
+        // distinguish from a real session). An invalid `pk.…` token
+        // 401s instead of silently falling through to anonymous —
+        // codex Wave-2 P2 — so apps don't accidentally serve
+        // public content when the caller meant to authenticate.
+        let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token.is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
                 auth_token.as_deref().unwrap_or("").as_bytes(),
                 admin_token.as_deref().unwrap_or("").as_bytes(),
             ) {
-            pylon_auth::AuthContext::admin()
+            Ok(pylon_auth::AuthContext::admin())
+        } else if let Some(t) = auth_token.as_deref() {
+            if t.starts_with("pk.") {
+                match ak.verify(t) {
+                    Ok(key) => Ok(pylon_auth::AuthContext::from_api_key(
+                        key.user_id,
+                        key.id,
+                        key.scopes,
+                    )),
+                    Err(_) => Err("INVALID_API_KEY"),
+                }
+            } else {
+                Ok(ss.resolve(Some(t)))
+            }
         } else {
-            ss.resolve(auth_token.as_deref())
+            Ok(ss.resolve(None))
+        };
+        let auth_ctx = match auth_ctx_result {
+            Ok(c) => c,
+            Err(_) => {
+                let resp = tiny_http::Response::from_string(
+                    r#"{"error":{"code":"INVALID_API_KEY","message":"API key is malformed, expired, or revoked"}}"#,
+                )
+                .with_status_code(401)
+                .with_header(
+                    "Content-Type: application/json"
+                        .parse::<tiny_http::Header>()
+                        .unwrap(),
+                );
+                let _ = request.respond(resp);
+                continue;
+            }
         };
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---
@@ -1953,6 +1990,7 @@ fn start_server(
                     magic_codes: &mc,
                     oauth_state: &os,
                     account_store: &acc,
+                    api_keys: &ak,
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2128,6 +2166,7 @@ struct AuthStores {
     magic_codes: Arc<pylon_auth::MagicCodeStore>,
     oauth_state: Arc<pylon_auth::OAuthStateStore>,
     account_store: Arc<pylon_auth::AccountStore>,
+    api_keys: Arc<pylon_auth::api_key::ApiKeyStore>,
 }
 
 fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
@@ -2168,6 +2207,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         magic_codes: Arc::new(pylon_auth::MagicCodeStore::new()),
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
+        api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
     }
 }
 
@@ -2203,11 +2243,19 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::AccountStore::new()
         }
     };
+    let api_keys = match crate::api_key_backend::SqliteApiKeyBackend::open(path) {
+        Ok(b) => pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] api-key SQLite backend unavailable: {e}");
+            pylon_auth::api_key::ApiKeyStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
+        api_keys: Arc::new(api_keys),
     }
 }
 
@@ -2247,11 +2295,19 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::AccountStore::new()
         }
     };
+    let api_keys = match crate::api_key_backend::PostgresApiKeyBackend::connect(url) {
+        Ok(b) => pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG api-key backend unavailable: {e}");
+            pylon_auth::api_key::ApiKeyStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
+        api_keys: Arc::new(api_keys),
     }
 }
 

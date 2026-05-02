@@ -45,6 +45,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
         provider: "google".into(),
         callback_url: "https://app/dash".into(),
         error_callback_url: "https://app/login".into(),
+        pkce_verifier: None,
         expires_at: 9_999_999_999,
     };
     b.put("tok_pg_oauth", &s);

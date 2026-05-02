@@ -1,4 +1,5 @@
 pub mod account_backend;
+pub mod api_key_backend;
 pub mod cache_handlers;
 pub mod cache_server;
 pub mod config;

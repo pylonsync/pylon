@@ -584,11 +584,29 @@ pub(crate) fn handle(
             Some(p) => p,
             None => return Some((400, json_error("MISSING_PASSWORD", "password is required"))),
         };
-        if password.len() < 8 {
-            return Some((
-                400,
-                json_error("WEAK_PASSWORD", "password must be at least 8 characters"),
-            ));
+        if let Err(e) = pylon_auth::password::validate_length(password) {
+            return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
+        }
+        // HIBP check unless explicitly disabled (off in test/dev to keep
+        // unit tests offline). Honors PYLON_DISABLE_HIBP=1.
+        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
+            match pylon_auth::password::check_pwned(password) {
+                Ok(0) => {}
+                Ok(n) => {
+                    return Some((
+                        400,
+                        json_error_safe(
+                            "PWNED_PASSWORD",
+                            "This password has appeared in known data breaches. Choose a different one.",
+                            &format!("HIBP returned {n} occurrences"),
+                        ),
+                    ));
+                }
+                // Fail-open on HIBP outage — security-vs-availability
+                // tradeoff favors not locking out registration when an
+                // external service is down.
+                Err(_) => {}
+            }
         }
         let display_name = data
             .get("displayName")
@@ -1141,6 +1159,293 @@ pub(crate) fn handle(
         };
         let n = ctx.session_store.revoke_all_for_user(user_id);
         return Some((200, serde_json::json!({"revoked_count": n}).to_string()));
+    }
+
+    // ─── API keys ───────────────────────────────────────────────────────
+    //
+    // POST /api/auth/api-keys           — mint a new key (returns the
+    //                                     plaintext exactly once)
+    // GET  /api/auth/api-keys           — list (no plaintext, prefix only)
+    // DELETE /api/auth/api-keys/:id     — revoke
+    if url == "/api/auth/api-keys" {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u,
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        // P2 fix (codex Wave-2): API-key-authenticated requests cannot
+        // create / list / revoke API keys. Same posture as Stripe
+        // restricted keys — the user must hold a real session to manage
+        // their keys. Admin tokens (server-issued) bypass.
+        if ctx.auth_ctx.is_api_key_auth() && !ctx.auth_ctx.is_admin {
+            return Some((
+                403,
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "API key management requires a session, not an API key",
+                ),
+            ));
+        }
+        if method == HttpMethod::Post {
+            let data: serde_json::Value = match serde_json::from_str(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Some((
+                        400,
+                        json_error_safe(
+                            "INVALID_JSON",
+                            "Invalid request body",
+                            &format!("Invalid JSON: {e}"),
+                        ),
+                    ));
+                }
+            };
+            let name = data
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untitled")
+                .to_string();
+            let scopes = data
+                .get("scopes")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let expires_at = data
+                .get("expires_at")
+                .and_then(|v| v.as_u64());
+            let (plaintext, key) =
+                ctx.api_keys.create(user_id.to_string(), name, scopes, expires_at);
+            return Some((
+                200,
+                serde_json::json!({
+                    // ONLY shown here. Frontend MUST display & forget.
+                    "key": plaintext,
+                    "id": key.id,
+                    "prefix": key.prefix,
+                    "name": key.name,
+                    "scopes": key.scopes,
+                    "expires_at": key.expires_at,
+                    "created_at": key.created_at,
+                })
+                .to_string(),
+            ));
+        }
+        if method == HttpMethod::Get {
+            let list = ctx.api_keys.list_for_user(user_id);
+            let payload: Vec<serde_json::Value> = list
+                .iter()
+                .map(|k| {
+                    serde_json::json!({
+                        "id": k.id,
+                        "prefix": k.prefix,
+                        "name": k.name,
+                        "scopes": k.scopes,
+                        "expires_at": k.expires_at,
+                        "last_used_at": k.last_used_at,
+                        "created_at": k.created_at,
+                    })
+                })
+                .collect();
+            return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+        }
+    }
+    if let Some(id) = url.strip_prefix("/api/auth/api-keys/") {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u,
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if method == HttpMethod::Delete {
+            // Verify ownership before revoking — a compromised api-key
+            // shouldn't let an attacker revoke arbitrary other users' keys.
+            match ctx.api_keys.list_for_user(user_id).iter().find(|k| k.id == id) {
+                Some(_) => {
+                    let revoked = ctx.api_keys.revoke(id);
+                    return Some((
+                        200,
+                        serde_json::json!({"revoked": revoked}).to_string(),
+                    ));
+                }
+                None => return Some((404, json_error("NOT_FOUND", "API key not found"))),
+            }
+        }
+    }
+
+    // ─── Password change (logged in) ───────────────────────────────────
+    if url == "/api/auth/password/change" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        // P2 fix (codex Wave-2): API key auth cannot change passwords —
+        // a leaked key shouldn't be able to lock the user out by
+        // changing the password. Real session required.
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Password change requires a session, not an API key",
+                ),
+            ));
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let current = data
+            .get("currentPassword")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new_password = match data.get("newPassword").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => {
+                return Some((
+                    400,
+                    json_error("MISSING_PASSWORD", "newPassword is required"),
+                ));
+            }
+        };
+        // Pull current row to verify old password (security rule:
+        // session compromise alone shouldn't let an attacker change
+        // the password and lock the user out).
+        let row = match ctx.store.get_by_id(
+            &ctx.store.manifest().auth.user.entity,
+            &user_id,
+        ) {
+            Ok(Some(r)) => r,
+            _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let stored_hash = row
+            .get("passwordHash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if stored_hash.is_empty() {
+            return Some((
+                400,
+                json_error(
+                    "NO_PASSWORD_SET",
+                    "This account has no password (signed in via OAuth). Set one first.",
+                ),
+            ));
+        }
+        if !pylon_auth::password::verify_password(current, stored_hash) {
+            return Some((
+                401,
+                json_error("WRONG_PASSWORD", "Current password is incorrect"),
+            ));
+        }
+        if let Err(e) = pylon_auth::password::validate_length(new_password) {
+            return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
+        }
+        if std::env::var("PYLON_DISABLE_HIBP").ok().as_deref() != Some("1") {
+            if let Ok(n) = pylon_auth::password::check_pwned(new_password) {
+                if n > 0 {
+                    return Some((
+                        400,
+                        json_error_safe(
+                            "PWNED_PASSWORD",
+                            "This password has appeared in known data breaches.",
+                            &format!("HIBP returned {n} occurrences"),
+                        ),
+                    ));
+                }
+            }
+        }
+        let new_hash = pylon_auth::password::hash_password(new_password);
+        match ctx.store.update(
+            &ctx.store.manifest().auth.user.entity,
+            &user_id,
+            &serde_json::json!({"passwordHash": new_hash}),
+        ) {
+            Ok(_) => {}
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        }
+        // P1 fix (codex Wave-2): revoke ALL other sessions on
+        // password change — better-auth pattern. A stolen session
+        // shouldn't survive the password change that's meant to
+        // contain its blast radius. We then re-mint a fresh session
+        // for THIS request so the user isn't logged out of their
+        // own password-change tab.
+        let total_revoked = ctx.session_store.revoke_all_for_user(&user_id);
+        let session = ctx.session_store.create(user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        return Some((
+            200,
+            serde_json::json!({
+                "changed": true,
+                "revoked_sessions": total_revoked,
+                "token": session.token,
+                "expires_at": session.expires_at,
+            })
+            .to_string(),
+        ));
+    }
+
+    // ─── Account deletion ──────────────────────────────────────────────
+    //
+    // DELETE /api/auth/account — wipes the user row, revokes all
+    // sessions, deletes all API keys, removes linked accounts. The
+    // app-defined `User` entity is the source of truth so other tables
+    // that reference it cascade through whatever FK story the schema
+    // has set up.
+    if url == "/api/auth/account" && method == HttpMethod::Delete {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        // P2 fix: API key auth cannot delete the account.
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Account deletion requires a session, not an API key",
+                ),
+            ));
+        }
+        // Revoke sessions first so a slow user-row delete doesn't
+        // leave the attacker with a usable session.
+        let revoked_sessions = ctx.session_store.revoke_all_for_user(&user_id);
+        // Delete all api keys for this user.
+        let mut revoked_keys = 0;
+        for key in ctx.api_keys.list_for_user(&user_id) {
+            if ctx.api_keys.revoke(&key.id) {
+                revoked_keys += 1;
+            }
+        }
+        // Remove all linked OAuth accounts (codex P2). App-owned
+        // tables that reference the user are NOT cascade-deleted by
+        // pylon — the host schema is the source of truth and must
+        // declare its own deletion semantics. The /api/auth/account
+        // docs call this out so apps register a `before-delete-user`
+        // hook to purge their tables.
+        let revoked_accounts = ctx.account_store.delete_for_user(&user_id);
+        // Delete the user row.
+        match ctx
+            .store
+            .delete(&ctx.store.manifest().auth.user.entity, &user_id)
+        {
+            Ok(_) => {}
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        }
+        ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
+        return Some((
+            200,
+            serde_json::json!({
+                "deleted": true,
+                "revoked_sessions": revoked_sessions,
+                "revoked_api_keys": revoked_keys,
+                "unlinked_accounts": revoked_accounts,
+            })
+            .to_string(),
+        ));
     }
 
     None

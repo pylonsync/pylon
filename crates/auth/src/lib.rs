@@ -1,3 +1,4 @@
+pub mod api_key;
 pub mod apple_jwt;
 pub mod cookie;
 pub mod email;
@@ -42,6 +43,16 @@ pub struct AuthContext {
     /// selected an organization for the current session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// API key id when the request was authenticated via a `pk.…`
+    /// bearer token. Set so policies + management endpoints can
+    /// distinguish "user-via-session" from "user-via-key" — e.g.
+    /// password change is forbidden via API key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    /// Comma-separated scope string from the API key. Application
+    /// policies decide what scopes mean — pylon only carries them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_scopes: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -57,6 +68,8 @@ impl AuthContext {
             is_guest: false,
             roles: Vec::new(),
             tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
         }
     }
 
@@ -68,7 +81,29 @@ impl AuthContext {
             is_guest: false,
             roles: Vec::new(),
             tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
         }
+    }
+
+    /// Create an authenticated context backed by an API key. Policies +
+    /// auth-management endpoints can detect this via `is_api_key_auth()`.
+    pub fn from_api_key(user_id: String, key_id: String, scopes: Option<String>) -> Self {
+        Self {
+            user_id: Some(user_id),
+            is_admin: false,
+            is_guest: false,
+            roles: Vec::new(),
+            tenant_id: None,
+            api_key_id: Some(key_id),
+            api_key_scopes: scopes,
+        }
+    }
+
+    /// True iff this request was authenticated by an API key (not a
+    /// session cookie / bearer session token).
+    pub fn is_api_key_auth(&self) -> bool {
+        self.api_key_id.is_some()
     }
 
     /// Create a guest auth context with a persistent anonymous ID.
@@ -82,6 +117,8 @@ impl AuthContext {
             is_guest: true,
             roles: Vec::new(),
             tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
         }
     }
 
@@ -93,6 +130,8 @@ impl AuthContext {
             is_guest: false,
             roles: vec!["admin".into()],
             tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
         }
     }
 
@@ -2181,6 +2220,18 @@ pub trait AccountBackend: Send + Sync {
     fn find_for_user(&self, user_id: &str) -> Vec<Account>;
     /// Remove a single provider link. Returns `true` if a row was removed.
     fn unlink(&self, provider_id: &str, account_id: &str) -> bool;
+    /// Remove every account link for a user. Used during account
+    /// deletion to ensure no OAuth references survive past a user row
+    /// delete. Default implementation walks `find_for_user` + `unlink`;
+    /// SQL backends can override with a single DELETE.
+    fn delete_for_user(&self, user_id: &str) -> usize {
+        let accounts = self.find_for_user(user_id);
+        let n = accounts.len();
+        for a in accounts {
+            self.unlink(&a.provider_id, &a.account_id);
+        }
+        n
+    }
     /// Every account in the store. Used by `AccountStore::list_all_unfiltered`
     /// to power the Studio admin inspector. Backends that can stream
     /// (SQLite, Postgres) just `SELECT *`; the in-memory backend
@@ -2275,6 +2326,10 @@ impl AccountStore {
     pub fn find_for_user(&self, user_id: &str) -> Vec<Account> {
         self.backend.find_for_user(user_id)
     }
+    pub fn delete_for_user(&self, user_id: &str) -> usize {
+        self.backend.delete_for_user(user_id)
+    }
+
     pub fn unlink(&self, provider_id: &str, account_id: &str) -> bool {
         self.backend.unlink(provider_id, account_id)
     }
@@ -2317,6 +2372,27 @@ mod tests {
         let ctx = AuthContext::authenticated("user-1".into());
         assert!(ctx.is_authenticated());
         assert_eq!(ctx.user_id, Some("user-1".into()));
+    }
+
+    #[test]
+    fn from_api_key_carries_scope_metadata() {
+        let ctx = AuthContext::from_api_key(
+            "user-1".into(),
+            "key_abc".into(),
+            Some("read,write".into()),
+        );
+        assert!(ctx.is_authenticated());
+        assert!(ctx.is_api_key_auth());
+        assert_eq!(ctx.user_id.as_deref(), Some("user-1"));
+        assert_eq!(ctx.api_key_id.as_deref(), Some("key_abc"));
+        assert_eq!(ctx.api_key_scopes.as_deref(), Some("read,write"));
+    }
+
+    #[test]
+    fn session_auth_is_not_api_key_auth() {
+        let ctx = AuthContext::authenticated("user-1".into());
+        assert!(!ctx.is_api_key_auth());
+        assert!(ctx.api_key_id.is_none());
     }
 
     #[test]

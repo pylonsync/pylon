@@ -15,7 +15,10 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Sessions | Opaque 256-bit tokens, 30-day default expiry, refresh + revoke |
 | Multi-tenant | Active org per session; row-scoped policies via `auth.tenantId` |
 | Roles (RBAC) | `auth.hasRole('admin')` in policies; multi-role aware |
-| API keys | First-class via the `api_keys` plugin — see [API keys](/auth/api-keys) |
+| API keys | First-class — `pk.…` bearer tokens, optional scopes + expiry, server-issued at `/api/auth/api-keys` |
+| HIBP password check | Argon2 + Pwned Passwords k-anonymity check at register/change. Disable with `PYLON_DISABLE_HIBP=1` (tests) |
+| Password change/reset | `/api/auth/password/change` (requires current password); reset flow rides on magic codes |
+| Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
@@ -55,6 +58,11 @@ All under `/api/auth/`:
 | `/select-org` | POST | Switch active tenant |
 | `/guest` | POST | Mint a guest session with a stable anonymous id |
 | `/upgrade` | POST | Convert a guest session to a real user (admin / dev only) |
+| `/password/change` | POST | Change password (requires current; HIBP-checked; revokes other sessions) |
+| `/api-keys` | POST | Mint an API key (returns plaintext exactly once) |
+| `/api-keys` | GET | List the current user's API keys (no plaintext) |
+| `/api-keys/:id` | DELETE | Revoke a single API key by id |
+| `/account` | DELETE | Wipe user — sessions, API keys, OAuth links, user row |
 
 ## Sessions vs cookies vs bearer tokens
 

@@ -476,6 +476,10 @@ pub struct RouterContext<'a> {
     /// `(provider, provider_account_id) → user_id` mapping plus the
     /// access/refresh token bundle.
     pub account_store: &'a pylon_auth::AccountStore,
+    /// Long-lived API keys — `pk.key_<id>.<secret>` bearer tokens that
+    /// resolve to a user_id with optional scopes/expiry. Created via
+    /// `POST /api/auth/api-keys`, listed/revoked from the same path.
+    pub api_keys: &'a pylon_auth::api_key::ApiKeyStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -1813,6 +1817,7 @@ mod auth_gate_tests {
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1833,6 +1838,7 @@ mod auth_gate_tests {
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
             account_store: &account_store,
+            api_keys: &api_keys,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2249,6 +2255,7 @@ mod auth_gate_tests {
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2272,6 +2279,7 @@ mod auth_gate_tests {
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
             account_store: &account_store,
+            api_keys: &api_keys,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2336,13 +2344,7 @@ mod auth_gate_tests {
         // different email in the body, the code should be issued for
         // the SESSION's email — otherwise an authed caller could spam
         // codes to arbitrary addresses.
-        let alice = AuthContext {
-            user_id: Some("u-1".into()),
-            is_admin: false,
-            is_guest: false,
-            roles: vec![],
-            tenant_id: None,
-        };
+        let alice = AuthContext::authenticated("u-1".into());
         with_user_ctx(true, &alice, |ctx, _, email, _| {
             let (status, body, _) = route(
                 ctx,
@@ -2364,13 +2366,7 @@ mod auth_gate_tests {
 
     #[test]
     fn email_verify_happy_path_stamps_email_verified() {
-        let alice = AuthContext {
-            user_id: Some("u-1".into()),
-            is_admin: false,
-            is_guest: false,
-            roles: vec![],
-            tenant_id: None,
-        };
+        let alice = AuthContext::authenticated("u-1".into());
         with_user_ctx(true, &alice, |ctx, store, _, magic_codes| {
             // Pre-issue a code (skipping the send endpoint) so we test
             // verify in isolation.
@@ -2391,13 +2387,7 @@ mod auth_gate_tests {
 
     #[test]
     fn email_verify_rejects_wrong_code() {
-        let alice = AuthContext {
-            user_id: Some("u-1".into()),
-            is_admin: false,
-            is_guest: false,
-            roles: vec![],
-            tenant_id: None,
-        };
+        let alice = AuthContext::authenticated("u-1".into());
         with_user_ctx(true, &alice, |ctx, store, _, magic_codes| {
             let _ = magic_codes.try_create("alice@example.com").unwrap();
             let (status, body, _) = route(
@@ -2779,6 +2769,7 @@ mod auth_gate_tests {
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2804,6 +2795,7 @@ mod auth_gate_tests {
                 magic_codes: &magic_codes,
                 oauth_state: &oauth_state,
                 account_store: &account_store,
+            api_keys: &api_keys,
                 trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,
