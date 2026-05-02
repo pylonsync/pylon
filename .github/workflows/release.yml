@@ -258,6 +258,11 @@ jobs:
           registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           ignore-unpublished-changes: true
           check-repo: false
+          # Studio UI bundle (`crates/studio_api/web/dist/`) is built
+          # in the previous step but is gitignored — the workspace
+          # is therefore "dirty" from cargo's perspective. Allow it,
+          # otherwise pylon-studio-api never publishes.
+          args: "--allow-dirty"
 
   binaries:
     name: binary (${{ matrix.target }})
