@@ -772,7 +772,7 @@ pub(crate) fn handle(
 
     // GET /api/auth/providers
     if url == "/api/auth/providers" && method == HttpMethod::Get {
-        let registry = pylon_auth::OAuthRegistry::from_env();
+        let registry = pylon_auth::OAuthRegistry::shared();
         // Iterate the configured ids — order isn't stable across calls
         // but the frontend doesn't need it to be (it sorts by display
         // name). Sorting here would mask provider-list churn that's
@@ -812,7 +812,7 @@ pub(crate) fn handle(
     if let Some(provider_raw) = url.strip_prefix("/api/auth/login/") {
         let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
         if method == HttpMethod::Get {
-            let registry = pylon_auth::OAuthRegistry::from_env();
+            let registry = pylon_auth::OAuthRegistry::shared();
             let Some(config) = registry.get(provider) else {
                 return Some((
                     404,
@@ -1495,8 +1495,12 @@ pub(crate) fn handle(
         if already_verified {
             let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
             let code = data.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            let secret_b32 = row.get("totpSecret").and_then(|v| v.as_str()).unwrap_or("");
-            let secret = pylon_auth::totp::base32_decode(secret_b32).unwrap_or_default();
+            let stored_blob = row
+                .get("totpSecret")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let secret_b32 = pylon_auth::totp::unseal_secret(stored_blob).unwrap_or_default();
+            let secret = pylon_auth::totp::base32_decode(&secret_b32).unwrap_or_default();
             if !pylon_auth::totp::verify_now(&secret, code) {
                 return Some((
                     401,
@@ -1518,13 +1522,15 @@ pub(crate) fn handle(
         let secret = pylon_auth::totp::generate_secret();
         let secret_b32 = pylon_auth::totp::base32_encode(&secret);
         let url_otp = pylon_auth::totp::provisioning_url(&issuer, &account, &secret_b32);
-        // Persist the secret as PENDING (totpVerified=false). The app's
-        // user entity needs `totpSecret: string?` + `totpVerified: bool?`.
+        // Persist the secret as PENDING (totpVerified=false), encrypted
+        // at rest with PYLON_TOTP_ENCRYPTION_KEY. The app's user
+        // entity needs `totpSecret: string?` + `totpVerified: bool?`.
+        let sealed = pylon_auth::totp::seal_secret(&secret_b32);
         match ctx.store.update(
             &ctx.store.manifest().auth.user.entity,
             &user_id,
             &serde_json::json!({
-                "totpSecret": secret_b32,
+                "totpSecret": sealed,
                 "totpVerified": false,
             }),
         ) {
@@ -1572,7 +1578,7 @@ pub(crate) fn handle(
             Ok(Some(r)) => r,
             _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
         };
-        let secret_b32 = match row.get("totpSecret").and_then(|v| v.as_str()) {
+        let secret_blob = match row.get("totpSecret").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
             _ => {
                 return Some((
@@ -1581,7 +1587,11 @@ pub(crate) fn handle(
                 ));
             }
         };
-        let secret = match pylon_auth::totp::base32_decode(secret_b32) {
+        let secret_b32 = match pylon_auth::totp::unseal_secret(secret_blob) {
+            Ok(s) => s,
+            Err(_) => return Some((500, json_error("TOTP_BAD_SECRET", "Stored secret is corrupt or PYLON_TOTP_ENCRYPTION_KEY missing"))),
+        };
+        let secret = match pylon_auth::totp::base32_decode(&secret_b32) {
             Ok(s) => s,
             Err(_) => return Some((500, json_error("TOTP_BAD_SECRET", "Stored secret is corrupt"))),
         };
@@ -1632,9 +1642,11 @@ pub(crate) fn handle(
             Ok(Some(r)) => r,
             _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
         };
-        if let Some(secret_b32) = row.get("totpSecret").and_then(|v| v.as_str()) {
-            if !secret_b32.is_empty() {
-                let secret = pylon_auth::totp::base32_decode(secret_b32).unwrap_or_default();
+        if let Some(secret_blob) = row.get("totpSecret").and_then(|v| v.as_str()) {
+            if !secret_blob.is_empty() {
+                let secret_b32 =
+                    pylon_auth::totp::unseal_secret(secret_blob).unwrap_or_default();
+                let secret = pylon_auth::totp::base32_decode(&secret_b32).unwrap_or_default();
                 if !pylon_auth::totp::verify_now(&secret, code) {
                     return Some((
                         401,
@@ -2087,6 +2099,11 @@ pub(crate) fn handle(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // body.as_bytes() is safe here because Stripe webhooks are
+        // always JSON, JSON is always UTF-8, and the upstream
+        // read_to_string preserves UTF-8 byte-for-byte. If a future
+        // protocol carries non-UTF-8 bodies past read_to_string,
+        // this assumption breaks — switch the dispatcher to bytes.
         let event = match pylon_auth::stripe::verify_webhook(&secret, body.as_bytes(), sig_header, now) {
             Ok(e) => e,
             Err(e) => {

@@ -2,6 +2,13 @@
 //! sign-in working with the platforms users actually use (iOS,
 //! macOS, Android, Windows Hello, 1Password, hardware keys).
 //!
+//! **Status: library only — HTTP endpoints not yet wired.**
+//! `verify_assertion` + `PasskeyStore` are production-quality and
+//! exposed for apps that want to roll their own register/login
+//! handlers. Pylon-shipped `/api/auth/passkey/*` routes are queued
+//! for the next wave; until then, treat this module as primitives
+//! to compose into your own routes.
+//!
 //! This implementation supports:
 //!   - Registration with `none` attestation (passkeys generally use
 //!     `none` to avoid the privacy issues of platform attestation)
@@ -271,15 +278,28 @@ impl std::fmt::Display for WebauthnError {
 /// Verify an assertion against a stored passkey. Updates the sign
 /// counter on success. The `expected_origin` and `expected_rp_id`
 /// are typically `https://yourapp.com` and `yourapp.com`.
+///
+/// `expected_user_id` — when set, the credential MUST belong to that
+/// user. Pass `None` for discoverable-credential ("usernameless")
+/// flows where the user is identified by the credential. Pass
+/// `Some(user_id)` for "you claim to be Alice — prove it" flows
+/// (this is the defense against a credential from user A being
+/// presented as user B during a higher-stakes second-factor step).
 pub fn verify_assertion(
     store: &PasskeyStore,
     input: &AssertionInput,
     expected_origin: &str,
     expected_rp_id: &str,
+    expected_user_id: Option<&str>,
 ) -> Result<Passkey, WebauthnError> {
     let stored = store
         .get_passkey(input.credential_id)
         .ok_or(WebauthnError::UnknownCredential)?;
+    if let Some(uid) = expected_user_id {
+        if stored.user_id != uid {
+            return Err(WebauthnError::UnknownCredential);
+        }
+    }
 
     // 1. Parse clientDataJSON.
     let client_data: serde_json::Value =
@@ -663,7 +683,34 @@ mod tests {
             signature: &[],
             user_handle: None,
         };
-        let err = verify_assertion(&store, &input, "https://app", "app").unwrap_err();
+        let err = verify_assertion(&store, &input, "https://app", "app", None).unwrap_err();
+        assert_eq!(err, WebauthnError::UnknownCredential);
+    }
+
+    /// P3-5 (codex Wave-3 review): credential bound to user A
+    /// presented as user B must reject. Defense against an attacker
+    /// who registered a passkey on their own account then tries to
+    /// use it during a second-factor challenge framed as another user.
+    #[test]
+    fn assertion_user_mismatch_rejected() {
+        let store = PasskeyStore::new();
+        store.store_passkey(Passkey {
+            id: "cred1".into(),
+            user_id: "alice".into(),
+            public_key: vec![],
+            sign_count: 0,
+            name: "key".into(),
+            created_at: 1,
+            last_used_at: None,
+        });
+        let input = AssertionInput {
+            credential_id: "cred1",
+            authenticator_data: &[0u8; 37],
+            client_data_json: b"{}",
+            signature: &[],
+            user_handle: None,
+        };
+        let err = verify_assertion(&store, &input, "https://app", "app", Some("bob")).unwrap_err();
         assert_eq!(err, WebauthnError::UnknownCredential);
     }
 }

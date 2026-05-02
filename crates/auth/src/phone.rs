@@ -28,6 +28,11 @@ use serde::{Deserialize, Serialize};
 pub struct PhoneCode {
     pub phone: String,
     pub code: String,
+    /// Unix-epoch seconds when this code was minted. Used by the
+    /// resend-throttle calculation. Stored explicitly (not derived
+    /// from `expires_at - TTL`) so a TTL change between mint and
+    /// throttle-check doesn't shift the throttle window.
+    pub issued_at: u64,
     pub expires_at: u64,
     pub attempts: u32,
 }
@@ -125,11 +130,9 @@ impl PhoneCodeStore {
         let normalized = normalize(phone).ok_or(PhoneCodeError::InvalidPhone)?;
         let now = now_secs();
         if let Some(existing) = self.backend.get(&normalized) {
-            // Throttle: same phone, recent issuance.
-            let issued_at = existing.expires_at.saturating_sub(Self::TTL_SECS);
-            if now - issued_at < Self::RESEND_THROTTLE_SECS {
+            if now - existing.issued_at < Self::RESEND_THROTTLE_SECS {
                 return Err(PhoneCodeError::Throttled {
-                    retry_after_secs: Self::RESEND_THROTTLE_SECS - (now - issued_at),
+                    retry_after_secs: Self::RESEND_THROTTLE_SECS - (now - existing.issued_at),
                 });
             }
         }
@@ -137,6 +140,7 @@ impl PhoneCodeStore {
         let pc = PhoneCode {
             phone: normalized.clone(),
             code: code.clone(),
+            issued_at: now,
             expires_at: now + Self::TTL_SECS,
             attempts: 0,
         };
@@ -144,29 +148,43 @@ impl PhoneCodeStore {
         Ok(code)
     }
 
+    /// Verify a code. Equalizes timing between "no pending code"
+    /// and "wrong code" paths by always running a constant-time
+    /// compare against a dummy value when the lookup misses, so
+    /// an attacker can't enumerate which phone numbers have
+    /// requested codes.
     pub fn try_verify(&self, phone: &str, code: &str) -> Result<(), PhoneCodeError> {
         let normalized = normalize(phone).ok_or(PhoneCodeError::InvalidPhone)?;
-        let mut entry = self.backend.get(&normalized).ok_or(PhoneCodeError::NotFound)?;
-        if entry.expires_at <= now_secs() {
-            self.backend.remove(&normalized);
-            return Err(PhoneCodeError::Expired);
-        }
-        if entry.attempts >= Self::MAX_ATTEMPTS {
-            self.backend.remove(&normalized);
-            return Err(PhoneCodeError::TooManyAttempts);
-        }
-        let ok = crate::constant_time_eq(entry.code.as_bytes(), code.trim().as_bytes());
-        if ok {
-            self.backend.remove(&normalized);
-            Ok(())
-        } else {
-            entry.attempts += 1;
-            self.backend.put_attempts(&normalized, entry.attempts);
-            if entry.attempts >= Self::MAX_ATTEMPTS {
-                self.backend.remove(&normalized);
-                return Err(PhoneCodeError::TooManyAttempts);
+        let entry = self.backend.get(&normalized);
+        match entry {
+            None => {
+                // P3-2 (codex Wave-5 review): equalize timing.
+                let _ = crate::constant_time_eq(b"000000", code.trim().as_bytes());
+                Err(PhoneCodeError::NotFound)
             }
-            Err(PhoneCodeError::BadCode)
+            Some(mut entry) => {
+                if entry.expires_at <= now_secs() {
+                    self.backend.remove(&normalized);
+                    return Err(PhoneCodeError::Expired);
+                }
+                if entry.attempts >= Self::MAX_ATTEMPTS {
+                    self.backend.remove(&normalized);
+                    return Err(PhoneCodeError::TooManyAttempts);
+                }
+                let ok = crate::constant_time_eq(entry.code.as_bytes(), code.trim().as_bytes());
+                if ok {
+                    self.backend.remove(&normalized);
+                    Ok(())
+                } else {
+                    entry.attempts += 1;
+                    self.backend.put_attempts(&normalized, entry.attempts);
+                    if entry.attempts >= Self::MAX_ATTEMPTS {
+                        self.backend.remove(&normalized);
+                        return Err(PhoneCodeError::TooManyAttempts);
+                    }
+                    Err(PhoneCodeError::BadCode)
+                }
+            }
         }
     }
 }

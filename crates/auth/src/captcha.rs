@@ -123,6 +123,19 @@ impl CaptchaConfig {
                 }
             }
         }
+        // P3-8 (codex Wave-3 review): reject stale tokens to limit
+        // captured-token replay. 2-minute window is conservative;
+        // fresh sign-in flows complete in seconds.
+        if let Some(ts) = parsed.challenge_ts.as_deref() {
+            if let Ok(parsed_ts) = chrono::DateTime::parse_from_rfc3339(ts) {
+                let age_secs = chrono::Utc::now()
+                    .signed_duration_since(parsed_ts.with_timezone(&chrono::Utc))
+                    .num_seconds();
+                if age_secs > 120 {
+                    return Err(format!("captcha token stale ({age_secs}s old)"));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -134,6 +147,12 @@ struct SiteVerifyResponse {
     /// reCAPTCHA v3 only.
     #[serde(default)]
     score: Option<f64>,
+    /// Issued-at timestamp from the provider — present on hCaptcha
+    /// + Turnstile + reCAPTCHA. ISO-8601. Used to defeat replay
+    /// (an attacker who captures a token gets ~2 min to use it
+    /// before pylon rejects it as stale).
+    #[serde(default, rename = "challenge_ts")]
+    challenge_ts: Option<String>,
     /// Provider-specific error codes — left opaque since the host
     /// app shouldn't surface them to the caller.
     #[serde(default, rename = "error-codes")]

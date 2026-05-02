@@ -1029,12 +1029,22 @@ fn start_server(
                     )),
                     Err(_) => Err("INVALID_API_KEY"),
                 }
-            } else if pylon_auth::jwt::looks_like_jwt(t)
-                && std::env::var("PYLON_JWT_SECRET").is_ok()
-            {
-                let secret = std::env::var("PYLON_JWT_SECRET").unwrap_or_default();
-                let issuer = std::env::var("PYLON_JWT_ISSUER").ok();
-                match pylon_auth::jwt::verify(t, secret.as_bytes(), issuer.as_deref()) {
+            } else if pylon_auth::jwt::looks_like_jwt(t) && jwt_secret().is_some() {
+                // P0-6 (codex Wave-5 review): require PYLON_JWT_ISSUER
+                // when JWT auth is enabled. Without it, tokens minted
+                // with the same HS256 secret for ANY issuer would
+                // verify, letting a JWT minted for "external-system"
+                // log in as that system's `sub`. Refuse on misconfig.
+                let Some(issuer) = jwt_issuer() else {
+                    tracing::warn!(
+                        "[auth] PYLON_JWT_SECRET set but PYLON_JWT_ISSUER missing — \
+                         refusing JWT verify (set both to enable JWT sessions)"
+                    );
+                    Err("JWT_MISCONFIGURED")?;
+                    unreachable!();
+                };
+                let secret = jwt_secret().expect("checked above");
+                match pylon_auth::jwt::verify(t, secret.as_bytes(), Some(issuer)) {
                     Ok(claims) => {
                         let mut ctx = pylon_auth::AuthContext::authenticated(claims.sub);
                         ctx.roles = claims.roles;
@@ -1043,7 +1053,6 @@ fn start_server(
                         }
                         Ok(ctx)
                     }
-                    // Bad JWTs are 401, like bad api keys.
                     Err(_) => Err("INVALID_JWT"),
                 }
             } else {
@@ -2193,6 +2202,22 @@ struct AuthStores {
     orgs: Arc<pylon_auth::org::OrgStore>,
 }
 
+// Memoized env reads — auth resolver runs PER REQUEST so we can't
+// afford `std::env::var` syscalls there. OnceLock initialized
+// lazily on first lookup; tests that mutate env between cases
+// should use process-level isolation, not in-process mutation.
+fn jwt_secret() -> Option<&'static String> {
+    static CELL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::env::var("PYLON_JWT_SECRET").ok().filter(|s| !s.is_empty()))
+        .as_ref()
+}
+
+fn jwt_issuer() -> Option<&'static String> {
+    static CELL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::env::var("PYLON_JWT_ISSUER").ok().filter(|s| !s.is_empty()))
+        .as_ref()
+}
+
 fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
     // Forced in-memory escape hatch — used by integration tests that
     // never want to touch disk.
@@ -2275,17 +2300,20 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::api_key::ApiKeyStore::new()
         }
     };
+    let orgs = match crate::org_backend::SqliteOrgBackend::open(path) {
+        Ok(b) => pylon_auth::org::OrgStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] org SQLite backend unavailable: {e}");
+            pylon_auth::org::OrgStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
-        // SQL backend for orgs lands when the schema's wired in;
-        // until then we use in-memory even for SQLite-backed apps.
-        // Apps that need persistence across restarts can register
-        // their own backend via OrgStore::with_backend at startup.
-        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
+        orgs: Arc::new(orgs),
     }
 }
 
@@ -2332,13 +2360,20 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::api_key::ApiKeyStore::new()
         }
     };
+    let orgs = match crate::org_backend::PostgresOrgBackend::connect(url) {
+        Ok(b) => pylon_auth::org::OrgStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG org backend unavailable: {e}");
+            pylon_auth::org::OrgStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
-        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
+        orgs: Arc::new(orgs),
     }
 }
 

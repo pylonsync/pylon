@@ -2,6 +2,14 @@
 //! can sign in against. Useful for SSO across a fleet of internal
 //! tools when you don't want to depend on Auth0/Okta/Cognito.
 //!
+//! **Status: library only — HTTP endpoints not yet wired.**
+//! Discovery doc / JWKS / AuthCode types ship today so apps that
+//! want to roll their own OIDC routes can compose them. The
+//! pylon-shipped `/.well-known/openid-configuration` + `/oidc/*`
+//! routes are queued for the next wave (need RSA key generation
+//! + on-disk persistence first). Until then, do NOT advertise a
+//! pylon instance as an OIDC provider in production.
+//!
 //! What pylon implements:
 //!   - `/.well-known/openid-configuration` discovery doc
 //!   - `/oidc/jwks` — public keys other services use to verify

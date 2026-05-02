@@ -758,13 +758,28 @@ fn generate_pkce() -> PkcePair {
     }
 }
 
-/// Decode an Apple id_token JWT and pull the identity claims. We
-/// trust the token because it just came back from Apple over a
-/// TLS-validated channel as the body of the token-exchange
-/// response — no third party touched it. (For pure-frontend Apple
-/// flows that POST the id_token to us, we'd need to verify
-/// `aud/iss/exp` plus the signature against Apple's JWKS; that
-/// hardening lives in the Wave 3 passkey/JWT-session work.)
+/// Decode an Apple id_token JWT and pull the identity claims.
+///
+/// **Trust assumption:** the caller MUST have obtained this token
+/// via the back-channel `/auth/token` exchange (mutually authenticated
+/// TLS to `appleid.apple.com`). Under that assumption no third party
+/// can have substituted a forged JWT, so we skip signature
+/// verification.
+///
+/// **DO NOT call this on a JWT supplied by the client** (e.g. a
+/// "post your id_token to me" mobile-SDK flow). For those paths,
+/// implement Apple JWKS verification: fetch
+/// `https://appleid.apple.com/auth/keys`, verify the RS256
+/// signature, then check `iss == "https://appleid.apple.com"`,
+/// `aud == client_id`, and `exp > now`. Pylon doesn't ship that
+/// verifier yet — apps that need it can compose `crate::jwt::verify`
+/// against a JWKS-loaded RSA key.
+///
+/// This function is private (`fn`, not `pub fn`) precisely so it
+/// can't be misused by an external caller. The only call site is
+/// [`OAuthConfig::fetch_userinfo_with_id_token`] which is reached
+/// only via the OAuth callback handler, which only processes
+/// back-channel-exchanged tokens.
 fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, String> {
     let mut parts = id_token.split('.');
     let _header = parts.next().ok_or("apple id_token: missing header")?;
@@ -1346,6 +1361,17 @@ impl OAuthRegistry {
     /// `/api/auth/login/<id>` paths against the configured set.
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(|s| s.as_str())
+    }
+
+    /// Process-wide cached registry. Built once on first use from
+    /// `from_env`; subsequent calls are zero-cost. Routes use this
+    /// to avoid the ~150 syscalls `from_env` does per call.
+    ///
+    /// **Trade-off:** env changes after server start aren't picked up
+    /// without a restart — same as every other Pylon env-var path.
+    pub fn shared() -> &'static OAuthRegistry {
+        static CELL: std::sync::OnceLock<OAuthRegistry> = std::sync::OnceLock::new();
+        CELL.get_or_init(Self::from_env)
     }
 }
 

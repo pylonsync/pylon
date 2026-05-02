@@ -618,7 +618,7 @@ pub(crate) fn complete_oauth_login_pkce(
     dev_name: Option<&str>,
 ) -> Result<(String, pylon_auth::Session), OAuthError> {
     let (userinfo, tokens) = if let Some(code) = code {
-        let registry = pylon_auth::OAuthRegistry::from_env();
+        let registry = pylon_auth::OAuthRegistry::shared();
         let config = registry.get(provider).cloned().ok_or_else(|| OAuthError {
             status: 404,
             code: "PROVIDER_NOT_FOUND",

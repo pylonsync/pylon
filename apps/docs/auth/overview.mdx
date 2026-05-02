@@ -20,15 +20,15 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Password change/reset | `/api/auth/password/change` (requires current password); reset flow rides on magic codes |
 | Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
 | TOTP / 2FA | RFC 6238 6-digit codes. `/api/auth/totp/enroll` + `/verify` + `/disable`. Compatible with every authenticator app |
-| WebAuthn / passkeys | ES256 + Ed25519 — Touch ID, Face ID, Windows Hello, Yubikeys. Counter-regression detection |
+| WebAuthn / passkeys | ES256 + Ed25519 verification primitives in `pylon_auth::webauthn`. **HTTP endpoints not yet wired** — apps compose their own register/login routes from `verify_assertion` + `PasskeyStore`. |
 | JWT sessions | Optional stateless `Authorization: Bearer <jwt>` mode. Set `PYLON_JWT_SECRET` to enable; `/api/auth/jwt` mints from a session |
 | CAPTCHA | hCaptcha + Turnstile + reCAPTCHA. Set `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` to gate magic-code send + password register |
 | Organizations | Multi-tenant orgs + RBAC (owner/admin/member) + email invites with single-use tokens. Endpoints under `/api/auth/orgs/...` |
 | Stripe billing | Hosted Checkout sessions + signed webhook verification. Set `PYLON_STRIPE_API_KEY` + `PYLON_STRIPE_WEBHOOK_SECRET` |
 | Phone / SMS sign-in | E.164-normalized magic codes via Twilio (or any SmsSender). Endpoints under `/api/auth/phone/...` |
-| SIWE (Sign-In With Ethereum) | EIP-4361 message verification with per-address nonce stash; wallet-native passwordless |
-| OIDC Provider | Run pylon as the IdP — discovery doc + JWKS + auth-code flow at `/.well-known/openid-configuration` and `/oidc/...` |
-| SCIM 2.0 | Auto-provision users from Okta / Azure AD / Workday at `/scim/v2/Users` (bearer auth via `PYLON_SCIM_TOKEN`) |
+| SIWE (Sign-In With Ethereum) | EIP-4361 message validation + nonce stash. **Signature verification is opt-in** via `SiweSignatureVerifier` trait — apps wire k256 themselves to keep crypto opt-in. |
+| OIDC Provider | Discovery doc / JWKS / AuthCode types in `pylon_auth::oidc_provider`. **HTTP endpoints not yet wired**. |
+| SCIM 2.0 | Schema types + bearer auth helper in `pylon_auth::scim`. **HTTP endpoints not yet wired**. |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |

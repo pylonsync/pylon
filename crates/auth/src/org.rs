@@ -256,10 +256,27 @@ pub struct InviteWithToken {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptError {
+    /// Token doesn't match any stored invite (typo, never sent,
+    /// or revoked by an admin). Frontend should ask the user to
+    /// request a fresh invite.
     NotFound,
+    /// Invite is past `expires_at`. Frontend should ask for a resend.
     Expired,
+    /// Invite was already redeemed by SOMEONE (possibly the same
+    /// user, possibly a different account that shared the email).
+    /// **Frontends should treat this as success** for UX — the user
+    /// is effectively in the org via that prior accept; surface as
+    /// "you're already a member" not as an error.
     AlreadyAccepted,
+    /// The accepting user's email doesn't match the invite's
+    /// addressee. This is the security gate — surface as a real
+    /// error ("this invite was sent to <other-email>; sign in
+    /// with that account to accept").
     EmailMismatch,
+    /// User is already a member of this org via a DIFFERENT path
+    /// (e.g. they created the org themselves, or accepted an earlier
+    /// invite). **Frontends should treat this as success** — the
+    /// invite was redundant.
     AlreadyMember,
 }
 

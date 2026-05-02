@@ -81,7 +81,17 @@ impl std::fmt::Display for JwtError {
 /// `header.claims.sig` triplet, ready to be returned in
 /// `Authorization: Bearer …` form. Client doesn't need to know the
 /// difference from an opaque session token.
+///
+/// Panics in debug if `claims.exp <= claims.iat` — programmer error
+/// (the token would be instantly expired). Release builds let it
+/// through; the verifier would then reject as `Expired`.
 pub fn mint(secret: &[u8], claims: &JwtClaims) -> String {
+    debug_assert!(
+        claims.exp > claims.iat,
+        "JWT exp ({}) must be > iat ({})",
+        claims.exp,
+        claims.iat
+    );
     let header = serde_json::json!({"alg": "HS256", "typ": "JWT"});
     let mut claims_obj = serde_json::Map::new();
     claims_obj.insert("sub".into(), claims.sub.clone().into());
@@ -252,9 +262,33 @@ mod tests {
     #[test]
     fn expired_token_rejected() {
         let secret = b"k";
-        let claims = fixture_claims(-60); // expired 1 min ago
-        let token = mint(secret, &claims);
+        // Use a clock-drift scenario: token minted with future iat but
+        // also future-then-now-then-past exp. We mint a token far in
+        // the future, then verify after the OS clock has moved past
+        // exp. Easier: hand-craft the encoded JWT directly to bypass
+        // mint's debug_assert.
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let claims = URL_SAFE_NO_PAD
+            .encode(br#"{"sub":"user-1","iat":1,"exp":2,"iss":"pylon-test"}"#);
+        let signing_input = format!("{header}.{claims}");
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(signing_input.as_bytes());
+        let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let token = format!("{signing_input}.{sig}");
         assert_eq!(verify(&token, secret, None), Err(JwtError::Expired));
+    }
+
+    #[test]
+    #[should_panic(expected = "JWT exp")]
+    #[cfg(debug_assertions)]
+    fn mint_panics_on_exp_le_iat_in_debug() {
+        let secret = b"k";
+        let mut claims = fixture_claims(0);
+        claims.exp = claims.iat;
+        let _ = mint(secret, &claims);
     }
 
     #[test]
@@ -312,5 +346,19 @@ mod tests {
         // BEFORE looks_like_jwt. Documented for whoever changes that
         // dispatcher next.
         assert!(looks_like_jwt("pk.key_abc.secret"));
+    }
+
+    /// Codex Wave-5 P0-3 regression. The auth-token dispatcher in
+    /// server.rs uses `t.starts_with("pk.")` BEFORE `looks_like_jwt`
+    /// because `pk.…` tokens have three dot-separated nonempty
+    /// segments and would otherwise fall through to JWT verify.
+    /// This test pins the contract at the predicate level: any
+    /// `pk.…` token must classify as both an api-key AND a JWT
+    /// shape, so the dispatcher MUST disambiguate via the prefix.
+    #[test]
+    fn pk_token_overlaps_jwt_shape_dispatcher_must_check_prefix_first() {
+        let pk_like = "pk.key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(pk_like.starts_with("pk."));
+        assert!(looks_like_jwt(pk_like));
     }
 }

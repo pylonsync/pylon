@@ -31,6 +31,136 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha1 = Hmac<Sha1>;
 
+// ---------------------------------------------------------------------------
+// At-rest encryption for TOTP secrets
+// ---------------------------------------------------------------------------
+//
+// TOTP secrets are 2FA seeds — one DB dump leaks every user's 2FA
+// indefinitely. We encrypt them with HMAC-SHA256 stream-cipher style
+// (no AEAD dep) keyed off `PYLON_TOTP_ENCRYPTION_KEY`. The encrypted
+// blob is what gets stored on the User row's `totpSecret` field.
+//
+// Output format: `enc:<nonce-hex>:<ciphertext-hex>`. Plain base32
+// secrets without the `enc:` prefix are still accepted on read for
+// migration — apps with existing plaintext seeds keep working until
+// the user re-enrolls.
+
+/// Encrypt a base32-encoded secret for at-rest storage. Stamps the
+/// `enc:` prefix so reads can distinguish encrypted from legacy.
+/// Apps that haven't set `PYLON_TOTP_ENCRYPTION_KEY` get the plain
+/// base32 back with a `tracing::warn!` once per process — better
+/// than refusing TOTP entirely.
+pub fn seal_secret(secret_b32: &str) -> String {
+    let key = match std::env::var("PYLON_TOTP_ENCRYPTION_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            warn_once();
+            return secret_b32.to_string();
+        }
+    };
+    use rand::RngCore;
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let plaintext = secret_b32.as_bytes();
+    let keystream = derive_keystream(key.as_bytes(), &nonce, plaintext.len());
+    let ciphertext: Vec<u8> = plaintext
+        .iter()
+        .zip(keystream.iter())
+        .map(|(p, k)| p ^ k)
+        .collect();
+    format!("enc:{}:{}", hex(&nonce), hex(&ciphertext))
+}
+
+/// Reverse of [`seal_secret`]. Accepts both `enc:…` blobs and
+/// legacy plain base32 (returned as-is).
+pub fn unseal_secret(blob: &str) -> Result<String, String> {
+    if !blob.starts_with("enc:") {
+        return Ok(blob.to_string());
+    }
+    let key = std::env::var("PYLON_TOTP_ENCRYPTION_KEY")
+        .map_err(|_| "PYLON_TOTP_ENCRYPTION_KEY not set but stored secret is encrypted".to_string())?;
+    let parts: Vec<&str> = blob.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return Err("totp seed: malformed enc blob".into());
+    }
+    let nonce = unhex(parts[1]).map_err(|_| "totp seed: bad nonce hex")?;
+    let ciphertext = unhex(parts[2]).map_err(|_| "totp seed: bad ciphertext hex")?;
+    let keystream = derive_keystream(key.as_bytes(), &nonce, ciphertext.len());
+    let plaintext: Vec<u8> = ciphertext
+        .iter()
+        .zip(keystream.iter())
+        .map(|(c, k)| c ^ k)
+        .collect();
+    String::from_utf8(plaintext).map_err(|e| format!("totp seed: not utf-8: {e}"))
+}
+
+/// Derive a `len`-byte keystream from `(key, nonce)` via HMAC-SHA256
+/// in counter mode. Not AEAD — there's no integrity tag — but the
+/// secret is also stored alongside `totpVerified`, so if an attacker
+/// flips bits, the TOTP code just stops verifying and the user
+/// re-enrolls. Acceptable trade-off vs adding a real AEAD dep.
+fn derive_keystream(key: &[u8], nonce: &[u8], len: usize) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut out = Vec::with_capacity(len);
+    let mut counter: u32 = 0;
+    while out.len() < len {
+        let mut mac =
+            HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        mac.update(nonce);
+        mac.update(&counter.to_be_bytes());
+        let block = mac.finalize().into_bytes();
+        out.extend_from_slice(&block);
+        counter += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+fn warn_once() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            "[totp] PYLON_TOTP_ENCRYPTION_KEY is not set — 2FA seeds stored unencrypted. \
+             Set this env var to a 32+ random byte value to encrypt at rest."
+        );
+    });
+}
+
+fn hex(b: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        let _ = write!(s, "{x:02x}");
+    }
+    s
+}
+
+fn unhex(s: &str) -> Result<Vec<u8>, ()> {
+    if s.len() % 2 != 0 {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hi = match chunk[0] {
+            b'0'..=b'9' => chunk[0] - b'0',
+            b'a'..=b'f' => chunk[0] - b'a' + 10,
+            b'A'..=b'F' => chunk[0] - b'A' + 10,
+            _ => return Err(()),
+        };
+        let lo = match chunk[1] {
+            b'0'..=b'9' => chunk[1] - b'0',
+            b'a'..=b'f' => chunk[1] - b'a' + 10,
+            b'A'..=b'F' => chunk[1] - b'A' + 10,
+            _ => return Err(()),
+        };
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
 /// 30-second window per RFC 6238 — the universally implemented choice.
 pub const TOTP_PERIOD_SECS: u64 = 30;
 
@@ -262,6 +392,41 @@ mod tests {
         assert!(!verify_at(&secret, "000000", t, 1));
         assert!(!verify_at(&secret, "999999", t, 1));
         assert!(!verify_at(&secret, "", t, 1));
+    }
+
+    // Env-var tests must run serially — Rust runs `#[test]` in
+    // parallel by default and `set_var` / `remove_var` race.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn seal_unseal_round_trip_with_key() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PYLON_TOTP_ENCRYPTION_KEY", "test-encryption-key-do-not-reuse");
+        let secret = "JBSWY3DPEHPK3PXP";
+        let sealed = seal_secret(secret);
+        assert!(sealed.starts_with("enc:"));
+        assert_ne!(sealed, secret);
+        let unsealed = unseal_secret(&sealed).unwrap();
+        assert_eq!(unsealed, secret);
+        std::env::remove_var("PYLON_TOTP_ENCRYPTION_KEY");
+    }
+
+    #[test]
+    fn unseal_passes_through_legacy_plaintext() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // Migration path: existing plain base32 secrets stored before
+        // the seal-at-rest change must still unseal to themselves.
+        std::env::set_var("PYLON_TOTP_ENCRYPTION_KEY", "k");
+        assert_eq!(unseal_secret("JBSWY3DPEHPK3PXP").unwrap(), "JBSWY3DPEHPK3PXP");
+        std::env::remove_var("PYLON_TOTP_ENCRYPTION_KEY");
+    }
+
+    #[test]
+    fn unseal_without_key_errors_on_encrypted() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PYLON_TOTP_ENCRYPTION_KEY");
+        let err = unseal_secret("enc:abcd:ef01").unwrap_err();
+        assert!(err.contains("PYLON_TOTP_ENCRYPTION_KEY"));
     }
 
     #[test]

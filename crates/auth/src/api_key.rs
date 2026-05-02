@@ -24,7 +24,6 @@
 //! in SQLite/Postgres backends behind the scenes; the in-memory
 //! default is fine for tests + ephemeral dev servers.
 
-use crate::password::{hash_password, verify_password};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -48,8 +47,17 @@ pub struct ApiKey {
     /// starts AFTER the second `.` separator. Lets the user
     /// distinguish keys by sight without ever exposing the secret.
     pub prefix: String,
-    /// Argon2id hash of the secret. Verified at request time via
-    /// [`crate::password::verify_password`] (constant-time).
+    /// HMAC-SHA256 hash of the secret using a server-side pepper
+    /// (`PYLON_API_KEY_PEPPER`, or a fixed dev pepper when unset).
+    /// Verified at request time via constant-time compare.
+    ///
+    /// **Why HMAC-SHA256, not Argon2?** Argon2 exists to slow brute
+    /// force of LOW-entropy passwords. API key secrets are 32 random
+    /// bytes (256 bits) — brute force is computationally infeasible
+    /// regardless of hash speed. Using Argon2 here would add ~50ms
+    /// of latency per request for zero security benefit. SHA-256
+    /// HMAC at ~1µs gives the same effective security plus 50000×
+    /// throughput.
     pub secret_hash: String,
     /// Comma-separated scope strings. Application-defined; pylon
     /// stores opaquely.
@@ -191,7 +199,7 @@ impl ApiKeyStore {
             user_id,
             name,
             prefix,
-            secret_hash: hash_password(&secret),
+            secret_hash: hash_secret(&secret),
             scopes,
             expires_at,
             last_used_at: None,
@@ -203,6 +211,10 @@ impl ApiKeyStore {
 
     /// Verify a plaintext token. Touches `last_used_at` on success
     /// so the management UI can show "last used 5m ago".
+    ///
+    /// `touch` is debounced to once-per-minute per key to avoid a
+    /// write storm on hot keys (one DB write per request was a real
+    /// contention source under load).
     pub fn verify(&self, token: &str) -> Result<ApiKey, ApiKeyVerifyError> {
         let (id, secret) = parse_token(token).ok_or(ApiKeyVerifyError::Malformed)?;
         let key = self.backend.get(&id).ok_or(ApiKeyVerifyError::NotFound)?;
@@ -211,10 +223,16 @@ impl ApiKeyStore {
                 return Err(ApiKeyVerifyError::Expired);
             }
         }
-        if !verify_password(&secret, &key.secret_hash) {
+        let expected = hash_secret(&secret);
+        if !crate::constant_time_eq(expected.as_bytes(), key.secret_hash.as_bytes()) {
             return Err(ApiKeyVerifyError::BadSecret);
         }
-        self.backend.touch(&key.id, now_secs());
+        // Debounced last_used_at update — no point persisting a
+        // touch within 60s of the previous one.
+        let now = now_secs();
+        if key.last_used_at.map(|t| now - t > 60).unwrap_or(true) {
+            self.backend.touch(&key.id, now);
+        }
         Ok(key)
     }
 
@@ -274,6 +292,31 @@ fn random_token(n_bytes: usize) -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// HMAC-SHA256 the secret with a server-side pepper. Returns hex.
+/// The pepper is read from `PYLON_API_KEY_PEPPER` (set this in
+/// production — apps that don't risk the pepper being a known
+/// constant). For dev convenience an unset pepper yields a fixed
+/// dev value so testing works without env setup.
+fn hash_secret(secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    // OnceLock would be nicer but std env::var per call is fine:
+    // we already trade-off env reads vs cache complexity elsewhere.
+    let pepper = std::env::var("PYLON_API_KEY_PEPPER")
+        .unwrap_or_else(|_| "pylon-dev-api-key-pepper-not-for-production".into());
+    let mut mac = HmacSha256::new_from_slice(pepper.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(secret.as_bytes());
+    let out = mac.finalize().into_bytes();
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in out {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 fn now_secs() -> u64 {

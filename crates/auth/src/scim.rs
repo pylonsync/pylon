@@ -6,6 +6,12 @@
 //! to read, PATCHes to update, DELETEs to deactivate. Same shape
 //! for `/scim/v2/Groups`.
 //!
+//! **Status: library only — HTTP endpoints not yet wired.**
+//! ScimUser / ScimError / check_bearer ship today as primitives so
+//! apps that want to roll their own SCIM endpoints can compose
+//! them. The pylon-shipped `/scim/v2/*` routes (POST/GET/PATCH/
+//! DELETE Users + Groups) are queued for the next wave.
+//!
 //! Auth: SCIM endpoints accept a static bearer token configured via
 //! `PYLON_SCIM_TOKEN`. IdPs configure this once when they connect.
 //!

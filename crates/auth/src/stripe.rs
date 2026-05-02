@@ -229,12 +229,19 @@ pub fn verify_webhook(
 ) -> Result<BillingEvent, WebhookError> {
     let mut t: Option<u64> = None;
     let mut v1_sigs: Vec<&str> = Vec::new();
+    // P3-6 (codex Wave-4 review): cap v1 sigs at 8 to prevent
+    // header-amplification DoS — an attacker who can submit a
+    // 10MB Stripe-Signature header would otherwise force 10000
+    // constant-time HMAC comparisons.
+    const MAX_V1_SIGS: usize = 8;
     for kv in signature_header.split(',') {
         let kv = kv.trim();
         if let Some(v) = kv.strip_prefix("t=") {
             t = v.parse().ok();
         } else if let Some(v) = kv.strip_prefix("v1=") {
-            v1_sigs.push(v);
+            if v1_sigs.len() < MAX_V1_SIGS {
+                v1_sigs.push(v);
+            }
         }
     }
     let ts = t.ok_or(WebhookError::MissingSignature)?;

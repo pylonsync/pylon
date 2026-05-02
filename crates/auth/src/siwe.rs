@@ -122,14 +122,19 @@ impl NonceStore {
         nonce
     }
 
-    /// Consume the stored nonce for `address` (single-use).
+    /// Consume the stored nonce for `address` (single-use). Returns
+    /// `None` for unknown OR expired entries — but DOESN'T remove an
+    /// expired entry early (an attacker repeatedly posting expired
+    /// nonces would otherwise burn the slot and DoS legitimate
+    /// retries).
     pub fn take(&self, address: &str) -> Option<String> {
         let key = address.to_ascii_lowercase();
         let mut map = self.nonces.lock().unwrap();
-        let (nonce, exp) = map.remove(&key)?;
+        let (nonce, exp) = map.get(&key)?.clone();
         if exp <= now_secs() {
             return None;
         }
+        map.remove(&key);
         Some(nonce)
     }
 }
@@ -169,20 +174,34 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
         return Err(SiweError::Malformed);
     }
 
-    // Skip blank line, then statement (optional), then blank line.
-    let mut statement: Option<String> = None;
+    // Skip the blank line after the address; collect the statement
+    // (which CAN span multiple lines per spec) until we hit URI:.
+    let mut statement_parts: Vec<String> = Vec::new();
     let mut peeked: Option<&str> = None;
-    while let Some(l) = lines.next() {
+    let mut seen_blank = false;
+    for l in lines.by_ref() {
         if l.is_empty() {
+            seen_blank = true;
             continue;
         }
         if l.starts_with("URI:") {
             peeked = Some(l);
             break;
         }
-        // Otherwise this is the statement.
-        statement = Some(l.to_string());
+        // Pre-URI non-blank lines are statement content. Re-introduce
+        // the inter-line newlines so re-serialization matches the
+        // wallet-signed bytes exactly.
+        if !statement_parts.is_empty() {
+            statement_parts.push("\n".into());
+        }
+        statement_parts.push(l.to_string());
     }
+    let _ = seen_blank;
+    let statement = if statement_parts.is_empty() {
+        None
+    } else {
+        Some(statement_parts.concat())
+    };
     // We may have already consumed the URI line into `peeked`.
     let mut uri: Option<String> = None;
     let mut version: Option<String> = None;
@@ -195,7 +214,7 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
     let mut resources = Vec::new();
     let mut in_resources = false;
 
-    let mut process = |line: &str,
+    let process = |line: &str,
                        uri: &mut Option<String>,
                        version: &mut Option<String>,
                        chain_id: &mut Option<u64>,
@@ -285,15 +304,25 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
     })
 }
 
-/// Validate a parsed SIWE message + signature against the issued
-/// nonce + expected origin. Returns `Ok(address)` (lowercased,
-/// 0x-prefixed) on success.
-pub fn verify(
+/// Validate the non-cryptographic parts of a SIWE message: domain,
+/// nonce, expiration, not-before. Does NOT verify the signature —
+/// that requires a real secp256k1 + keccak256 verifier which pylon
+/// doesn't ship today (Wave 6).
+///
+/// Apps that need full SIWE auth wire a `SiweSignatureVerifier`
+/// trait impl (k256-backed) at server start; pylon then composes
+/// `validate_message` + the app's verifier in
+/// `routes/auth.rs::siwe_finish`.
+///
+/// **Why no built-in verifier?** Bringing in `k256` adds a
+/// significant compile-time + binary-size hit to every pylon
+/// install — most teams that don't use SIWE shouldn't pay it.
+/// Crypto stays opt-in via the trait below.
+pub fn validate_message(
     nonces: &NonceStore,
     message: &SiweMessage,
-    signature_hex: &str,
     expected_domain: &str,
-) -> Result<String, SiweError> {
+) -> Result<(), SiweError> {
     if message.domain != expected_domain {
         return Err(SiweError::DomainMismatch);
     }
@@ -303,7 +332,6 @@ pub fn verify(
     if issued != message.nonce {
         return Err(SiweError::NonceMismatch);
     }
-
     if let Some(exp) = &message.expiration_time {
         if iso_to_unix(exp).map(|t| t <= now_secs()).unwrap_or(false) {
             return Err(SiweError::Expired);
@@ -314,62 +342,44 @@ pub fn verify(
             return Err(SiweError::NotYetValid);
         }
     }
+    Ok(())
+}
 
-    // Recover the signer address from the signature and check it
-    // matches what the message claims.
-    let recovered = recover_address(message, signature_hex)?;
+/// Trait apps implement to plug in k256-based ECDSA recovery +
+/// keccak256. `serialize_for_signing(message)` gives the canonical
+/// bytes the wallet hashed; the impl recovers the signer address
+/// from the 65-byte (r||s||v) signature.
+pub trait SiweSignatureVerifier: Send + Sync {
+    /// Returns the lowercased 0x-prefixed Ethereum address that
+    /// signed the canonical message bytes.
+    fn recover_address(
+        &self,
+        signed_text: &str,
+        signature_hex: &str,
+    ) -> Result<String, SiweError>;
+}
+
+/// Compose `validate_message` + an app-supplied signature verifier.
+/// Returns the lowercased recovered address on success.
+pub fn verify_with(
+    nonces: &NonceStore,
+    message: &SiweMessage,
+    signature_hex: &str,
+    expected_domain: &str,
+    verifier: &dyn SiweSignatureVerifier,
+) -> Result<String, SiweError> {
+    validate_message(nonces, message, expected_domain)?;
+    let signed = serialize_for_signing(message);
+    let recovered = verifier.recover_address(&signed, signature_hex)?;
     if !recovered.eq_ignore_ascii_case(&message.address) {
         return Err(SiweError::AddressMismatch);
     }
     Ok(recovered.to_ascii_lowercase())
 }
 
-// ---------------------------------------------------------------------------
-// secp256k1 + keccak256 — vendored micro-implementation
-// ---------------------------------------------------------------------------
-//
-// Pulling in libsecp256k1 (or k256) for one verify per user is heavy.
-// We implement just enough secp256k1 to do ECDSA recovery + keccak256
-// for the Ethereum signed-message scheme. If sign-in throughput ever
-// exceeds 10/s sustained, swap in k256.
-
-/// Recover the Ethereum address that signed `message`. Returns the
-/// lowercase 0x-prefixed form.
-fn recover_address(message: &SiweMessage, signature_hex: &str) -> Result<String, SiweError> {
-    let signed_text = serialize_for_signing(message);
-    // Ethereum personal_sign hashes the message with the prefix
-    // "\x19Ethereum Signed Message:\n<len>".
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", signed_text.len());
-    let mut to_hash = Vec::with_capacity(prefix.len() + signed_text.len());
-    to_hash.extend_from_slice(prefix.as_bytes());
-    to_hash.extend_from_slice(signed_text.as_bytes());
-    let digest = keccak256(&to_hash);
-
-    let sig = decode_hex(signature_hex.trim_start_matches("0x"))
-        .map_err(|_| SiweError::BadSignature)?;
-    if sig.len() != 65 {
-        return Err(SiweError::BadSignature);
-    }
-    let r = &sig[..32];
-    let s = &sig[32..64];
-    let v = sig[64];
-    let recovery_id = match v {
-        0 | 27 => 0,
-        1 | 28 => 1,
-        _ => return Err(SiweError::BadSignature),
-    };
-
-    // For the actual recovery we delegate to the `ring` crate's
-    // primitives. `ring` doesn't expose secp256k1 directly, so we
-    // use a vendored micro-implementation. Cost ~200µs per verify.
-    let pubkey = recover_pubkey(&digest, r, s, recovery_id).ok_or(SiweError::BadSignature)?;
-    let addr = pubkey_to_address(&pubkey);
-    Ok(format!("0x{}", bytes_to_hex(&addr)))
-}
-
 /// Serialize a SIWE message back into its canonical wire form for
 /// signing. MUST be byte-identical to what the wallet hashed.
-fn serialize_for_signing(m: &SiweMessage) -> String {
+pub fn serialize_for_signing(m: &SiweMessage) -> String {
     let mut out = String::new();
     out.push_str(&m.domain);
     out.push_str(" wants you to sign in with your Ethereum account:\n");
@@ -403,64 +413,6 @@ fn serialize_for_signing(m: &SiweMessage) -> String {
         }
     }
     out
-}
-
-// secp256k1 + keccak256 implementation deferred to a separate crate
-// once a real verifier is needed in production. For now, recover
-// returns None so verify() always fails — apps that need SIWE
-// register a feature-flag plugin that swaps in a real crypto path.
-//
-// This is honest: shipping fake crypto would be worse than shipping
-// a clear "not yet wired" error.
-fn recover_pubkey(_digest: &[u8; 32], _r: &[u8], _s: &[u8], _v: u8) -> Option<[u8; 64]> {
-    // TODO Wave-6: integrate `k256` for production-grade verification.
-    None
-}
-
-fn pubkey_to_address(pubkey: &[u8; 64]) -> [u8; 20] {
-    let h = keccak256(pubkey);
-    let mut out = [0u8; 20];
-    out.copy_from_slice(&h[12..]);
-    out
-}
-
-/// Keccak-256 (NOT SHA-3) — Ethereum's variant. We don't have a
-/// keccak crate dep; fall back to using `sha3` if it gets added.
-/// For now this returns a placeholder that makes recovery fail —
-/// see `recover_pubkey` note.
-fn keccak256(_input: &[u8]) -> [u8; 32] {
-    [0u8; 32]
-}
-
-fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 {
-        return Err(());
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    for chunk in s.as_bytes().chunks(2) {
-        let hi = hex_digit(chunk[0])?;
-        let lo = hex_digit(chunk[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn hex_digit(b: u8) -> Result<u8, ()> {
-    match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(()),
-    }
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 fn iso_to_unix(iso: &str) -> Option<u64> {
@@ -539,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_domain_mismatch() {
+    fn validate_rejects_domain_mismatch() {
         let store = NonceStore::new();
         store.issue("0x1111222233334444555566667777888899990000");
         let m = SiweMessage {
@@ -556,12 +508,12 @@ mod tests {
             request_id: None,
             resources: vec![],
         };
-        let err = verify(&store, &m, "0x", "good.com").unwrap_err();
+        let err = validate_message(&store, &m, "good.com").unwrap_err();
         assert_eq!(err, SiweError::DomainMismatch);
     }
 
     #[test]
-    fn verify_rejects_nonce_mismatch() {
+    fn validate_rejects_nonce_mismatch() {
         let store = NonceStore::new();
         store.issue("0x1111222233334444555566667777888899990000");
         let m = SiweMessage {
@@ -578,7 +530,46 @@ mod tests {
             request_id: None,
             resources: vec![],
         };
-        let err = verify(&store, &m, "0x", "good.com").unwrap_err();
+        let err = validate_message(&store, &m, "good.com").unwrap_err();
         assert_eq!(err, SiweError::NonceMismatch);
+    }
+
+    /// Codex-flagged P0-7: nonce-bombing. Posting an EXPIRED nonce
+    /// must NOT consume the slot. Otherwise an attacker who can
+    /// observe the (address, nonce) handshake could repeatedly
+    /// invalidate a target's pending nonce by posting any expired
+    /// version of it.
+    #[test]
+    fn expired_take_does_not_remove_slot() {
+        let store = NonceStore::new();
+        // Inject an expired entry directly.
+        store
+            .nonces
+            .lock()
+            .unwrap()
+            .insert("0xabc".into(), ("nonce-x".into(), 1));
+        // First take — sees expired, returns None, MUST keep the slot.
+        assert!(store.take("0xabc").is_none());
+        // Slot still present (the test would also trip if we did remove it).
+        assert!(store.nonces.lock().unwrap().contains_key("0xabc"));
+    }
+
+    /// Multi-line statements per spec are real (any printable
+    /// character + LF). The serializer must round-trip them.
+    #[test]
+    fn parse_handles_multiline_statement() {
+        let raw = "x.com wants you to sign in with your Ethereum account:\n\
+                   0x1111222233334444555566667777888899990000\n\
+                   \n\
+                   line one\n\
+                   line two\n\
+                   \n\
+                   URI: https://x.com\n\
+                   Version: 1\n\
+                   Chain ID: 1\n\
+                   Nonce: n\n\
+                   Issued At: 2026-01-01T00:00:00Z";
+        let m = parse_message(raw).expect("parse");
+        assert_eq!(m.statement.as_deref(), Some("line one\nline two"));
     }
 }
