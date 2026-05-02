@@ -25,7 +25,7 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // of the pylon stack).
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.17";
+const PYLON_VERSION = "0.3.19";
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompt
@@ -35,9 +35,9 @@ const args = argv.slice(2);
 let projectName = args.find((a) => !a.startsWith("--"));
 
 const flags = {
-	pm:
-		args.find((a) => a === "--bun" || a === "--pnpm" || a === "--yarn" || a === "--npm")?.slice(2) ??
-		detectPackageManager(),
+	pm: args.find(
+		(a) => a === "--bun" || a === "--pnpm" || a === "--yarn" || a === "--npm",
+	)?.slice(2),
 	skipInstall: args.includes("--skip-install"),
 	help: args.includes("--help") || args.includes("-h"),
 };
@@ -47,11 +47,35 @@ if (flags.help) {
 	exit(0);
 }
 
+// Interactive prompts for project name + package manager. Default
+// PM to bun: it handles `workspace:*` correctly out of the box,
+// installs faster than the alternatives, and is what the
+// @pylonsync/* packages are tested against. The user can pick
+// anything though.
+const rl = createInterface({ input: stdin, output: stdout });
 if (!projectName) {
-	const rl = createInterface({ input: stdin, output: stdout });
 	projectName = (await rl.question("Project name: ")).trim() || "my-pylon-app";
-	rl.close();
 }
+if (!flags.pm) {
+	const detected = detectPackageManager();
+	const def = detected ?? "bun";
+	const choice = (
+		await rl.question(`Package manager (bun, pnpm, yarn, npm) [${def}]: `)
+	)
+		.trim()
+		.toLowerCase();
+	flags.pm = ["bun", "pnpm", "yarn", "npm"].includes(choice) ? choice : def;
+}
+rl.close();
+
+// Some PMs reject the `workspace:` protocol. Bun/pnpm/yarn berry
+// understand it and rewrite to the local sibling version at install
+// time. npm errors EUNSUPPORTEDPROTOCOL ("Unsupported URL Type").
+// For npm, emit "*" — npm's own workspaces feature still resolves
+// it to the local sibling because the workspace package is in the
+// root's `workspaces` list.
+const usesWorkspaceProtocol = flags.pm !== "npm";
+const workspaceDepSpec = usesWorkspaceProtocol ? "workspace:*" : "*";
 
 const root = resolve(cwd(), projectName);
 
@@ -82,6 +106,12 @@ function writeJson(path, value) {
 // Root workspace
 // ---------------------------------------------------------------------------
 
+// Per-PM script syntax: bun has its own --filter, pnpm uses --filter,
+// npm/yarn use --workspace. Picking the right shape at scaffold time
+// means `npm run dev` (or whichever PM) works without the user
+// learning each PM's flag dialect.
+const wsScripts = pmScripts(flags.pm);
+
 writeJson("package.json", {
 	name: projectName,
 	private: true,
@@ -89,9 +119,9 @@ writeJson("package.json", {
 	workspaces: ["apps/*", "packages/*"],
 	scripts: {
 		dev: "npm-run-all --parallel dev:api dev:web",
-		"dev:api": "npm --workspace apps/api run dev",
-		"dev:web": "npm --workspace apps/web run dev",
-		build: "npm --workspaces run build --if-present",
+		"dev:api": wsScripts.devApi,
+		"dev:web": wsScripts.devWeb,
+		build: wsScripts.build,
 	},
 	devDependencies: {
 		"npm-run-all": "^4.1.5",
@@ -526,7 +556,7 @@ writeJson("apps/web/package.json", {
 		lint: "next lint",
 	},
 	dependencies: {
-		[`@${projectName}/ui`]: "workspace:*",
+		[`@${projectName}/ui`]: workspaceDepSpec,
 		"@pylonsync/sdk": `^${PYLON_VERSION}`,
 		"@pylonsync/react": `^${PYLON_VERSION}`,
 		"@pylonsync/next": `^${PYLON_VERSION}`,
@@ -816,7 +846,50 @@ function detectPackageManager() {
 	if (ua.startsWith("bun")) return "bun";
 	if (ua.startsWith("pnpm")) return "pnpm";
 	if (ua.startsWith("yarn")) return "yarn";
-	return "npm";
+	if (ua.startsWith("npm")) return "npm";
+	return null;
+}
+
+/**
+ * Per-package-manager workspace script syntax. Each PM exposes
+ * "run X in workspace Y" differently:
+ *   bun  bun run --filter ./apps/api dev
+ *   pnpm pnpm --filter ./apps/api run dev
+ *   yarn yarn workspace @<name>/api run dev
+ *   npm  npm --workspace apps/api run dev
+ *
+ * The scaffold doesn't try to abstract the PM — it bakes the right
+ * syntax into the generated scripts so `<pm> run dev` works
+ * everywhere with no further config.
+ */
+function pmScripts(pm) {
+	switch (pm) {
+		case "bun":
+			return {
+				devApi: "bun run --filter './apps/api' dev",
+				devWeb: "bun run --filter './apps/web' dev",
+				build: "bun run --filter '*' build",
+			};
+		case "pnpm":
+			return {
+				devApi: "pnpm --filter './apps/api' run dev",
+				devWeb: "pnpm --filter './apps/web' run dev",
+				build: "pnpm --filter '*' run build",
+			};
+		case "yarn":
+			return {
+				devApi: `yarn workspace @${projectName}/api run dev`,
+				devWeb: `yarn workspace @${projectName}/web run dev`,
+				build: "yarn workspaces foreach -A run build",
+			};
+		case "npm":
+		default:
+			return {
+				devApi: "npm --workspace apps/api run dev",
+				devWeb: "npm --workspace apps/web run dev",
+				build: "npm --workspaces run build --if-present",
+			};
+	}
 }
 
 // ---------------------------------------------------------------------------

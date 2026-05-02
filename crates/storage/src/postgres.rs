@@ -865,27 +865,40 @@ pub mod live {
         /// Honors libpq-style URL params the Rust postgres crate doesn't
         /// natively understand:
         ///   - `sslmode=verify-full`, `verify-ca`, `require` → use TLS
-        ///     via `postgres-native-tls`. The Rust crate only knows
-        ///     `disable`, `prefer`, `require` — it rejects the libpq
-        ///     extras with "invalid connection string".
-        ///   - `sslrootcert=system` → trust the OS CA store (the
-        ///     `native-tls` connector reads it via SecurityFramework /
-        ///     SChannel / openssl). `sslrootcert=<path>` is not yet
-        ///     supported and falls back to system roots with a warning.
+        ///     via rustls + the OS trust store. The Rust postgres crate
+        ///     only knows `disable`/`prefer`/`require` — it rejects the
+        ///     libpq extras with "invalid connection string".
+        ///   - `sslrootcert=system` → trust the OS CA store (rustls-
+        ///     native-certs reads it via SecurityFramework / SChannel /
+        ///     /etc/ssl). `sslrootcert=<path>` is not yet supported and
+        ///     falls back to system roots with a warning.
         ///
         /// Strips the libpq-only params from the URL before passing to
         /// the postgres crate's parser, so it doesn't choke. Common
         /// real-world example that was failing pre-fix: Fly Postgres
         /// emits `?sslmode=verify-full&sslrootcert=system` URLs.
+        ///
+        /// Uses rustls (not native-tls/openssl) so binary builds
+        /// cross-compile cleanly on musl + arm64 without needing
+        /// OPENSSL_DIR. Pure Rust all the way down.
         pub fn connect(url: &str) -> Result<Self, StorageError> {
             let (cleaned, ssl) = parse_pg_url_ssl(url);
             let result = if ssl.use_tls {
-                let connector =
-                    native_tls::TlsConnector::new().map_err(|e| StorageError {
-                        code: "PG_TLS_INIT_FAILED".into(),
-                        message: format!("Failed to initialize TLS: {e}"),
-                    })?;
-                let tls = postgres_native_tls::MakeTlsConnector::new(connector);
+                let mut roots = rustls::RootCertStore::empty();
+                let native_certs = rustls_native_certs::load_native_certs();
+                for cert in native_certs.certs {
+                    let _ = roots.add(cert);
+                }
+                if !native_certs.errors.is_empty() {
+                    tracing::warn!(
+                        "[pg] rustls native cert load reported {} non-fatal errors",
+                        native_certs.errors.len()
+                    );
+                }
+                let config = rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
                 postgres::Client::connect(&cleaned, tls)
             } else {
                 postgres::Client::connect(&cleaned, postgres::NoTls)
