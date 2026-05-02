@@ -1766,6 +1766,7 @@ version = "0.3.19"
 dependencies = [
  "argon2",
  "base64",
+ "hmac 0.12.1",
  "rand 0.8.5",
  "ring",
  "serde",

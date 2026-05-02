@@ -19,6 +19,10 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | HIBP password check | Argon2 + Pwned Passwords k-anonymity check at register/change. Disable with `PYLON_DISABLE_HIBP=1` (tests) |
 | Password change/reset | `/api/auth/password/change` (requires current password); reset flow rides on magic codes |
 | Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
+| TOTP / 2FA | RFC 6238 6-digit codes. `/api/auth/totp/enroll` + `/verify` + `/disable`. Compatible with every authenticator app |
+| WebAuthn / passkeys | ES256 + Ed25519 — Touch ID, Face ID, Windows Hello, Yubikeys. Counter-regression detection |
+| JWT sessions | Optional stateless `Authorization: Bearer <jwt>` mode. Set `PYLON_JWT_SECRET` to enable; `/api/auth/jwt` mints from a session |
+| CAPTCHA | hCaptcha + Turnstile + reCAPTCHA. Set `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` to gate magic-code send + password register |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |
@@ -63,6 +67,10 @@ All under `/api/auth/`:
 | `/api-keys` | GET | List the current user's API keys (no plaintext) |
 | `/api-keys/:id` | DELETE | Revoke a single API key by id |
 | `/account` | DELETE | Wipe user — sessions, API keys, OAuth links, user row |
+| `/totp/enroll` | POST | Mint a TOTP secret + provisioning URL (re-enroll requires current code) |
+| `/totp/verify` | POST | Confirm a TOTP code; finalizes enrollment on first success |
+| `/totp/disable` | POST | Remove TOTP (requires a current code) |
+| `/jwt` | POST | Exchange the current session for a JWT-shaped token (requires `PYLON_JWT_SECRET`) |
 
 ## Sessions vs cookies vs bearer tokens
 

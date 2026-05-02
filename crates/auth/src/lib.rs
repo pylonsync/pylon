@@ -1,9 +1,13 @@
 pub mod api_key;
 pub mod apple_jwt;
+pub mod captcha;
 pub mod cookie;
 pub mod email;
+pub mod jwt;
 pub mod password;
 pub mod provider;
+pub mod totp;
+pub mod webauthn;
 
 pub use cookie::{extract_token as extract_session_cookie, CookieConfig, SameSite};
 

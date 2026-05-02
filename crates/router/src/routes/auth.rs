@@ -266,6 +266,19 @@ pub(crate) fn handle(
             Some(e) => e.to_string(),
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
+        // Optional CAPTCHA gate. When PYLON_CAPTCHA_PROVIDER+SECRET
+        // are set, the request must include `captchaToken`. Skipped
+        // entirely when unconfigured so existing apps keep working.
+        if let Some(cfg) = pylon_auth::captcha::CaptchaConfig::from_env() {
+            let token = data.get("captchaToken").and_then(|v| v.as_str()).unwrap_or("");
+            if let Err(reason) = cfg.verify(token, Some(ctx.peer_ip)) {
+                tracing::warn!("[captcha] magic/send rejected: {reason}");
+                return Some((
+                    400,
+                    json_error("CAPTCHA_FAILED", "CAPTCHA verification failed"),
+                ));
+            }
+        }
         let code = match ctx.magic_codes.try_create(&email) {
             Ok(c) => c,
             Err(pylon_auth::MagicCodeError::Throttled { retry_after_secs }) => {
@@ -586,6 +599,17 @@ pub(crate) fn handle(
         };
         if let Err(e) = pylon_auth::password::validate_length(password) {
             return Some((400, json_error("WEAK_PASSWORD", &e.to_string())));
+        }
+        // CAPTCHA gate (no-op when unconfigured).
+        if let Some(cfg) = pylon_auth::captcha::CaptchaConfig::from_env() {
+            let token = data.get("captchaToken").and_then(|v| v.as_str()).unwrap_or("");
+            if let Err(reason) = cfg.verify(token, Some(ctx.peer_ip)) {
+                tracing::warn!("[captcha] password/register rejected: {reason}");
+                return Some((
+                    400,
+                    json_error("CAPTCHA_FAILED", "CAPTCHA verification failed"),
+                ));
+            }
         }
         // HIBP check unless explicitly disabled (off in test/dev to keep
         // unit tests offline). Honors PYLON_DISABLE_HIBP=1.
@@ -1099,6 +1123,51 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"revoked": true}).to_string()));
     }
 
+    // POST /api/auth/jwt — exchange the current session for a JWT-shaped
+    // token (HS256 signed with PYLON_JWT_SECRET). Useful for edge runtimes
+    // that can't tolerate a session-store round-trip on every request.
+    // Requires PYLON_JWT_SECRET to be set; 501 otherwise.
+    if url == "/api/auth/jwt" && method == HttpMethod::Post {
+        if !ctx.auth_ctx.is_authenticated() {
+            return Some((401, json_error("AUTH_REQUIRED", "Login required")));
+        }
+        let secret = match std::env::var("PYLON_JWT_SECRET").ok() {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                return Some((
+                    501,
+                    json_error_with_hint(
+                        "JWT_NOT_CONFIGURED",
+                        "JWT-shaped sessions are disabled",
+                        "Set PYLON_JWT_SECRET (32+ random bytes) to enable; optional PYLON_JWT_ISSUER for validation",
+                    ),
+                ));
+            }
+        };
+        let issuer = std::env::var("PYLON_JWT_ISSUER").unwrap_or_else(|_| "pylon".into());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let lifetime = std::env::var("PYLON_JWT_LIFETIME_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60 * 60); // 1 hour default
+        let claims = pylon_auth::jwt::JwtClaims {
+            sub: ctx.auth_ctx.user_id.clone().unwrap_or_default(),
+            iat: now,
+            exp: now + lifetime,
+            iss: issuer,
+            tenant_id: ctx.auth_ctx.tenant_id.clone(),
+            roles: ctx.auth_ctx.roles.clone(),
+        };
+        let token = pylon_auth::jwt::mint(secret.as_bytes(), &claims);
+        return Some((
+            200,
+            serde_json::json!({"token": token, "expires_at": claims.exp}).to_string(),
+        ));
+    }
+
     // POST /api/auth/refresh
     if url == "/api/auth/refresh" && method == HttpMethod::Post {
         let old = match auth_token {
@@ -1386,6 +1455,206 @@ pub(crate) fn handle(
             })
             .to_string(),
         ));
+    }
+
+    // ─── TOTP (RFC 6238 — 6-digit, 30-second, HMAC-SHA1) ──────────────
+    //
+    // Two-step enrollment: POST /enroll returns a fresh secret +
+    // provisioning URL (NOT yet active); POST /verify with a code from
+    // the user's authenticator app finalizes it. Subsequent password /
+    // magic-code logins don't auto-enforce TOTP — apps gate that
+    // themselves by checking `User.totpVerified`. This matches
+    // better-auth's "you bring the gate" stance.
+    if url == "/api/auth/totp/enroll" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "TOTP enrollment requires a session"),
+            ));
+        }
+        // Fetch user row to derive the QR account label (their email).
+        let row = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+        {
+            Ok(Some(r)) => r,
+            _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        // If TOTP is already verified, require a current TOTP code to
+        // re-enroll. Defends against a session-cookie-only attacker
+        // silently rotating the secret to one they control. Same posture
+        // as password change requiring the current password.
+        let already_verified = row
+            .get("totpVerified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if already_verified {
+            let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let code = data.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let secret_b32 = row.get("totpSecret").and_then(|v| v.as_str()).unwrap_or("");
+            let secret = pylon_auth::totp::base32_decode(secret_b32).unwrap_or_default();
+            if !pylon_auth::totp::verify_now(&secret, code) {
+                return Some((
+                    401,
+                    json_error(
+                        "INVALID_TOTP_CODE",
+                        "TOTP is already enrolled — provide a current code to rotate the secret",
+                    ),
+                ));
+            }
+        }
+        let account = row
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&user_id)
+            .to_string();
+        let issuer = std::env::var("PYLON_TOTP_ISSUER")
+            .unwrap_or_else(|_| ctx.store.manifest().name.clone());
+
+        let secret = pylon_auth::totp::generate_secret();
+        let secret_b32 = pylon_auth::totp::base32_encode(&secret);
+        let url_otp = pylon_auth::totp::provisioning_url(&issuer, &account, &secret_b32);
+        // Persist the secret as PENDING (totpVerified=false). The app's
+        // user entity needs `totpSecret: string?` + `totpVerified: bool?`.
+        match ctx.store.update(
+            &ctx.store.manifest().auth.user.entity,
+            &user_id,
+            &serde_json::json!({
+                "totpSecret": secret_b32,
+                "totpVerified": false,
+            }),
+        ) {
+            Ok(_) => {}
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        }
+        return Some((
+            200,
+            serde_json::json!({
+                "secret": secret_b32,
+                "url": url_otp,
+                // Apps MAY render the QR code themselves; expose the
+                // raw bytes too for non-web clients.
+                "issuer": issuer,
+                "account": account,
+            })
+            .to_string(),
+        ));
+    }
+
+    if url == "/api/auth/totp/verify" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                ));
+            }
+        };
+        let code = data
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let row = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+        {
+            Ok(Some(r)) => r,
+            _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        let secret_b32 = match row.get("totpSecret").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                return Some((
+                    400,
+                    json_error("TOTP_NOT_ENROLLED", "Call /api/auth/totp/enroll first"),
+                ));
+            }
+        };
+        let secret = match pylon_auth::totp::base32_decode(secret_b32) {
+            Ok(s) => s,
+            Err(_) => return Some((500, json_error("TOTP_BAD_SECRET", "Stored secret is corrupt"))),
+        };
+        if !pylon_auth::totp::verify_now(&secret, &code) {
+            return Some((401, json_error("INVALID_TOTP_CODE", "Wrong code")));
+        }
+        let was_verified = row
+            .get("totpVerified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !was_verified {
+            // Stamp on first successful verify so the app knows
+            // enrollment is finalized.
+            match ctx.store.update(
+                &ctx.store.manifest().auth.user.entity,
+                &user_id,
+                &serde_json::json!({"totpVerified": true}),
+            ) {
+                Ok(_) => {}
+                Err(e) => return Some((400, json_error(&e.code, &e.message))),
+            }
+        }
+        return Some((
+            200,
+            serde_json::json!({"verified": true, "enrolled": !was_verified}).to_string(),
+        ));
+    }
+
+    if url == "/api/auth/totp/disable" && method == HttpMethod::Post {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "TOTP disable requires a session"),
+            ));
+        }
+        // Require a current code to disable — defends against a
+        // session-cookie-only attacker silently turning off 2FA.
+        let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        let code = data.get("code").and_then(|v| v.as_str()).unwrap_or("");
+        let row = match ctx
+            .store
+            .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+        {
+            Ok(Some(r)) => r,
+            _ => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if let Some(secret_b32) = row.get("totpSecret").and_then(|v| v.as_str()) {
+            if !secret_b32.is_empty() {
+                let secret = pylon_auth::totp::base32_decode(secret_b32).unwrap_or_default();
+                if !pylon_auth::totp::verify_now(&secret, code) {
+                    return Some((
+                        401,
+                        json_error(
+                            "INVALID_TOTP_CODE",
+                            "Provide a current TOTP code to disable 2FA",
+                        ),
+                    ));
+                }
+            }
+        }
+        match ctx.store.update(
+            &ctx.store.manifest().auth.user.entity,
+            &user_id,
+            &serde_json::json!({"totpSecret": null, "totpVerified": false}),
+        ) {
+            Ok(_) => {}
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        }
+        return Some((200, serde_json::json!({"disabled": true}).to_string()));
     }
 
     // ─── Account deletion ──────────────────────────────────────────────

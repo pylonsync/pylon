@@ -1002,12 +1002,14 @@ fn start_server(
                 })
         };
         let auth_token: Option<String> = bearer_token.or(cookie_token);
-        // API key tokens (`pk.…`) resolve to a key-flavored
-        // AuthContext (carrying `api_key_id` + scopes so policies can
-        // distinguish from a real session). An invalid `pk.…` token
-        // 401s instead of silently falling through to anonymous —
-        // codex Wave-2 P2 — so apps don't accidentally serve
-        // public content when the caller meant to authenticate.
+        // Token dispatcher (in priority order):
+        //   1. Admin token → AuthContext::admin
+        //   2. `pk.…` API key → AuthContext::from_api_key (401 on bad)
+        //   3. Looks-like-JWT + PYLON_JWT_SECRET set → JWT verify
+        //   4. Otherwise → session store lookup
+        // pk. check happens BEFORE looks_like_jwt because an api-key
+        // token also has 3 dot-separated segments and would otherwise
+        // be misrouted.
         let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token.is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
@@ -1025,6 +1027,23 @@ fn start_server(
                     )),
                     Err(_) => Err("INVALID_API_KEY"),
                 }
+            } else if pylon_auth::jwt::looks_like_jwt(t)
+                && std::env::var("PYLON_JWT_SECRET").is_ok()
+            {
+                let secret = std::env::var("PYLON_JWT_SECRET").unwrap_or_default();
+                let issuer = std::env::var("PYLON_JWT_ISSUER").ok();
+                match pylon_auth::jwt::verify(t, secret.as_bytes(), issuer.as_deref()) {
+                    Ok(claims) => {
+                        let mut ctx = pylon_auth::AuthContext::authenticated(claims.sub);
+                        ctx.roles = claims.roles;
+                        if let Some(t) = claims.tenant_id {
+                            ctx = ctx.with_tenant(t);
+                        }
+                        Ok(ctx)
+                    }
+                    // Bad JWTs are 401, like bad api keys.
+                    Err(_) => Err("INVALID_JWT"),
+                }
             } else {
                 Ok(ss.resolve(Some(t)))
             }
@@ -1033,16 +1052,17 @@ fn start_server(
         };
         let auth_ctx = match auth_ctx_result {
             Ok(c) => c,
-            Err(_) => {
-                let resp = tiny_http::Response::from_string(
-                    r#"{"error":{"code":"INVALID_API_KEY","message":"API key is malformed, expired, or revoked"}}"#,
-                )
-                .with_status_code(401)
-                .with_header(
-                    "Content-Type: application/json"
-                        .parse::<tiny_http::Header>()
-                        .unwrap(),
+            Err(reason) => {
+                let body = format!(
+                    r#"{{"error":{{"code":"{reason}","message":"Bearer token is malformed, expired, or revoked"}}}}"#
                 );
+                let resp = tiny_http::Response::from_string(body)
+                    .with_status_code(401)
+                    .with_header(
+                        "Content-Type: application/json"
+                            .parse::<tiny_http::Header>()
+                            .unwrap(),
+                    );
                 let _ = request.respond(resp);
                 continue;
             }
