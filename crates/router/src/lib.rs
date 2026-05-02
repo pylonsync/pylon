@@ -495,6 +495,10 @@ pub struct RouterContext<'a> {
     /// change, magic-link sign-in). Endpoints under
     /// `/api/auth/{password/reset,email/change,magic-link}/...`.
     pub verification: &'a pylon_auth::verification::VerificationStore,
+    /// Append-only audit log for security-relevant events. Endpoints
+    /// `/api/auth/audit` (current user) + `/api/auth/audit/tenant`
+    /// (active tenant; admin-gated by your policy layer).
+    pub audit: &'a pylon_auth::audit::AuditStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -1838,6 +1842,7 @@ mod auth_gate_tests {
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
         let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1864,6 +1869,7 @@ mod auth_gate_tests {
             phone_codes: &phone_codes,
             passkeys: &passkeys,
             verification: &verification,
+            audit: &audit,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2286,6 +2292,7 @@ mod auth_gate_tests {
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
         let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2315,6 +2322,7 @@ mod auth_gate_tests {
             phone_codes: &phone_codes,
             passkeys: &passkeys,
             verification: &verification,
+            audit: &audit,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2810,6 +2818,7 @@ mod auth_gate_tests {
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
         let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2841,6 +2850,7 @@ mod auth_gate_tests {
             phone_codes: &phone_codes,
             passkeys: &passkeys,
             verification: &verification,
+            audit: &audit,
                 trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,

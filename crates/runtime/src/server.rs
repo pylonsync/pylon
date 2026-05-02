@@ -260,6 +260,7 @@ fn start_server(
     let phone_codes = auth_stores.phone_codes;
     let passkeys = auth_stores.passkeys;
     let verification = auth_stores.verification;
+    let audit = auth_stores.audit;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -743,6 +744,7 @@ fn start_server(
         let pcd = Arc::clone(&phone_codes);
         let pks = Arc::clone(&passkeys);
         let vrf = Arc::clone(&verification);
+        let aud = Arc::clone(&audit);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -2035,6 +2037,7 @@ fn start_server(
                     phone_codes: &pcd,
                     passkeys: &pks,
                     verification: &vrf,
+                    audit: &aud,
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2216,6 +2219,7 @@ struct AuthStores {
     phone_codes: Arc<pylon_auth::phone::PhoneCodeStore>,
     passkeys: Arc<pylon_auth::webauthn::PasskeyStore>,
     verification: Arc<pylon_auth::verification::VerificationStore>,
+    audit: Arc<pylon_auth::audit::AuditStore>,
 }
 
 // Memoized env reads — auth resolver runs PER REQUEST so we can't
@@ -2278,6 +2282,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(pylon_auth::verification::VerificationStore::new()),
+        audit: Arc::new(pylon_auth::audit::AuditStore::new()),
     }
 }
 
@@ -2334,6 +2339,13 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::verification::VerificationStore::new()
         }
     };
+    let audit = match crate::audit_backend::SqliteAuditBackend::open(path) {
+        Ok(b) => pylon_auth::audit::AuditStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] audit SQLite backend unavailable: {e}");
+            pylon_auth::audit::AuditStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2345,6 +2357,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
+        audit: Arc::new(audit),
     }
 }
 
@@ -2406,6 +2419,13 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
                 pylon_auth::verification::VerificationStore::new()
             }
         };
+    let audit = match crate::audit_backend::PostgresAuditBackend::connect(url) {
+        Ok(b) => pylon_auth::audit::AuditStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG audit backend unavailable: {e}");
+            pylon_auth::audit::AuditStore::new()
+        }
+    };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2417,6 +2437,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
+        audit: Arc::new(audit),
     }
 }
 

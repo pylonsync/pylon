@@ -1,7 +1,9 @@
 pub mod api_key;
 pub mod apple_jwt;
+pub mod audit;
 pub mod captcha;
 pub mod cookie;
+pub mod device;
 pub mod email;
 pub mod jwt;
 pub mod oidc_provider;
@@ -1956,7 +1958,17 @@ impl SessionStore {
     /// configured `default_lifetime_secs` (from the manifest's
     /// `auth.session.expires_in`, default 30 days).
     pub fn create(&self, user_id: String) -> Session {
-        let session = Session::with_lifetime(user_id, self.default_lifetime_secs);
+        self.create_with_device(user_id, None)
+    }
+
+    /// Create a session with an attached device label. The label is
+    /// what `/api/auth/sessions` shows to the user — typically the
+    /// parsed User-Agent (see [`crate::device::parse_user_agent`]).
+    /// Pass `None` (or use `create()`) for non-browser flows where
+    /// no UA is available.
+    pub fn create_with_device(&self, user_id: String, device: Option<String>) -> Session {
+        let mut session = Session::with_lifetime(user_id, self.default_lifetime_secs);
+        session.device = device;
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(session.token.clone(), session.clone());
         if let Some(b) = &self.backend {

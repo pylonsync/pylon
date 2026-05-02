@@ -12,6 +12,47 @@ use crate::{
 };
 use pylon_http::HttpMethod;
 
+/// Build an `AuditEventBuilder` pre-populated with the per-request
+/// fields (peer IP, User-Agent header, current tenant). Caller adds
+/// action-specific bits via `.user(...)`, `.failed(...)`, `.meta(...)`.
+fn audit(
+    ctx: &RouterContext,
+    action: pylon_auth::audit::AuditAction,
+) -> pylon_auth::audit::AuditEventBuilder {
+    let mut b = pylon_auth::audit::AuditEventBuilder::new(action).ip(ctx.peer_ip);
+    if let Some(ua) = request_user_agent(ctx) {
+        b = b.user_agent(ua);
+    }
+    if let Some(tid) = ctx.auth_ctx.tenant_id.as_deref() {
+        b = b.tenant(tid);
+    }
+    if let Some(uid) = ctx.auth_ctx.user_id.as_deref() {
+        // Default actor = currently-logged-in user. Endpoints that
+        // do "admin acts on user" override `.user(target)` after.
+        b = b.actor(uid);
+    }
+    b
+}
+
+/// Extract the User-Agent header value (case-insensitive). Returns
+/// None if absent or empty.
+fn request_user_agent<'a>(ctx: &'a RouterContext) -> Option<&'a str> {
+    ctx.request_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, v)| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// Mint a session pre-tagged with the parsed device label (so
+/// `/api/auth/sessions` can show "Chrome on macOS" instead of the
+/// raw User-Agent). Falls back to a no-device session for non-
+/// browser callers without a UA header.
+fn create_session_with_device(ctx: &RouterContext, user_id: String) -> pylon_auth::Session {
+    let device = request_user_agent(ctx).map(pylon_auth::device::parse_user_agent);
+    ctx.session_store.create_with_device(user_id, device)
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -406,7 +447,7 @@ pub(crate) fn handle(
                             )
                             .unwrap_or_else(|_| email.to_string()),
                     };
-                let session = ctx.session_store.create(user_id.clone());
+                let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
                 return Some((
                     200,
@@ -691,7 +732,7 @@ pub(crate) fn handle(
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
         };
 
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((
             200,
@@ -768,6 +809,13 @@ pub(crate) fn handle(
         };
 
         if !matched {
+            ctx.audit.log(
+                audit(ctx, pylon_auth::audit::AuditAction::SignInFailed)
+                    .user(user_id.clone().unwrap_or_else(|| email.clone()))
+                    .failed("WRONG_PASSWORD")
+                    .meta("method", "password")
+                    .build(),
+            );
             return Some((
                 401,
                 json_error("INVALID_CREDENTIALS", "Email or password is incorrect"),
@@ -783,8 +831,15 @@ pub(crate) fn handle(
                 ));
             }
         };
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+                .user(user_id.clone())
+                .actor(user_id.clone())
+                .meta("method", "password")
+                .build(),
+        );
         return Some((
             200,
             serde_json::json!({
@@ -1469,7 +1524,7 @@ pub(crate) fn handle(
         // for THIS request so the user isn't logged out of their
         // own password-change tab.
         let total_revoked = ctx.session_store.revoke_all_for_user(&user_id);
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((
             200,
@@ -2122,7 +2177,7 @@ pub(crate) fn handle(
                 }
             }
         };
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((200, serde_json::json!({
             "token": session.token, "user_id": user_id, "expires_at": session.expires_at
@@ -2181,7 +2236,7 @@ pub(crate) fn handle(
                 }
             }
         };
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((200, serde_json::json!({
             "token": session.token, "user_id": user_id, "address": recovered,
@@ -2582,6 +2637,59 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"received": true}).to_string()));
     }
 
+    // ─── Audit log (read-only) ────────────────────────────────────────
+    //
+    // GET /api/auth/audit?limit=100  — events where the current
+    //   user is subject OR actor.
+    // GET /api/auth/audit/tenant?limit=100 — events for the current
+    //   active tenant. App's policy layer should gate this to admins.
+    if let Some(rest) = url.strip_prefix("/api/auth/audit") {
+        if method == HttpMethod::Get {
+            let user_id = match ctx.auth_ctx.user_id.as_deref() {
+                Some(u) => u.to_string(),
+                None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+            };
+            let q = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let params = parse_query(q);
+            // Cap limit at 1000 here; the backend caps again at 10k
+            // for raw queries. Defense in depth.
+            let limit = params
+                .get("limit")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(100)
+                .min(1000);
+            // Tenant-scoped variant requires an active tenant on the
+            // session AND that tenant matches the URL path's claim.
+            let events = if rest.starts_with("/tenant") {
+                let Some(tid) = ctx.auth_ctx.tenant_id.as_deref() else {
+                    return Some((400, json_error("NO_ACTIVE_TENANT", "Select an org first")));
+                };
+                ctx.audit.find_for_tenant(tid, limit)
+            } else {
+                ctx.audit.find_for_user(&user_id, limit)
+            };
+            let payload: Vec<serde_json::Value> = events
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "created_at": e.created_at,
+                        "action": e.action.as_str(),
+                        "user_id": e.user_id,
+                        "actor_id": e.actor_id,
+                        "tenant_id": e.tenant_id,
+                        "ip": e.ip,
+                        "user_agent": e.user_agent,
+                        "success": e.success,
+                        "reason": e.reason,
+                        "metadata": e.metadata,
+                    })
+                })
+                .collect();
+            return Some((200, serde_json::to_string(&payload).unwrap_or_else(|_| "[]".into())));
+        }
+    }
+
     // ─── Password reset (forgot password) ─────────────────────────────
     //
     // Two-step: request mints a token + emails a reset URL; complete
@@ -2679,8 +2787,15 @@ pub(crate) fn handle(
         }
         // Revoke ALL existing sessions — same posture as password change.
         let revoked = ctx.session_store.revoke_all_for_user(&user_id);
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::PasswordReset)
+                .user(user_id.clone())
+                .actor(user_id.clone())
+                .meta("revoked_sessions", revoked.to_string())
+                .build(),
+        );
         return Some((200, serde_json::json!({
             "reset": true, "revoked_sessions": revoked,
             "token": session.token, "user_id": user_id, "expires_at": session.expires_at,
@@ -2772,7 +2887,7 @@ pub(crate) fn handle(
                     }
                 }
             };
-            let session = ctx.session_store.create(user_id.clone());
+            let session = create_session_with_device(ctx, user_id.clone());
             ctx.maybe_set_session_cookie(&session.token);
             // Browser flow → 302 to dashboard; SDK flow → JSON.
             if method == HttpMethod::Get {
@@ -2868,7 +2983,7 @@ pub(crate) fn handle(
         // Revoke other sessions on email change — same blast-radius
         // posture as password change.
         ctx.session_store.revoke_all_for_user(&user_id);
-        let session = ctx.session_store.create(user_id.clone());
+        let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
         return Some((200, serde_json::json!({
             "changed": true, "email": new_email,
@@ -2980,6 +3095,15 @@ pub(crate) fn handle(
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
         }
         ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::AccountDelete)
+                .user(user_id.clone())
+                .actor(user_id.clone())
+                .meta("revoked_sessions", revoked_sessions.to_string())
+                .meta("revoked_api_keys", revoked_keys.to_string())
+                .meta("unlinked_accounts", revoked_accounts.to_string())
+                .build(),
+        );
         return Some((
             200,
             serde_json::json!({
