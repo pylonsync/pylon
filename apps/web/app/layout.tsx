@@ -16,25 +16,25 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://pylonsync.com"),
-  title: "Pylon — The backend for real-time apps and games",
+  title: "Pylon — The modern Rails for realtime apps",
   description:
-    "Declarative schema, live sync, TypeScript functions, and tick-based game shards — as a single Rust binary. Self-host or deploy to Cloudflare Workers, idle at $0.",
+    "An integrated framework for realtime apps: schema, auth, server functions, live queries, jobs, workflows, files, search, and deploy-anywhere optionality.",
   icons: {
     icon: "/brand/pylon-icon.svg",
   },
   openGraph: {
-    title: "Pylon — The backend for real-time apps and games",
+    title: "Pylon — The modern Rails for realtime apps",
     description:
-      "Declarative schema, live sync, TypeScript functions, and tick-based game shards — as a single Rust binary.",
+      "Schema, auth, server functions, live queries, jobs, workflows, files, and search in one framework.",
     url: "https://pylonsync.com",
     siteName: "Pylon",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Pylon — The realtime backend framework",
+    title: "Pylon — The modern Rails for realtime apps",
     description:
-      "Schema, policies, functions, live queries, auth — one binary.",
+      "One integrated framework for the backend, realtime UI, jobs, workflows, files, and search.",
   },
 };
 

@@ -149,10 +149,10 @@ export function Unusual() {
     <section className="section" id="unusual">
       <div className="container-page">
         <div className="section-label">The unusual bits</div>
-        <h2 className="section-title">Three choices you won&apos;t find elsewhere.</h2>
+        <h2 className="section-title">Three choices that make it feel cohesive.</h2>
         <p className="section-sub">
-          Opinions that shape how the whole system feels. If these don&apos;t sound right
-          for your project, that&apos;s fair — pick something else.
+          The Rails feeling comes from strong defaults. Pylon brings that same
+          bias to transactions, realtime loops, and local-first data.
         </p>
         <div className="unusual-grid">
           <UnusualCard1 />

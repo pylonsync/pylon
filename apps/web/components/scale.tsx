@@ -1,30 +1,30 @@
 const STEPS = [
   {
     num: "01",
-    title: "Laptop",
+    title: "Local",
     meta: "pylon dev",
-    desc: "SQLite backend, hot-reload, type-safe client regen. Zero config to start.",
+    desc: "SQLite backend, hot-reload, type-safe client regen. Zero config while you build.",
     tag: { label: "SQLite", accent: false },
   },
   {
     num: "02",
-    title: "VPS",
-    meta: "systemd · one binary",
-    desc: "Ship the same binary to a $5 box. Built-in TLS, embedded storage, graceful restart.",
-    tag: { label: "docker run", accent: false },
+    title: "Pylon Cloud",
+    meta: "managed",
+    desc: "Start with hosted infra when you want the framework, not another operations project.",
+    tag: { label: "managed", accent: true },
   },
   {
     num: "03",
-    title: "Workers",
-    meta: "cloudflare edge",
-    desc: "Experimental D1/Workers path for edge workloads. Track the adapter as it hardens toward full parity.",
-    tag: { label: "experimental", accent: true },
+    title: "Your infra",
+    meta: "docker · systemd",
+    desc: "Run the same app on a VPS, container platform, or private network when control matters.",
+    tag: { label: "portable", accent: false },
   },
   {
     num: "04",
     title: "AWS ECS + Aurora",
     meta: "terraform apply",
-    desc: "Included Terraform module: ECS services, Aurora Postgres, ALB, secrets. Your VPC, your keys.",
+    desc: "Move into your AWS account with Postgres, load balancing, secrets, and your VPC.",
     tag: { label: "terraform", accent: false },
   },
 ];
@@ -35,13 +35,14 @@ export function Scale() {
       <div className="container-page">
         <div className="section-label">Scales with you</div>
         <h2 className="section-title">
-          Same binary. Same code.
+          Start managed.
           <br />
-          Four deploy targets.
+          Keep the escape hatch.
         </h2>
         <p className="section-sub">
-          Start on a laptop, end on a managed cluster — without rewriting a handler.
-          The storage driver is pluggable; everything above it is identical.
+          Pylon is not a hosting bet. It is one app model that can run locally,
+          on Pylon Cloud, on a VPS, or inside your AWS account without rewriting
+          the handlers that make your product work.
         </p>
 
         <div className="stepper">

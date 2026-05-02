@@ -140,13 +140,13 @@ export function DemoSection() {
       <div className="container-page">
         <div className="section-label">The 30-second demo</div>
         <h2 className="section-title">
-          Schema. Function. Subscribe.
+          Declare the model. Write the logic. Watch the UI update.
           <br />
           Or: simulate, host, play.
         </h2>
         <p className="section-sub">
-          No migrations, no glue code, no separate realtime layer. The same server
-          runs your app queries and your game ticks.
+          Rails-like productivity for modern app shapes: schema, server code,
+          policies, realtime subscriptions, and tick loops all share one project.
         </p>
 
         <div

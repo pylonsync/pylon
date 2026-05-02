@@ -1,6 +1,6 @@
 # Pylon
 
-> Pylon is a realtime backend framework. You define entities, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, row-level security, and a single Rust binary to run anywhere. One system instead of three glued together (database + API + realtime pub/sub).
+> Pylon is a Rails-like framework for realtime apps. You define entities, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, row-level security, jobs, workflows, files, search, and a portable runtime that can run locally, managed, or on your infrastructure.
 
 Pylon is best for apps where two browsers need to see the same thing instantly: dashboards, CRMs, collaborative editors, multiplayer games, chat. Storage is pluggable: SQLite by default, Postgres via `DATABASE_URL`. Schema, policies, functions, and client APIs are identical across both adapters.
 

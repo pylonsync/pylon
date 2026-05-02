@@ -78,10 +78,11 @@ export function Features() {
     <section className="section" id="features">
       <div className="container-page">
         <div className="section-label">What you get</div>
-        <h2 className="section-title">One binary, twelve primitives.</h2>
+        <h2 className="section-title">One framework, twelve primitives.</h2>
         <p className="section-sub">
-          Everything below ships in <code className="mono">pylon</code>. No sidecars.
-          No extra Redis. No separate realtime layer. Use the app side on its own, or layer on the game-shaped bits when you need them.
+          The pieces you usually stitch together ship as one system. Use the app
+          side on its own, or layer on realtime, workflows, search, and
+          game-shaped primitives when the product needs them.
         </p>
 
         <div className="features-grid">

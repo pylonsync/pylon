@@ -36,9 +36,9 @@ const APP_ROWS: AppRow[] = [
   // no FTS at all (docs recommend Algolia).
   { feat: "Native faceted search", pylon: "yes", convex: "no", supabase: "part", firebase: "no" },
   // Convex and Supabase both have self-host paths (docker-compose stacks),
-  // so claiming they don't is both wrong and easily falsifiable. The
-  // honest differentiator is single-process below.
-  { feat: "Self-hosted", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
+  // so the honest differentiator is portable deployment shape rather than
+  // self-hosting as an ideology.
+  { feat: "Portable deploys", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
   { feat: "Single process", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
   { feat: "Authoritative game loop", pylon: "yes", convex: "no", supabase: "no", firebase: "no" },
   { feat: "Open source", pylon: "yes", convex: "yes", supabase: "yes", firebase: "no" },
@@ -64,7 +64,7 @@ const GAME_ROWS: GameRow[] = [
   // Colyseus is "a standard Node.js application" — your code + Node, not
   // a single binary. Nakama is a single Go binary + Postgres dependency.
   // Marking Colyseus "part" to be honest about the deployment shape.
-  { feat: "Self-hosted, one binary", pylon: "yes", colyseus: "part", playroom: "no", nakama: "yes" },
+  { feat: "Portable deploy, one binary", pylon: "yes", colyseus: "part", playroom: "no", nakama: "yes" },
 ];
 
 function Mark({ kind }: { kind: Kind }) {
@@ -139,11 +139,12 @@ export function Compare() {
       <div className="container-page">
         <div className="section-label">Compare</div>
         <h2 className="section-title">
-          The only option that does both well — in one process.
+          Rails-like productivity, without locking the app to one host.
         </h2>
         <p className="section-sub">
-          Pick an app backend <em>or</em> a game server and you&apos;ll stitch the other
-          in. pylon ships with both primitives, sharing auth, storage, and policies.
+          Pick a managed backend and you inherit its boundaries. Pick raw
+          infrastructure and you rebuild the framework. Pylon keeps one product
+          model across app data, realtime UI, workflows, and deployment targets.
         </p>
 
         <div className="compare-grid">

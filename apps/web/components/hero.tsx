@@ -100,7 +100,9 @@ function GithubButton() {
   return (
     <a
       className="inline-flex items-center gap-2 h-9 px-3.5 rounded-md text-[13px] font-medium border border-[color:var(--border-2)] text-[color:var(--text)] hover:bg-[color:var(--bg-2)] hover:border-[#33333a] transition-colors"
-      href="#github"
+      href="https://github.com/pylonsync/pylon"
+      target="_blank"
+      rel="noopener noreferrer"
     >
       <svg
         viewBox="0 0 24 24"
@@ -919,20 +921,20 @@ export function Hero() {
       <div className="hero-grid-bg" />
       <div className="container-page hero-inner">
         <div className="hero-eyebrow">
-          <span className="chip">OSS</span>
-          <span>Self-hosted · SQLite or Postgres · pre-1.0</span>
+          <span className="chip">pre-1.0</span>
+          <span>Integrated framework · realtime by default · deploy anywhere</span>
         </div>
 
         <h1 className="hero-h1">
-          The backend for
+          The modern Rails for
           <br />
-          <em>real-time</em> apps and games.
+          <em>realtime</em> apps.
         </h1>
 
         <p className="hero-sub">
-          Declarative schema, live sync, TypeScript functions, and tick-based game
-          shards — as a single Rust binary. Run it with <code>SQLite</code> or{" "}
-          <code>Postgres</code> on a VPS or AWS.
+          Schema, auth, server functions, live queries, jobs, workflows, files,
+          and search in one framework. Start local or managed, then run the same
+          app on <code>SQLite</code>, <code>Postgres</code>, your VPS, or AWS.
         </p>
 
         <div className="cta-row">

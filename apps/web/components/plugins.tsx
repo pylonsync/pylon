@@ -78,9 +78,11 @@ export function Plugins() {
     <section className="section" id="plugins">
       <div className="container-page">
         <div className="section-label">Batteries included</div>
-        <h2 className="section-title">Plugins included in the binary.</h2>
+        <h2 className="section-title">Batteries that belong in the framework.</h2>
         <p className="section-sub">
-          Every plugin below ships in <code className="mono">pylon</code>. Enable what you need in your manifest, ignore the rest. No npm install, no sidecar container, no "we integrate with X, you bring the X."
+          Enable what you need in your manifest, ignore the rest. Auth, files,
+          search, webhooks, email, AI calls, and ops features live in the same
+          framework instead of another set of services to glue together.
         </p>
 
         <div className="plugin-grid">

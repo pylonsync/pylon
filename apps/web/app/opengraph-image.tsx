@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 
 export const runtime = "edge";
-export const alt = "Pylon — The realtime backend framework";
+export const alt = "Pylon — The modern Rails for realtime apps";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -104,11 +104,11 @@ export default async function OpengraphImage() {
               flexDirection: "column",
             }}
           >
-            <span>The realtime</span>
+            <span>The modern Rails</span>
             <span>
-              backend{" "}
+              for{" "}
               <span style={{ color: "#A78BFA", fontStyle: "italic" }}>
-                framework
+                realtime apps
               </span>
               .
             </span>
@@ -124,7 +124,7 @@ export default async function OpengraphImage() {
               display: "flex",
             }}
           >
-            Schema, policies, functions, live queries, auth — one binary.
+            Schema, auth, functions, live queries, jobs, workflows, files, and search.
           </div>
         </div>
 

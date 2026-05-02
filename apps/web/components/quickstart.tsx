@@ -77,8 +77,8 @@ export function Quickstart() {
         <div className="section-label">Quickstart</div>
         <h2 className="section-title">Four commands to a running backend.</h2>
         <p className="section-sub">
-          No account, no API keys, no waitlist. One curl, one binary, one
-          dev server.
+          Start with a local app in minutes. Move to managed or self-hosted
+          deployment later, without changing the programming model.
         </p>
 
         <div className="quickstart">

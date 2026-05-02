@@ -44,8 +44,9 @@ export function Footer() {
                 margin: 0,
               }}
             >
-              One Rust binary for real-time apps and games. Self-hostable. Open
-              source. No managed tier, no lock-in.
+              A Rails-like framework for realtime apps. Start managed, stay
+              portable, and run the same app on your infrastructure when you
+              need the control.
             </p>
           </div>
           <div>
