@@ -131,8 +131,7 @@ pub fn load_config(config_path: &Path) -> Result<StudioConfig, Diagnostic> {
             column: None,
         }),
         hint: Some(
-            "Make sure your file `export default defineStudioConfig({...})` from @pylon/sdk"
-                .into(),
+            "Make sure your file `export default defineStudioConfig({...})` from @pylon/sdk".into(),
         ),
     })
 }
@@ -208,10 +207,7 @@ pub fn bundle_entry(entry_path: &Path, out_file: &Path) -> Result<(), Diagnostic
 ///
 /// On error, leaves any pre-existing artefacts untouched so the running
 /// dev server keeps the last good config.
-pub fn build_artefacts(
-    entry_file: &str,
-    data_dir: &Path,
-) -> Result<StudioConfig, Vec<Diagnostic>> {
+pub fn build_artefacts(entry_file: &str, data_dir: &Path) -> Result<StudioConfig, Vec<Diagnostic>> {
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut config = StudioConfig::default();
 

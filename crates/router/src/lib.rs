@@ -1096,10 +1096,7 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
     // legacy `{data, count, offset, limit}` shape so existing clients
     // keep working unchanged.
     let limit: Option<usize> = qp.get("limit").and_then(|v| v.parse().ok());
-    let offset: usize = qp
-        .get("offset")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let offset: usize = qp.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
     let page: Option<usize> = qp.get("page").and_then(|v| v.parse().ok());
     let per_page: Option<usize> = qp.get("per_page").and_then(|v| v.parse().ok());
     let paginated = page.is_some() || per_page.is_some();
@@ -1116,10 +1113,7 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
     let mut filter = serde_json::Map::new();
     for (k, v) in &qp {
         // filter[<field>]=<value>
-        if let Some(field) = k
-            .strip_prefix("filter[")
-            .and_then(|s| s.strip_suffix(']'))
-        {
+        if let Some(field) = k.strip_prefix("filter[").and_then(|s| s.strip_suffix(']')) {
             // Try numeric / bool coercion so `filter[active]=true` matches
             // a stored boolean. Fall back to string equality otherwise.
             let parsed = parse_query_value(v);

@@ -102,9 +102,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // Build studio artefacts (config JSON + extension bundle if present).
     // Failures are non-fatal — the runtime falls back to defaults so a
     // bad studio.config.ts can't take down a production server.
-    let entry_dir = Path::new(&entry_file)
-        .parent()
-        .unwrap_or(Path::new("."));
+    let entry_dir = Path::new(&entry_file).parent().unwrap_or(Path::new("."));
     let studio_data_dir = entry_dir.join(".pylon");
     if studio_config::locate_config(&entry_file).is_some()
         || studio_config::locate_entry(&entry_file).is_some()

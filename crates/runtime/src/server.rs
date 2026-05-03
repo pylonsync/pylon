@@ -2021,8 +2021,7 @@ fn start_server(
                 .unwrap_or_else(|| "http".to_string());
             let base = format!("{scheme}://{host}");
             let studio_cfg = rt.studio_config();
-            let html =
-                pylon_studio_api::generate_studio_html(rt.manifest(), &studio_cfg, &base);
+            let html = pylon_studio_api::generate_studio_html(rt.manifest(), &studio_cfg, &base);
             (
                 200u16,
                 html,

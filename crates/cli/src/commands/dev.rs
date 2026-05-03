@@ -636,10 +636,7 @@ fn write_generated_files(
 /// missing or invalid.
 fn build_studio_artefacts(entry_file: &str, json_mode: bool) {
     let entry_path = Path::new(entry_file);
-    let data_dir = entry_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(".pylon");
+    let data_dir = entry_path.parent().unwrap_or(Path::new(".")).join(".pylon");
 
     // Skip when neither file exists. The runtime treats a missing
     // config the same as an empty one, so writing a default JSON

@@ -664,11 +664,7 @@ impl Runtime {
     /// parse — the Studio web shell falls back to sensible defaults
     /// in that case rather than rendering a blank screen.
     pub fn studio_config(&self) -> StudioConfig {
-        let path = self
-            .studio_config_path
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let path = self.studio_config_path.read().ok().and_then(|g| g.clone());
         match path {
             Some(p) => match std::fs::read_to_string(&p) {
                 Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
@@ -681,11 +677,7 @@ impl Runtime {
     /// Read the bundled extensions JS, or `None` if not configured /
     /// missing on disk.
     pub fn studio_entry_bytes(&self) -> Option<Vec<u8>> {
-        let path = self
-            .studio_entry_path
-            .read()
-            .ok()
-            .and_then(|g| g.clone())?;
+        let path = self.studio_entry_path.read().ok().and_then(|g| g.clone())?;
         std::fs::read(&path).ok()
     }
 

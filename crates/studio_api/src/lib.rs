@@ -181,11 +181,7 @@ mod tests {
         // backslash-escaped (or Unicode-escaped) in the output so it
         // can't close the string early.
         let m = test_manifest();
-        let html = generate_studio_html(
-            &m,
-            &empty_config(),
-            "http://example.com\"; alert(1); //",
-        );
+        let html = generate_studio_html(&m, &empty_config(), "http://example.com\"; alert(1); //");
         let needle = "window.__PYLON_API__ = \"";
         let start = html.find(needle).expect("no PYLON_API assignment");
         let rest = &html[start + needle.len()..];
@@ -313,7 +309,9 @@ mod tests {
         // Pull the studio config block out and confirm any literal
         // </script needles are backslash-escaped.
         let needle = "window.__PYLON_STUDIO_CONFIG__ = ";
-        let start = html.find(needle).expect("no PYLON_STUDIO_CONFIG assignment");
+        let start = html
+            .find(needle)
+            .expect("no PYLON_STUDIO_CONFIG assignment");
         let after = &html[start..];
         let end = after.find("</script").unwrap_or(after.len());
         let literal = &after[..end];
