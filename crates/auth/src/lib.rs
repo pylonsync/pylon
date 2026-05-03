@@ -608,6 +608,92 @@ impl OAuthConfig {
         Ok(self.exchange_code_full(code)?.access_token)
     }
 
+    /// Exchange a refresh token for a fresh access (and possibly refresh)
+    /// token. Wave 8 — implements `grant_type=refresh_token` per RFC
+    /// 6749 §6, mirroring the four token-exchange shapes supported by
+    /// `exchange_code_full_pkce`.
+    ///
+    /// Many providers (Google, Auth0, Okta) ROTATE the refresh token on
+    /// each successful refresh and invalidate the old one — callers MUST
+    /// upsert the returned `TokenSet` into the account store immediately
+    /// or the next refresh will fail. The framework's
+    /// [`AccountStore::ensure_fresh_access_token`] helper handles this
+    /// atomically; downstream code should prefer it over calling this
+    /// raw method directly.
+    pub fn exchange_refresh_token(&self, refresh_token: &str) -> Result<TokenSet, String> {
+        let spec = self.resolved_spec()?;
+        let cfg = self.provider_cfg();
+        let token_url = provider::resolve_endpoint(spec.token_url(), &cfg);
+
+        let out = match spec.token_exchange() {
+            provider::TokenExchangeShape::Standard => {
+                let body = format!(
+                    "refresh_token={rt}&{cid_param}={cid}&client_secret={secret}&grant_type=refresh_token",
+                    rt = url_encode(refresh_token),
+                    cid_param = spec.client_id_param(),
+                    cid = url_encode(&self.client_id),
+                    secret = url_encode(&self.client_secret),
+                );
+                http_post_form(&token_url, &body, true).map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::AppleJwt => {
+                // Apple's refresh flow signs a fresh client_secret JWT
+                // every time — same as the initial exchange.
+                let apple = self.apple.as_ref().ok_or(
+                    "apple provider requires `apple` config (team_id, key_id, private_key_pem)",
+                )?;
+                let signed_secret = apple_jwt::mint_client_secret(apple, &self.client_id)?;
+                let body = format!(
+                    "refresh_token={rt}&client_id={cid}&client_secret={secret}&grant_type=refresh_token",
+                    rt = url_encode(refresh_token),
+                    cid = url_encode(&self.client_id),
+                    secret = url_encode(&signed_secret),
+                );
+                http_post_form(&token_url, &body, true).map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::BasicAuth => {
+                let body = format!(
+                    "refresh_token={rt}&grant_type=refresh_token",
+                    rt = url_encode(refresh_token),
+                );
+                http_post_form_basic(&token_url, &body, &self.client_id, &self.client_secret)
+                    .map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::JsonBody => {
+                let mut json = serde_json::Map::new();
+                json.insert("grant_type".into(), "refresh_token".into());
+                json.insert("refresh_token".into(), refresh_token.into());
+                json.insert("client_id".into(), self.client_id.clone().into());
+                json.insert("client_secret".into(), self.client_secret.clone().into());
+                let body = serde_json::Value::Object(json).to_string();
+                http_post_json(&token_url, &body, None).map_err(sanitize_token_error)?
+            }
+            provider::TokenExchangeShape::BasicAuthJsonBody => {
+                let mut json = serde_json::Map::new();
+                json.insert("grant_type".into(), "refresh_token".into());
+                json.insert("refresh_token".into(), refresh_token.into());
+                let body = serde_json::Value::Object(json).to_string();
+                http_post_json(
+                    &token_url,
+                    &body,
+                    Some((&self.client_id, &self.client_secret)),
+                )
+                .map_err(sanitize_token_error)?
+            }
+        };
+        let mut tokens = parse_token_response(&out)?;
+        // Token-rotation gotcha: providers that DO NOT rotate (Microsoft,
+        // some OIDC servers) omit `refresh_token` from the response. Per
+        // RFC 6749 §6 the prior refresh remains valid in that case;
+        // copy it forward so the caller doesn't store None and lose the
+        // ability to refresh again. Providers that DO rotate (Google,
+        // Auth0) include the new value which overrides this default.
+        if tokens.refresh_token.is_none() {
+            tokens.refresh_token = Some(refresh_token.to_string());
+        }
+        Ok(tokens)
+    }
+
     /// Fetch the authenticated user's email + display name using an access token.
     pub fn fetch_userinfo(&self, access_token: &str) -> Result<(String, Option<String>), String> {
         let info = self.fetch_userinfo_full(access_token)?;
@@ -2271,6 +2357,20 @@ impl Account {
         }
     }
 
+    /// True if the access token will expire within `buffer_secs`. Used
+    /// by the auto-refresh path so apps don't pull a token that's about
+    /// to expire mid-flight. Non-expiring tokens (GitHub Classic) always
+    /// return false — refresh-on-401 is the right pattern there.
+    ///
+    /// `buffer_secs` is typically 60–300 (1–5 min). The upstream
+    /// recommendation is to refresh ~5 minutes before expiry.
+    pub fn needs_refresh(&self, buffer_secs: u64) -> bool {
+        match self.access_token_expires_at {
+            Some(ts) => now_secs().saturating_add(buffer_secs) >= ts,
+            None => false,
+        }
+    }
+
     /// True if `access_token_expires_at` is set and has passed.
     /// Non-expiring tokens (GitHub Classic) report `false` — caller
     /// should treat them as "valid until proven otherwise" and refresh
@@ -2429,6 +2529,100 @@ impl AccountStore {
     /// can grow if we ever need this at scale.
     pub fn list_all_unfiltered(&self) -> Vec<Account> {
         self.backend.list_all()
+    }
+
+    /// Wave-8 — auto-refresh helper. Looks up the account by
+    /// `(provider_id, account_id)`, returns the existing access token if
+    /// it has more than `buffer_secs` of life left, otherwise calls the
+    /// provider's `grant_type=refresh_token` endpoint, upserts the new
+    /// bundle, and returns the refreshed account.
+    ///
+    /// Errors:
+    /// - `ACCOUNT_NOT_FOUND` — no row for that provider/account pair.
+    /// - `NO_REFRESH_TOKEN` — row exists but never stored a refresh
+    ///   token (provider didn't issue one, or operator scrubbed it).
+    /// - `REFRESH_FAILED` — provider rejected the refresh (revoked,
+    ///   expired). Caller should re-prompt the user to OAuth again.
+    /// - `PROVIDER_NOT_CONFIGURED` — `OAuthRegistry` has no entry for
+    ///   `provider_id` in this process. Operator misconfig.
+    ///
+    /// Atomic upsert: the new bundle is persisted BEFORE the function
+    /// returns, so a caller crashing right after won't have a stale row
+    /// in the store. The OAuth-refresh-twice race (two callers refresh
+    /// concurrently, one wins) is mitigated by the provider — most
+    /// providers either accept both refreshes or reject the second
+    /// with INVALID_GRANT. Pylon doesn't add its own lock since the
+    /// per-user refresh rate is naturally low (once per ~hour).
+    pub fn ensure_fresh_access_token(
+        &self,
+        provider_id: &str,
+        account_id: &str,
+        buffer_secs: u64,
+    ) -> Result<Account, RefreshError> {
+        let account = self
+            .find_by_provider(provider_id, account_id)
+            .ok_or(RefreshError::AccountNotFound)?;
+        if !account.needs_refresh(buffer_secs) {
+            return Ok(account);
+        }
+        let refresh = account
+            .refresh_token
+            .as_deref()
+            .ok_or(RefreshError::NoRefreshToken)?;
+        let registry = OAuthRegistry::shared();
+        let cfg = registry
+            .get(provider_id)
+            .cloned()
+            .ok_or(RefreshError::ProviderNotConfigured)?;
+        let new_tokens = cfg
+            .exchange_refresh_token(refresh)
+            .map_err(|e| RefreshError::RefreshFailed(e))?;
+        // Preserve created_at + user_id; rotate the token bundle.
+        let mut updated = account.clone();
+        updated.access_token = Some(new_tokens.access_token.clone());
+        if let Some(rt) = new_tokens.refresh_token {
+            updated.refresh_token = Some(rt);
+        }
+        if new_tokens.id_token.is_some() {
+            updated.id_token = new_tokens.id_token;
+        }
+        updated.access_token_expires_at = new_tokens.expires_at;
+        if let Some(scope) = new_tokens.scope {
+            updated.scope = Some(scope);
+        }
+        updated.updated_at = now_secs();
+        self.upsert(&updated);
+        Ok(updated)
+    }
+}
+
+/// Reasons [`AccountStore::ensure_fresh_access_token`] can fail. Codes
+/// match the wire codes used by `/api/auth/oauth/refresh/<provider>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshError {
+    AccountNotFound,
+    NoRefreshToken,
+    RefreshFailed(String),
+    ProviderNotConfigured,
+}
+
+impl RefreshError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AccountNotFound => "ACCOUNT_NOT_FOUND",
+            Self::NoRefreshToken => "NO_REFRESH_TOKEN",
+            Self::RefreshFailed(_) => "REFRESH_FAILED",
+            Self::ProviderNotConfigured => "PROVIDER_NOT_CONFIGURED",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::AccountNotFound => "no linked account for that provider".into(),
+            Self::NoRefreshToken => "account has no stored refresh token".into(),
+            Self::RefreshFailed(e) => format!("refresh failed: {e}"),
+            Self::ProviderNotConfigured => "OAuth provider not configured on this server".into(),
+        }
     }
 }
 
@@ -3222,5 +3416,108 @@ mod tests {
             validate_trusted_redirect("", &trusted),
             Err(TrustedOriginError::Empty)
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Wave-8: OAuth refresh-token helpers
+    // -----------------------------------------------------------------
+
+    fn fresh_account_with_expiry(expires_in_secs: i64) -> Account {
+        let now = now_secs();
+        let expires_at = if expires_in_secs >= 0 {
+            Some(now.saturating_add(expires_in_secs as u64))
+        } else {
+            Some(now.saturating_sub((-expires_in_secs) as u64))
+        };
+        Account {
+            id: "acc-1".into(),
+            user_id: "user-1".into(),
+            provider_id: "google".into(),
+            account_id: "google-sub-123".into(),
+            access_token: Some("at_old".into()),
+            refresh_token: Some("rt_old".into()),
+            id_token: None,
+            access_token_expires_at: expires_at,
+            refresh_token_expires_at: None,
+            scope: Some("openid email".into()),
+            password: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn needs_refresh_true_when_within_buffer() {
+        let acc = fresh_account_with_expiry(30); // expires in 30s
+        assert!(acc.needs_refresh(60));
+    }
+
+    #[test]
+    fn needs_refresh_false_when_well_outside_buffer() {
+        let acc = fresh_account_with_expiry(3600); // 1h to live
+        assert!(!acc.needs_refresh(60));
+    }
+
+    #[test]
+    fn needs_refresh_true_when_already_expired() {
+        let acc = fresh_account_with_expiry(-30);
+        assert!(acc.needs_refresh(60));
+    }
+
+    #[test]
+    fn needs_refresh_false_when_no_expiry_set() {
+        // GitHub-Classic-style non-expiring tokens. Refresh-on-401 is
+        // the right pattern there; we shouldn't proactively refresh.
+        let mut acc = fresh_account_with_expiry(0);
+        acc.access_token_expires_at = None;
+        assert!(!acc.needs_refresh(60));
+    }
+
+    #[test]
+    fn ensure_fresh_returns_existing_when_not_due() {
+        let store = AccountStore::new();
+        let acc = fresh_account_with_expiry(3600);
+        store.upsert(&acc);
+        let got = store
+            .ensure_fresh_access_token(&acc.provider_id, &acc.account_id, 60)
+            .expect("non-expired account should not trigger refresh");
+        // Same access token — no provider call was made.
+        assert_eq!(got.access_token.as_deref(), Some("at_old"));
+        assert_eq!(got.updated_at, acc.updated_at);
+    }
+
+    #[test]
+    fn ensure_fresh_errors_when_no_account() {
+        let store = AccountStore::new();
+        let err = store
+            .ensure_fresh_access_token("google", "ghost", 60)
+            .unwrap_err();
+        assert_eq!(err.code(), "ACCOUNT_NOT_FOUND");
+    }
+
+    #[test]
+    fn ensure_fresh_errors_when_no_refresh_token_stored() {
+        let store = AccountStore::new();
+        let mut acc = fresh_account_with_expiry(10);
+        acc.refresh_token = None;
+        store.upsert(&acc);
+        let err = store
+            .ensure_fresh_access_token(&acc.provider_id, &acc.account_id, 60)
+            .unwrap_err();
+        assert_eq!(err.code(), "NO_REFRESH_TOKEN");
+    }
+
+    #[test]
+    fn refresh_error_codes_map_to_documented_strings() {
+        assert_eq!(RefreshError::AccountNotFound.code(), "ACCOUNT_NOT_FOUND");
+        assert_eq!(RefreshError::NoRefreshToken.code(), "NO_REFRESH_TOKEN");
+        assert_eq!(
+            RefreshError::ProviderNotConfigured.code(),
+            "PROVIDER_NOT_CONFIGURED"
+        );
+        assert_eq!(
+            RefreshError::RefreshFailed("boom".into()).code(),
+            "REFRESH_FAILED"
+        );
     }
 }

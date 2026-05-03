@@ -1393,6 +1393,89 @@ pub(crate) fn handle(
         }
     }
 
+    // POST /api/auth/oauth/refresh/<provider>
+    //
+    // Wave 8 — surface the AccountStore::ensure_fresh_access_token
+    // helper so apps can guarantee a non-stale OAuth access token
+    // before calling the provider's API. Common pattern:
+    //
+    //   const { access_token } = await pylon.fetch(
+    //     "/api/auth/oauth/refresh/google", { method: "POST" });
+    //   await fetch("https://gmail.googleapis.com/...",
+    //     { headers: { Authorization: `Bearer ${access_token}` }});
+    //
+    // The endpoint is an idempotent no-op when the cached token still
+    // has > 60s of life — won't burn provider rate-limit budget on
+    // every request.
+    if let Some(provider_raw) = url.strip_prefix("/api/auth/oauth/refresh/") {
+        if method == HttpMethod::Post {
+            let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
+            if provider.is_empty() {
+                return Some((
+                    400,
+                    json_error("MISSING_PROVIDER", "provider name is required"),
+                ));
+            }
+            let user_id = match ctx.auth_ctx.user_id.as_deref() {
+                Some(u) => u.to_string(),
+                None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+            };
+            // The user can have at most one account row per provider
+            // (it's the natural key on AccountBackend), so finding by
+            // user_id + provider is unambiguous. find_for_user filters
+            // client-side; for at most a handful of accounts per user
+            // that's fine.
+            let account = ctx
+                .account_store
+                .find_for_user(&user_id)
+                .into_iter()
+                .find(|a| a.provider_id == provider);
+            let account = match account {
+                Some(a) => a,
+                None => {
+                    return Some((
+                        404,
+                        json_error("ACCOUNT_NOT_FOUND", "no linked account for that provider"),
+                    ));
+                }
+            };
+            // 60-second buffer: refresh if the access token expires in
+            // <= 60s. Tunable via PYLON_OAUTH_REFRESH_BUFFER_SECS env if
+            // an app needs longer (e.g. provider has slow propagation).
+            let buffer = std::env::var("PYLON_OAUTH_REFRESH_BUFFER_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60);
+            match ctx.account_store.ensure_fresh_access_token(
+                &account.provider_id,
+                &account.account_id,
+                buffer,
+            ) {
+                Ok(refreshed) => {
+                    return Some((
+                        200,
+                        serde_json::json!({
+                            "access_token": refreshed.access_token,
+                            "expires_at": refreshed.access_token_expires_at,
+                            "scope": refreshed.scope,
+                            "provider": refreshed.provider_id,
+                        })
+                        .to_string(),
+                    ));
+                }
+                Err(err) => {
+                    let status = match err {
+                        pylon_auth::RefreshError::AccountNotFound => 404,
+                        pylon_auth::RefreshError::NoRefreshToken => 400,
+                        pylon_auth::RefreshError::ProviderNotConfigured => 501,
+                        pylon_auth::RefreshError::RefreshFailed(_) => 502,
+                    };
+                    return Some((status, json_error(err.code(), &err.message())));
+                }
+            }
+        }
+    }
+
     // GET /api/auth/sessions
     if url == "/api/auth/sessions" && method == HttpMethod::Get {
         let user_id = match ctx.auth_ctx.user_id.as_deref() {
