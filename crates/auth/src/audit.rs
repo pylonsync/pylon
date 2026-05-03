@@ -98,6 +98,13 @@ pub enum AuditAction {
     OrgMemberRemove,
     OrgRoleChange,
     AccountDelete,
+    /// Anonymous (guest) session merged into a real user — fired when
+    /// magic-code verify or OAuth callback observes a guest cookie and
+    /// transfers ownership of the guest's data to the authenticated
+    /// user. `metadata.from_user_id` is the guest id; `metadata.entities`
+    /// is a comma-separated list of `<entity>.<field>:<rows>` pairs so
+    /// an operator can audit "did the cart actually move?" without SQL.
+    AnonymousMerge,
     /// Apps that need a custom event use this with their own string.
     /// Stored verbatim — pylon doesn't validate the content.
     Custom(String),
@@ -129,6 +136,7 @@ impl AuditAction {
             Self::OrgMemberRemove => "org_member_remove",
             Self::OrgRoleChange => "org_role_change",
             Self::AccountDelete => "account_delete",
+            Self::AnonymousMerge => "anonymous_merge",
             Self::Custom(s) => s,
         }
     }

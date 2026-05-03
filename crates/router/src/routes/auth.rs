@@ -53,6 +53,70 @@ fn create_session_with_device(ctx: &RouterContext, user_id: String) -> pylon_aut
     ctx.session_store.create_with_device(user_id, device)
 }
 
+/// If the request arrived under a guest session whose user_id differs
+/// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
+/// row from the guest to the authenticated user and revoke the guest
+/// session. Returns `(from_user_id, summary)` when a merge ran, `None`
+/// otherwise (no guest cookie, same id, or no rows to move).
+///
+/// Side effects beyond the row updates:
+/// - Revokes the guest session token so a leaked guest cookie can't
+///   later impersonate the (now empty) guest user_id.
+/// - Does NOT delete the guest user row. Apps may have FK constraints
+///   that prevent deletion, and an orphan guest row with zero
+///   referencing entities is harmless. A future GC sweep can clean up.
+/// Wave-7 D — wraps the SignIn audit + anonymous merge + AnonymousMerge
+/// audit into one call so every successful auth path (magic-code, OAuth,
+/// password, passkey, …) gets identical bookkeeping. The OAuth callbacks
+/// each invoke this exactly once, in the Ok arm.
+fn audit_oauth_login(ctx: &RouterContext, user_id: &str, provider: &str) {
+    let merge_summary = maybe_merge_anonymous(ctx, user_id);
+    ctx.audit.log(
+        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+            .user(user_id.to_string())
+            .actor(user_id.to_string())
+            .meta("method", format!("oauth:{provider}"))
+            .build(),
+    );
+    if let Some((from, summary)) = merge_summary {
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::AnonymousMerge)
+                .user(user_id.to_string())
+                .actor(user_id.to_string())
+                .meta("from_user_id", from)
+                .meta("rows_updated", summary.rows_updated.to_string())
+                .meta("entities", summary.entities_csv())
+                .build(),
+        );
+    }
+}
+
+fn maybe_merge_anonymous(
+    ctx: &RouterContext,
+    to_user_id: &str,
+) -> Option<(String, crate::merge::MergeResult)> {
+    if !ctx.auth_ctx.is_guest {
+        return None;
+    }
+    let from_user_id = ctx.auth_ctx.user_id.as_deref()?.to_string();
+    if from_user_id == to_user_id {
+        return None;
+    }
+    let user_entity = ctx.store.manifest().auth.user.entity.clone();
+    let summary = crate::merge::transfer_user_ownership(
+        ctx.store,
+        ctx.store.manifest(),
+        &from_user_id,
+        to_user_id,
+        &user_entity,
+    );
+    // Revoke the guest session regardless of whether rows moved — the
+    // guest cookie is no longer needed and leaving it valid is a small
+    // session-fixation surface.
+    ctx.session_store.revoke_all_for_user(&from_user_id);
+    Some((from_user_id, summary))
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -460,6 +524,32 @@ pub(crate) fn handle(
                     };
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
+                // Wave-7 D: anonymous → authenticated merge. If the request
+                // arrived carrying a guest session cookie, transfer ownership
+                // of any rows referencing that guest user_id over to the
+                // newly-authenticated user. Cart-survives-login is the
+                // canonical case. Guarded so a self-merge (already signed
+                // in as the same user, refreshing the magic code) is a
+                // no-op.
+                let merge_summary = maybe_merge_anonymous(ctx, &user_id);
+                ctx.audit.log(
+                    audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+                        .user(user_id.clone())
+                        .actor(user_id.clone())
+                        .meta("method", "magic_code")
+                        .build(),
+                );
+                if let Some((from, summary)) = merge_summary {
+                    ctx.audit.log(
+                        audit(ctx, pylon_auth::audit::AuditAction::AnonymousMerge)
+                            .user(user_id.clone())
+                            .actor(user_id.clone())
+                            .meta("from_user_id", from)
+                            .meta("rows_updated", summary.rows_updated.to_string())
+                            .meta("entities", summary.entities_csv())
+                            .build(),
+                    );
+                }
                 return Some((
                     200,
                     serde_json::json!({"token": session.token, "user_id": user_id, "expires_at": session.expires_at}).to_string(),
@@ -1090,7 +1180,8 @@ pub(crate) fn handle(
             // cookie set, just like the GET browser callback path.
             if is_browser {
                 return Some(match result {
-                    Ok((_user_id, session)) => {
+                    Ok((user_id, session)) => {
+                        audit_oauth_login(ctx, &user_id, provider);
                         let cookie_value = ctx.cookie_config.set_value(&session.token);
                         ctx.add_response_header("Set-Cookie", cookie_value);
                         ctx.add_response_header("Location", state_record.callback_url);
@@ -1123,6 +1214,7 @@ pub(crate) fn handle(
 
             return Some(match result {
                 Ok((user_id, session)) => {
+                    audit_oauth_login(ctx, &user_id, provider);
                     ctx.maybe_set_session_cookie(&session.token);
                     (
                         200,
@@ -1180,7 +1272,8 @@ pub(crate) fn handle(
                 None,
                 None,
             ) {
-                Ok((_user_id, session)) => {
+                Ok((user_id, session)) => {
+                    audit_oauth_login(ctx, &user_id, provider);
                     let cookie_value = ctx.cookie_config.set_value(&session.token);
                     ctx.add_response_header("Set-Cookie", cookie_value);
                     ctx.add_response_header("Location", state_record.callback_url);

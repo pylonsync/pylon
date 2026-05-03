@@ -11,6 +11,7 @@ use pylon_policy::PolicyEngine;
 use pylon_sync::{ChangeKind, ChangeLog};
 use std::cell::RefCell;
 
+pub mod merge;
 mod routes;
 
 // ---------------------------------------------------------------------------
