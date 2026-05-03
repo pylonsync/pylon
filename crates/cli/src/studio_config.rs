@@ -65,15 +65,19 @@ pub fn load_config(config_path: &Path) -> Result<StudioConfig, Diagnostic> {
         }
     };
 
-    // Bun can `import()` a `.ts` file directly. The shim is a one-liner:
-    // dynamic-import the file by URL, then write its default export to
-    // stdout as JSON. We pass it via `--print` so there's no temp file
-    // to clean up. The `file://` URL avoids any cwd-relative resolution
+    // Bun can `import()` a `.ts` file directly. The shim is a one-liner
+    // whose *value* is the JSON string we want — `--print` then writes
+    // exactly that to stdout (trailing newline stripped on the Rust
+    // side). The `file://` URL avoids any cwd-relative resolution
     // surprises across editors / CIs.
+    //
+    // Don't use `process.stdout.write` inside `--print`: bun will write
+    // the returned value of the whole expression *in addition* to
+    // anything you wrote yourself, doubling the output and breaking the
+    // JSON parse on the Rust side.
     let url = format!("file://{}", abs.display());
     let shim = format!(
-        "(await import({json_url})).default && \
-         process.stdout.write(JSON.stringify((await import({json_url})).default ?? {{}}))",
+        "JSON.stringify((await import({json_url})).default ?? {{}})",
         json_url = serde_json::to_string(&url).unwrap()
     );
 
