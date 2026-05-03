@@ -1924,9 +1924,157 @@ pub(crate) fn handle(
                 Err(e) => return Some((400, json_error(&e.code, &e.message))),
             }
         }
+        // Wave-7 E. Optional `trust_device: true` body field: mint a
+        // trusted-device record bound to this user + set the
+        // `pylon_trusted_device` cookie. Apps that gate sensitive flows
+        // on TOTP can then skip the prompt for 30 days from this
+        // browser by checking `ctx.auth.isTrustedDevice`. Skipped
+        // silently when false/absent — opt-in.
+        let trust_requested = data
+            .get("trust_device")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut trust_minted: Option<String> = None;
+        if trust_requested {
+            let label = request_user_agent(ctx).map(pylon_auth::device::parse_user_agent);
+            let device = pylon_auth::trusted_device::TrustedDevice::mint(
+                user_id.clone(),
+                label,
+                pylon_auth::trusted_device::DEFAULT_TRUST_LIFETIME_SECS,
+            );
+            trust_minted = Some(device.token.clone());
+            ctx.trusted_devices.create(device);
+            // Cookie shape mirrors the session cookie (HttpOnly, Secure
+            // when applicable, SameSite=Lax). Built from the existing
+            // CookieConfig knobs so secure/SameSite/path stay in lockstep
+            // with sessions — operators don't have to configure two
+            // sets of cookie attributes.
+            if let Some(token) = &trust_minted {
+                let cookie_value = ctx.cookie_config.set_value_for(
+                    pylon_auth::trusted_device::TRUST_COOKIE_NAME,
+                    token,
+                    Some(pylon_auth::trusted_device::DEFAULT_TRUST_LIFETIME_SECS),
+                );
+                ctx.add_response_header("Set-Cookie", cookie_value);
+            }
+        }
         return Some((
             200,
-            serde_json::json!({"verified": true, "enrolled": !was_verified}).to_string(),
+            serde_json::json!({
+                "verified": true,
+                "enrolled": !was_verified,
+                "trust_device": trust_minted.is_some(),
+            })
+            .to_string(),
+        ));
+    }
+
+    // GET /api/auth/trusted-devices — list current user's trusted
+    // browsers. Each entry has the random token (used for revoke), the
+    // device label (parsed UA), created_at + expires_at. Useful for an
+    // "active devices" account-settings page.
+    if url == "/api/auth/trusted-devices" && method == HttpMethod::Get {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+            ));
+        }
+        let devices = ctx.trusted_devices.list_for_user(&user_id);
+        return Some((
+            200,
+            serde_json::json!({
+                // Notably absent: `token`. The cookie value MUST stay
+                // server-side. Returning it would let dashboard XSS
+                // exfiltrate trust tokens equivalent to stealing the
+                // cookie itself. `id` is the management handle.
+                "devices": devices
+                    .into_iter()
+                    .map(|d| serde_json::json!({
+                        "id": d.id,
+                        "label": d.label,
+                        "created_at": d.created_at,
+                        "expires_at": d.expires_at,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+            .to_string(),
+        ));
+    }
+
+    // DELETE /api/auth/trusted-devices — revoke ALL of the current
+    // user's trusted devices. The "log everything else out of TOTP" big
+    // red button.
+    if url == "/api/auth/trusted-devices" && method == HttpMethod::Delete {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+            ));
+        }
+        let removed = ctx.trusted_devices.revoke_all_for_user(&user_id);
+        // Clear the trust cookie on the current request so the browser
+        // doesn't keep presenting a now-revoked token.
+        ctx.add_response_header(
+            "Set-Cookie",
+            ctx.cookie_config
+                .clear_value_for(pylon_auth::trusted_device::TRUST_COOKIE_NAME),
+        );
+        return Some((
+            200,
+            serde_json::json!({"revoked": removed}).to_string(),
+        ));
+    }
+
+    // DELETE /api/auth/trusted-devices/<id> — revoke a single trusted-
+    // device record. The id is the public-facing handle returned by
+    // GET /api/auth/trusted-devices; the secret token (the cookie value)
+    // is never exposed to the client. Only succeeds when the record's
+    // user_id matches the caller — preventing one user from revoking
+    // another's trust by guessing ids.
+    if url.starts_with("/api/auth/trusted-devices/") && method == HttpMethod::Delete {
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+        };
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+            ));
+        }
+        let id = &url["/api/auth/trusted-devices/".len()..];
+        if id.is_empty() {
+            return Some((400, json_error("MISSING_ID", "trust device id is required")));
+        }
+        // Object-level auth: only the owner can revoke. Look up first
+        // so cross-user revoke attempts return 404 identical to "doesn't
+        // exist" — defense against id enumeration via response timing
+        // (both paths run find_by_id then short-circuit at the same
+        // point).
+        let owned = ctx
+            .trusted_devices
+            .find_by_id(id)
+            .map(|d| d.user_id == user_id)
+            .unwrap_or(false);
+        if !owned {
+            return Some((
+                404,
+                json_error("NOT_FOUND", "trusted device not found"),
+            ));
+        }
+        let removed = ctx.trusted_devices.revoke_by_id(id);
+        return Some((
+            200,
+            serde_json::json!({"revoked": removed}).to_string(),
         ));
     }
 
@@ -3825,6 +3973,11 @@ pub(crate) fn handle(
         // docs call this out so apps register a `before-delete-user`
         // hook to purge their tables.
         let revoked_accounts = ctx.account_store.delete_for_user(&user_id);
+        // Trusted-device records — same rationale as sessions/api keys.
+        // Without this, deleting an account leaves orphan trust cookies
+        // that would happen to match no user (find returns None) but
+        // still pollute the table.
+        let revoked_trust = ctx.trusted_devices.revoke_all_for_user(&user_id);
         // Delete the user row.
         match ctx
             .store
@@ -3841,6 +3994,7 @@ pub(crate) fn handle(
                 .meta("revoked_sessions", revoked_sessions.to_string())
                 .meta("revoked_api_keys", revoked_keys.to_string())
                 .meta("unlinked_accounts", revoked_accounts.to_string())
+                .meta("revoked_trusted_devices", revoked_trust.to_string())
                 .build(),
         );
         return Some((

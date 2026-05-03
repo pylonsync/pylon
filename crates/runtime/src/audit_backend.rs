@@ -183,6 +183,7 @@ fn parse_action(s: &str) -> AuditAction {
         "org_member_remove" => AuditAction::OrgMemberRemove,
         "org_role_change" => AuditAction::OrgRoleChange,
         "account_delete" => AuditAction::AccountDelete,
+        "anonymous_merge" => AuditAction::AnonymousMerge,
         other => AuditAction::Custom(other.to_string()),
     }
 }

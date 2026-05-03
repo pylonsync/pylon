@@ -127,17 +127,30 @@ impl CookieConfig {
 
     /// Build the Set-Cookie header value carrying a session token.
     pub fn set_value(&self, token: &str) -> String {
-        self.build(token, self.max_age_secs)
+        self.build(&self.name, token, self.max_age_secs)
     }
 
     /// Build the Set-Cookie header value that clears the cookie. The
     /// browser drops it immediately because Max-Age is 0.
     pub fn clear_value(&self) -> String {
-        self.build("", 0)
+        self.build(&self.name, "", 0)
     }
 
-    fn build(&self, value: &str, max_age: u64) -> String {
-        let mut s = format!("{}={}; Path={}", self.name, value, self.path);
+    /// Build a Set-Cookie value for an *arbitrary* cookie name, reusing
+    /// the configured Domain/Secure/SameSite/Path attributes. Used for
+    /// the trusted-device cookie which lives alongside the session
+    /// cookie but has its own name, value, and lifetime.
+    pub fn set_value_for(&self, name: &str, value: &str, max_age_secs: Option<u64>) -> String {
+        self.build(name, value, max_age_secs.unwrap_or(self.max_age_secs))
+    }
+
+    /// Mirror of `clear_value()` but for a non-session cookie name.
+    pub fn clear_value_for(&self, name: &str) -> String {
+        self.build(name, "", 0)
+    }
+
+    fn build(&self, name: &str, value: &str, max_age: u64) -> String {
+        let mut s = format!("{}={}; Path={}", name, value, self.path);
         if let Some(domain) = &self.domain {
             s.push_str("; Domain=");
             s.push_str(domain);

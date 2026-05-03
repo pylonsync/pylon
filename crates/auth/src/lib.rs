@@ -17,6 +17,7 @@ pub mod scim;
 pub mod siwe;
 pub mod stripe;
 pub mod totp;
+pub mod trusted_device;
 pub mod verification;
 pub mod webauthn;
 
@@ -68,6 +69,16 @@ pub struct AuthContext {
     /// policies decide what scopes mean — pylon only carries them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_scopes: Option<String>,
+    /// Wave-7 E. True iff the request carried a `pylon_trusted_device`
+    /// cookie that resolved to a non-expired record bound to the same
+    /// user_id as the current session. Apps gate their TOTP step on
+    /// this — `if user.totpVerified && !ctx.auth.isTrustedDevice` →
+    /// require a code; otherwise skip.
+    ///
+    /// The framework deliberately does NOT auto-skip TOTP: enforcement
+    /// is an app policy. We only carry the boolean.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_trusted_device: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -85,6 +96,7 @@ impl AuthContext {
             tenant_id: None,
             api_key_id: None,
             api_key_scopes: None,
+            is_trusted_device: false,
         }
     }
 
@@ -98,6 +110,7 @@ impl AuthContext {
             tenant_id: None,
             api_key_id: None,
             api_key_scopes: None,
+            is_trusted_device: false,
         }
     }
 
@@ -112,6 +125,7 @@ impl AuthContext {
             tenant_id: None,
             api_key_id: Some(key_id),
             api_key_scopes: scopes,
+            is_trusted_device: false,
         }
     }
 
@@ -134,6 +148,7 @@ impl AuthContext {
             tenant_id: None,
             api_key_id: None,
             api_key_scopes: None,
+            is_trusted_device: false,
         }
     }
 
@@ -147,6 +162,7 @@ impl AuthContext {
             tenant_id: None,
             api_key_id: None,
             api_key_scopes: None,
+            is_trusted_device: false,
         }
     }
 

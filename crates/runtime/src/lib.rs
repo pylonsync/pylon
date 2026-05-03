@@ -29,6 +29,7 @@ pub mod session_backend;
 pub mod shard_ws;
 pub mod sse;
 pub mod tls;
+pub mod trusted_device_backend;
 pub mod verification_backend;
 pub mod workflow_store;
 pub mod workflows;

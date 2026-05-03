@@ -261,6 +261,7 @@ fn start_server(
     let passkeys = auth_stores.passkeys;
     let verification = auth_stores.verification;
     let audit = auth_stores.audit;
+    let trusted_devices = auth_stores.trusted_devices;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -745,6 +746,7 @@ fn start_server(
         let pks = Arc::clone(&passkeys);
         let vrf = Arc::clone(&verification);
         let aud = Arc::clone(&audit);
+        let td = Arc::clone(&trusted_devices);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -1072,7 +1074,7 @@ fn start_server(
         } else {
             Ok(ss.resolve(None))
         };
-        let auth_ctx = match auth_ctx_result {
+        let mut auth_ctx = match auth_ctx_result {
             Ok(c) => c,
             Err(reason) => {
                 let body = format!(
@@ -1089,6 +1091,34 @@ fn start_server(
                 continue;
             }
         };
+
+        // Wave-7 E: trusted-device cookie. Read `pylon_trusted_device=<token>`,
+        // resolve it, and if the record's user_id matches the current
+        // session's user_id stamp `auth_ctx.is_trusted_device = true`. App
+        // code uses this to skip the TOTP step for repeat sign-ins from
+        // the same browser. Bound to the user — a stale cookie left from
+        // a previous account on the same browser quietly degrades to
+        // untrusted (we don't actively reject, just don't trust).
+        if let Some(uid) = auth_ctx.user_id.as_deref() {
+            let trust_token: Option<String> = request
+                .headers()
+                .iter()
+                .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+                .and_then(|h| {
+                    pylon_auth::extract_session_cookie(
+                        h.value.as_str(),
+                        pylon_auth::trusted_device::TRUST_COOKIE_NAME,
+                    )
+                });
+            if let Some(token) = trust_token {
+                if let Some(record) = td.find(&token) {
+                    if record.user_id == uid {
+                        auth_ctx.is_trusted_device = true;
+                    }
+                }
+            }
+        }
+        let auth_ctx = auth_ctx;
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---
         //
@@ -2039,6 +2069,7 @@ fn start_server(
                     passkeys: &pks,
                     verification: &vrf,
                     audit: &aud,
+                    trusted_devices: td.as_ref(),
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2221,6 +2252,7 @@ struct AuthStores {
     passkeys: Arc<pylon_auth::webauthn::PasskeyStore>,
     verification: Arc<pylon_auth::verification::VerificationStore>,
     audit: Arc<pylon_auth::audit::AuditStore>,
+    trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore>,
 }
 
 // Memoized env reads — auth resolver runs PER REQUEST so we can't
@@ -2292,6 +2324,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(pylon_auth::verification::VerificationStore::new()),
         audit: Arc::new(pylon_auth::audit::AuditStore::new()),
+        trusted_devices: Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new()),
     }
 }
 
@@ -2355,6 +2388,14 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::audit::AuditStore::new()
         }
     };
+    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> =
+        match crate::trusted_device_backend::SqliteTrustedDeviceBackend::open(path) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] trusted-device SQLite backend unavailable: {e}");
+                Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2367,6 +2408,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
         audit: Arc::new(audit),
+        trusted_devices,
     }
 }
 
@@ -2435,6 +2477,14 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::audit::AuditStore::new()
         }
     };
+    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> =
+        match crate::trusted_device_backend::PostgresTrustedDeviceBackend::connect(url) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] PG trusted-device backend unavailable: {e}");
+                Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2447,6 +2497,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
         verification: Arc::new(verification),
         audit: Arc::new(audit),
+        trusted_devices,
     }
 }
 
