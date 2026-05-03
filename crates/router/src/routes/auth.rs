@@ -1361,6 +1361,19 @@ pub(crate) fn handle(
                 json_error("INVALID_EMAIL", "email must be well-formed"),
             ));
         }
+        // Disposable / throwaway email blocker. Operators who don't want
+        // this set PYLON_EMAIL_BLOCKLIST_DISABLED=1. Refused at signup
+        // because every downstream gate (org create, payment) would
+        // otherwise re-litigate it — block once at the identity boundary.
+        if pylon_auth::email_blocklist::is_disposable_email(&email) {
+            return Some((
+                400,
+                json_error(
+                    "DISPOSABLE_EMAIL",
+                    "Sign up with a permanent email address. Disposable / throwaway providers aren't accepted.",
+                ),
+            ));
+        }
         let password = match data.get("password").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => return Some((400, json_error("MISSING_PASSWORD", "password is required"))),
@@ -4705,6 +4718,15 @@ pub(crate) fn handle(
             .to_lowercase();
         if email.is_empty() || !email.contains('@') {
             return Some((400, json_error("INVALID_EMAIL", "valid email required")));
+        }
+        if pylon_auth::email_blocklist::is_disposable_email(&email) {
+            return Some((
+                400,
+                json_error(
+                    "DISPOSABLE_EMAIL",
+                    "Sign in with a permanent email address. Disposable / throwaway providers aren't accepted.",
+                ),
+            ));
         }
         let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
         if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(

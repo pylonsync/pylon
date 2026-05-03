@@ -706,6 +706,19 @@ pub(crate) fn complete_oauth_login_pkce(
         });
     };
 
+    // Disposable email blocker. The provider vouched for the address,
+    // but if it's still a known throwaway domain we don't want to
+    // create the User row — the abuse signal is the same regardless
+    // of which provider rubber-stamped it. PYLON_EMAIL_BLOCKLIST_DISABLED=1
+    // turns this off.
+    if pylon_auth::email_blocklist::is_disposable_email(&userinfo.email) {
+        return Err(OAuthError {
+            status: 400,
+            code: "DISPOSABLE_EMAIL",
+            message: "Sign in with a permanent email address. Disposable / throwaway providers aren't accepted.".into(),
+        });
+    }
+
     // Real-world bug this replaces: the previous formatter produced
     // strings like "1761811234Z" (epoch-seconds with a stray Z) that
     // SQLite happily stored as TEXT but PostgreSQL rejected as
