@@ -24,6 +24,7 @@ pub mod rate_limit;
 pub mod resp;
 pub mod resp_server;
 pub mod rooms;
+pub mod saml_backend;
 pub mod scheduler;
 pub mod server;
 pub mod session_backend;

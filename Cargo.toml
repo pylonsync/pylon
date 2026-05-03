@@ -77,6 +77,14 @@ sha3 = "0.10"
 # OASIS SAML 2.0 Bindings §3.4.4 mandates deflate compression of the
 # AuthnRequest XML before base64 encoding into the redirect URL.
 flate2 = "1"
+# SAML 2.0 protocol primitives + XMLDSig signature verification. The
+# `xmlsec` feature pulls in libxml + libxmlsec1 system bindings; that
+# system dep is the cost of correct SAML signature verification.
+# Operators who don't need SAML can build with `--no-default-features`
+# on pylon-auth — the saml module's runtime endpoints refuse all
+# requests without verification, so the system dep is only required
+# when SAML is actually in use.
+samael = { version = "0.0.20", default-features = false, features = ["xmlsec"] }
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

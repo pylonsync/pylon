@@ -3,26 +3,21 @@
 //! HTTP-Redirect AuthnRequest binding, HTTP-POST Response binding,
 //! IdP metadata XML parsing.
 //!
-//! **Security boundary — signature verification is OFF by default.**
-//! This module ships the SAML protocol surface (request generation,
-//! response parsing, attribute extraction) but does NOT verify the
-//! IdP's XMLDSig signature on incoming Responses. That step requires
-//! a vetted XML-canonicalization + signature library
-//! (`samael` with its `xmlsec` feature, or hand-rolled C14N + ring).
-//! Both add libxml2/xmlsec1 system dependencies that materially
-//! complicate Pylon's binary distribution.
+//! Signature verification is performed by `samael` with its `xmlsec`
+//! feature, which links libxml2 + libxmlsec1 at runtime. The
+//! Dockerfile installs both system packages; standalone binaries link
+//! against the shared libraries the host has installed.
 //!
-//! Operators must explicitly opt-in to the unverified path by setting
-//! `PYLON_SAML_INSECURE_NO_VERIFY=1`; without it, the callback handler
-//! refuses every Response with a 501 + a clear pointer to the open
-//! follow-up. This lets enterprise customers who run their own Pylon
-//! in a controlled environment use SAML today (gating on operator
-//! risk acceptance) while we wire the proper xmlsec path next sprint.
+//! Validation chain on every incoming Response:
+//! - XMLDSig signature against the configured IdP cert
+//! - InResponseTo matches the AuthnRequest we minted (anti-replay)
+//! - Issuer matches the configured idp_entity_id
+//! - NotBefore / NotOnOrAfter expiry windows + clock-skew slack
+//! - AudienceRestriction includes the SP entity_id
+//! - SubjectConfirmation is a bearer token with valid recipient
 //!
-//! Storage uses the existing AES-GCM seal envelope (`PYLON_SSO_ENCRYPTION_KEY`)
-//! for the signing certificate's private key when the SP needs to
-//! sign its AuthnRequests (most IdPs accept unsigned AuthnRequests
-//! over HTTP-Redirect — we do that by default).
+//! All of this happens inside `samael::ServiceProvider::parse_base64_response`;
+//! a single `Err(_)` return terminates the auth flow.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -305,54 +300,68 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Decoded SAML Response. Populated by `parse_response` after
-/// signature verification (when enabled).
+/// Decoded SAML assertion (post-validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SamlAssertion {
     pub email: String,
     pub name: Option<String>,
     /// The original AuthnRequest's ID, echoed back via `InResponseTo`.
-    /// `None` when the IdP omitted it (some IdPs do for IdP-initiated
-    /// flows; we reject those by requiring a value).
     pub in_response_to: Option<String>,
 }
 
-/// Parse a base64-encoded SAML Response (the `SAMLResponse` form param
-/// from the HTTP-POST binding). Extracts the email + name attributes.
+/// Verify and parse a base64-encoded SAML Response (the `SAMLResponse`
+/// form param from the HTTP-POST binding). Hard-fails on:
 ///
-/// **DOES NOT verify the XMLDSig signature.** The caller MUST gate this
-/// behind a feature toggle that explicitly accepts the security trade-
-/// off. See [`require_signature_verification_or_refuse`].
-pub fn parse_response_unverified(
-    b64: &str,
+/// - bad XMLDSig signature (against the cert configured for the org)
+/// - InResponseTo mismatch (anti-replay binding to our AuthnRequest)
+/// - Issuer mismatch (idp_entity_id)
+/// - expired NotBefore / NotOnOrAfter conditions
+/// - audience restriction not including the SP entity_id
+/// - bearer SubjectConfirmation missing or recipient mismatch
+///
+/// Returns the validated email + optional display name, ready to look
+/// up or create a User row.
+pub fn verify_and_parse_response(
+    config: &SamlConfig,
+    sp_entity_id: &str,
+    sp_acs_url: &str,
+    encoded_response: &str,
     expected_in_response_to: &str,
 ) -> Result<SamlAssertion, String> {
-    use base64::Engine;
-    let xml_bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64.replace(['\n', '\r', ' '], ""))
-        .map_err(|e| format!("base64 decode failed: {e}"))?;
-    let xml = std::str::from_utf8(&xml_bytes).map_err(|e| format!("response is not utf-8: {e}"))?;
+    let sp = build_service_provider(config, sp_entity_id, sp_acs_url)?;
+    let possible_ids = [expected_in_response_to];
+    let assertion = sp
+        .parse_base64_response(encoded_response, Some(&possible_ids))
+        .map_err(|e| format!("SAML response rejected: {e}"))?;
 
-    // Lightweight extraction: the response is well-formed XML from a
-    // trusted IdP (modulo signature). We pull the fields we need by
-    // string scan rather than instantiating a full XML DOM. This is
-    // brittle against weird-but-valid XML formatting; production
-    // operators should layer the proper XML parser via samael.
-    let in_response_to =
-        pluck_attr(xml, "InResponseTo").or_else(|| pluck_attr(xml, "InResponseTo="));
-    if let Some(irt) = &in_response_to {
-        if irt != expected_in_response_to {
-            return Err(format!(
-                "InResponseTo mismatch (got `{irt}`, expected `{expected_in_response_to}`)"
-            ));
-        }
-    } else {
-        return Err("Response missing required InResponseTo attribute".into());
-    }
-    let email = pluck_email_attribute(xml).ok_or_else(|| {
-        "Response missing email attribute or NameID with format=emailAddress".to_string()
-    })?;
-    let name = pluck_attribute_value(xml, "name");
+    // Resolve email: try named attribute first, then NameID@Format=emailAddress.
+    let email = extract_attribute_value(&assertion, &config.email_attribute)
+        .or_else(|| extract_email_nameid(&assertion))
+        .ok_or_else(|| {
+            "SAML assertion missing email attribute and NameID@Format=emailAddress".to_string()
+        })?;
+
+    // Display name: optional named attribute, falls back to None.
+    let name = config
+        .name_attribute
+        .as_deref()
+        .and_then(|attr| extract_attribute_value(&assertion, attr));
+
+    // Echo the InResponseTo back to the caller. samael already verified
+    // it matches `possible_ids`, so this is just a courtesy field for
+    // downstream audit logs.
+    let in_response_to = assertion
+        .subject
+        .as_ref()
+        .and_then(|s| s.subject_confirmations.as_ref())
+        .and_then(|confs| {
+            confs
+                .iter()
+                .find_map(|c| c.subject_confirmation_data.as_ref())
+        })
+        .and_then(|d| d.in_response_to.clone())
+        .or_else(|| Some(expected_in_response_to.to_string()));
+
     Ok(SamlAssertion {
         email,
         name,
@@ -360,35 +369,112 @@ pub fn parse_response_unverified(
     })
 }
 
-fn pluck_attr(xml: &str, name: &str) -> Option<String> {
-    let needle = format!(r#"{name}=""#);
-    let start = xml.find(&needle)? + needle.len();
-    let rest = &xml[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+/// Build a `samael::ServiceProvider` from our flat per-org config.
+/// Constructs a minimal IdP `EntityDescriptor` with a single signing
+/// `KeyDescriptor` carrying the configured X.509 cert (PEM stripped of
+/// BEGIN/END markers — samael wants raw base64 of the DER bytes).
+fn build_service_provider(
+    config: &SamlConfig,
+    sp_entity_id: &str,
+    sp_acs_url: &str,
+) -> Result<samael::service_provider::ServiceProvider, String> {
+    use samael::key_info::{KeyInfo, X509Data};
+    use samael::metadata::{
+        Endpoint, EntityDescriptor, IdpSsoDescriptor, KeyDescriptor, HTTP_POST_BINDING,
+        HTTP_REDIRECT_BINDING,
+    };
+    use samael::service_provider::ServiceProvider;
+
+    let cert_b64 = strip_pem_envelope(&config.idp_x509_cert_pem)?;
+
+    let idp_descriptor = IdpSsoDescriptor {
+        id: None,
+        valid_until: None,
+        cache_duration: None,
+        protocol_support_enumeration: Some("urn:oasis:names:tc:SAML:2.0:protocol".to_string()),
+        error_url: None,
+        signature: None,
+        key_descriptors: vec![KeyDescriptor {
+            key_use: Some("signing".to_string()),
+            encryption_methods: None,
+            key_info: KeyInfo {
+                id: None,
+                x509_data: Some(X509Data {
+                    certificates: vec![cert_b64],
+                }),
+            },
+        }],
+        organization: None,
+        contact_people: vec![],
+        artifact_resolution_service: vec![],
+        single_logout_services: vec![],
+        manage_name_id_services: vec![],
+        name_id_formats: vec![],
+        want_authn_requests_signed: None,
+        single_sign_on_services: vec![
+            Endpoint {
+                binding: HTTP_REDIRECT_BINDING.to_string(),
+                location: config.idp_sso_url.clone(),
+                response_location: None,
+            },
+            Endpoint {
+                binding: HTTP_POST_BINDING.to_string(),
+                location: config.idp_sso_url.clone(),
+                response_location: None,
+            },
+        ],
+        name_id_mapping_services: vec![],
+        assertion_id_request_services: vec![],
+        attribute_profiles: vec![],
+        attributes: vec![],
+    };
+
+    let idp_metadata = EntityDescriptor {
+        entity_id: Some(config.idp_entity_id.clone()),
+        idp_sso_descriptors: Some(vec![idp_descriptor]),
+        ..EntityDescriptor::default()
+    };
+
+    Ok(ServiceProvider {
+        entity_id: Some(sp_entity_id.to_string()),
+        acs_url: Some(sp_acs_url.to_string()),
+        idp_metadata,
+        ..ServiceProvider::default()
+    })
 }
 
-fn pluck_email_attribute(xml: &str) -> Option<String> {
-    // Try common attribute names in priority order.
-    for attr_name in [
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-        "urn:oid:0.9.2342.19200300.100.1.3",
-        "mail",
-        "email",
-    ] {
-        if let Some(v) = pluck_attribute_value(xml, attr_name) {
-            return Some(v);
+/// Strip PEM `-----BEGIN/END-----` envelopes + whitespace, leaving the
+/// raw base64 of the certificate's DER bytes (what samael's
+/// `X509Data::certificates` field expects).
+fn strip_pem_envelope(pem: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(pem.len());
+    for line in pem.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----") || trimmed.is_empty() {
+            continue;
         }
+        out.push_str(trimmed);
     }
-    // Fall back to NameID with Format=emailAddress.
-    if xml.contains("Format=\"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress\"") {
-        let needle = "<saml:NameID";
-        if let Some(start) = xml.find(needle) {
-            let rest = &xml[start..];
-            if let Some(open_end) = rest.find('>') {
-                let after_open = &rest[open_end + 1..];
-                if let Some(close) = after_open.find("</saml:NameID>") {
-                    return Some(after_open[..close].trim().to_string());
+    if out.is_empty() {
+        return Err("certificate is empty after stripping PEM envelope".into());
+    }
+    Ok(out)
+}
+
+fn extract_attribute_value(
+    assertion: &samael::schema::Assertion,
+    attribute_name: &str,
+) -> Option<String> {
+    let statements = assertion.attribute_statements.as_ref()?;
+    for statement in statements {
+        for attr in &statement.attributes {
+            if attr.name.as_deref() == Some(attribute_name)
+                || attr.friendly_name.as_deref() == Some(attribute_name)
+            {
+                if let Some(v) = attr.values.first() {
+                    if let Some(text) = v.value.as_deref() {
+                        return Some(text.to_string());
+                    }
                 }
             }
         }
@@ -396,26 +482,17 @@ fn pluck_email_attribute(xml: &str) -> Option<String> {
     None
 }
 
-fn pluck_attribute_value(xml: &str, attr_name: &str) -> Option<String> {
-    let needle = format!(r#"Name="{attr_name}""#);
-    let start = xml.find(&needle)? + needle.len();
-    let rest = &xml[start..];
-    // Find <saml:AttributeValue>VALUE</saml:AttributeValue> following.
-    let v_open = rest.find("<saml:AttributeValue")?;
-    let after = &rest[v_open..];
-    let close_open = after.find('>')?;
-    let after_open = &after[close_open + 1..];
-    let close = after_open.find("</saml:AttributeValue>")?;
-    Some(after_open[..close].trim().to_string())
-}
-
-/// True when the operator has explicitly opted in to running SAML
-/// without signature verification. Default (unset) → false → the
-/// callback handler must refuse.
-pub fn signature_verification_bypassed() -> bool {
-    std::env::var("PYLON_SAML_INSECURE_NO_VERIFY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+fn extract_email_nameid(assertion: &samael::schema::Assertion) -> Option<String> {
+    let nameid = assertion.subject.as_ref()?.name_id.as_ref()?;
+    if nameid
+        .format
+        .as_deref()
+        .map(|f| f.contains("emailAddress"))
         .unwrap_or(false)
+    {
+        return Some(nameid.value.clone());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -515,65 +592,83 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_extracts_email_attribute() {
+    fn strip_pem_envelope_handles_standard_format() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0\nAQEFAAOCAQ8AMI\n-----END CERTIFICATE-----\n";
+        let stripped = strip_pem_envelope(pem).unwrap();
+        assert_eq!(stripped, "MIIBIjANBgkqhkiG9w0AQEFAAOCAQ8AMI");
+    }
+
+    #[test]
+    fn strip_pem_envelope_handles_no_envelope() {
+        // Operators sometimes paste raw base64 without the BEGIN/END
+        // wrapper; we shouldn't reject that.
+        let raw = "MIIBIjANBgkqhkiG9w0AQEFAAOCAQ8AMI";
+        assert_eq!(strip_pem_envelope(raw).unwrap(), raw);
+    }
+
+    #[test]
+    fn strip_pem_envelope_handles_crlf() {
+        let pem = "-----BEGIN CERTIFICATE-----\r\nMIIBIj\r\nANBgkq\r\n-----END CERTIFICATE-----";
+        assert_eq!(strip_pem_envelope(pem).unwrap(), "MIIBIjANBgkq");
+    }
+
+    #[test]
+    fn strip_pem_envelope_rejects_empty() {
+        let err = strip_pem_envelope("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----")
+            .unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn verify_rejects_unsigned_response() {
+        // A handcrafted unsigned XML response must NOT verify against a
+        // configured cert. Confirms the samael wire-up actually requires
+        // a signature (vs silently passing through).
+        let cfg = cfg("acme", vec![]);
         let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" InResponseTo="_abc">
           <saml:AttributeStatement>
             <saml:Attribute Name="http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress">
               <saml:AttributeValue>jane@acme.com</saml:AttributeValue>
             </saml:Attribute>
-            <saml:Attribute Name="name">
-              <saml:AttributeValue>Jane Doe</saml:AttributeValue>
-            </saml:Attribute>
           </saml:AttributeStatement>
         </samlp:Response>"#;
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
-        let assertion = parse_response_unverified(&b64, "_abc").unwrap();
-        assert_eq!(assertion.email, "jane@acme.com");
-        assert_eq!(assertion.name.as_deref(), Some("Jane Doe"));
-        assert_eq!(assertion.in_response_to.as_deref(), Some("_abc"));
+        let result = verify_and_parse_response(
+            &cfg,
+            "https://my-app/sp",
+            "https://my-app/acs",
+            &b64,
+            "_abc",
+        );
+        assert!(result.is_err(), "unsigned response must be rejected");
     }
 
     #[test]
-    fn parse_response_falls_back_to_nameid() {
-        let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" InResponseTo="_xyz">
-          <saml:Subject>
-            <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">user@example.com</saml:NameID>
-          </saml:Subject>
-        </samlp:Response>"#;
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
-        let assertion = parse_response_unverified(&b64, "_xyz").unwrap();
-        assert_eq!(assertion.email, "user@example.com");
-        assert!(assertion.name.is_none());
+    fn verify_rejects_garbage_base64() {
+        let cfg = cfg("acme", vec![]);
+        let result = verify_and_parse_response(
+            &cfg,
+            "https://my-app/sp",
+            "https://my-app/acs",
+            "not-base64!!!",
+            "_abc",
+        );
+        assert!(result.is_err());
     }
 
     #[test]
-    fn parse_response_rejects_in_response_to_mismatch() {
-        let xml = r#"<samlp:Response InResponseTo="_attacker">
-          <saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">x</saml:NameID></saml:Subject>
-        </samlp:Response>"#;
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
-        let err = parse_response_unverified(&b64, "_my_request").unwrap_err();
-        assert!(err.contains("InResponseTo mismatch"));
-    }
-
-    #[test]
-    fn parse_response_rejects_missing_in_response_to() {
-        let xml = r#"<samlp:Response>no in_response_to here</samlp:Response>"#;
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
-        let err = parse_response_unverified(&b64, "_anything").unwrap_err();
-        assert!(err.contains("InResponseTo"));
-    }
-
-    #[test]
-    fn signature_bypass_off_by_default() {
-        // Test environment doesn't set the env var; bypass must be off.
-        // (We intentionally don't mutate env here — tests run in
-        // parallel and process-wide env mutation would cross-contaminate.)
-        assert!(!signature_verification_bypassed());
+    fn verify_rejects_response_with_invalid_pem_cert() {
+        let mut cfg = cfg("acme", vec![]);
+        cfg.idp_x509_cert_pem = "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----".into();
+        let result = verify_and_parse_response(
+            &cfg,
+            "https://my-app/sp",
+            "https://my-app/acs",
+            "Zm9v",
+            "_abc",
+        );
+        assert!(result.is_err());
     }
 
     #[test]

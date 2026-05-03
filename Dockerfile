@@ -46,6 +46,11 @@ FROM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev ca-certificates \
+    # libxml2 + xmlsec1: SAML 2.0 XMLDSig signature verification
+    # (samael's xmlsec feature). Both -dev for build-time linking; the
+    # runtime stage installs the non-dev runtime libraries.
+    libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
+    libclang-dev clang \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -77,6 +82,9 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \
+    # Runtime shared libs for samael's SAML XMLDSig verification path —
+    # the binary dynamically links against these at startup.
+    libxml2 libxmlsec1 libxmlsec1-openssl \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
     && ln -s /usr/local/bin/bun /usr/bin/bun

@@ -2414,6 +2414,14 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
                 Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
             }
         };
+    let saml: Arc<dyn pylon_auth::saml::SamlStore> =
+        match crate::saml_backend::SqliteSamlBackend::open(path) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] SAML SQLite backend unavailable: {e}");
+                Arc::new(pylon_auth::saml::InMemorySamlStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2428,7 +2436,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         audit: Arc::new(audit),
         trusted_devices,
         org_sso,
-        saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
+        saml,
     }
 }
 
@@ -2513,6 +2521,14 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
                 Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
             }
         };
+    let saml: Arc<dyn pylon_auth::saml::SamlStore> =
+        match crate::saml_backend::PostgresSamlBackend::connect(url) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] PG SAML backend unavailable: {e}");
+                Arc::new(pylon_auth::saml::InMemorySamlStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2527,7 +2543,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         audit: Arc::new(audit),
         trusted_devices,
         org_sso,
-        saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
+        saml,
     }
 }
 

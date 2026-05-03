@@ -205,6 +205,12 @@ mod tests {
 
     #[test]
     fn default_substitution() {
+        // Hold ENV_LOCK so a parallel `env_override_*` test isn't
+        // mid-set when we read defaults — without this, the test fails
+        // intermittently in workspace runs (process-wide env mutation).
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PYLON_EMAIL_TEMPLATE_MAGIC_CODE_SUBJECT");
+        std::env::remove_var("PYLON_EMAIL_TEMPLATE_MAGIC_CODE_BODY");
         let mut vars = HashMap::new();
         vars.insert("code", "123456");
         let (subject, body) = render(EmailTemplate::MagicCode, &vars);

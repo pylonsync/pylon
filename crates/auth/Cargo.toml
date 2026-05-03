@@ -40,3 +40,5 @@ k256 = { workspace = true }
 sha3 = { workspace = true }
 # DEFLATE for SAML 2.0 HTTP-Redirect binding (Bindings §3.4.4).
 flate2 = { workspace = true }
+# SAML 2.0 + XMLDSig signature verification.
+samael = { workspace = true }

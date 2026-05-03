@@ -428,24 +428,10 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
 }
 
 /// Wave-9 — `POST /api/auth/orgs/<org_id>/saml/acs`. The IdP POSTs the
-/// SAMLResponse + RelayState here. Validates state, parses the assertion,
-/// looks up/creates the User row, auto-joins the org, mints a session.
-///
-/// **Refuses with 501** unless `PYLON_SAML_INSECURE_NO_VERIFY=1` is set.
-/// XMLDSig signature verification is the gate; without it, an attacker
-/// who can craft a well-formed SAMLResponse could authenticate as any
-/// email. Operators in trusted environments may opt in.
+/// SAMLResponse + RelayState here. Validates state + signature + all
+/// SAML 2.0 conditions via samael, parses the assertion, looks up/
+/// creates the User row, auto-joins the org, mints a session.
 fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, String) {
-    if !pylon_auth::saml::signature_verification_bypassed() {
-        return (
-            501,
-            json_error_with_hint(
-                "SAML_VERIFY_NOT_IMPLEMENTED",
-                "SAML signature verification is not yet implemented",
-                "Set PYLON_SAML_INSECURE_NO_VERIFY=1 to accept unverified SAML responses (NOT for production)",
-            ),
-        );
-    }
     let config = match ctx.saml.get(org_id) {
         Some(c) => c,
         None => {
@@ -455,7 +441,6 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             )
         }
     };
-    let _ = &config; // (intentional — config is required for cert validation in the proper impl)
     let params = parse_form_body(body);
     let saml_response = match params.get("SAMLResponse") {
         Some(s) if !s.is_empty() => s.clone(),
@@ -490,19 +475,36 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             );
         }
     };
-    let assertion =
-        match pylon_auth::saml::parse_response_unverified(&saml_response, &state_record.request_id)
-        {
-            Ok(a) => a,
-            Err(e) => {
-                return saml_error_redirect(
-                    ctx,
-                    &state_record.error_callback_url,
-                    "SAML_RESPONSE_INVALID",
-                    &e,
-                );
-            }
-        };
+    let acs_url = match build_saml_acs_url(org_id) {
+        Some(u) => u,
+        None => {
+            return (
+                500,
+                json_error(
+                    "ACS_URL_UNAVAILABLE",
+                    "set PYLON_PUBLIC_URL so SAML can verify response Recipient",
+                ),
+            );
+        }
+    };
+    let sp_entity_id = std::env::var("PYLON_SAML_ENTITY_ID").unwrap_or_else(|_| acs_url.clone());
+    let assertion = match pylon_auth::saml::verify_and_parse_response(
+        &config,
+        &sp_entity_id,
+        &acs_url,
+        &saml_response,
+        &state_record.request_id,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            return saml_error_redirect(
+                ctx,
+                &state_record.error_callback_url,
+                "SAML_RESPONSE_INVALID",
+                &e,
+            );
+        }
+    };
     let now = format!(
         "{}Z",
         std::time::SystemTime::now()
