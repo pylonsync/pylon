@@ -55,6 +55,15 @@ pub type NestedCallHook = Box<
         + Sync,
 >;
 
+/// Callback invoked when an action calls `ctx.email.send(to, subject, body)`.
+/// Returns Ok(()) on transport success, Err(reason) on failure.
+///
+/// The runner forwards this to the runtime's EmailAdapter (which knows
+/// about PYLON_EMAIL_PROVIDER + credentials). Without this hook installed,
+/// `ctx.email.send` returns a "transport not configured" error instead
+/// of silently no-op'ing — apps shouldn't think email sent when it didn't.
+pub type EmailHook = Box<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Function runner
 // ---------------------------------------------------------------------------
@@ -79,6 +88,11 @@ pub struct FnRunner {
     /// fall back to the old recursive path (no transaction for nested
     /// mutations — documented limitation).
     nested_call_hook: Mutex<Option<NestedCallHook>>,
+    /// Optional handler for `ctx.email.send(...)`. Apps that don't configure
+    /// an email transport see `ctx.email.send` reject with an explicit
+    /// error so silently-dropped invite emails surface in the action's
+    /// error response.
+    email_hook: Mutex<Option<EmailHook>>,
     /// Timeout for `recv()` between protocol messages. A handler that doesn't
     /// reply within this window is treated as stuck.
     call_timeout: Mutex<Duration>,
@@ -99,6 +113,7 @@ impl FnRunner {
             trace_log: TraceLog::new(trace_capacity),
             schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
+            email_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
         }
@@ -120,6 +135,15 @@ impl FnRunner {
     /// the outer action's non-transactional store and writes aren't atomic.
     pub fn set_nested_call_hook(&self, hook: NestedCallHook) {
         *self.nested_call_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback for `ctx.email.send(to, subject, body)` from
+    /// action handlers. Wires through the runtime's configured EmailAdapter.
+    /// When unset, `ctx.email.send` returns an explicit
+    /// "EMAIL_TRANSPORT_NOT_CONFIGURED" error so authors see the gap
+    /// instead of getting a silent no-op.
+    pub fn set_email_hook(&self, hook: EmailHook) {
+        *self.email_hook.lock().unwrap() = Some(hook);
     }
 
     /// Start the TypeScript process and complete the startup handshake.
@@ -482,6 +506,29 @@ impl FnRunner {
                                 ),
                             }
                         }
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::SendEmail(req) if req.call_id == call_id => {
+                    // Hand off to the runtime's email transport (configured
+                    // via PYLON_EMAIL_PROVIDER). Without a hook installed
+                    // we surface the missing-config gap explicitly so
+                    // operators don't think their invite emails sent.
+                    let result: Result<(), String> = {
+                        let hook = self.email_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => cb(&req.to, &req.subject, &req.body),
+                            None => Err(
+                                "ctx.email.send: no email transport configured (set PYLON_EMAIL_PROVIDER)".into(),
+                            ),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(()) => {
+                            DbResultMessage::ok(call_id.clone(), serde_json::json!({"sent": true}))
+                        }
+                        Err(e) => DbResultMessage::err(call_id.clone(), "EMAIL_SEND_FAILED", &e),
                     };
                     self.send(&reply)?;
                 }

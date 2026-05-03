@@ -169,6 +169,12 @@ pub enum TsMessage {
     #[serde(rename = "run_fn")]
     RunFn(RunFnMessage),
 
+    /// Send a transactional email via the runtime's configured provider.
+    /// Only valid from action handlers — mutations + queries reject by
+    /// the time the dispatcher hands the message off.
+    #[serde(rename = "send_email")]
+    SendEmail(SendEmailMessage),
+
     /// Function completed successfully.
     #[serde(rename = "return")]
     Return(ReturnMessage),
@@ -287,6 +293,18 @@ pub struct RunFnMessage {
     pub fn_name: String,
     pub fn_type: FnType,
     pub args: serde_json::Value,
+}
+
+/// Send a transactional email via the runtime's configured provider.
+/// Mirror of Pylon's auth-side EmailAdapter — exposed to actions so
+/// app code (invites, notifications, password handoffs) can use the
+/// same transport without rebuilding HTTP clients per provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendEmailMessage {
+    pub call_id: String,
+    pub to: String,
+    pub subject: String,
+    pub body: String,
 }
 
 /// Function returned successfully.

@@ -18,6 +18,7 @@
 import type {
   DbReader,
   DbWriter,
+  EmailSender,
   Stream,
   Scheduler,
   QueryCtx,
@@ -441,11 +442,33 @@ function buildScheduler(callId: string): Scheduler {
   };
 }
 
+/**
+ * Build the email sender that round-trips through the host runtime.
+ *
+ * Each `send` emits a `send_email` protocol message; the runtime
+ * forwards to whatever transport PYLON_EMAIL_PROVIDER points at and
+ * replies success or error. Errors arrive as thrown exceptions on
+ * the action's await, just like every other RPC. No silent failures.
+ */
+function buildEmail(callId: string): EmailSender {
+  return {
+    async send(to, subject, body) {
+      await rpc(callId, {
+        type: "send_email",
+        to,
+        subject,
+        body,
+      });
+    },
+  };
+}
+
 function buildActionCtx(
   callId: string,
   auth: AuthInfo,
   stream: Stream,
   scheduler: Scheduler,
+  email: EmailSender,
   request?: unknown
 ): ActionCtx {
   // The host sends `request` as snake_case JSON (`raw_body`); normalize it
@@ -465,6 +488,7 @@ function buildActionCtx(
     auth,
     stream,
     scheduler,
+    email,
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
       return rpc(callId, {
@@ -544,6 +568,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
 
   const stream = buildStream(msg.call_id);
   const scheduler = buildScheduler(msg.call_id);
+  const email = buildEmail(msg.call_id);
 
   // Normalize the Rust-side auth envelope (snake_case) to the camelCase
   // shape that AuthInfo documents. Handlers read `ctx.auth.userId`; the
@@ -597,6 +622,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         auth,
         stream,
         scheduler,
+        email,
         (msg as unknown as { request?: unknown }).request,
       );
       break;

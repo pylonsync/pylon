@@ -486,12 +486,20 @@ fn start_server(
             ws: Arc::clone(&ws_hub),
             sse: Arc::clone(&sse_hub),
         });
+    // Single EmailAdapter for the whole runtime: the function runner's
+    // ctx.email.send hook + the per-request route handlers below both
+    // share it. Constructing per-request was fine when adapters were
+    // pure; once we pass it across the FFI boundary into the function
+    // runner we want one identity for cleaner logs + future request
+    // batching.
+    let fn_email_adapter = Arc::new(crate::datastore::EmailAdapter::from_env());
     let fn_ops_maybe = crate::datastore::try_spawn_functions(
         Arc::clone(&runtime),
         Arc::clone(&job_queue),
         Arc::clone(&fn_rate_limiter),
         Arc::clone(&change_log),
         fn_notifier,
+        Arc::clone(&fn_email_adapter),
     );
 
     // Dev mode flag. Gates a *lot* of permissive behavior: magic codes

@@ -2152,6 +2152,7 @@ pub fn try_spawn_functions(
     fn_rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     change_log: Arc<pylon_sync::ChangeLog>,
     notifier: Arc<dyn pylon_router::ChangeNotifier>,
+    email_adapter: Arc<EmailAdapter>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     if !std::path::Path::new(&fn_dir).exists() {
@@ -2252,6 +2253,21 @@ pub fn try_spawn_functions(
             "functions",
         )
     }));
+
+    // Wire ctx.email.send → runtime's EmailAdapter. Without this hook,
+    // any function that calls ctx.email.send() gets EMAIL_SEND_FAILED
+    // with "no email transport configured" — explicit gap surface
+    // instead of a silent no-op. Apps that don't set PYLON_EMAIL_PROVIDER
+    // see the failure and know to wire one up.
+    {
+        let email = Arc::clone(&email_adapter);
+        runner.set_email_hook(Box::new(
+            move |to: &str, subject: &str, body: &str| -> Result<(), String> {
+                use pylon_router::EmailSender as _;
+                email.send(to, subject, body)
+            },
+        ));
+    }
 
     let registry = Arc::new(FnRegistry::new());
     let count = defs.len();

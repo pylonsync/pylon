@@ -171,6 +171,27 @@ export interface Scheduler {
   cancel(scheduleId: string): Promise<void>;
 }
 
+/**
+ * Transactional email transport.
+ *
+ * Sends through whatever provider the runtime is configured for
+ * (PYLON_EMAIL_PROVIDER env var → SendGrid / Resend / Stack0 / SMTP /
+ * webhook). Available on action ctx only — sending email is external
+ * I/O, not allowed in mutation transactions.
+ *
+ * The runtime owns provider config + credentials; functions only
+ * supply the (to, subject, body) tuple. Failures are surfaced as
+ * thrown errors; on success the return is void.
+ *
+ * Use cases: invite emails, password-reset hand-offs, notifications,
+ * digest reports. NOT for marketing email — those should go through
+ * a dedicated bulk transport, not the transactional path.
+ */
+export interface EmailSender {
+  /** Send a plain-text email. `to` is a single address. */
+  send(to: string, subject: string, body: string): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Context objects — what handlers receive
 // ---------------------------------------------------------------------------
@@ -200,6 +221,8 @@ export interface ActionCtx {
   auth: AuthInfo;
   stream: Stream;
   scheduler: Scheduler;
+  /** Send transactional email via the runtime's configured provider. */
+  email: EmailSender;
   /** Environment variables / secrets. */
   env: Record<string, string>;
   /** Run a registered query within its own read transaction. */
