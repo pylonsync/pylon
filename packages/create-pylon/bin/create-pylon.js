@@ -270,6 +270,11 @@ const Todo = entity("Todo", {
 \ttitle: field.string(),
 \tdone: field.bool(),
 \tcreatedAt: field.datetime(),
+\t// Float position so drag-reorder can insert between two existing
+\t// rows without renumbering the whole list. Frontend computes
+\t// (prev.position + next.position) / 2 on drop. Optional for
+\t// backwards compat with legacy rows.
+\tposition: field.float().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -289,6 +294,20 @@ const toggleTodo = action("toggleTodo", {
 
 const deleteTodo = action("deleteTodo", {
 \tinput: [{ name: "id", type: "id(Todo)" }],
+});
+
+const editTodo = action("editTodo", {
+\tinput: [
+\t\t{ name: "id", type: "id(Todo)" },
+\t\t{ name: "title", type: "string" },
+\t],
+});
+
+const reorderTodo = action("reorderTodo", {
+\tinput: [
+\t\t{ name: "id", type: "id(Todo)" },
+\t\t{ name: "position", type: "float" },
+\t],
 });
 
 // ---------------------------------------------------------------------------
@@ -316,7 +335,7 @@ const manifest = buildManifest({
 \tversion: "0.0.1",
 \tentities: [Todo],
 \tqueries: [listTodos],
-\tactions: [addTodo, toggleTodo, deleteTodo],
+\tactions: [addTodo, toggleTodo, deleteTodo, editTodo, reorderTodo],
 \tpolicies: [todoPolicy],
 \troutes: [],
 });
@@ -330,18 +349,68 @@ write(
 	`import { query } from "@pylonsync/functions";
 
 /**
- * Live query — every Todo, newest first. The Pylon runtime
- * subscribes the calling client to row-change events so any
- * \`useQuery("Todo")\` consumer auto-refreshes when this list
- * changes.
+ * Live query — every Todo, in user-controlled drag-reorder position.
+ * Rows without a \`position\` (legacy data) get sorted by createdAt as
+ * a fallback so the list stays deterministic.
  */
 export default query({
 \targs: {},
 \tasync handler(ctx) {
-\t\treturn await ctx.db.query("Todo", { $order: { createdAt: "desc" } });
+\t\tconst rows = await ctx.db.query("Todo", {});
+\t\treturn [...rows].sort((a: any, b: any) => {
+\t\t\tconst ap =
+\t\t\t\ttypeof a.position === "number"
+\t\t\t\t\t? a.position
+\t\t\t\t\t: Date.parse(a.createdAt) || 0;
+\t\t\tconst bp =
+\t\t\t\ttypeof b.position === "number"
+\t\t\t\t\t? b.position
+\t\t\t\t\t: Date.parse(b.createdAt) || 0;
+\t\t\treturn ap - bp;
+\t\t});
 \t},
 });
 `,
+);
+
+write(
+\t"apps/api/functions/editTodo.ts",
+\t\`import { mutation, v } from "@pylonsync/functions";
+
+/**
+ * Rename a Todo. Trims whitespace; rejects empty titles.
+ */
+export default mutation({
+\\targs: { id: v.id("Todo"), title: v.string() },
+\\tasync handler(ctx, args: { id: string; title: string }) {
+\\t\\tconst trimmed = args.title.trim();
+\\t\\tif (!trimmed) {
+\\t\\t\\tthrow ctx.error("EMPTY_TITLE", "title cannot be empty");
+\\t\\t}
+\\t\\tawait ctx.db.update("Todo", args.id, { title: trimmed });
+\\t\\treturn await ctx.db.get("Todo", args.id);
+\\t},
+});
+\`,
+);
+
+write(
+\t"apps/api/functions/reorderTodo.ts",
+\t\`import { mutation, v } from "@pylonsync/functions";
+
+/**
+ * Drag-reorder. Frontend computes \\\`position\\\` as the midpoint of the
+ * drop target's neighbors; we just write it. Floats give us ~52 inserts
+ * between any two rows before precision matters.
+ */
+export default mutation({
+\\targs: { id: v.id("Todo"), position: v.number() },
+\\tasync handler(ctx, args: { id: string; position: number }) {
+\\t\\tawait ctx.db.update("Todo", args.id, { position: args.position });
+\\t\\treturn await ctx.db.get("Todo", args.id);
+\\t},
+});
+\`,
 );
 
 write(
@@ -386,22 +455,26 @@ write(
 	`import { mutation, v } from "@pylonsync/functions";
 
 /**
- * Insert a new Todo. Runs as a mutation — only mutation handlers
- * receive a writable \`ctx.db\` (with \`insert\` / \`update\` / \`delete\`).
- * Actions get a different ctx with \`runQuery\`/\`runMutation\` for
- * cross-function calls but no direct DB write.
- *
- * The Pylon runtime broadcasts a row-change event after the insert
- * commits so any \`useQuery("Todo")\` consumer auto-refreshes without
- * an explicit refetch on the client side.
+ * Insert a new Todo. Seeds \`position\` to (max + 1024) so new rows
+ * land at the end of the drag-reorder list; the 1024 step leaves
+ * room for inserts-between without needing global renumber.
  */
 export default mutation({
 \targs: { title: v.string() },
 \tasync handler(ctx, args: { title: string }) {
+\t\tconst existing = await ctx.db.query("Todo", {});
+\t\tconst maxPos = existing.reduce((acc: number, row: any) => {
+\t\t\tconst p =
+\t\t\t\ttypeof row.position === "number"
+\t\t\t\t\t? row.position
+\t\t\t\t\t: Date.parse(row.createdAt) || 0;
+\t\t\treturn p > acc ? p : acc;
+\t\t}, 0);
 \t\tconst id = await ctx.db.insert("Todo", {
 \t\t\ttitle: args.title,
 \t\t\tdone: false,
 \t\t\tcreatedAt: new Date().toISOString(),
+\t\t\tposition: maxPos + 1024,
 \t\t});
 \t\treturn await ctx.db.get("Todo", id);
 \t},
@@ -613,6 +686,10 @@ writeJson("apps/web/package.json", {
 		"@pylonsync/sdk": `^${PYLON_VERSION}`,
 		"@pylonsync/react": `^${PYLON_VERSION}`,
 		"@pylonsync/next": `^${PYLON_VERSION}`,
+		// Drag-reorder for the scaffolded TodoList demo.
+		"@dnd-kit/core": "^6.3.1",
+		"@dnd-kit/sortable": "^10.0.0",
+		"@dnd-kit/utilities": "^3.2.2",
 		next: "^16.0.0",
 		react: "^19.0.0",
 		"react-dom": "^19.0.0",
@@ -816,29 +893,49 @@ write(
 	"apps/web/src/app/components/TodoList.tsx",
 	`"use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useRef, useEffect } from "react";
 import { Button } from "@${projectName}/ui";
 import { Input } from "@${projectName}/ui";
+import {
+\tDndContext,
+\tclosestCenter,
+\tKeyboardSensor,
+\tPointerSensor,
+\tuseSensor,
+\tuseSensors,
+\ttype DragEndEvent,
+} from "@dnd-kit/core";
+import {
+\tarrayMove,
+\tSortableContext,
+\tsortableKeyboardCoordinates,
+\tuseSortable,
+\tverticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 type Todo = {
 \tid: string;
 \ttitle: string;
 \tdone: boolean;
 \tcreatedAt: string;
+\tposition?: number;
 };
 
 /**
- * Optimistic todo list — local state mirrors the server-fetched
- * initial list. Add prepends, toggle flips \`done\` in place, delete
- * removes. Wire \`@pylonsync/react\`'s \`useQuery\` hook for full
- * realtime updates that re-render on every change-event push (this
- * scaffold uses plain fetch + local state to keep the demo dependency-
- * free).
+ * Optimistic todo list with drag-reorder, inline title edit, toggle,
+ * and delete. All mutations are optimistic with revert-on-failure.
+ * Drag uses @dnd-kit; on drop we compute the new row's position as
+ * the midpoint between its new neighbors and POST it to reorderTodo.
  */
 export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \tconst [todos, setTodos] = useState(initialTodos);
 \tconst [title, setTitle] = useState("");
 \tconst [pending, startTransition] = useTransition();
+\tconst sensors = useSensors(
+\t\tuseSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+\t\tuseSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+\t);
 
 \tasync function add() {
 \t\tif (!title.trim()) return;
@@ -852,13 +949,12 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t});
 \t\t\tif (res.ok) {
 \t\t\t\tconst todo = (await res.json()) as Todo;
-\t\t\t\tsetTodos((prev) => [todo, ...prev]);
+\t\t\t\tsetTodos((prev) => [...prev, todo]);
 \t\t\t}
 \t\t});
 \t}
 
 \tasync function toggle(t: Todo) {
-\t\t// Optimistic flip — revert on server failure.
 \t\tconst next = !t.done;
 \t\tsetTodos((prev) =>
 \t\t\tprev.map((row) => (row.id === t.id ? { ...row, done: next } : row)),
@@ -885,6 +981,55 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t\tmethod: "POST",
 \t\t\t\theaders: { "Content-Type": "application/json" },
 \t\t\t\tbody: JSON.stringify({ id: t.id }),
+\t\t\t});
+\t\t\tif (!res.ok) setTodos(snapshot);
+\t\t});
+\t}
+
+\tasync function rename(t: Todo, newTitle: string) {
+\t\tconst trimmed = newTitle.trim();
+\t\tif (!trimmed || trimmed === t.title) return;
+\t\tsetTodos((prev) =>
+\t\t\tprev.map((row) => (row.id === t.id ? { ...row, title: trimmed } : row)),
+\t\t);
+\t\tstartTransition(async () => {
+\t\t\tconst res = await fetch("/api/fn/editTodo", {
+\t\t\t\tmethod: "POST",
+\t\t\t\theaders: { "Content-Type": "application/json" },
+\t\t\t\tbody: JSON.stringify({ id: t.id, title: trimmed }),
+\t\t\t});
+\t\t\tif (!res.ok) {
+\t\t\t\tsetTodos((prev) =>
+\t\t\t\t\tprev.map((row) => (row.id === t.id ? { ...row, title: t.title } : row)),
+\t\t\t\t);
+\t\t\t}
+\t\t});
+\t}
+
+\tfunction onDragEnd(e: DragEndEvent) {
+\t\tconst { active, over } = e;
+\t\tif (!over || active.id === over.id) return;
+\t\tconst oldIndex = todos.findIndex((t) => t.id === active.id);
+\t\tconst newIndex = todos.findIndex((t) => t.id === over.id);
+\t\tif (oldIndex < 0 || newIndex < 0) return;
+\t\tconst reordered = arrayMove(todos, oldIndex, newIndex);
+\t\tsetTodos(reordered);
+\t\tconst prev = reordered[newIndex - 1];
+\t\tconst next = reordered[newIndex + 1];
+\t\tconst prevPos = prev?.position ?? Date.parse(prev?.createdAt ?? "") ?? 0;
+\t\tconst nextPos = next?.position ?? Date.parse(next?.createdAt ?? "") ?? 0;
+\t\tlet position: number;
+\t\tif (prev && next) position = (prevPos + nextPos) / 2;
+\t\telse if (prev) position = prevPos + 1024;
+\t\telse if (next) position = nextPos - 1024;
+\t\telse position = 1024;
+\t\tconst movedId = String(active.id);
+\t\tconst snapshot = todos;
+\t\tstartTransition(async () => {
+\t\t\tconst res = await fetch("/api/fn/reorderTodo", {
+\t\t\t\tmethod: "POST",
+\t\t\t\theaders: { "Content-Type": "application/json" },
+\t\t\t\tbody: JSON.stringify({ id: movedId, position }),
 \t\t\t});
 \t\t\tif (!res.ok) setTodos(snapshot);
 \t\t});
@@ -920,39 +1065,128 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t\t\tNo todos yet. Add one above.
 \t\t\t\t</p>
 \t\t\t) : (
-\t\t\t\t<ul className="divide-y divide-neutral-200 dark:divide-neutral-800 rounded-md border border-neutral-200 dark:border-neutral-800">
-\t\t\t\t\t{todos.map((t) => (
-\t\t\t\t\t\t<li
-\t\t\t\t\t\t\tkey={t.id}
-\t\t\t\t\t\t\tclassName="flex items-center gap-3 px-4 py-3 text-sm group"
-\t\t\t\t\t\t>
-\t\t\t\t\t\t\t<input
-\t\t\t\t\t\t\t\ttype="checkbox"
-\t\t\t\t\t\t\t\tchecked={t.done}
-\t\t\t\t\t\t\t\tonChange={() => toggle(t)}
-\t\t\t\t\t\t\t\tdisabled={pending}
-\t\t\t\t\t\t\t\tclassName="size-4 cursor-pointer"
-\t\t\t\t\t\t\t\taria-label={\\\`Mark "\${t.title}" as \${t.done ? "not done" : "done"}\\\`}
-\t\t\t\t\t\t\t/>
-\t\t\t\t\t\t\t<span
-\t\t\t\t\t\t\t\tclassName={\\\`flex-1 \${t.done ? "line-through text-neutral-400" : ""}\\\`}
-\t\t\t\t\t\t\t>
-\t\t\t\t\t\t\t\t{t.title}
-\t\t\t\t\t\t\t</span>
-\t\t\t\t\t\t\t<button
-\t\t\t\t\t\t\t\ttype="button"
-\t\t\t\t\t\t\t\tonClick={() => remove(t)}
-\t\t\t\t\t\t\t\tdisabled={pending}
-\t\t\t\t\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-red-500"
-\t\t\t\t\t\t\t\taria-label={\\\`Delete "\${t.title}"\\\`}
-\t\t\t\t\t\t\t>
-\t\t\t\t\t\t\t\tDelete
-\t\t\t\t\t\t\t</button>
-\t\t\t\t\t\t</li>
-\t\t\t\t\t))}
-\t\t\t\t</ul>
+\t\t\t\t<DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+\t\t\t\t\t<SortableContext items={todos.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+\t\t\t\t\t\t<ul className="divide-y divide-neutral-200 dark:divide-neutral-800 rounded-md border border-neutral-200 dark:border-neutral-800">
+\t\t\t\t\t\t\t{todos.map((t) => (
+\t\t\t\t\t\t\t\t<SortableRow
+\t\t\t\t\t\t\t\t\tkey={t.id}
+\t\t\t\t\t\t\t\t\ttodo={t}
+\t\t\t\t\t\t\t\t\tpending={pending}
+\t\t\t\t\t\t\t\t\tonToggle={() => toggle(t)}
+\t\t\t\t\t\t\t\t\tonRemove={() => remove(t)}
+\t\t\t\t\t\t\t\t\tonRename={(next) => rename(t, next)}
+\t\t\t\t\t\t\t\t/>
+\t\t\t\t\t\t\t))}
+\t\t\t\t\t\t</ul>
+\t\t\t\t\t</SortableContext>
+\t\t\t\t</DndContext>
 \t\t\t)}
 \t\t</div>
+\t);
+}
+
+function SortableRow({ todo, pending, onToggle, onRemove, onRename }: {
+\ttodo: Todo;
+\tpending: boolean;
+\tonToggle: () => void;
+\tonRemove: () => void;
+\tonRename: (next: string) => void;
+}) {
+\tconst { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+\t\tuseSortable({ id: todo.id });
+\tconst style = {
+\t\ttransform: CSS.Transform.toString(transform),
+\t\ttransition,
+\t\topacity: isDragging ? 0.4 : 1,
+\t};
+\tconst [editing, setEditing] = useState(false);
+\tconst [draft, setDraft] = useState(todo.title);
+\tconst inputRef = useRef<HTMLInputElement>(null);
+
+\tuseEffect(() => {
+\t\tif (editing) {
+\t\t\tsetDraft(todo.title);
+\t\t\trequestAnimationFrame(() => {
+\t\t\t\tinputRef.current?.focus();
+\t\t\t\tinputRef.current?.select();
+\t\t\t});
+\t\t}
+\t}, [editing, todo.title]);
+
+\tfunction commit() {
+\t\tsetEditing(false);
+\t\tonRename(draft);
+\t}
+
+\treturn (
+\t\t<li
+\t\t\tref={setNodeRef}
+\t\t\tstyle={style}
+\t\t\tclassName="flex items-center gap-3 px-4 py-3 text-sm group bg-white dark:bg-neutral-950"
+\t\t>
+\t\t\t<button
+\t\t\t\ttype="button"
+\t\t\t\t{...attributes}
+\t\t\t\t{...listeners}
+\t\t\t\tclassName="cursor-grab active:cursor-grabbing text-neutral-300 hover:text-neutral-500 select-none touch-none"
+\t\t\t\taria-label="Drag to reorder"
+\t\t\t\ttabIndex={-1}
+\t\t\t>
+\t\t\t\t⋮⋮
+\t\t\t</button>
+\t\t\t<input
+\t\t\t\ttype="checkbox"
+\t\t\t\tchecked={todo.done}
+\t\t\t\tonChange={onToggle}
+\t\t\t\tdisabled={pending}
+\t\t\t\tclassName="size-4 cursor-pointer"
+\t\t\t\taria-label={\\\`Mark "\${todo.title}" as \${todo.done ? "not done" : "done"}\\\`}
+\t\t\t/>
+\t\t\t{editing ? (
+\t\t\t\t<input
+\t\t\t\t\tref={inputRef}
+\t\t\t\t\tvalue={draft}
+\t\t\t\t\tonChange={(e) => setDraft(e.target.value)}
+\t\t\t\t\tonBlur={commit}
+\t\t\t\t\tonKeyDown={(e) => {
+\t\t\t\t\t\tif (e.key === "Enter") commit();
+\t\t\t\t\t\telse if (e.key === "Escape") {
+\t\t\t\t\t\t\tsetEditing(false);
+\t\t\t\t\t\t\tsetDraft(todo.title);
+\t\t\t\t\t\t}
+\t\t\t\t\t}}
+\t\t\t\t\tclassName="flex-1 bg-transparent border-b border-neutral-300 dark:border-neutral-700 outline-none text-sm"
+\t\t\t\t\taria-label="Edit title"
+\t\t\t\t/>
+\t\t\t) : (
+\t\t\t\t<button
+\t\t\t\t\ttype="button"
+\t\t\t\t\tonDoubleClick={() => setEditing(true)}
+\t\t\t\t\tclassName={\\\`flex-1 text-left \${todo.done ? "line-through text-neutral-400" : ""}\\\`}
+\t\t\t\t\ttitle="Double-click to edit"
+\t\t\t\t>
+\t\t\t\t\t{todo.title}
+\t\t\t\t</button>
+\t\t\t)}
+\t\t\t<button
+\t\t\t\ttype="button"
+\t\t\t\tonClick={() => setEditing(true)}
+\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+\t\t\t\taria-label={\\\`Edit "\${todo.title}"\\\`}
+\t\t\t>
+\t\t\t\tEdit
+\t\t\t</button>
+\t\t\t<button
+\t\t\t\ttype="button"
+\t\t\t\tonClick={onRemove}
+\t\t\t\tdisabled={pending}
+\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-red-500"
+\t\t\t\taria-label={\\\`Delete "\${todo.title}"\\\`}
+\t\t\t>
+\t\t\t\tDelete
+\t\t\t</button>
+\t\t</li>
 \t);
 }
 `,
