@@ -179,6 +179,8 @@ export interface Scheduler {
 export interface QueryCtx {
   db: DbReader;
   auth: AuthInfo;
+  /** Environment variables / secrets. */
+  env: Record<string, string>;
 }
 
 /** Context for mutation handlers (read + write, transactional). */
@@ -187,6 +189,8 @@ export interface MutationCtx {
   auth: AuthInfo;
   stream: Stream;
   scheduler: Scheduler;
+  /** Environment variables / secrets. */
+  env: Record<string, string>;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
 }

@@ -77,6 +77,23 @@ function fenceStdout(): void {
     const line = args
       .map((a) => {
         if (typeof a === "string") return a;
+        // Error: JSON.stringify yields `{}` because message/stack are
+        // non-enumerable. That made `console.error("x:", err)` log as `x: {}`,
+        // hiding the real failure from operators. Unwrap by hand.
+        if (a instanceof Error) {
+          const parts = [a.stack || `${a.name}: ${a.message}`];
+          const code = (a as { code?: unknown }).code;
+          if (code !== undefined) parts.push(`code=${String(code)}`);
+          const cause = (a as { cause?: unknown }).cause;
+          if (cause !== undefined) {
+            try {
+              parts.push(`cause=${cause instanceof Error ? cause.stack || cause.message : JSON.stringify(cause)}`);
+            } catch {
+              parts.push(`cause=${String(cause)}`);
+            }
+          }
+          return parts.join(" ");
+        }
         try {
           return JSON.stringify(a);
         } catch {
@@ -543,10 +560,17 @@ async function handleCall(msg: CallMessage): Promise<void> {
       null,
   };
 
+  // Env is read-only config — safe to expose on every ctx variant. Without
+  // this, queries/mutations that need a config flag have to be declared as
+  // actions just to reach `process.env`, which is a footgun: the failure
+  // mode is `ctx.env.X` throwing "cannot read properties of undefined" at
+  // runtime, with no compile-time hint.
+  const env = process.env as Record<string, string>;
+
   let ctx: QueryCtx | MutationCtx | ActionCtx;
   switch (def.type) {
     case "query":
-      ctx = { db: buildDbReader(msg.call_id), auth };
+      ctx = { db: buildDbReader(msg.call_id), auth, env };
       break;
     case "mutation":
       ctx = {
@@ -554,6 +578,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         auth,
         stream,
         scheduler,
+        env,
         error(code, message) {
           const err = new Error(message);
           (err as any).code = code;
