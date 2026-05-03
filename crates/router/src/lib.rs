@@ -952,6 +952,19 @@ fn route_inner(
         return (204, String::new());
     }
 
+    // Email verification gate. When PYLON_REQUIRE_EMAIL_VERIFICATION=1,
+    // an authed user with no emailVerified timestamp on their User row
+    // can only hit /api/auth/* (so they can verify, log out, request a
+    // resend) and the public manifest. Every other route returns 403
+    // EMAIL_NOT_VERIFIED. Off by default — opt-in per deployment.
+    //
+    // Why here vs per-route: this is a session-state gate, not a
+    // capability gate. Centralising it means a new route added later
+    // doesn't accidentally bypass the check.
+    if let Some((status, err)) = email_verification_gate(ctx, url) {
+        return (status, err);
+    }
+
     // GET /api/manifest
     // Public manifest. Clients need entity/field/route shapes to call
     // the API, but they do NOT need raw policy expressions — those are
@@ -1664,6 +1677,57 @@ pub(crate) fn require_admin(ctx: &RouterContext) -> Option<(u16, String)> {
     }
 }
 
+/// Email verification gate. Triggers only when:
+///   - PYLON_REQUIRE_EMAIL_VERIFICATION=1 is set on the runtime
+///   - The caller has a user session (admins + anonymous bypass)
+///   - The User row's `emailVerified` field is null
+///   - The request is not to /api/auth/* (so the user can verify)
+///   - The request is not /api/manifest (clients need shapes to render
+///     the verify-email page itself)
+///
+/// On miss, returns 403 EMAIL_NOT_VERIFIED with a hint pointing at
+/// /api/auth/email/send-verification. Adds one extra DB read per
+/// gated request — the user lookup. Acceptable: this is opt-in.
+fn email_verification_gate(ctx: &RouterContext, url: &str) -> Option<(u16, String)> {
+    if std::env::var("PYLON_REQUIRE_EMAIL_VERIFICATION").as_deref() != Ok("1") {
+        return None;
+    }
+    // Anonymous + admin contexts: nothing to verify.
+    let user_id = ctx.auth_ctx.user_id.as_deref()?;
+    if ctx.auth_ctx.is_admin {
+        return None;
+    }
+    // Auth surfaces stay open so the user can verify, log out, manage
+    // sessions, request a new code. /api/manifest is needed for the
+    // dashboard chrome to even render the verify-email page.
+    let path = url.split('?').next().unwrap_or(url);
+    if path.starts_with("/api/auth/") || path == "/api/manifest" {
+        return None;
+    }
+    // Resolve emailVerified for this user. If we can't find the row
+    // (race with deletion, etc.), fail closed — the request would
+    // bounce on the underlying entity policy anyway.
+    let entity = &ctx.store.manifest().auth.user.entity;
+    let verified = match ctx.store.get_by_id(entity, user_id) {
+        Ok(Some(row)) => !row
+            .get("emailVerified")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        _ => false,
+    };
+    if verified {
+        return None;
+    }
+    Some((
+        403,
+        json_error_with_hint(
+            "EMAIL_NOT_VERIFIED",
+            "Verify your email address before continuing.",
+            "POST /api/auth/email/send-verification → POST /api/auth/email/verify",
+        ),
+    ))
+}
+
 /// Gate a route behind "any authenticated identity". Returns `Some(err)` when
 /// the caller has neither a user session nor an admin token. Used for the
 /// rooms API, which previously let unauthenticated clients enumerate rooms
@@ -2313,6 +2377,73 @@ mod auth_gate_tests {
             // treat as empty — either is fine. The key property: no panic.
             assert!(status >= 200 && status < 600);
         });
+    }
+
+    /// Regression: gate respects PYLON_REQUIRE_EMAIL_VERIFICATION env,
+    /// blocks non-/api/auth/* for unverified users, lets /api/auth/* +
+    /// /api/manifest pass, and bypasses for admin / anonymous.
+    ///
+    /// Tests the gate function directly because route() also hits other
+    /// auth checks on the test routes, making end-to-end status codes
+    /// noisy. Direct gate testing is more precise.
+    #[test]
+    fn email_verification_gate_behavior() {
+        let user = AuthContext {
+            user_id: Some("u-1".into()),
+            is_admin: false,
+            is_guest: false,
+            roles: vec![],
+            tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
+            is_trusted_device: false,
+        };
+        let admin = AuthContext::admin();
+        let anon = AuthContext::anonymous();
+
+        // env unset: gate never fires
+        std::env::remove_var("PYLON_REQUIRE_EMAIL_VERIFICATION");
+        with_ctx(true, &user, |ctx| {
+            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+        });
+
+        // env set, unverified user, non-auth route: blocked
+        std::env::set_var("PYLON_REQUIRE_EMAIL_VERIFICATION", "1");
+        with_ctx(true, &user, |ctx| {
+            let r = email_verification_gate(ctx, "/api/fn");
+            assert!(r.is_some(), "gate must trigger for unverified user");
+            let (status, body) = r.unwrap();
+            assert_eq!(status, 403);
+            assert!(body.contains("EMAIL_NOT_VERIFIED"));
+        });
+
+        // env set, unverified user, /api/auth/me: bypassed
+        with_ctx(true, &user, |ctx| {
+            assert!(
+                email_verification_gate(ctx, "/api/auth/me").is_none(),
+                "/api/auth/me must bypass"
+            );
+            assert!(
+                email_verification_gate(ctx, "/api/auth/email/send-verification").is_none(),
+                "/api/auth/email/send-verification must bypass"
+            );
+            assert!(
+                email_verification_gate(ctx, "/api/manifest").is_none(),
+                "/api/manifest must bypass (chrome needs it to render)"
+            );
+        });
+
+        // env set, admin: bypassed
+        with_ctx(true, &admin, |ctx| {
+            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+        });
+
+        // env set, anonymous: bypassed (nothing to verify)
+        with_ctx(true, &anon, |ctx| {
+            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+        });
+
+        std::env::remove_var("PYLON_REQUIRE_EMAIL_VERIFICATION");
     }
 
     #[test]

@@ -1462,17 +1462,52 @@ pub(crate) fn handle(
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
         };
 
+        // Mint + send a verification code immediately so the user has
+        // it waiting in their inbox by the time the dashboard mounts.
+        // Failures are non-fatal — the account exists, the user can
+        // re-trigger via /api/auth/email/send-verification. Don't make
+        // a slow / flaky email transport block account creation.
+        //
+        // The dev_code echoes back in dev mode (PYLON_DEV_MODE=true) so
+        // local testing doesn't require an email transport at all.
+        let mut dev_code: Option<String> = None;
+        match ctx.magic_codes.try_create(&email) {
+            Ok(code) => {
+                let subject = "Verify your email address";
+                let body_text = format!(
+                    "Welcome to Pylon!\n\nYour email verification code is: {code}\n\nThis code will expire in 10 minutes."
+                );
+                if let Err(e) = ctx.email.send(&email, subject, &body_text) {
+                    tracing::warn!(
+                        "[auth] post-register verification email to {} failed: {e}",
+                        redact_email(&email)
+                    );
+                }
+                if ctx.is_dev {
+                    dev_code = Some(code);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[auth] post-register magic-code mint for {} failed: {:?}",
+                    redact_email(&email),
+                    e
+                );
+            }
+        }
+
         let session = create_session_with_device(ctx, user_id.clone());
         ctx.maybe_set_session_cookie(&session.token);
-        return Some((
-            200,
-            serde_json::json!({
-                "token": session.token,
-                "user_id": user_id,
-                "expires_at": session.expires_at,
-            })
-            .to_string(),
-        ));
+        let mut response = serde_json::json!({
+            "token": session.token,
+            "user_id": user_id,
+            "expires_at": session.expires_at,
+            "verification_email_sent": true,
+        });
+        if let Some(c) = dev_code {
+            response["dev_code"] = serde_json::Value::String(c);
+        }
+        return Some((200, response.to_string()));
     }
 
     // POST /api/auth/password/login
