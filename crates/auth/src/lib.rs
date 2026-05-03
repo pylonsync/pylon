@@ -14,6 +14,7 @@ pub mod password;
 pub mod phone;
 pub mod provider;
 pub mod rate_limit;
+pub mod saml;
 pub mod scim;
 pub mod siwe;
 pub mod stripe;

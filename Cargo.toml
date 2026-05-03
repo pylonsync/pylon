@@ -73,6 +73,10 @@ roaring = "0.10"
 # tool. sha3 provides Keccak-256 (Ethereum's variant, NOT SHA-3).
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 sha3 = "0.10"
+# DEFLATE (raw, no zlib wrapper) for the SAML 2.0 HTTP-Redirect binding —
+# OASIS SAML 2.0 Bindings §3.4.4 mandates deflate compression of the
+# AuthnRequest XML before base64 encoding into the redirect URL.
+flate2 = "1"
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

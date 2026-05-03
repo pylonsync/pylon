@@ -263,6 +263,7 @@ fn start_server(
     let audit = auth_stores.audit;
     let trusted_devices = auth_stores.trusted_devices;
     let org_sso = auth_stores.org_sso;
+    let saml = auth_stores.saml;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -749,6 +750,7 @@ fn start_server(
         let aud = Arc::clone(&audit);
         let td = Arc::clone(&trusted_devices);
         let osso = Arc::clone(&org_sso);
+        let sml = Arc::clone(&saml);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -2073,6 +2075,7 @@ fn start_server(
                     audit: &aud,
                     trusted_devices: td.as_ref(),
                     org_sso: osso.as_ref(),
+                    saml: sml.as_ref(),
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2257,6 +2260,7 @@ struct AuthStores {
     audit: Arc<pylon_auth::audit::AuditStore>,
     trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore>,
     org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore>,
+    saml: Arc<dyn pylon_auth::saml::SamlStore>,
 }
 
 // Memoized env reads — auth resolver runs PER REQUEST so we can't
@@ -2330,6 +2334,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         audit: Arc::new(pylon_auth::audit::AuditStore::new()),
         trusted_devices: Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new()),
         org_sso: Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new()),
+        saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
     }
 }
 
@@ -2423,6 +2428,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         audit: Arc::new(audit),
         trusted_devices,
         org_sso,
+        saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
     }
 }
 
@@ -2521,6 +2527,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         audit: Arc::new(audit),
         trusted_devices,
         org_sso,
+        saml: Arc::new(pylon_auth::saml::InMemorySamlStore::new()),
     }
 }
 

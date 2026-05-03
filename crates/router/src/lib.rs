@@ -508,6 +508,10 @@ pub struct RouterContext<'a> {
     /// Per-org SSO config + state. Endpoints under
     /// `/api/auth/orgs/<slug>/sso/...`.
     pub org_sso: &'a dyn pylon_auth::org_sso::OrgSsoStore,
+    /// Per-org SAML 2.0 SSO config + state. Endpoints under
+    /// `/api/auth/orgs/<slug>/saml/...`. Note: signature verification
+    /// is OFF by default — see `pylon_auth::saml::signature_verification_bypassed`.
+    pub saml: &'a dyn pylon_auth::saml::SamlStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
     pub notifier: &'a dyn ChangeNotifier,
@@ -1854,6 +1858,7 @@ mod auth_gate_tests {
         let audit = pylon_auth::audit::AuditStore::new();
         let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
         let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -1883,6 +1888,7 @@ mod auth_gate_tests {
             audit: &audit,
             trusted_devices: &trusted_devices,
             org_sso: &org_sso,
+            saml: &saml,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2308,6 +2314,7 @@ mod auth_gate_tests {
         let audit = pylon_auth::audit::AuditStore::new();
         let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
         let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2340,6 +2347,7 @@ mod auth_gate_tests {
             audit: &audit,
             trusted_devices: &trusted_devices,
             org_sso: &org_sso,
+            saml: &saml,
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
@@ -2838,6 +2846,7 @@ mod auth_gate_tests {
         let audit = pylon_auth::audit::AuditStore::new();
         let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
         let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let notifier = NoopNotifier;
@@ -2872,6 +2881,7 @@ mod auth_gate_tests {
                 audit: &audit,
                 trusted_devices: &trusted_devices,
                 org_sso: &org_sso,
+                saml: &saml,
                 trusted_origins: &[],
                 policy_engine: &policy_engine,
                 change_log: &change_log,

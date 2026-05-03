@@ -354,6 +354,282 @@ fn sso_error_redirect(
     (302, String::new())
 }
 
+/// Wave-9 — `GET /api/auth/orgs/<org_id>/saml/start`. Builds an
+/// AuthnRequest, encodes it for the HTTP-Redirect binding, 302s to
+/// the IdP. Stores RelayState + the request_id for echo-check on
+/// callback.
+fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, String) {
+    let config = match ctx.saml.get(org_id) {
+        Some(c) => c,
+        None => {
+            return (
+                404,
+                json_error("SAML_NOT_CONFIGURED", "org has no SAML SSO configured"),
+            )
+        }
+    };
+    let query = raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params = parse_query(query);
+    let callback = match params.get("callback") {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => {
+            return (
+                400,
+                json_error("MISSING_CALLBACK", "callback URL is required"),
+            )
+        }
+    };
+    let error_callback = params
+        .get("error_callback")
+        .cloned()
+        .unwrap_or_else(|| callback.clone());
+    if let Err(e) = pylon_auth::validate_trusted_redirect(&callback, ctx.trusted_origins) {
+        return (
+            403,
+            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e:?}")),
+        );
+    }
+    let acs_url = match build_saml_acs_url(org_id) {
+        Some(u) => u,
+        None => {
+            return (
+                500,
+                json_error(
+                    "ACS_URL_UNAVAILABLE",
+                    "set PYLON_PUBLIC_URL so the IdP can POST to the ACS endpoint",
+                ),
+            );
+        }
+    };
+    let sp_entity_id = std::env::var("PYLON_SAML_ENTITY_ID").unwrap_or_else(|_| acs_url.clone());
+    let (request_id, xml) =
+        pylon_auth::saml::build_authn_request(&sp_entity_id, &config.idp_sso_url, &acs_url);
+    use rand::RngCore;
+    let mut rs_bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut rs_bytes);
+    use base64::Engine;
+    let relay_state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rs_bytes);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    ctx.saml.save_state(pylon_auth::saml::SamlStateRecord {
+        relay_state: relay_state.clone(),
+        org_id: org_id.to_string(),
+        request_id,
+        callback_url: callback,
+        error_callback_url: error_callback,
+        created_at: now,
+    });
+    let qs = pylon_auth::saml::encode_redirect_binding(&xml, &relay_state);
+    let target = format!("{}?{qs}", config.idp_sso_url);
+    ctx.add_response_header("Location", target);
+    (302, String::new())
+}
+
+/// Wave-9 — `POST /api/auth/orgs/<org_id>/saml/acs`. The IdP POSTs the
+/// SAMLResponse + RelayState here. Validates state, parses the assertion,
+/// looks up/creates the User row, auto-joins the org, mints a session.
+///
+/// **Refuses with 501** unless `PYLON_SAML_INSECURE_NO_VERIFY=1` is set.
+/// XMLDSig signature verification is the gate; without it, an attacker
+/// who can craft a well-formed SAMLResponse could authenticate as any
+/// email. Operators in trusted environments may opt in.
+fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, String) {
+    if !pylon_auth::saml::signature_verification_bypassed() {
+        return (
+            501,
+            json_error_with_hint(
+                "SAML_VERIFY_NOT_IMPLEMENTED",
+                "SAML signature verification is not yet implemented",
+                "Set PYLON_SAML_INSECURE_NO_VERIFY=1 to accept unverified SAML responses (NOT for production)",
+            ),
+        );
+    }
+    let config = match ctx.saml.get(org_id) {
+        Some(c) => c,
+        None => {
+            return (
+                404,
+                json_error("SAML_NOT_CONFIGURED", "org has no SAML SSO configured"),
+            )
+        }
+    };
+    let _ = &config; // (intentional — config is required for cert validation in the proper impl)
+    let params = parse_form_body(body);
+    let saml_response = match params.get("SAMLResponse") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return (
+                400,
+                json_error(
+                    "MISSING_SAML_RESPONSE",
+                    "SAMLResponse form field is required",
+                ),
+            )
+        }
+    };
+    let relay_state = match params.get("RelayState") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return (
+                400,
+                json_error("MISSING_RELAY_STATE", "RelayState form field is required"),
+            )
+        }
+    };
+    let state_record = match ctx.saml.take_state(&relay_state, org_id) {
+        Some(r) => r,
+        None => {
+            return (
+                403,
+                json_error(
+                    "INVALID_SAML_STATE",
+                    "RelayState is unknown, expired, or for a different org",
+                ),
+            );
+        }
+    };
+    let assertion =
+        match pylon_auth::saml::parse_response_unverified(&saml_response, &state_record.request_id)
+        {
+            Ok(a) => a,
+            Err(e) => {
+                return saml_error_redirect(
+                    ctx,
+                    &state_record.error_callback_url,
+                    "SAML_RESPONSE_INVALID",
+                    &e,
+                );
+            }
+        };
+    let now = format!(
+        "{}Z",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let user_entity = ctx.store.manifest().auth.user.entity.clone();
+    let user_id = match ctx.store.lookup(&user_entity, "email", &assertion.email) {
+        Ok(Some(row)) => {
+            let id = row["id"].as_str().unwrap_or("").to_string();
+            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                let _ = ctx.store.update(
+                    &user_entity,
+                    &id,
+                    &serde_json::json!({ "emailVerified": now }),
+                );
+            }
+            id
+        }
+        _ => match ctx.store.insert(
+            &user_entity,
+            &serde_json::json!({
+                "email": &assertion.email,
+                "displayName": assertion.name.clone().unwrap_or_else(|| assertion.email.clone()),
+                "emailVerified": now,
+                "createdAt": now,
+            }),
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                return saml_error_redirect(
+                    ctx,
+                    &state_record.error_callback_url,
+                    "USER_CREATE_FAILED",
+                    &format!("{}: {}", e.code, e.message),
+                );
+            }
+        },
+    };
+    if ctx.orgs.role_of(org_id, &user_id).is_none() {
+        let role = pylon_auth::org::OrgRole::from_str(&config.default_role)
+            .unwrap_or(pylon_auth::org::OrgRole::Member);
+        ctx.orgs.add_member(org_id, &user_id, role);
+    }
+    let session = create_session_with_device(ctx, user_id.clone());
+    ctx.audit.log(
+        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+            .user(user_id.clone())
+            .actor(user_id.clone())
+            .meta("method", "saml")
+            .meta("org_id", org_id.to_string())
+            .build(),
+    );
+    let cookie_value = ctx.cookie_config.set_value(&session.token);
+    ctx.add_response_header("Set-Cookie", cookie_value);
+    ctx.add_response_header("Location", state_record.callback_url);
+    (302, String::new())
+}
+
+fn build_saml_acs_url(org_id: &str) -> Option<String> {
+    let base = std::env::var("PYLON_PUBLIC_URL").ok()?;
+    let trimmed = base.trim_end_matches('/');
+    Some(format!("{trimmed}/api/auth/orgs/{org_id}/saml/acs"))
+}
+
+fn saml_error_redirect(
+    ctx: &RouterContext,
+    error_url: &str,
+    code: &str,
+    msg: &str,
+) -> (u16, String) {
+    let sep = if error_url.contains('?') { '&' } else { '?' };
+    let target = format!(
+        "{error_url}{sep}saml_error={code}&saml_error_message={msg}",
+        code = url_encode(code),
+        msg = url_encode(&msg[..msg.len().min(200)]),
+    );
+    ctx.add_response_header("Location", target);
+    (302, String::new())
+}
+
+fn parse_form_body(body: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for pair in body.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        out.insert(form_decode(k), form_decode(v));
+    }
+    out
+}
+
+fn form_decode(s: &str) -> String {
+    // application/x-www-form-urlencoded: + → space, %XX hex.
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
@@ -2472,6 +2748,30 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"disabled": true}).to_string()));
     }
 
+    // ─── Per-org SAML 2.0 public endpoints (unauthenticated) ────────────
+    //
+    // GET  /api/auth/orgs/<org_id>/saml/start
+    //   Build an unsigned AuthnRequest, encode for HTTP-Redirect binding,
+    //   302 to the IdP's SingleSignOnService.
+    // POST /api/auth/orgs/<org_id>/saml/acs
+    //   AssertionConsumerService — the IdP POSTs the SAMLResponse here.
+    //   Refuses with 501 unless PYLON_SAML_INSECURE_NO_VERIFY is set
+    //   (signature verification is a follow-up — see saml.rs module
+    //   header).
+    if let Some(rest) = url.strip_prefix("/api/auth/orgs/") {
+        let path = rest.split('?').next().unwrap_or(rest);
+        if let Some(org_id) = path.strip_suffix("/saml/start") {
+            if method == HttpMethod::Get {
+                return Some(handle_saml_start(ctx, org_id, rest));
+            }
+        }
+        if let Some(org_id) = path.strip_suffix("/saml/acs") {
+            if method == HttpMethod::Post {
+                return Some(handle_saml_acs(ctx, org_id, body));
+            }
+        }
+    }
+
     // ─── Per-org SSO public endpoints (unauthenticated) ────────────────
     //
     // GET /api/auth/orgs/<org_id>/sso/start
@@ -2776,6 +3076,144 @@ pub(crate) fn handle(
                     ));
                 }
                 let removed = ctx.org_sso.delete(org_id);
+                return Some((200, serde_json::json!({"deleted": removed}).to_string()));
+            }
+            // ───── Wave-9 per-org SAML 2.0 config CRUD ─────
+            [_id, "saml"] if method == HttpMethod::Get => {
+                return Some(match ctx.saml.get(org_id) {
+                    Some(cfg) => (
+                        200,
+                        serde_json::json!({
+                            "configured": true,
+                            "idp_entity_id": cfg.idp_entity_id,
+                            "idp_sso_url": cfg.idp_sso_url,
+                            "default_role": cfg.default_role,
+                            "email_domains": cfg.email_domains,
+                            "email_attribute": cfg.email_attribute,
+                            "name_attribute": cfg.name_attribute,
+                            "created_at": cfg.created_at,
+                            "updated_at": cfg.updated_at,
+                        })
+                        .to_string(),
+                    ),
+                    None => (200, serde_json::json!({"configured": false}).to_string()),
+                });
+            }
+            [_id, "saml"] if method == HttpMethod::Put => {
+                if !caller_role.can_delete_org() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners can configure SAML"),
+                    ));
+                }
+                let data: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe(
+                                "INVALID_JSON",
+                                "Invalid request body",
+                                &format!("{e}"),
+                            ),
+                        ));
+                    }
+                };
+                let idp_entity_id = data
+                    .get("idp_entity_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let idp_sso_url = data
+                    .get("idp_sso_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let idp_x509_cert_pem = data
+                    .get("idp_x509_cert_pem")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if idp_entity_id.is_empty()
+                    || idp_sso_url.is_empty()
+                    || idp_x509_cert_pem.is_empty()
+                {
+                    return Some((
+                        400,
+                        json_error(
+                            "MISSING_FIELDS",
+                            "idp_entity_id + idp_sso_url + idp_x509_cert_pem are all required",
+                        ),
+                    ));
+                }
+                if !idp_sso_url.starts_with("https://") {
+                    return Some((
+                        400,
+                        json_error("INSECURE_SSO_URL", "idp_sso_url must use https://"),
+                    ));
+                }
+                let default_role = data
+                    .get("default_role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("member")
+                    .to_string();
+                if default_role.eq_ignore_ascii_case("owner") {
+                    return Some((
+                        400,
+                        json_error(
+                            "BAD_DEFAULT_ROLE",
+                            "default_role must be `member` or `admin`, never `owner`",
+                        ),
+                    ));
+                }
+                let email_attribute = data
+                    .get("email_attribute")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
+                    .to_string();
+                let name_attribute = data
+                    .get("name_attribute")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let email_domains: Vec<String> = data
+                    .get("email_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let existing_created = ctx.saml.get(org_id).map(|c| c.created_at).unwrap_or(now);
+                let cfg = pylon_auth::saml::SamlConfig {
+                    org_id: org_id.to_string(),
+                    idp_entity_id,
+                    idp_sso_url,
+                    idp_x509_cert_pem,
+                    default_role,
+                    email_domains,
+                    email_attribute,
+                    name_attribute,
+                    created_at: existing_created,
+                    updated_at: now,
+                };
+                ctx.saml.upsert(cfg);
+                return Some((200, serde_json::json!({"configured": true}).to_string()));
+            }
+            [_id, "saml"] if method == HttpMethod::Delete => {
+                if !caller_role.can_delete_org() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners can delete SAML config"),
+                    ));
+                }
+                let removed = ctx.saml.delete(org_id);
                 return Some((200, serde_json::json!({"deleted": removed}).to_string()));
             }
             // /api/auth/orgs/:id/members
