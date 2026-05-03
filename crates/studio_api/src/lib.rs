@@ -1,22 +1,28 @@
-use pylon_kernel::AppManifest;
+use pylon_kernel::{AppManifest, StudioConfig};
 
 /// Bundled Studio HTML — produced by `crates/studio_api/web/` (Vite +
 /// React + shadcn). The web/ project builds a single self-contained
 /// HTML file via `vite-plugin-singlefile`; we embed it at compile time
-/// and substitute three placeholders per request:
+/// and substitute four placeholders per request:
 ///
 ///   __PYLON_NAME__         — HTML-escaped app name (used in <title>)
 ///   __PYLON_API_BASE__     — JS-string-escaped API origin
 ///   __PYLON_MANIFEST_JSON__ — script-safe manifest JSON literal
+///   __PYLON_STUDIO_CONFIG_JSON__ — script-safe studio config JSON literal
 ///
 /// To rebuild Studio: `cd crates/studio_api/web && bun run build`.
 const STUDIO_HTML: &str = include_str!("../web/dist/index.html");
 
 /// Generate the Studio inspector HTML.
 ///
-/// XSS prevention. The manifest is developer-authored but contains
-/// user-shaped strings (entity names, app name from package.json), so
-/// every interpolated value is treated as untrusted:
+/// Pass an empty/default [`StudioConfig`] when the project doesn't have
+/// `studio.config.ts` — the web shell falls back to defaults (auto-derive
+/// resources from manifest entities, emerald accent, default footer).
+///
+/// XSS prevention. The manifest + config are developer-authored but
+/// contain user-shaped strings (entity names, app name from
+/// package.json, sidebar labels), so every interpolated value is
+/// treated as untrusted:
 ///
 ///   - JSON embedded inside <script>: `</script` (case-insensitive) is
 ///     broken with a backslash so a crafted entity name can't close
@@ -26,17 +32,24 @@ const STUDIO_HTML: &str = include_str!("../web/dist/index.html");
 ///   - Strings in JS string literals (api_base): backslash + Unicode
 ///     escapes, plus `<` → `\u003c` so a `</script` can't slip
 ///     through any bundler that re-quotes the value.
-pub fn generate_studio_html(manifest: &AppManifest, api_base: &str) -> String {
+pub fn generate_studio_html(
+    manifest: &AppManifest,
+    studio_config: &StudioConfig,
+    api_base: &str,
+) -> String {
     let manifest_json =
         escape_script_json(&serde_json::to_string(manifest).unwrap_or_else(|_| "{}".into()));
+    let config_json =
+        escape_script_json(&serde_json::to_string(studio_config).unwrap_or_else(|_| "{}".into()));
     let name = html_escape(&manifest.name);
     let api = js_string_escape(api_base);
 
     STUDIO_HTML
         .replace("__PYLON_NAME__", &name)
         .replace("__PYLON_API_BASE__", &api)
-        // Replace LAST so the JSON's own braces / quotes can't be
-        // re-interpreted by a subsequent .replace.
+        // Replace JSON placeholders LAST so their own braces / quotes
+        // can't be re-interpreted by a subsequent .replace.
+        .replace("__PYLON_STUDIO_CONFIG_JSON__", &config_json)
         .replace("__PYLON_MANIFEST_JSON__", &manifest_json)
 }
 
@@ -131,9 +144,13 @@ mod tests {
         m
     }
 
+    fn empty_config() -> StudioConfig {
+        StudioConfig::default()
+    }
+
     #[test]
     fn generates_html() {
-        let html = generate_studio_html(&test_manifest(), "http://localhost:4321");
+        let html = generate_studio_html(&test_manifest(), &empty_config(), "http://localhost:4321");
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("Pylon Studio")); // <title> base
         assert!(html.contains("todo-app")); // manifest name made it in
@@ -145,7 +162,7 @@ mod tests {
         // attacker-influenced name must not break out of the title element.
         let mut m = test_manifest();
         m.name = "</title><script>alert('x')</script>".into();
-        let html = generate_studio_html(&m, "http://localhost:4321");
+        let html = generate_studio_html(&m, &empty_config(), "http://localhost:4321");
 
         let start = html.find("<title>").expect("no <title>");
         let end = html[start..].find("</title>").expect("no </title>");
@@ -164,7 +181,11 @@ mod tests {
         // backslash-escaped (or Unicode-escaped) in the output so it
         // can't close the string early.
         let m = test_manifest();
-        let html = generate_studio_html(&m, "http://example.com\"; alert(1); //");
+        let html = generate_studio_html(
+            &m,
+            &empty_config(),
+            "http://example.com\"; alert(1); //",
+        );
         let needle = "window.__PYLON_API__ = \"";
         let start = html.find(needle).expect("no PYLON_API assignment");
         let rest = &html[start + needle.len()..];
@@ -200,7 +221,7 @@ mod tests {
         // must get the backslash break.
         let mut m = test_manifest();
         m.entities[0].name = "E</ScRiPt><svg onload=alert(1)>".into();
-        let html = generate_studio_html(&m, "http://ok");
+        let html = generate_studio_html(&m, &empty_config(), "http://ok");
         let embedded = find_manifest_json_block(&html);
         let lower = embedded.to_ascii_lowercase();
         let mut pos = 0;
@@ -221,7 +242,7 @@ mod tests {
         // Escape them so a crafted name can't break the inline JSON.
         let mut m = test_manifest();
         m.entities[0].name = "ok\u{2028}oops".into();
-        let html = generate_studio_html(&m, "http://ok");
+        let html = generate_studio_html(&m, &empty_config(), "http://ok");
         let embedded = find_manifest_json_block(&html);
         assert!(
             !embedded.contains('\u{2028}'),
@@ -249,7 +270,7 @@ mod tests {
     fn escape_helpers_directly() {
         let mut m = test_manifest();
         m.name = "A&B <C>".into();
-        let html = generate_studio_html(&m, "http://ok");
+        let html = generate_studio_html(&m, &empty_config(), "http://ok");
         let start = html.find("<title>").unwrap();
         let end = html[start..].find("</title>").unwrap();
         assert!(html[start..start + end].contains("A&amp;B &lt;C&gt;"));
@@ -257,7 +278,7 @@ mod tests {
 
     #[test]
     fn includes_entity_data() {
-        let html = generate_studio_html(&test_manifest(), "http://localhost:4321");
+        let html = generate_studio_html(&test_manifest(), &empty_config(), "http://localhost:4321");
         // Entities appear inside the embedded MANIFEST JSON.
         assert!(html.contains("\"User\""));
         assert!(html.contains("\"Todo\""));
@@ -265,8 +286,47 @@ mod tests {
 
     #[test]
     fn includes_manifest() {
-        let html = generate_studio_html(&test_manifest(), "http://localhost:4321");
+        let html = generate_studio_html(&test_manifest(), &empty_config(), "http://localhost:4321");
         assert!(html.contains("manifest_version"));
         assert!(html.contains("todosByAuthor"));
+    }
+
+    #[test]
+    fn studio_config_is_injected_xss_safe() {
+        // The studio config goes through the same escape pipeline as
+        // the manifest. A label containing </script> must end up
+        // backslash-broken inside the embedded JSON.
+        use pylon_kernel::studio::*;
+        let cfg = StudioConfig {
+            sidebar: Some(SidebarConfig {
+                sections: vec![SidebarSection {
+                    label: "</ScRiPt><img src=x onerror=alert(1)>".into(),
+                    items: vec![],
+                    default_open: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let html = generate_studio_html(&test_manifest(), &cfg, "http://ok");
+
+        // Pull the studio config block out and confirm any literal
+        // </script needles are backslash-escaped.
+        let needle = "window.__PYLON_STUDIO_CONFIG__ = ";
+        let start = html.find(needle).expect("no PYLON_STUDIO_CONFIG assignment");
+        let after = &html[start..];
+        let end = after.find("</script").unwrap_or(after.len());
+        let literal = &after[..end];
+        let lower = literal.to_ascii_lowercase();
+        let mut pos = 0;
+        while let Some(idx) = lower[pos..].find("</script") {
+            let abs = pos + idx;
+            let preceded_by_backslash = abs > 0 && literal.as_bytes()[abs - 1] == b'\\';
+            assert!(
+                preceded_by_backslash,
+                "unescaped </script in studio config block at {abs}: {literal:?}"
+            );
+            pos = abs + 1;
+        }
     }
 }

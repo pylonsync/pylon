@@ -23,6 +23,7 @@ use pylon_kernel::{Diagnostic, ExitCode, Severity};
 
 use crate::manifest::{parse_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
+use crate::studio_config;
 
 const DEFAULT_PORT: u16 = 4321;
 
@@ -98,6 +99,28 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return ExitCode::Error;
     }
 
+    // Build studio artefacts (config JSON + extension bundle if present).
+    // Failures are non-fatal — the runtime falls back to defaults so a
+    // bad studio.config.ts can't take down a production server.
+    let entry_dir = Path::new(&entry_file)
+        .parent()
+        .unwrap_or(Path::new("."));
+    let studio_data_dir = entry_dir.join(".pylon");
+    if studio_config::locate_config(&entry_file).is_some()
+        || studio_config::locate_entry(&entry_file).is_some()
+    {
+        if let Err(diags) = studio_config::build_artefacts(&entry_file, &studio_data_dir) {
+            let warnings: Vec<Diagnostic> = diags
+                .into_iter()
+                .map(|mut d| {
+                    d.severity = Severity::Warning;
+                    d
+                })
+                .collect();
+            print_diagnostics(&warnings, json_mode);
+        }
+    }
+
     // Database target — Postgres takes precedence when DATABASE_URL is set
     // so multi-replica deployments (pylon-cloud, k8s, Fly clusters) only
     // need that one env var. Falls back to PYLON_DB_PATH (SQLite path),
@@ -158,6 +181,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             return ExitCode::Error;
         }
     };
+
+    // Hand the runtime the paths to studio artefacts (if present) so
+    // /studio renders against the user's config and /studio/extensions.js
+    // can serve the bundled custom components.
+    let cfg_path = studio_data_dir.join(studio_config::STUDIO_CONFIG_OUT);
+    if cfg_path.exists() {
+        runtime.set_studio_config_path(Some(cfg_path));
+    }
+    let ext_path = studio_data_dir.join(studio_config::STUDIO_ENTRY_OUT);
+    if ext_path.exists() {
+        runtime.set_studio_entry_path(Some(ext_path));
+    }
 
     let backend_label = if is_pg { "postgres" } else { "sqlite" };
     if json_mode {

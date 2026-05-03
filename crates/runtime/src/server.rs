@@ -2020,7 +2020,9 @@ fn start_server(
                 .map(|h| h.value.as_str().to_string())
                 .unwrap_or_else(|| "http".to_string());
             let base = format!("{scheme}://{host}");
-            let html = pylon_studio_api::generate_studio_html(rt.manifest(), &base);
+            let studio_cfg = rt.studio_config();
+            let html =
+                pylon_studio_api::generate_studio_html(rt.manifest(), &studio_cfg, &base);
             (
                 200u16,
                 html,
@@ -2028,6 +2030,56 @@ fn start_server(
                 true,
                 Vec::<(String, String)>::new(),
             )
+        } else if url == "/studio/extensions.js" && method == Method::Get {
+            // Bundled `studio.entry.tsx` — produced by the CLI's
+            // `bun build` pass. Same admin gate as /studio in
+            // production (the bundle can carry custom React components
+            // that introspect the live API surface — admin-only).
+            if !is_dev && !auth_ctx.is_admin {
+                let body = json_error(
+                    "AUTH_REQUIRED",
+                    "/studio/extensions.js requires admin auth in production",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            match rt.studio_entry_bytes() {
+                Some(bytes) => {
+                    let body = String::from_utf8_lossy(&bytes).to_string();
+                    (
+                        200u16,
+                        body,
+                        "application/javascript",
+                        true,
+                        Vec::<(String, String)>::new(),
+                    )
+                }
+                None => (
+                    404u16,
+                    json_error(
+                        "STUDIO_EXT_NOT_FOUND",
+                        "No studio.entry.tsx bundle is configured for this project.",
+                    ),
+                    "application/json",
+                    false,
+                    Vec::new(),
+                ),
+            }
         } else {
             // Run plugin middleware with per-request metadata so rate-limit
             // plugins can bucket by peer IP (not just user id) when the

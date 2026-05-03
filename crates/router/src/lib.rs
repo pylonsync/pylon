@@ -1085,49 +1085,215 @@ fn route_inner(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u16, String) {
-    let limit: Option<usize> = url
-        .split("limit=")
-        .nth(1)
-        .and_then(|s| s.split('&').next())
-        .and_then(|s| s.parse().ok());
-    let offset: usize = url
-        .split("offset=")
-        .nth(1)
-        .and_then(|s| s.split('&').next())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let qp = parse_query_params(url);
 
-    // Push limit/offset down to SQL via query_filtered's $limit/$offset.
-    // Skips full-table scans for large entities.
+    // ---- Pagination ---------------------------------------------------
+    // Two parameter shapes are accepted:
+    //   ?limit=&offset=         legacy
+    //   ?page=&per_page=        Studio + Refine convention
+    // When `page` is supplied the response is an envelope with
+    // `data` + `total` + `page` + `per_page`; otherwise we return the
+    // legacy `{data, count, offset, limit}` shape so existing clients
+    // keep working unchanged.
+    let limit: Option<usize> = qp.get("limit").and_then(|v| v.parse().ok());
+    let offset: usize = qp
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let page: Option<usize> = qp.get("page").and_then(|v| v.parse().ok());
+    let per_page: Option<usize> = qp.get("per_page").and_then(|v| v.parse().ok());
+    let paginated = page.is_some() || per_page.is_some();
+
+    let (effective_limit, effective_offset) = if paginated {
+        let pp = per_page.unwrap_or(25).max(1).min(1000);
+        let p = page.unwrap_or(1).max(1);
+        (Some(pp), (p - 1) * pp)
+    } else {
+        (limit, offset)
+    };
+
+    // ---- Build base filter (per-field) -------------------------------
     let mut filter = serde_json::Map::new();
-    if let Some(l) = limit {
+    for (k, v) in &qp {
+        // filter[<field>]=<value>
+        if let Some(field) = k
+            .strip_prefix("filter[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            // Try numeric / bool coercion so `filter[active]=true` matches
+            // a stored boolean. Fall back to string equality otherwise.
+            let parsed = parse_query_value(v);
+            filter.insert(field.to_string(), parsed);
+        }
+    }
+
+    // ---- Sort --------------------------------------------------------
+    if let Some(sort_field) = qp.get("sort") {
+        let order = qp
+            .get("order")
+            .map(|s| s.as_str())
+            .unwrap_or("asc")
+            .to_lowercase();
+        let dir = if order == "desc" { "desc" } else { "asc" };
+        let mut order_obj = serde_json::Map::new();
+        order_obj.insert(sort_field.clone(), serde_json::Value::String(dir.into()));
+        filter.insert("$order".into(), serde_json::Value::Object(order_obj));
+    }
+
+    // ---- Text search ------------------------------------------------
+    // `q` maps to the storage-layer $search clause, which uses FTS5 on
+    // SQLite when the entity declares `search.text`. Entities without a
+    // search config will get an error from the storage layer; we
+    // surface that as a soft fallback (drop $search and continue) so a
+    // search input on an unsearchable entity simply ignores the query
+    // instead of returning a hard 500.
+    if let Some(q) = qp.get("q") {
+        if !q.trim().is_empty() {
+            filter.insert("$search".into(), serde_json::Value::String(q.clone()));
+        }
+    }
+
+    // ---- Total count (paginated mode only) ---------------------------
+    let total = if paginated {
+        let mut count_filter = filter.clone();
+        // Strip pagination + ordering for the count query.
+        count_filter.remove("$limit");
+        count_filter.remove("$offset");
+        count_filter.remove("$order");
+        match store.query_filtered(entity, &serde_json::Value::Object(count_filter)) {
+            Ok(rows) => Some(rows.len()),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // ---- Apply pagination to the data filter -------------------------
+    if let Some(l) = effective_limit {
         filter.insert("$limit".into(), serde_json::json!(l));
     }
-    if offset > 0 {
-        filter.insert("$offset".into(), serde_json::json!(offset));
+    if effective_offset > 0 {
+        filter.insert("$offset".into(), serde_json::json!(effective_offset));
     }
     let filter = serde_json::Value::Object(filter);
 
-    match store.query_filtered(entity, &filter) {
-        Ok(rows) => {
-            // For backwards compatibility we keep the response shape but
-            // `total` here means "rows returned" not "total in table".
-            // The cursor pagination endpoint at /api/entities/:e/cursor is
-            // the right path for total counts at scale.
-            let count = rows.len();
-            (
-                200,
-                serde_json::json!({
-                    "data": rows,
-                    "count": count,
-                    "offset": offset,
-                    "limit": limit,
-                })
-                .to_string(),
-            )
+    // ---- Execute -----------------------------------------------------
+    let rows_result = store.query_filtered(entity, &filter);
+    let rows = match rows_result {
+        Ok(r) => r,
+        Err(e) => {
+            // FTS-not-configured failures: retry without $search so the
+            // unsearchable entity still loads on a mistargeted query.
+            if e.code == "SEARCH_NOT_CONFIGURED" || e.code == "FTS_UNSUPPORTED" {
+                let mut retry = filter.clone();
+                if let Some(obj) = retry.as_object_mut() {
+                    obj.remove("$search");
+                }
+                match store.query_filtered(entity, &retry) {
+                    Ok(r) => r,
+                    Err(e) => return (400, json_error(&e.code, &e.message)),
+                }
+            } else {
+                return (400, json_error(&e.code, &e.message));
+            }
         }
-        Err(e) => (400, json_error(&e.code, &e.message)),
+    };
+
+    if paginated {
+        let p = page.unwrap_or(1);
+        let pp = per_page.unwrap_or(25);
+        (
+            200,
+            serde_json::json!({
+                "data": rows,
+                "total": total,
+                "page": p,
+                "per_page": pp,
+            })
+            .to_string(),
+        )
+    } else {
+        let count = rows.len();
+        (
+            200,
+            serde_json::json!({
+                "data": rows,
+                "count": count,
+                "offset": offset,
+                "limit": limit,
+            })
+            .to_string(),
+        )
     }
+}
+
+/// Parse the `?key=value&key=value` portion of a URL into a flat map.
+/// Values are URL-decoded (best-effort — unknown escapes pass through).
+/// Repeated keys keep only the *last* value, which matches every
+/// existing call site's expectation.
+fn parse_query_params(url: &str) -> std::collections::HashMap<String, String> {
+    let q = url.split('?').nth(1).unwrap_or("");
+    let mut out = std::collections::HashMap::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let mut it = pair.splitn(2, '=');
+        let k = it.next().unwrap_or("");
+        let v = it.next().unwrap_or("");
+        let dk = url_decode(k);
+        let dv = url_decode(v);
+        out.insert(dk, dv);
+    }
+    out
+}
+
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'+' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        if b == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push(((h * 16 + l) as u8) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
+/// Best-effort coercion of a query-string value to a JSON Value.
+/// `"true" / "false"` → bool; pure-digit strings → integer; otherwise
+/// kept as a string. This lets `filter[active]=true` match a stored
+/// boolean without forcing the operator to think about types.
+fn parse_query_value(s: &str) -> serde_json::Value {
+    if s == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if s == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(n) = s.parse::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    serde_json::Value::String(s.to_string())
 }
 
 pub(crate) fn handle_get(store: &dyn DataStore, entity: &str, id: &str) -> (u16, String) {

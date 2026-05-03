@@ -10,6 +10,7 @@ use crate::bun::run_bun_codegen;
 use crate::client_codegen::generate_client_ts;
 use crate::manifest::{parse_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
+use crate::studio_config;
 
 const DEFAULT_PORT: u16 = 4321;
 
@@ -336,6 +337,20 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         };
 
+        // Point /studio at the studio artefacts inside .pylon/. The
+        // runtime re-reads the config file on every render so dev
+        // edits to studio.config.ts take effect on refresh — no
+        // server restart needed. The extension bundle is served at
+        // /studio/extensions.js from disk for the same reason.
+        let studio_cfg_path = data_dir.join(studio_config::STUDIO_CONFIG_OUT);
+        if studio_cfg_path.exists() {
+            runtime.set_studio_config_path(Some(studio_cfg_path));
+        }
+        let studio_ext_path = data_dir.join(studio_config::STUDIO_ENTRY_OUT);
+        if studio_ext_path.exists() {
+            runtime.set_studio_entry_path(Some(studio_ext_path));
+        }
+
         let rt_clone = Arc::clone(&runtime);
         std::thread::spawn(move || {
             // Previously this dropped the error with `let _ = ...` which made
@@ -478,6 +493,7 @@ fn run_rebuild_and_get_manifest(
 
     if !has_errors {
         write_generated_files(entry_file, &manifest_json, &manifest);
+        build_studio_artefacts(entry_file, json_mode);
     }
 
     if json_mode {
@@ -563,6 +579,7 @@ fn run_rebuild(entry_file: &str, json_mode: bool, count: &mut u32) {
     // Write generated files on success.
     if !has_errors {
         write_generated_files(entry_file, &manifest_json, &manifest);
+        build_studio_artefacts(entry_file, json_mode);
     }
 
     if json_mode {
@@ -610,6 +627,43 @@ fn write_generated_files(
     let client_path = dir.join("pylon.client.ts");
     let client_ts = generate_client_ts(manifest);
     let _ = std::fs::write(&client_path, client_ts);
+}
+
+/// Build studio artefacts (`.pylon/studio.config.json` + optional
+/// `.pylon/studio.entry.js`). Studio config failures are non-fatal —
+/// they're surfaced as warnings so the manifest build still goes
+/// through. The runtime falls back to defaults when the config is
+/// missing or invalid.
+fn build_studio_artefacts(entry_file: &str, json_mode: bool) {
+    let entry_path = Path::new(entry_file);
+    let data_dir = entry_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(".pylon");
+
+    // Skip when neither file exists. The runtime treats a missing
+    // config the same as an empty one, so writing a default JSON
+    // would just churn .pylon/ on every rebuild.
+    if studio_config::locate_config(entry_file).is_none()
+        && studio_config::locate_entry(entry_file).is_none()
+    {
+        return;
+    }
+
+    match studio_config::build_artefacts(entry_file, &data_dir) {
+        Ok(_) => {}
+        Err(diags) => {
+            // Demote to warnings so the manifest pass dominates.
+            let warnings: Vec<Diagnostic> = diags
+                .into_iter()
+                .map(|mut d| {
+                    d.severity = Severity::Warning;
+                    d
+                })
+                .collect();
+            print_diagnostics(&warnings, json_mode);
+        }
+    }
 }
 
 /// Walk up from cwd looking for `.env.local` and `.env`, then load them
@@ -698,13 +752,17 @@ fn exec_restart(_json_mode: bool) {
     }
 }
 
-/// Collect mtime of `.ts` files in a directory, excluding generated files.
+/// Collect mtime of `.ts` and `.tsx` files in a directory, excluding
+/// generated files. `.tsx` is included so edits to `studio.entry.tsx`
+/// trigger the same rebuild path as edits to `app.ts` /
+/// `studio.config.ts`.
 fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
     let mut mtimes = HashMap::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext == Some("ts") || ext == Some("tsx") {
                 // Skip generated files to avoid infinite rebuild loops.
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("pylon.") {

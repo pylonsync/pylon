@@ -3,6 +3,7 @@ mod client_codegen;
 mod commands;
 mod manifest;
 mod output;
+mod studio_config;
 mod swift_codegen;
 
 use pylon_kernel::ExitCode;

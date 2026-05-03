@@ -38,10 +38,11 @@ pub mod workflows;
 pub mod ws;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
-use pylon_kernel::{AppManifest, ManifestEntity};
+use pylon_kernel::{AppManifest, ManifestEntity, StudioConfig};
 use rusqlite::Connection;
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,21 @@ pub struct Runtime {
     /// Gates the test-reset endpoint — a false positive here would let
     /// `/api/__test__/reset` truncate real tables.
     is_in_memory: bool,
+    /// Path to the user's `.pylon/studio.config.json`, populated by the
+    /// CLI when `studio.config.ts` is present in the project. The
+    /// `/studio` handler re-reads this file on every render so dev
+    /// edits don't require a server restart. `None` means "no config
+    /// authored — use defaults."
+    ///
+    /// Wrapped in a `RwLock` so the dev watch loop can swap the path
+    /// without taking down the server (e.g. when the operator first
+    /// adds a `studio.config.ts` to a running project). Reads are
+    /// cheap; writes happen at most once per dev cycle.
+    studio_config_path: RwLock<Option<PathBuf>>,
+    /// Path to the bundled `.pylon/studio.entry.js` if the project
+    /// ships custom Studio extensions. Same hot-swap semantics as
+    /// `studio_config_path`.
+    studio_entry_path: RwLock<Option<PathBuf>>,
 }
 
 /// Backend storage for entity CRUD. SQLite variant owns the connection
@@ -306,6 +322,8 @@ impl Runtime {
             manifest,
             entities,
             is_in_memory: false,
+            studio_config_path: RwLock::new(None),
+            studio_entry_path: RwLock::new(None),
         })
     }
 
@@ -566,6 +584,8 @@ impl Runtime {
             manifest,
             entities,
             is_in_memory,
+            studio_config_path: RwLock::new(None),
+            studio_entry_path: RwLock::new(None),
         })
     }
 
@@ -618,6 +638,55 @@ impl Runtime {
     /// Return a reference to the app manifest.
     pub fn manifest(&self) -> &AppManifest {
         &self.manifest
+    }
+
+    /// Point the runtime at a `studio.config.json` written by the CLI.
+    /// Subsequent `/studio` renders re-read this file from disk so dev
+    /// edits to `studio.config.ts` take effect on refresh — no server
+    /// restart needed.
+    pub fn set_studio_config_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut guard) = self.studio_config_path.write() {
+            *guard = path;
+        }
+    }
+
+    /// Point the runtime at a bundled `studio.entry.js`. The HTTP layer
+    /// serves this file at `/studio/extensions.js` (see
+    /// `crates/runtime/src/server.rs`).
+    pub fn set_studio_entry_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut guard) = self.studio_entry_path.write() {
+            *guard = path;
+        }
+    }
+
+    /// Load the current studio config from disk. Returns the default
+    /// (empty) config when no file is configured or the file fails to
+    /// parse — the Studio web shell falls back to sensible defaults
+    /// in that case rather than rendering a blank screen.
+    pub fn studio_config(&self) -> StudioConfig {
+        let path = self
+            .studio_config_path
+            .read()
+            .ok()
+            .and_then(|g| g.clone());
+        match path {
+            Some(p) => match std::fs::read_to_string(&p) {
+                Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+                Err(_) => StudioConfig::default(),
+            },
+            None => StudioConfig::default(),
+        }
+    }
+
+    /// Read the bundled extensions JS, or `None` if not configured /
+    /// missing on disk.
+    pub fn studio_entry_bytes(&self) -> Option<Vec<u8>> {
+        let path = self
+            .studio_entry_path
+            .read()
+            .ok()
+            .and_then(|g| g.clone())?;
+        std::fs::read(&path).ok()
     }
 
     /// Expose the write connection mutex for transactional operations.

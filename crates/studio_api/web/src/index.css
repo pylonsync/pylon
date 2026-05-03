@@ -2,16 +2,41 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ---------------------------------------------------------------------------
+   Theme tokens
+   ---------------------------------------------------------------------------
+
+   Three layers compose into the final color set:
+
+   1. Neutral surface (background / card / sidebar / border / muted / etc.)
+      Light + dark variants. These don't depend on accent.
+
+   2. Accent palette (primary / ring / sidebar-primary). Five built-in
+      variants — emerald (default), blue, violet, rose, amber. Each
+      provides a `--primary` and a `--primary-foreground` tuned for AA
+      contrast in *both* dark and light surfaces.
+
+   3. Per-app overrides. studio.config.ts can set theme.primary to an
+      arbitrary hex; the layout component injects an inline `style`
+      that re-points `--primary` (and recomputes ring / sidebar-primary).
+
+   `data-accent` on the `<html>` element selects the accent palette. The
+   theme provider sets it from config.theme.accent (defaults to "emerald").
+
+   `.dark` / `.light` (or :root absent both) selects the surface variant,
+   driven by next-themes.
+*/
+
 :root {
 	--radius: 0.625rem;
+
+	/* Neutral surface — light */
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.141 0.005 285.823);
 	--card: oklch(1 0 0);
 	--card-foreground: oklch(0.141 0.005 285.823);
 	--popover: oklch(1 0 0);
 	--popover-foreground: oklch(0.141 0.005 285.823);
-	--primary: oklch(0.21 0.006 285.885);
-	--primary-foreground: oklch(0.985 0 0);
 	--secondary: oklch(0.967 0.001 286.375);
 	--secondary-foreground: oklch(0.21 0.006 285.885);
 	--muted: oklch(0.967 0.001 286.375);
@@ -21,31 +46,51 @@
 	--destructive: oklch(0.577 0.245 27.325);
 	--border: oklch(0.92 0.004 286.32);
 	--input: oklch(0.92 0.004 286.32);
-	--ring: oklch(0.705 0.015 286.067);
+
+	/* Sidebar surface — light, slightly off-background */
+	--sidebar: oklch(0.985 0 0);
+	--sidebar-foreground: oklch(0.141 0.005 285.823);
+	--sidebar-accent: oklch(0.967 0.001 286.375);
+	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
+	--sidebar-border: oklch(0.92 0.004 286.32);
+
+	/* Charts (kept from previous theme — used by metrics dashboards) */
 	--chart-1: oklch(0.646 0.222 41.116);
 	--chart-2: oklch(0.6 0.118 184.704);
 	--chart-3: oklch(0.398 0.07 227.392);
 	--chart-4: oklch(0.828 0.189 84.429);
 	--chart-5: oklch(0.769 0.188 70.08);
-	--sidebar: oklch(0.985 0 0);
-	--sidebar-foreground: oklch(0.141 0.005 285.823);
-	--sidebar-primary: oklch(0.21 0.006 285.885);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.967 0.001 286.375);
-	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-	--sidebar-border: oklch(0.92 0.004 286.32);
-	--sidebar-ring: oklch(0.705 0.015 286.067);
+
+	/* Default accent: emerald (matches the screenshot) */
+	--primary: oklch(0.696 0.17 162.48);
+	--primary-foreground: oklch(0.13 0.028 162.48);
+	--ring: oklch(0.696 0.17 162.48);
+	--sidebar-primary: oklch(0.696 0.17 162.48);
+	--sidebar-primary-foreground: oklch(0.13 0.028 162.48);
+	--sidebar-ring: oklch(0.696 0.17 162.48);
+
+	/* Status / badge palette — used by RendererBadge and Status pills.
+	   Tuned for both light and dark surfaces. */
+	--status-green-bg: color-mix(in oklab, oklch(0.696 0.17 162.48) 12%, transparent);
+	--status-green-fg: oklch(0.696 0.17 162.48);
+	--status-red-bg: color-mix(in oklab, oklch(0.704 0.191 22.216) 14%, transparent);
+	--status-red-fg: oklch(0.704 0.191 22.216);
+	--status-amber-bg: color-mix(in oklab, oklch(0.769 0.188 70.08) 14%, transparent);
+	--status-amber-fg: oklch(0.769 0.188 70.08);
+	--status-blue-bg: color-mix(in oklab, oklch(0.6 0.165 250) 14%, transparent);
+	--status-blue-fg: oklch(0.6 0.165 250);
+	--status-gray-bg: color-mix(in oklab, oklch(0.552 0.016 285.938) 14%, transparent);
+	--status-gray-fg: oklch(0.552 0.016 285.938);
 }
 
 .dark {
+	/* Neutral surface — dark (matches the screenshot's near-black panels) */
 	--background: oklch(0.141 0.005 285.823);
 	--foreground: oklch(0.985 0 0);
 	--card: oklch(0.21 0.006 285.885);
 	--card-foreground: oklch(0.985 0 0);
 	--popover: oklch(0.21 0.006 285.885);
 	--popover-foreground: oklch(0.985 0 0);
-	--primary: oklch(0.92 0.004 286.32);
-	--primary-foreground: oklch(0.21 0.006 285.885);
 	--secondary: oklch(0.274 0.006 286.033);
 	--secondary-foreground: oklch(0.985 0 0);
 	--muted: oklch(0.274 0.006 286.033);
@@ -55,20 +100,65 @@
 	--destructive: oklch(0.704 0.191 22.216);
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.552 0.016 285.938);
-	--chart-1: oklch(0.488 0.243 264.376);
-	--chart-2: oklch(0.696 0.17 162.48);
-	--chart-3: oklch(0.769 0.188 70.08);
-	--chart-4: oklch(0.627 0.265 303.9);
-	--chart-5: oklch(0.645 0.246 16.439);
-	--sidebar: oklch(0.21 0.006 285.885);
+
+	/* Sidebar — slightly darker than card, matches Refine */
+	--sidebar: oklch(0.18 0.006 285.885);
 	--sidebar-foreground: oklch(0.985 0 0);
-	--sidebar-primary: oklch(0.488 0.243 264.376);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
 	--sidebar-accent: oklch(0.274 0.006 286.033);
 	--sidebar-accent-foreground: oklch(0.985 0 0);
-	--sidebar-border: oklch(1 0 0 / 10%);
-	--sidebar-ring: oklch(0.552 0.016 285.938);
+	--sidebar-border: oklch(1 0 0 / 8%);
+}
+
+/* -----------------------------------------------------------------
+   Accent palettes — `<html data-accent="...">` selects one.
+   Each provides `--primary` and friends for both light and dark.
+   ----------------------------------------------------------------- */
+
+[data-accent="emerald"] {
+	--primary: oklch(0.696 0.17 162.48);
+	--primary-foreground: oklch(0.13 0.028 162.48);
+	--ring: oklch(0.696 0.17 162.48);
+	--sidebar-primary: oklch(0.696 0.17 162.48);
+	--sidebar-primary-foreground: oklch(0.13 0.028 162.48);
+	--sidebar-ring: oklch(0.696 0.17 162.48);
+	--status-green-bg: color-mix(in oklab, oklch(0.696 0.17 162.48) 12%, transparent);
+	--status-green-fg: oklch(0.696 0.17 162.48);
+}
+
+[data-accent="blue"] {
+	--primary: oklch(0.6 0.165 250);
+	--primary-foreground: oklch(0.985 0.005 250);
+	--ring: oklch(0.6 0.165 250);
+	--sidebar-primary: oklch(0.6 0.165 250);
+	--sidebar-primary-foreground: oklch(0.985 0.005 250);
+	--sidebar-ring: oklch(0.6 0.165 250);
+}
+
+[data-accent="violet"] {
+	--primary: oklch(0.627 0.265 303.9);
+	--primary-foreground: oklch(0.985 0.005 303.9);
+	--ring: oklch(0.627 0.265 303.9);
+	--sidebar-primary: oklch(0.627 0.265 303.9);
+	--sidebar-primary-foreground: oklch(0.985 0.005 303.9);
+	--sidebar-ring: oklch(0.627 0.265 303.9);
+}
+
+[data-accent="rose"] {
+	--primary: oklch(0.645 0.246 16.439);
+	--primary-foreground: oklch(0.985 0.005 16.439);
+	--ring: oklch(0.645 0.246 16.439);
+	--sidebar-primary: oklch(0.645 0.246 16.439);
+	--sidebar-primary-foreground: oklch(0.985 0.005 16.439);
+	--sidebar-ring: oklch(0.645 0.246 16.439);
+}
+
+[data-accent="amber"] {
+	--primary: oklch(0.769 0.188 70.08);
+	--primary-foreground: oklch(0.18 0.028 70.08);
+	--ring: oklch(0.769 0.188 70.08);
+	--sidebar-primary: oklch(0.769 0.188 70.08);
+	--sidebar-primary-foreground: oklch(0.18 0.028 70.08);
+	--sidebar-ring: oklch(0.769 0.188 70.08);
 }
 
 @theme inline {
@@ -107,6 +197,16 @@
 	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-ring: var(--sidebar-ring);
+	--color-status-green-bg: var(--status-green-bg);
+	--color-status-green-fg: var(--status-green-fg);
+	--color-status-red-bg: var(--status-red-bg);
+	--color-status-red-fg: var(--status-red-fg);
+	--color-status-amber-bg: var(--status-amber-bg);
+	--color-status-amber-fg: var(--status-amber-fg);
+	--color-status-blue-bg: var(--status-blue-bg);
+	--color-status-blue-fg: var(--status-blue-fg);
+	--color-status-gray-bg: var(--status-gray-bg);
+	--color-status-gray-fg: var(--status-gray-fg);
 }
 
 @layer base {

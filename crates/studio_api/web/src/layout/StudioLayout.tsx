@@ -1,18 +1,5 @@
-import { useState } from "react";
-import {
-	Activity,
-	Box,
-	Database,
-	FileCode,
-	FileText,
-	LogIn,
-	LogOut,
-	Lock,
-	Radio,
-	Settings,
-	ShieldCheck,
-	Zap,
-} from "lucide-react";
+import { useMemo, useState } from "react";
+import { ExternalLink, LayoutDashboard, Lock, LogIn, LogOut, Settings } from "lucide-react";
 import {
 	Sidebar,
 	SidebarContent,
@@ -26,11 +13,9 @@ import {
 	SidebarMenuButton,
 	SidebarMenuItem,
 	SidebarProvider,
-	SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -43,198 +28,276 @@ import { useAuth } from "@/auth/AuthContext";
 import { SignInDialog } from "@/auth/SignInDialog";
 import { LockedPage } from "@/pages/Locked";
 import { MANIFEST } from "@/lib/pylon";
+import type { StudioConfig } from "@/lib/studio-config";
+import { Brand } from "@/layout/Brand";
+import { Breadcrumbs, type BreadcrumbCrumb } from "@/layout/Breadcrumbs";
+import { SidebarFooterCard } from "@/layout/SidebarFooterCard";
+import { ThemeProvider } from "@/layout/ThemeProvider";
+import { resolveIcon } from "@/layout/icons";
+import {
+	defaultFooter,
+	resolveNav,
+	type ResolvedNavItem,
+} from "@/layout/resolve-nav";
 
-export type StudioPage =
-	| "entities"
-	| "functions"
-	| "manifest"
-	| "policies"
-	| "routes"
-	| "sync"
-	| "health"
-	| "settings";
+/// Identifier for what the user is currently viewing. Discriminated by
+/// `kind` so the App can render the right page for each.
+export type StudioRoute =
+	| { kind: "page"; id: string }
+	| { kind: "resource"; entity: string };
 
-type NavItem = {
-	id: StudioPage;
-	label: string;
-	icon: React.ComponentType<{ className?: string }>;
-	requiresAdmin?: boolean;
-};
-
-const NAV: { section: string; items: NavItem[] }[] = [
-	{
-		section: "Data",
-		items: [
-			{ id: "entities", label: "Entities", icon: Database },
-			{ id: "manifest", label: "Manifest", icon: FileText },
-		],
-	},
-	{
-		section: "Logic",
-		items: [
-			{ id: "functions", label: "Functions", icon: FileCode, requiresAdmin: true },
-			{ id: "policies", label: "Policies", icon: ShieldCheck },
-			{ id: "routes", label: "Routes", icon: Box },
-		],
-	},
-	{
-		section: "Operations",
-		items: [
-			{ id: "sync", label: "Live sync", icon: Radio },
-			{ id: "health", label: "Health", icon: Activity, requiresAdmin: true },
-		],
-	},
-];
+export function routeKey(r: StudioRoute): string {
+	return r.kind === "page" ? `page:${r.id}` : `resource:${r.entity}`;
+}
 
 export function StudioLayout({
-	page,
-	onPageChange,
+	config,
+	route,
+	onRouteChange,
 	children,
 }: {
-	page: StudioPage;
-	onPageChange: (next: StudioPage) => void;
+	config: StudioConfig;
+	route: StudioRoute;
+	onRouteChange: (r: StudioRoute) => void;
 	children: React.ReactNode;
 }) {
 	const { me, hasToken, loading, signOut } = useAuth();
 	const [signInOpen, setSignInOpen] = useState(false);
 	const isAdmin = !!me?.is_admin;
-	// Block the main content area for unauthenticated callers. The sidebar
-	// stays visible because entity names + nav structure come from the
-	// bundled manifest (public surface — same names appear in API URLs and
-	// in the openapi.json). What needs gating is the data view itself:
-	// previously /studio rendered the Entities table to anyone, called
-	// /api/entities/User, got back 401, set rows=[], and showed
-	// "No rows in User yet" — which misleadingly implied the table was
-	// empty rather than "you can't see this until you sign in."
+
+	const sections = useMemo(() => resolveNav(config, MANIFEST), [config]);
+	const footer = useMemo(() => defaultFooter(config.sidebar), [config.sidebar]);
+
+	// Block the main content area for unauthenticated callers.
 	const requireAuth = !loading && !hasToken;
 
+	const crumbs = useMemo<BreadcrumbCrumb[]>(() => {
+		const head: BreadcrumbCrumb = {
+			label: "Dashboard",
+			icon: LayoutDashboard,
+		};
+		const current = locateCurrent(route, sections);
+		if (!current) return [head];
+		const Icon = current.icon ? resolveIcon(current.icon) : undefined;
+		return [head, { label: current.label, icon: Icon }];
+	}, [route, sections]);
+
 	return (
-		<SidebarProvider>
-			<Sidebar variant="inset">
-				<SidebarHeader>
-					<div className="flex items-center gap-2 px-2 py-1.5">
-						<div className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
-							<Zap className="size-4" />
-						</div>
-						<div className="flex flex-col leading-tight">
-							<span className="text-sm font-semibold">Pylon Studio</span>
-							<span className="text-xs text-muted-foreground">
-								{MANIFEST.name} · v{MANIFEST.version}
-							</span>
-						</div>
-					</div>
-				</SidebarHeader>
-				<SidebarContent>
-					{NAV.map((group) => (
-						<SidebarGroup key={group.section}>
-							<SidebarGroupLabel>{group.section}</SidebarGroupLabel>
-							<SidebarGroupContent>
-								<SidebarMenu>
-									{group.items.map((item) => {
-										const locked = item.requiresAdmin && !isAdmin;
-										const Icon = item.icon;
-										return (
-											<SidebarMenuItem key={item.id}>
-												<SidebarMenuButton
-													isActive={page === item.id}
-													onClick={() => onPageChange(item.id)}
-													tooltip={
-														locked ? `${item.label} — admin required` : item.label
-													}
-												>
-													<Icon />
-													<span>{item.label}</span>
-													{locked && (
-														<Lock className="ml-auto size-3 opacity-60" />
-													)}
-												</SidebarMenuButton>
-											</SidebarMenuItem>
-										);
-									})}
-								</SidebarMenu>
-							</SidebarGroupContent>
-						</SidebarGroup>
-					))}
-				</SidebarContent>
-				<SidebarFooter>
-					<SidebarMenu>
-						<SidebarMenuItem>
-							{hasToken ? (
-								<DropdownMenu>
-									<DropdownMenuTrigger asChild>
-										<SidebarMenuButton tooltip="Account">
-											<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-												{isAdmin ? "A" : me?.user_id?.slice(0, 1).toUpperCase() ?? "U"}
-											</div>
-											<div className="flex flex-col items-start leading-tight">
-												<span className="text-xs font-medium">
-													{isAdmin ? "Admin" : me?.user_id ?? "Signed in"}
-												</span>
-												<span className="text-[10px] text-muted-foreground">
-													{isAdmin ? "Full access" : "Limited"}
-												</span>
-											</div>
-										</SidebarMenuButton>
-									</DropdownMenuTrigger>
-									<DropdownMenuContent side="right" align="end" className="min-w-44">
-										<DropdownMenuLabel className="text-xs font-normal">
-											{me?.user_id ?? "anonymous"}
-										</DropdownMenuLabel>
-										<DropdownMenuSeparator />
-										<DropdownMenuItem onClick={() => onPageChange("settings")}>
-											<Settings className="size-4" />
-											Settings
-										</DropdownMenuItem>
-										<DropdownMenuItem onClick={signOut}>
-											<LogOut className="size-4" />
-											Sign out
-										</DropdownMenuItem>
-									</DropdownMenuContent>
-								</DropdownMenu>
-							) : (
-								<SidebarMenuButton onClick={() => setSignInOpen(true)}>
-									<LogIn />
-									<span>Sign in</span>
-								</SidebarMenuButton>
-							)}
-						</SidebarMenuItem>
-					</SidebarMenu>
-				</SidebarFooter>
-			</Sidebar>
-			<SidebarInset>
-				<header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-					<SidebarTrigger className="-ml-1" />
-					<Separator orientation="vertical" className="mr-2 h-4" />
-					<h1 className="text-sm font-medium capitalize">{page}</h1>
-					<div className="ml-auto flex items-center gap-2">
-						{!hasToken && (
-							<Button
-								size="sm"
-								variant="outline"
-								onClick={() => setSignInOpen(true)}
-							>
-								<LogIn className="size-3.5" /> Sign in
-							</Button>
-						)}
-						{hasToken && (
-							<Badge variant={isAdmin ? "default" : "secondary"}>
-								{isAdmin ? "Admin" : "Signed in"}
-							</Badge>
-						)}
-					</div>
-				</header>
-				<div className="p-6">
-					{requireAuth ? (
-						<LockedPage
-							title="Sign in to Pylon Studio"
-							description="Studio surfaces your live data, schema, and operations. Sign in with PYLON_ADMIN_TOKEN (or your user token) to continue."
+		<ThemeProvider theme={config.theme}>
+			<SidebarProvider>
+				<Sidebar variant="inset">
+					<SidebarHeader>
+						<Brand
+							brand={config.brand}
+							sidebar={config.sidebar}
+							manifestName={MANIFEST.name}
+							manifestVersion={MANIFEST.version}
 						/>
-					) : (
-						children
-					)}
-				</div>
-			</SidebarInset>
-			<SignInDialog open={signInOpen} onOpenChange={setSignInOpen} />
-		</SidebarProvider>
+					</SidebarHeader>
+					<SidebarContent>
+						{sections.map((section, idx) => (
+							<SidebarGroup key={`${section.label}-${idx}`}>
+								{section.label && (
+									<SidebarGroupLabel className="text-[11px] tracking-[0.08em] uppercase">
+										{section.label}
+									</SidebarGroupLabel>
+								)}
+								<SidebarGroupContent>
+									<SidebarMenu>
+										{section.items.map((item, j) =>
+											renderItem(item, j, route, onRouteChange, isAdmin),
+										)}
+									</SidebarMenu>
+								</SidebarGroupContent>
+							</SidebarGroup>
+						))}
+					</SidebarContent>
+					<SidebarFooter className="gap-0 p-0">
+						{footer && footer.type === "card" && (
+							<SidebarFooterCard footer={footer} />
+						)}
+						<SidebarMenu className="px-2 pb-2">
+							<SidebarMenuItem>
+								{hasToken ? (
+									<DropdownMenu>
+										<DropdownMenuTrigger asChild>
+											<SidebarMenuButton tooltip="Account">
+												<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+													{isAdmin
+														? "A"
+														: me?.user_id?.slice(0, 1).toUpperCase() ?? "U"}
+												</div>
+												<div className="flex flex-col items-start leading-tight">
+													<span className="text-xs font-medium">
+														{isAdmin ? "Admin" : me?.user_id ?? "Signed in"}
+													</span>
+													<span className="text-[10px] text-muted-foreground">
+														{isAdmin ? "Full access" : "Limited"}
+													</span>
+												</div>
+											</SidebarMenuButton>
+										</DropdownMenuTrigger>
+										<DropdownMenuContent
+											side="right"
+											align="end"
+											className="min-w-44"
+										>
+											<DropdownMenuLabel className="text-xs font-normal">
+												{me?.user_id ?? "anonymous"}
+											</DropdownMenuLabel>
+											<DropdownMenuSeparator />
+											<DropdownMenuItem
+												onClick={() =>
+													onRouteChange({ kind: "page", id: "settings" })
+												}
+											>
+												<Settings className="size-4" />
+												Settings
+											</DropdownMenuItem>
+											<DropdownMenuItem onClick={signOut}>
+												<LogOut className="size-4" />
+												Sign out
+											</DropdownMenuItem>
+										</DropdownMenuContent>
+									</DropdownMenu>
+								) : (
+									<SidebarMenuButton onClick={() => setSignInOpen(true)}>
+										<LogIn />
+										<span>Sign in</span>
+									</SidebarMenuButton>
+								)}
+							</SidebarMenuItem>
+						</SidebarMenu>
+					</SidebarFooter>
+				</Sidebar>
+				<SidebarInset>
+					<header className="flex h-14 shrink-0 items-center gap-3 border-b px-6">
+						<Breadcrumbs crumbs={crumbs} />
+						<div className="ml-auto flex items-center gap-2">
+							{!hasToken && (
+								<Button
+									size="sm"
+									variant="outline"
+									onClick={() => setSignInOpen(true)}
+								>
+									<LogIn className="size-3.5" /> Sign in
+								</Button>
+							)}
+							{hasToken && (
+								<Badge variant={isAdmin ? "default" : "secondary"}>
+									{isAdmin ? "Admin" : "Signed in"}
+								</Badge>
+							)}
+						</div>
+					</header>
+					<div className="px-6 py-6">
+						{requireAuth ? (
+							<LockedPage
+								title="Sign in to Pylon Studio"
+								description="Studio surfaces your live data, schema, and operations. Sign in with PYLON_ADMIN_TOKEN (or your user token) to continue."
+							/>
+						) : (
+							children
+						)}
+					</div>
+				</SidebarInset>
+				<SignInDialog open={signInOpen} onOpenChange={setSignInOpen} />
+			</SidebarProvider>
+		</ThemeProvider>
 	);
+}
+
+function renderItem(
+	item: ResolvedNavItem,
+	key: number,
+	route: StudioRoute,
+	onRouteChange: (r: StudioRoute) => void,
+	isAdmin: boolean,
+): React.ReactNode {
+	if (item.kind === "heading") {
+		return (
+			<div
+				key={`h-${key}`}
+				className="px-2 pt-3 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/80"
+			>
+				{item.label}
+			</div>
+		);
+	}
+
+	if (item.kind === "link") {
+		const Icon = resolveIcon(item.icon, ExternalLink);
+		return (
+			<SidebarMenuItem key={`l-${key}`}>
+				<SidebarMenuButton asChild tooltip={item.label}>
+					<a
+						href={item.href}
+						target={item.external ? "_blank" : undefined}
+						rel={item.external ? "noreferrer" : undefined}
+					>
+						<Icon />
+						<span>{item.label}</span>
+						{item.external && (
+							<ExternalLink className="ml-auto size-3 opacity-60" />
+						)}
+					</a>
+				</SidebarMenuButton>
+			</SidebarMenuItem>
+		);
+	}
+
+	const locked = item.requiresAdmin && !isAdmin;
+	const isActive =
+		(item.kind === "page" && route.kind === "page" && route.id === item.id) ||
+		(item.kind === "resource" &&
+			route.kind === "resource" &&
+			route.entity === item.entity);
+	const Icon = resolveIcon(item.icon);
+	const tooltip = locked ? `${item.label} — admin required` : item.label;
+
+	return (
+		<SidebarMenuItem key={`i-${key}`}>
+			<SidebarMenuButton
+				isActive={isActive}
+				tooltip={tooltip}
+				onClick={() => {
+					if (item.kind === "page") onRouteChange({ kind: "page", id: item.id });
+					else
+						onRouteChange({ kind: "resource", entity: item.entity });
+				}}
+			>
+				<Icon />
+				<span>{item.label}</span>
+				{locked && <Lock className="ml-auto size-3 opacity-60" />}
+			</SidebarMenuButton>
+		</SidebarMenuItem>
+	);
+}
+
+function locateCurrent(
+	route: StudioRoute,
+	sections: ReturnType<typeof resolveNav>,
+): { label: string; icon?: string } | null {
+	for (const s of sections) {
+		for (const item of s.items) {
+			if (item.kind === "page" && route.kind === "page" && item.id === route.id) {
+				return { label: item.label, icon: item.icon };
+			}
+			if (
+				item.kind === "resource" &&
+				route.kind === "resource" &&
+				item.entity === route.entity
+			) {
+				return { label: item.label, icon: item.icon };
+			}
+		}
+	}
+	if (route.kind === "resource") return { label: route.entity };
+	if (route.kind === "page") return { label: capitalize(route.id) };
+	return null;
+}
+
+function capitalize(s: string): string {
+	if (!s) return "";
+	return s.charAt(0).toUpperCase() + s.slice(1);
 }
