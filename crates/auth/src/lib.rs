@@ -9,6 +9,7 @@ pub mod email_templates;
 pub mod jwt;
 pub mod oidc_provider;
 pub mod org;
+pub mod org_sso;
 pub mod password;
 pub mod phone;
 pub mod provider;
