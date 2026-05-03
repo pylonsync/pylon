@@ -204,13 +204,34 @@ pub(crate) fn handle(
                 return Some((429, body));
             }
 
-            return Some(match fn_ops.call(fn_name, args, auth, None, None) {
-                Ok((value, _trace)) => (
-                    200,
-                    serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
-                ),
-                Err(e) => (400, json_error(&e.code, &e.message)),
-            });
+            // Synthesize RequestInfo so action handlers invoked via
+            // /api/fn/<name> can inspect raw body + headers. Without
+            // this, webhook receivers (GitHub / Stripe / Slack) that
+            // need HMAC verification of the EXACT signed bytes are
+            // dead — `ctx.request` reads as undefined and the handler
+            // can't reach the raw body. Queries + mutations don't have
+            // ctx.request in their type signature, so passing this is
+            // a no-op for them.
+            let request_info = pylon_functions::protocol::RequestInfo {
+                method: "POST".to_string(),
+                path: url.to_string(),
+                headers: ctx
+                    .request_headers
+                    .iter()
+                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                    .collect(),
+                raw_body: body.to_string(),
+            };
+
+            return Some(
+                match fn_ops.call(fn_name, args, auth, None, Some(request_info)) {
+                    Ok((value, _trace)) => (
+                        200,
+                        serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+                    ),
+                    Err(e) => (400, json_error(&e.code, &e.message)),
+                },
+            );
         }
     }
 

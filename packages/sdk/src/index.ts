@@ -592,3 +592,48 @@ export function buildManifest(options: {
     auth: options.auth ?? auth(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Studio configuration — re-exports
+// ---------------------------------------------------------------------------
+
+export {
+  defineStudioConfig,
+  defineStudioExtensions,
+  type BrandConfig,
+  type ThemeConfig,
+  type ThemeAccent,
+  type ThemeAppearance,
+  type IconName,
+  type SidebarConfig,
+  type SidebarSection,
+  type SidebarItem,
+  type SidebarPageItem,
+  type SidebarResourceItem,
+  type SidebarLinkItem,
+  type SidebarHeadingItem,
+  type SidebarFooter,
+  type SidebarFooterCard,
+  type SidebarFooterCustom,
+  type ResourceConfig,
+  type ResourceListConfig,
+  type ColumnConfig,
+  type ColumnRenderer,
+  type RendererKind,
+  type RendererText,
+  type RendererAvatar,
+  type RendererBadge,
+  type RendererDate,
+  type RendererLink,
+  type RendererBoolean,
+  type RendererNumber,
+  type RendererJson,
+  type RendererCustom,
+  type BulkAction,
+  type RowAction,
+  type PageConfig,
+  type StudioConfig,
+  type StudioCellRendererProps,
+  type StudioPageProps,
+  type StudioExtensions,
+} from "./studio";

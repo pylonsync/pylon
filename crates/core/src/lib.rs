@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod clock;
 pub mod errors;
+pub mod studio;
 pub mod util;
 
 pub use clock::{Clock, MockClock, SystemClock};
+pub use studio::StudioConfig;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
