@@ -841,22 +841,28 @@ pub fn random_state() -> String {
 /// Encrypt-at-rest envelope for client secrets. Uses
 /// PYLON_SSO_ENCRYPTION_KEY (32-byte hex/base64). When unset, returns
 /// the secret verbatim with a `plain:` prefix so the round-trip works
-/// in dev — operators are warned at server-boot time when a secret
-/// would be persisted plain.
+/// in dev — operators are warned at server-boot time (see `server.rs`)
+/// when a secret would be persisted plain.
 ///
-/// Symmetric placeholder: production SHOULD set the key. The format is
-/// `enc:<nonce_hex>:<ciphertext_b64>` so a future migration can detect
-/// + upgrade old `plain:` rows.
-pub fn seal_secret(secret: &str) -> String {
+/// Returns Err when the operator HAS configured a key but encryption
+/// fails (CSPRNG nonce-gen error, ring init error). The previous
+/// silent fallback to `plain:` was a P2 from the post-Wave-8 review:
+/// operators believed their secrets were encrypted but the encryption
+/// path silently downgraded on transient ring errors. The PUT
+/// handler now surfaces the failure as 500 SSO_SECRET_SEAL_FAILED so
+/// the misconfiguration is loud.
+///
+/// Format: `enc:<nonce_hex>:<ciphertext_b64>` for sealed values,
+/// `plain:<value>` for dev-mode pass-through.
+pub fn seal_secret(secret: &str) -> Result<String, String> {
     if let Some(key) = sso_encryption_key() {
         // ChaCha20-Poly1305 sealed envelope. Re-uses the totp module's
         // approach to keep one crypto primitive in the auth crate.
-        match encrypt_chacha(secret.as_bytes(), &key) {
-            Ok(b) => format!("enc:{b}"),
-            Err(_) => format!("plain:{secret}"),
-        }
+        let b = encrypt_chacha(secret.as_bytes(), &key)
+            .map_err(|e| format!("ChaCha20-Poly1305 seal failed: {e}"))?;
+        Ok(format!("enc:{b}"))
     } else {
-        format!("plain:{secret}")
+        Ok(format!("plain:{secret}"))
     }
 }
 
@@ -1140,10 +1146,20 @@ mod tests {
     #[test]
     fn seal_unseal_round_trip_plain_mode() {
         // No PYLON_SSO_ENCRYPTION_KEY set in tests by default.
-        let sealed = seal_secret("topsecret");
+        let sealed = seal_secret("topsecret").expect("plain-mode seal cannot fail");
         assert!(sealed.starts_with("plain:") || sealed.starts_with("enc:"));
         let unsealed = unseal_secret(&sealed).unwrap();
         assert_eq!(unsealed, "topsecret");
+    }
+
+    #[test]
+    fn seal_returns_ok_for_normal_input() {
+        // Round-trip a few different shapes — proves seal_secret's
+        // Result-return doesn't reject benign input.
+        for input in ["", "x", "secret with spaces", "üñíçødé"] {
+            let sealed = seal_secret(input).expect("seal_secret should not fail");
+            assert_eq!(unseal_secret(&sealed).unwrap(), input);
+        }
     }
 
     #[test]

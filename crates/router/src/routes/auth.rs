@@ -3196,11 +3196,28 @@ pub(crate) fn handle(
                     .unwrap_or(0);
                 let existing_created_at =
                     ctx.org_sso.get(org_id).map(|c| c.created_at).unwrap_or(now);
+                // seal_secret can fail when PYLON_SSO_ENCRYPTION_KEY
+                // is set but the underlying ChaCha20-Poly1305 seal
+                // returns an error. Surface as 500 instead of silently
+                // persisting the secret in the clear.
+                let sealed_secret = match pylon_auth::org_sso::seal_secret(&client_secret) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Some((
+                            500,
+                            json_error_safe(
+                                "SSO_SECRET_SEAL_FAILED",
+                                "Could not encrypt the SSO client_secret",
+                                &e,
+                            ),
+                        ));
+                    }
+                };
                 let cfg = pylon_auth::org_sso::OrgSsoConfig {
                     org_id: org_id.to_string(),
                     issuer_url: issuer,
                     client_id,
-                    client_secret_sealed: pylon_auth::org_sso::seal_secret(&client_secret),
+                    client_secret_sealed: sealed_secret,
                     default_role,
                     email_domains,
                     authorization_endpoint: endpoints.authorization_endpoint,

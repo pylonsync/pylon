@@ -113,7 +113,25 @@ jobs:
       - name: Build Studio UI bundle
         working-directory: crates/studio_api/web
         run: bun install --frozen-lockfile && bun run build
-      - run: cargo test --workspace --all-targets -- --test-threads=1
+      - name: Install xmlsec1 + libxml2 (Linux only — for SAML signature path)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      - name: Install xmlsec1 + libxml2 (macOS — runner pre-installed via brew)
+        if: matrix.os == 'macos-latest'
+        run: brew install libxml2 libxmlsec1 || true
+      # PYLON_RUN_XMLSEC_SIGN_TESTS opts in to the SAML cert-trust
+      # regression tests on Linux. They're #[ignore]'d by default
+      # because samael's IdP signing path SIGSEGVs on macOS dev boxes
+      # (Homebrew xmlsec1 + OpenSSL 3 interop). --include-ignored
+      # forces them to run when the env opt-in is set.
+      - name: cargo test (Linux — includes xmlsec sign tests)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          PYLON_RUN_XMLSEC_SIGN_TESTS: "1"
+        run: cargo test --workspace --all-targets -- --test-threads=1 --include-ignored
+      - name: cargo test (macOS — skips ignored)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --workspace --all-targets -- --test-threads=1
       - run: cargo test --workspace --doc
 
   build:
