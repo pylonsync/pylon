@@ -71,8 +71,10 @@ pub(crate) fn handle(
                 }
             };
             let def = match fn_ops.get_fn(action_name) {
-                Some(d) => d,
-                None => {
+                Some(d) if !d.internal => d,
+                _ => {
+                    // Internal-only actions get the same 404 shape as
+                    // "not registered" so probing can't enumerate them.
                     return Some((
                         404,
                         json_error(
@@ -165,14 +167,33 @@ pub(crate) fn handle(
                 }
             };
 
-            if fn_ops.get_fn(fn_name).is_none() {
-                return Some((
-                    404,
-                    json_error(
-                        "FN_NOT_FOUND",
-                        &format!("Function \"{fn_name}\" is not registered"),
-                    ),
-                ));
+            // Refuse internal-only functions over HTTP. The TS define
+            // API exposes `internal: true` for helper mutations that
+            // shouldn't be reachable directly (e.g. ones that trust
+            // their args without re-checking caller authority because
+            // they assume a wrapping action verified everything).
+            // Same 404 shape as "not registered" — probing can't
+            // confirm the name exists.
+            match fn_ops.get_fn(fn_name) {
+                Some(def) if def.internal => {
+                    return Some((
+                        404,
+                        json_error(
+                            "FN_NOT_FOUND",
+                            &format!("Function \"{fn_name}\" is not registered"),
+                        ),
+                    ));
+                }
+                None => {
+                    return Some((
+                        404,
+                        json_error(
+                            "FN_NOT_FOUND",
+                            &format!("Function \"{fn_name}\" is not registered"),
+                        ),
+                    ));
+                }
+                _ => {}
             }
 
             let args: serde_json::Value = if body.trim().is_empty() {

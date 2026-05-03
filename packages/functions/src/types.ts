@@ -277,6 +277,14 @@ export interface FnDefinition<TArgs = unknown, TReturn = unknown> {
   type: FnType;
   args?: Record<string, Validator>;
   handler: (ctx: any, args: TArgs) => Promise<TReturn>;
+  /**
+   * When true, this function is reachable only via `ctx.runQuery()` /
+   * `ctx.runMutation()` / `ctx.runAction()` from another function —
+   * the public `/api/fn/<name>` endpoint refuses external calls.
+   * The router enforces this; the runtime treats internal == external
+   * for execution.
+   */
+  internal?: boolean;
 }
 
 // ---------------------------------------------------------------------------

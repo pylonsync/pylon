@@ -19,6 +19,21 @@ pub struct FnDef {
     /// JSON Schema for the function's args (from TypeScript validators).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args_schema: Option<serde_json::Value>,
+    /// When true, the function is callable only via `ctx.runQuery` /
+    /// `ctx.runMutation` / `ctx.runAction` from another function — the
+    /// router refuses external HTTP calls with `404 FN_NOT_FOUND` so
+    /// probing can't even confirm the name exists.
+    ///
+    /// Set in the TypeScript define API via `internal: true` on the
+    /// def. Apps mark their helper / "internal" mutations to prevent
+    /// direct callers from bypassing the wrapping action's gating
+    /// (see Pylon Cloud's deleteMachineRecord pattern for the rationale).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub internal: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 // ---------------------------------------------------------------------------
@@ -115,11 +130,13 @@ mod tests {
             name: "placeBid".into(),
             fn_type: FnType::Mutation,
             args_schema: None,
+            internal: false,
         });
         reg.register(FnDef {
             name: "getLots".into(),
             fn_type: FnType::Query,
             args_schema: None,
+            internal: false,
         });
 
         assert_eq!(reg.count(), 2);
@@ -138,21 +155,25 @@ mod tests {
                 name: "a".into(),
                 fn_type: FnType::Mutation,
                 args_schema: None,
+                internal: false,
             },
             FnDef {
                 name: "b".into(),
                 fn_type: FnType::Query,
                 args_schema: None,
+                internal: false,
             },
             FnDef {
                 name: "c".into(),
                 fn_type: FnType::Mutation,
                 args_schema: None,
+                internal: false,
             },
             FnDef {
                 name: "d".into(),
                 fn_type: FnType::Action,
                 args_schema: None,
+                internal: false,
             },
         ]);
 

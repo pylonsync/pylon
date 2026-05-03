@@ -715,6 +715,11 @@ async function main() {
     name,
     fn_type: def.type,
     args_schema: def.args || null,
+    // Whether the function is callable only via runQuery/runMutation/
+    // runAction from another function. The Rust router refuses /api/fn
+    // requests for internal fns; the Bun runtime here doesn't gate
+    // (nested calls go through the same dispatcher).
+    internal: def.internal === true,
   }));
   send({ type: "ready", functions });
 

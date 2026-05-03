@@ -15,16 +15,32 @@ import type {
 interface QueryDef<TArgs, TReturn> {
   args?: Record<string, Validator>;
   handler: (ctx: QueryCtx, args: TArgs) => Promise<TReturn>;
+  /**
+   * When true, the function is callable only via `ctx.runQuery()`
+   * from another function — never via the public `/api/fn/<name>`
+   * HTTP endpoint. The router refuses external calls with
+   * `404 FN_NOT_FOUND` so probing can't even confirm the name exists.
+   *
+   * Use for queries that are meant as helpers for trusted action /
+   * mutation flows but would be unsafe if any caller could invoke
+   * them directly (e.g. they trust args without re-checking caller
+   * authority).
+   */
+  internal?: boolean;
 }
 
 interface MutationDef<TArgs, TReturn> {
   args?: Record<string, Validator>;
   handler: (ctx: MutationCtx, args: TArgs) => Promise<TReturn>;
+  /** See QueryDef.internal — applies the same way to mutations. */
+  internal?: boolean;
 }
 
 interface ActionDef<TArgs, TReturn> {
   args?: Record<string, Validator>;
   handler: (ctx: ActionCtx, args: TArgs) => Promise<TReturn>;
+  /** See QueryDef.internal — applies the same way to actions. */
+  internal?: boolean;
 }
 
 /**
@@ -49,7 +65,12 @@ interface ActionDef<TArgs, TReturn> {
 export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: QueryDef<TArgs, TReturn>
 ): FnDefinition<TArgs, TReturn> {
-  return { type: "query", args: def.args, handler: def.handler };
+  return {
+    type: "query",
+    args: def.args,
+    handler: def.handler,
+    internal: def.internal,
+  };
 }
 
 /**
@@ -78,7 +99,12 @@ export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
 export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: MutationDef<TArgs, TReturn>
 ): FnDefinition<TArgs, TReturn> {
-  return { type: "mutation", args: def.args, handler: def.handler };
+  return {
+    type: "mutation",
+    args: def.args,
+    handler: def.handler,
+    internal: def.internal,
+  };
 }
 
 /**
@@ -105,5 +131,10 @@ export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
 export function action<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: ActionDef<TArgs, TReturn>
 ): FnDefinition<TArgs, TReturn> {
-  return { type: "action", args: def.args, handler: def.handler };
+  return {
+    type: "action",
+    args: def.args,
+    handler: def.handler,
+    internal: def.internal,
+  };
 }
