@@ -13,7 +13,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use pylon_auth::org_sso::{OrgSsoConfig, OrgSsoStateRecord, OrgSsoStore, STATE_TTL_SECS};
+use pylon_auth::org_sso::{
+    DomainConflictError, OrgSsoConfig, OrgSsoStateRecord, OrgSsoStore, STATE_TTL_SECS,
+};
 use rusqlite::Connection;
 
 const SQLITE_CONFIG: &str = "_pylon_org_sso";
@@ -58,6 +60,7 @@ impl SqliteOrgSsoBackend {
                 state TEXT PRIMARY KEY,
                 org_id TEXT NOT NULL,
                 pkce_verifier TEXT NOT NULL,
+                nonce TEXT NOT NULL DEFAULT '',
                 callback_url TEXT NOT NULL,
                 error_callback_url TEXT NOT NULL,
                 created_at INTEGER NOT NULL
@@ -66,6 +69,13 @@ impl SqliteOrgSsoBackend {
                 ON {SQLITE_STATE}(created_at);"
         ))
         .map_err(|e| format!("init schema: {e}"))?;
+        // Idempotent additive migration for the `nonce` column
+        // introduced after the table existed in the wild. SQLite's
+        // ALTER TABLE … ADD COLUMN is one-shot only on tables that
+        // don't already have it; ignore the error on the second call.
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE {SQLITE_STATE} ADD COLUMN nonce TEXT NOT NULL DEFAULT ''"
+        ));
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -88,46 +98,87 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
             .ok()
     }
 
-    fn upsert(&self, config: OrgSsoConfig) {
-        if let Ok(c) = self.conn.lock() {
-            let domains =
-                serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {SQLITE_CONFIG}
-                       (org_id, issuer_url, client_id, client_secret_sealed,
-                        default_role, email_domains_json, authorization_endpoint,
-                        token_endpoint, userinfo_endpoint, jwks_uri,
-                        created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                     ON CONFLICT(org_id) DO UPDATE SET
-                       issuer_url = excluded.issuer_url,
-                       client_id = excluded.client_id,
-                       client_secret_sealed = excluded.client_secret_sealed,
-                       default_role = excluded.default_role,
-                       email_domains_json = excluded.email_domains_json,
-                       authorization_endpoint = excluded.authorization_endpoint,
-                       token_endpoint = excluded.token_endpoint,
-                       userinfo_endpoint = excluded.userinfo_endpoint,
-                       jwks_uri = excluded.jwks_uri,
-                       updated_at = excluded.updated_at"
-                ),
-                rusqlite::params![
-                    config.org_id,
-                    config.issuer_url,
-                    config.client_id,
-                    config.client_secret_sealed,
-                    config.default_role,
-                    domains,
-                    config.authorization_endpoint,
-                    config.token_endpoint,
-                    config.userinfo_endpoint,
-                    config.jwks_uri,
-                    config.created_at as i64,
-                    config.updated_at as i64,
-                ],
-            );
+    fn upsert(&self, config: OrgSsoConfig) -> Result<(), DomainConflictError> {
+        let c = self.conn.lock().map_err(|_| DomainConflictError {
+            domain: String::new(),
+            claimed_by: String::new(),
+        })?;
+        // Conflict check FIRST — walk every other row's domains list.
+        // O(N) row count but configured-org count is in the hundreds at
+        // most for years; the operator UI can issue this once per save.
+        // The proper fix is a separate `_pylon_org_sso_domain` table
+        // with `UNIQUE(domain)` (planned follow-up); this gates the
+        // takeover vector immediately without a schema migration.
+        let mut stmt = c
+            .prepare(&format!(
+                "SELECT org_id, email_domains_json FROM {SQLITE_CONFIG} WHERE org_id != ?1"
+            ))
+            .map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![config.org_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+        let lower_requested: Vec<String> = config
+            .email_domains
+            .iter()
+            .map(|d| d.to_ascii_lowercase())
+            .collect();
+        for row in rows.flatten() {
+            let other_domains: Vec<String> = serde_json::from_str(&row.1).unwrap_or_default();
+            for od in other_domains.iter().map(|s| s.to_ascii_lowercase()) {
+                if lower_requested.contains(&od) {
+                    return Err(DomainConflictError {
+                        domain: od,
+                        claimed_by: row.0,
+                    });
+                }
+            }
         }
+        drop(stmt);
+        let domains = serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
+        let _ = c.execute(
+            &format!(
+                "INSERT INTO {SQLITE_CONFIG}
+                   (org_id, issuer_url, client_id, client_secret_sealed,
+                    default_role, email_domains_json, authorization_endpoint,
+                    token_endpoint, userinfo_endpoint, jwks_uri,
+                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(org_id) DO UPDATE SET
+                   issuer_url = excluded.issuer_url,
+                   client_id = excluded.client_id,
+                   client_secret_sealed = excluded.client_secret_sealed,
+                   default_role = excluded.default_role,
+                   email_domains_json = excluded.email_domains_json,
+                   authorization_endpoint = excluded.authorization_endpoint,
+                   token_endpoint = excluded.token_endpoint,
+                   userinfo_endpoint = excluded.userinfo_endpoint,
+                   jwks_uri = excluded.jwks_uri,
+                   updated_at = excluded.updated_at"
+            ),
+            rusqlite::params![
+                config.org_id,
+                config.issuer_url,
+                config.client_id,
+                config.client_secret_sealed,
+                config.default_role,
+                domains,
+                config.authorization_endpoint,
+                config.token_endpoint,
+                config.userinfo_endpoint,
+                config.jwks_uri,
+                config.created_at as i64,
+                config.updated_at as i64,
+            ],
+        );
+        Ok(())
     }
 
     fn delete(&self, org_id: &str) -> bool {
@@ -175,14 +226,15 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
             let _ = c.execute(
                 &format!(
                     "INSERT INTO {SQLITE_STATE}
-                       (state, org_id, pkce_verifier, callback_url, error_callback_url, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                       (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(state) DO NOTHING"
                 ),
                 rusqlite::params![
                     record.state,
                     record.org_id,
                     record.pkce_verifier,
+                    record.nonce,
                     record.callback_url,
                     record.error_callback_url,
                     record.created_at as i64,
@@ -195,7 +247,7 @@ impl OrgSsoStore for SqliteOrgSsoBackend {
         let c = self.conn.lock().ok()?;
         let mut stmt = c
             .prepare(&format!(
-                "SELECT state, org_id, pkce_verifier, callback_url, error_callback_url, created_at
+                "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at
                  FROM {SQLITE_STATE} WHERE state = ?1"
             ))
             .ok()?;
@@ -250,9 +302,10 @@ fn state_row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrgSsoStateR
         state: row.get(0)?,
         org_id: row.get(1)?,
         pkce_verifier: row.get(2)?,
-        callback_url: row.get(3)?,
-        error_callback_url: row.get(4)?,
-        created_at: row.get::<_, i64>(5)? as u64,
+        nonce: row.get(3)?,
+        callback_url: row.get(4)?,
+        error_callback_url: row.get(5)?,
+        created_at: row.get::<_, i64>(6)? as u64,
     })
 }
 
@@ -293,12 +346,16 @@ mod pg {
                         state TEXT PRIMARY KEY,
                         org_id TEXT NOT NULL,
                         pkce_verifier TEXT NOT NULL,
+                        nonce TEXT NOT NULL DEFAULT '',
                         callback_url TEXT NOT NULL,
                         error_callback_url TEXT NOT NULL,
                         created_at BIGINT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS {PG_STATE}_created_idx
-                        ON {PG_STATE}(created_at);"
+                        ON {PG_STATE}(created_at);
+                    -- Idempotent additive migration for nonce column.
+                    ALTER TABLE {PG_STATE}
+                        ADD COLUMN IF NOT EXISTS nonce TEXT NOT NULL DEFAULT '';"
                 ))
                 .map_err(|e| format!("PG init schema: {e}"))?;
             Ok(Self {
@@ -325,46 +382,79 @@ mod pg {
             Some(pg_row_to_config(&row))
         }
 
-        fn upsert(&self, config: OrgSsoConfig) {
-            if let Ok(mut c) = self.client.lock() {
-                let domains =
-                    serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-                let _ = c.execute(
+        fn upsert(&self, config: OrgSsoConfig) -> Result<(), DomainConflictError> {
+            let mut c = self.client.lock().map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+            // Conflict check FIRST — same shape as the SQLite branch.
+            let rows = c
+                .query(
                     &format!(
-                        "INSERT INTO {PG_CONFIG}
-                           (org_id, issuer_url, client_id, client_secret_sealed,
-                            default_role, email_domains_json, authorization_endpoint,
-                            token_endpoint, userinfo_endpoint, jwks_uri,
-                            created_at, updated_at)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                         ON CONFLICT(org_id) DO UPDATE SET
-                           issuer_url = EXCLUDED.issuer_url,
-                           client_id = EXCLUDED.client_id,
-                           client_secret_sealed = EXCLUDED.client_secret_sealed,
-                           default_role = EXCLUDED.default_role,
-                           email_domains_json = EXCLUDED.email_domains_json,
-                           authorization_endpoint = EXCLUDED.authorization_endpoint,
-                           token_endpoint = EXCLUDED.token_endpoint,
-                           userinfo_endpoint = EXCLUDED.userinfo_endpoint,
-                           jwks_uri = EXCLUDED.jwks_uri,
-                           updated_at = EXCLUDED.updated_at"
+                        "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
                     ),
-                    &[
-                        &config.org_id,
-                        &config.issuer_url,
-                        &config.client_id,
-                        &config.client_secret_sealed,
-                        &config.default_role,
-                        &domains,
-                        &config.authorization_endpoint,
-                        &config.token_endpoint,
-                        &config.userinfo_endpoint,
-                        &config.jwks_uri,
-                        &(config.created_at as i64),
-                        &(config.updated_at as i64),
-                    ],
-                );
+                    &[&config.org_id],
+                )
+                .map_err(|_| DomainConflictError {
+                    domain: String::new(),
+                    claimed_by: String::new(),
+                })?;
+            let lower_requested: Vec<String> = config
+                .email_domains
+                .iter()
+                .map(|d| d.to_ascii_lowercase())
+                .collect();
+            for r in rows {
+                let other_org: String = r.get(0);
+                let other_json: String = r.get(1);
+                let other: Vec<String> = serde_json::from_str(&other_json).unwrap_or_default();
+                for od in other.iter().map(|s| s.to_ascii_lowercase()) {
+                    if lower_requested.contains(&od) {
+                        return Err(DomainConflictError {
+                            domain: od,
+                            claimed_by: other_org,
+                        });
+                    }
+                }
             }
+            let domains =
+                serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
+            let _ = c.execute(
+                &format!(
+                    "INSERT INTO {PG_CONFIG}
+                       (org_id, issuer_url, client_id, client_secret_sealed,
+                        default_role, email_domains_json, authorization_endpoint,
+                        token_endpoint, userinfo_endpoint, jwks_uri,
+                        created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                     ON CONFLICT(org_id) DO UPDATE SET
+                       issuer_url = EXCLUDED.issuer_url,
+                       client_id = EXCLUDED.client_id,
+                       client_secret_sealed = EXCLUDED.client_secret_sealed,
+                       default_role = EXCLUDED.default_role,
+                       email_domains_json = EXCLUDED.email_domains_json,
+                       authorization_endpoint = EXCLUDED.authorization_endpoint,
+                       token_endpoint = EXCLUDED.token_endpoint,
+                       userinfo_endpoint = EXCLUDED.userinfo_endpoint,
+                       jwks_uri = EXCLUDED.jwks_uri,
+                       updated_at = EXCLUDED.updated_at"
+                ),
+                &[
+                    &config.org_id,
+                    &config.issuer_url,
+                    &config.client_id,
+                    &config.client_secret_sealed,
+                    &config.default_role,
+                    &domains,
+                    &config.authorization_endpoint,
+                    &config.token_endpoint,
+                    &config.userinfo_endpoint,
+                    &config.jwks_uri,
+                    &(config.created_at as i64),
+                    &(config.updated_at as i64),
+                ],
+            );
+            Ok(())
         }
 
         fn delete(&self, org_id: &str) -> bool {
@@ -412,14 +502,15 @@ mod pg {
                 let _ = c.execute(
                     &format!(
                         "INSERT INTO {PG_STATE}
-                           (state, org_id, pkce_verifier, callback_url, error_callback_url, created_at)
-                         VALUES ($1,$2,$3,$4,$5,$6)
+                           (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7)
                          ON CONFLICT(state) DO NOTHING"
                     ),
                     &[
                         &record.state,
                         &record.org_id,
                         &record.pkce_verifier,
+                        &record.nonce,
                         &record.callback_url,
                         &record.error_callback_url,
                         &(record.created_at as i64),
@@ -433,7 +524,7 @@ mod pg {
             let row = c
                 .query_opt(
                     &format!(
-                        "SELECT state, org_id, pkce_verifier, callback_url, error_callback_url, created_at
+                        "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at
                          FROM {PG_STATE} WHERE state = $1"
                     ),
                     &[&state],
@@ -486,9 +577,10 @@ mod pg {
             state: row.get(0),
             org_id: row.get(1),
             pkce_verifier: row.get(2),
-            callback_url: row.get(3),
-            error_callback_url: row.get(4),
-            created_at: row.get::<_, i64>(5) as u64,
+            nonce: row.get(3),
+            callback_url: row.get(4),
+            error_callback_url: row.get(5),
+            created_at: row.get::<_, i64>(6) as u64,
         }
     }
 }
@@ -574,6 +666,7 @@ mod tests {
             state: "tok_1".into(),
             org_id: "acme".into(),
             pkce_verifier: "v".into(),
+            nonce: "n_test".into(),
             callback_url: "https://app/cb".into(),
             error_callback_url: "https://app/err".into(),
             created_at: now,
@@ -596,6 +689,7 @@ mod tests {
             state: "tok_2".into(),
             org_id: "acme".into(),
             pkce_verifier: "v".into(),
+            nonce: "n_test".into(),
             callback_url: "u".into(),
             error_callback_url: "u".into(),
             created_at: now,

@@ -140,6 +140,10 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
     }
     let pkce = pylon_auth::generate_pkce();
     let state = pylon_auth::org_sso::random_state();
+    // OIDC §3.1.2.1: nonce binds the id_token to this specific
+    // AuthnRequest. The IdP echoes it in the id_token's `nonce` claim;
+    // the callback rejects any id_token whose nonce doesn't match.
+    let nonce = pylon_auth::org_sso::random_state();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -149,6 +153,7 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
             state: state.clone(),
             org_id: org_id.to_string(),
             pkce_verifier: pkce.code_verifier,
+            nonce: nonce.clone(),
             callback_url: callback,
             error_callback_url: error_callback,
             created_at: now,
@@ -168,15 +173,15 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
         }
     };
     // OIDC authorization request: response_type=code, scope=openid email
-    // profile, S256 PKCE. `prompt=select_account` left to the IdP — most
-    // OIDC servers respect SP omission.
+    // profile, S256 PKCE, nonce per §3.1.2.1.
     let target = format!(
-        "{auth}?response_type=code&client_id={cid}&redirect_uri={ruri}&scope={scope}&state={state}&code_challenge={chal}&code_challenge_method=S256",
+        "{auth}?response_type=code&client_id={cid}&redirect_uri={ruri}&scope={scope}&state={state}&nonce={nonce}&code_challenge={chal}&code_challenge_method=S256",
         auth = config.authorization_endpoint,
         cid = url_encode(&config.client_id),
         ruri = url_encode(&redirect_uri),
         scope = url_encode("openid email profile"),
         state = url_encode(&state),
+        nonce = url_encode(&nonce),
         chal = url_encode(&pkce.code_challenge),
     );
     ctx.add_response_header("Location", target);
@@ -246,6 +251,7 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
         &code,
         &state_record.pkce_verifier,
         &redirect_uri,
+        &state_record.nonce,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -348,7 +354,7 @@ fn sso_error_redirect(
     let target = format!(
         "{error_url}{sep}sso_error={code}&sso_error_message={msg}",
         code = url_encode(code),
-        msg = url_encode(&msg[..msg.len().min(200)]),
+        msg = url_encode(&truncate_chars(msg, 200)),
     );
     ctx.add_response_header("Location", target);
     (302, String::new())
@@ -387,6 +393,20 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
         return (
             403,
             json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e:?}")),
+        );
+    }
+    // Wave-9 P1 fix: error_callback was previously persisted into
+    // SamlStateRecord without origin validation. Any signature/audience
+    // failure on ACS would then 302 to the attacker-controlled URL,
+    // turning a malformed-Response trigger into open-redirect / CSRF
+    // payload delivery.
+    if let Err(e) = pylon_auth::validate_trusted_redirect(&error_callback, ctx.trusted_origins) {
+        return (
+            403,
+            json_error(
+                "UNTRUSTED_ERROR_CALLBACK",
+                &format!("error_callback rejected: {e:?}"),
+            ),
         );
     }
     let acs_url = match build_saml_acs_url(org_id) {
@@ -581,7 +601,7 @@ fn saml_error_redirect(
     let target = format!(
         "{error_url}{sep}saml_error={code}&saml_error_message={msg}",
         code = url_encode(code),
-        msg = url_encode(&msg[..msg.len().min(200)]),
+        msg = url_encode(&truncate_chars(msg, 200)),
     );
     ctx.add_response_header("Location", target);
     (302, String::new())
@@ -610,7 +630,19 @@ fn form_decode(s: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
+            // Wave-9 P3 fix: original guard was `i + 2 < bytes.len()`
+            // which leaves `%X` (one trailing hex digit, no second) and
+            // `%` (no trailing hex at all) decoded as the literal `%`
+            // byte while only advancing 1, so the partial sequence gets
+            // re-parsed as data — RelayState comparisons could mismatch
+            // under hostile encoding. Require both bytes available AND
+            // both valid hex; on failure, push the literal `%` and
+            // advance by 1 so the malformed escape still appears
+            // verbatim (rather than getting silently dropped).
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
                 let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
                 match u8::from_str_radix(hex, 16) {
                     Ok(b) => {
@@ -630,6 +662,14 @@ fn form_decode(s: &str) -> String {
         }
     }
     String::from_utf8(out).unwrap_or_default()
+}
+
+/// UTF-8-safe truncation. `&s[..n]` panics if `n` lands inside a
+/// multi-byte char boundary; `s.chars().take(n)` is `O(n)` but always
+/// valid. Used for error-message truncation in 302-redirect payloads
+/// where samael / IdP responses can carry i18n cert subjects.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 fn maybe_merge_anonymous(
@@ -2750,6 +2790,64 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"disabled": true}).to_string()));
     }
 
+    // ─── Email-domain → SSO discovery (unauthenticated) ──────────────────
+    //
+    // GET /api/auth/sso/discover?email=user@acme.com
+    //   Returns the org_id + SSO start URL for the IdP that owns the
+    //   email's domain. Lets a sign-in form route the user to their
+    //   org's SSO without prompting for the org slug. Tries OIDC first,
+    //   then SAML; first match wins.
+    //
+    // 404 when no org claims the domain. The response NEVER reveals
+    // anything about the user — it's purely a per-domain routing hint.
+    if url.starts_with("/api/auth/sso/discover") && method == HttpMethod::Get {
+        let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let params = parse_query(query);
+        let email = params.get("email").cloned().unwrap_or_default();
+        let domain = email
+            .rsplit_once('@')
+            .map(|(_, d)| d.to_ascii_lowercase())
+            .filter(|d| !d.is_empty());
+        let domain = match domain {
+            Some(d) => d,
+            None => {
+                return Some((
+                    400,
+                    json_error("MISSING_EMAIL", "email query parameter is required"),
+                ));
+            }
+        };
+        if let Some(org_id) = ctx.org_sso.find_by_email_domain(&domain) {
+            return Some((
+                200,
+                serde_json::json!({
+                    "org_id": org_id,
+                    "kind": "oidc",
+                    "start_url": format!("/api/auth/orgs/{org_id}/sso/start"),
+                })
+                .to_string(),
+            ));
+        }
+        if let Some(org_id) = ctx.saml.find_by_email_domain(&domain) {
+            return Some((
+                200,
+                serde_json::json!({
+                    "org_id": org_id,
+                    "kind": "saml",
+                    "start_url": format!("/api/auth/orgs/{org_id}/saml/start"),
+                })
+                .to_string(),
+            ));
+        }
+        return Some((
+            404,
+            json_error(
+                "NO_SSO_FOR_DOMAIN",
+                "no org has SSO configured for that email domain",
+            ),
+        ));
+    }
+
     // ─── Per-org SAML 2.0 public endpoints (unauthenticated) ────────────
     //
     // GET  /api/auth/orgs/<org_id>/saml/start
@@ -3033,6 +3131,16 @@ pub(crate) fn handle(
                             .collect()
                     })
                     .unwrap_or_default();
+                // Wave-8 P1 fix: enforce free-mail blocklist + operator
+                // PYLON_SSO_ALLOWED_DOMAINS allowlist before persisting.
+                // Without this, an org owner could claim `gmail.com`
+                // and intercept domain-detection sign-ins for every
+                // Gmail user on a multi-tenant Pylon deployment.
+                for d in &email_domains {
+                    if let Err(e) = pylon_auth::org_sso::validate_claimable_domain(d) {
+                        return Some((400, json_error(e.code(), &e.message())));
+                    }
+                }
                 let endpoints = match pylon_auth::org_sso::discover_endpoints(&issuer) {
                     Ok(e) => e,
                     Err(e) => {
@@ -3066,7 +3174,9 @@ pub(crate) fn handle(
                     created_at: existing_created_at,
                     updated_at: now,
                 };
-                ctx.org_sso.upsert(cfg);
+                if let Err(e) = ctx.org_sso.upsert(cfg) {
+                    return Some((409, json_error(e.code(), &e.message())));
+                }
                 return Some((200, serde_json::json!({"configured": true}).to_string()));
             }
             // DELETE /api/auth/orgs/:id/sso — owner-only.
@@ -3188,6 +3298,16 @@ pub(crate) fn handle(
                             .collect()
                     })
                     .unwrap_or_default();
+                // Wave-8 P1 fix: enforce free-mail blocklist + operator
+                // PYLON_SSO_ALLOWED_DOMAINS allowlist before persisting.
+                // Without this, an org owner could claim `gmail.com`
+                // and intercept domain-detection sign-ins for every
+                // Gmail user on a multi-tenant Pylon deployment.
+                for d in &email_domains {
+                    if let Err(e) = pylon_auth::org_sso::validate_claimable_domain(d) {
+                        return Some((400, json_error(e.code(), &e.message())));
+                    }
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -3205,7 +3325,9 @@ pub(crate) fn handle(
                     created_at: existing_created,
                     updated_at: now,
                 };
-                ctx.saml.upsert(cfg);
+                if let Err(e) = ctx.saml.upsert(cfg) {
+                    return Some((409, json_error(e.code(), &e.message())));
+                }
                 return Some((200, serde_json::json!({"configured": true}).to_string()));
             }
             [_id, "saml"] if method == HttpMethod::Delete => {

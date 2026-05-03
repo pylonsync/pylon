@@ -84,7 +84,10 @@ pub const SAML_STATE_TTL_SECS: u64 = 10 * 60;
 
 pub trait SamlStore: Send + Sync {
     fn get(&self, org_id: &str) -> Option<SamlConfig>;
-    fn upsert(&self, config: SamlConfig);
+    /// Same atomic-domain-conflict contract as
+    /// [`crate::org_sso::OrgSsoStore::upsert`] — upsert MUST reject
+    /// when any requested domain is owned by a different org.
+    fn upsert(&self, config: SamlConfig) -> Result<(), crate::org_sso::DomainConflictError>;
     fn delete(&self, org_id: &str) -> bool;
     fn find_by_email_domain(&self, domain: &str) -> Option<String>;
     fn save_state(&self, record: SamlStateRecord);
@@ -118,21 +121,32 @@ impl SamlStore for InMemorySamlStore {
         self.configs.read().unwrap().get(org_id).cloned()
     }
 
-    fn upsert(&self, config: SamlConfig) {
+    fn upsert(&self, config: SamlConfig) -> Result<(), crate::org_sso::DomainConflictError> {
         let mut configs = self.configs.write().unwrap();
+        let mut domains = self.domains.write().unwrap();
+        for d in &config.email_domains {
+            let lower = d.to_ascii_lowercase();
+            if let Some(owner) = domains.get(&lower) {
+                if owner != &config.org_id {
+                    return Err(crate::org_sso::DomainConflictError {
+                        domain: lower,
+                        claimed_by: owner.clone(),
+                    });
+                }
+            }
+        }
         if let Some(prev) = configs.get(&config.org_id) {
-            let mut domains = self.domains.write().unwrap();
             for d in &prev.email_domains {
                 if domains.get(d).map(|v| v == &config.org_id).unwrap_or(false) {
                     domains.remove(d);
                 }
             }
         }
-        let mut domains = self.domains.write().unwrap();
         for d in &config.email_domains {
             domains.insert(d.to_ascii_lowercase(), config.org_id.clone());
         }
         configs.insert(config.org_id.clone(), config);
+        Ok(())
     }
 
     fn delete(&self, org_id: &str) -> bool {
@@ -519,7 +533,7 @@ mod tests {
     #[test]
     fn upsert_and_get_round_trip() {
         let s = InMemorySamlStore::new();
-        s.upsert(cfg("acme", vec!["acme.com"]));
+        s.upsert(cfg("acme", vec!["acme.com"])).unwrap();
         let got = s.get("acme").unwrap();
         assert_eq!(got.idp_entity_id, "https://acme.okta.com/saml");
     }
@@ -527,7 +541,7 @@ mod tests {
     #[test]
     fn find_by_email_domain_is_case_insensitive() {
         let s = InMemorySamlStore::new();
-        s.upsert(cfg("acme", vec!["acme.com"]));
+        s.upsert(cfg("acme", vec!["acme.com"])).unwrap();
         assert_eq!(s.find_by_email_domain("ACME.COM").as_deref(), Some("acme"));
         assert_eq!(s.find_by_email_domain("nope.com"), None);
     }
@@ -535,8 +549,8 @@ mod tests {
     #[test]
     fn upsert_replaces_domain_index() {
         let s = InMemorySamlStore::new();
-        s.upsert(cfg("acme", vec!["old.com"]));
-        s.upsert(cfg("acme", vec!["new.com"]));
+        s.upsert(cfg("acme", vec!["old.com"])).unwrap();
+        s.upsert(cfg("acme", vec!["new.com"])).unwrap();
         assert_eq!(s.find_by_email_domain("old.com"), None);
         assert_eq!(s.find_by_email_domain("new.com").as_deref(), Some("acme"));
     }
@@ -544,7 +558,7 @@ mod tests {
     #[test]
     fn delete_clears_domain_index() {
         let s = InMemorySamlStore::new();
-        s.upsert(cfg("acme", vec!["acme.com"]));
+        s.upsert(cfg("acme", vec!["acme.com"])).unwrap();
         assert!(s.delete("acme"));
         assert_eq!(s.find_by_email_domain("acme.com"), None);
     }

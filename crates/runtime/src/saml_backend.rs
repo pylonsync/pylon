@@ -8,6 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use pylon_auth::org_sso::DomainConflictError;
 use pylon_auth::saml::{SamlConfig, SamlStateRecord, SamlStore, SAML_STATE_TTL_SECS};
 use rusqlite::Connection;
 
@@ -80,41 +81,78 @@ impl SamlStore for SqliteSamlBackend {
             .ok()
     }
 
-    fn upsert(&self, config: SamlConfig) {
-        if let Ok(c) = self.conn.lock() {
-            let domains =
-                serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {SQLITE_CONFIG}
-                       (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
-                        default_role, email_domains_json, email_attribute,
-                        name_attribute, created_at, updated_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                     ON CONFLICT(org_id) DO UPDATE SET
-                       idp_entity_id = excluded.idp_entity_id,
-                       idp_sso_url = excluded.idp_sso_url,
-                       idp_x509_cert_pem = excluded.idp_x509_cert_pem,
-                       default_role = excluded.default_role,
-                       email_domains_json = excluded.email_domains_json,
-                       email_attribute = excluded.email_attribute,
-                       name_attribute = excluded.name_attribute,
-                       updated_at = excluded.updated_at"
-                ),
-                rusqlite::params![
-                    config.org_id,
-                    config.idp_entity_id,
-                    config.idp_sso_url,
-                    config.idp_x509_cert_pem,
-                    config.default_role,
-                    domains,
-                    config.email_attribute,
-                    config.name_attribute,
-                    config.created_at as i64,
-                    config.updated_at as i64,
-                ],
-            );
+    fn upsert(&self, config: SamlConfig) -> Result<(), DomainConflictError> {
+        let c = self.conn.lock().map_err(|_| DomainConflictError {
+            domain: String::new(),
+            claimed_by: String::new(),
+        })?;
+        // Conflict check: any other org claiming a requested domain
+        // wins iff it was there first; we reject this upsert.
+        let mut stmt = c
+            .prepare(&format!(
+                "SELECT org_id, email_domains_json FROM {SQLITE_CONFIG} WHERE org_id != ?1"
+            ))
+            .map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![config.org_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+        let lower_requested: Vec<String> = config
+            .email_domains
+            .iter()
+            .map(|d| d.to_ascii_lowercase())
+            .collect();
+        for row in rows.flatten() {
+            let other: Vec<String> = serde_json::from_str(&row.1).unwrap_or_default();
+            for od in other.iter().map(|s| s.to_ascii_lowercase()) {
+                if lower_requested.contains(&od) {
+                    return Err(DomainConflictError {
+                        domain: od,
+                        claimed_by: row.0,
+                    });
+                }
+            }
         }
+        drop(stmt);
+        let domains = serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
+        let _ = c.execute(
+            &format!(
+                "INSERT INTO {SQLITE_CONFIG}
+                   (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
+                    default_role, email_domains_json, email_attribute,
+                    name_attribute, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(org_id) DO UPDATE SET
+                   idp_entity_id = excluded.idp_entity_id,
+                   idp_sso_url = excluded.idp_sso_url,
+                   idp_x509_cert_pem = excluded.idp_x509_cert_pem,
+                   default_role = excluded.default_role,
+                   email_domains_json = excluded.email_domains_json,
+                   email_attribute = excluded.email_attribute,
+                   name_attribute = excluded.name_attribute,
+                   updated_at = excluded.updated_at"
+            ),
+            rusqlite::params![
+                config.org_id,
+                config.idp_entity_id,
+                config.idp_sso_url,
+                config.idp_x509_cert_pem,
+                config.default_role,
+                domains,
+                config.email_attribute,
+                config.name_attribute,
+                config.created_at as i64,
+                config.updated_at as i64,
+            ],
+        );
+        Ok(())
     }
 
     fn delete(&self, org_id: &str) -> bool {
@@ -305,41 +343,73 @@ mod pg {
             Some(pg_row_to_config(&row))
         }
 
-        fn upsert(&self, config: SamlConfig) {
-            if let Ok(mut c) = self.client.lock() {
-                let domains =
-                    serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-                let _ = c.execute(
+        fn upsert(&self, config: SamlConfig) -> Result<(), DomainConflictError> {
+            let mut c = self.client.lock().map_err(|_| DomainConflictError {
+                domain: String::new(),
+                claimed_by: String::new(),
+            })?;
+            let rows = c
+                .query(
                     &format!(
-                        "INSERT INTO {PG_CONFIG}
-                           (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
-                            default_role, email_domains_json, email_attribute,
-                            name_attribute, created_at, updated_at)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                         ON CONFLICT(org_id) DO UPDATE SET
-                           idp_entity_id = EXCLUDED.idp_entity_id,
-                           idp_sso_url = EXCLUDED.idp_sso_url,
-                           idp_x509_cert_pem = EXCLUDED.idp_x509_cert_pem,
-                           default_role = EXCLUDED.default_role,
-                           email_domains_json = EXCLUDED.email_domains_json,
-                           email_attribute = EXCLUDED.email_attribute,
-                           name_attribute = EXCLUDED.name_attribute,
-                           updated_at = EXCLUDED.updated_at"
+                        "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
                     ),
-                    &[
-                        &config.org_id,
-                        &config.idp_entity_id,
-                        &config.idp_sso_url,
-                        &config.idp_x509_cert_pem,
-                        &config.default_role,
-                        &domains,
-                        &config.email_attribute,
-                        &config.name_attribute,
-                        &(config.created_at as i64),
-                        &(config.updated_at as i64),
-                    ],
-                );
+                    &[&config.org_id],
+                )
+                .map_err(|_| DomainConflictError {
+                    domain: String::new(),
+                    claimed_by: String::new(),
+                })?;
+            let lower_requested: Vec<String> = config
+                .email_domains
+                .iter()
+                .map(|d| d.to_ascii_lowercase())
+                .collect();
+            for r in rows {
+                let other_org: String = r.get(0);
+                let other_json: String = r.get(1);
+                let other: Vec<String> = serde_json::from_str(&other_json).unwrap_or_default();
+                for od in other.iter().map(|s| s.to_ascii_lowercase()) {
+                    if lower_requested.contains(&od) {
+                        return Err(DomainConflictError {
+                            domain: od,
+                            claimed_by: other_org,
+                        });
+                    }
+                }
             }
+            let domains =
+                serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
+            let _ = c.execute(
+                &format!(
+                    "INSERT INTO {PG_CONFIG}
+                       (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
+                        default_role, email_domains_json, email_attribute,
+                        name_attribute, created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     ON CONFLICT(org_id) DO UPDATE SET
+                       idp_entity_id = EXCLUDED.idp_entity_id,
+                       idp_sso_url = EXCLUDED.idp_sso_url,
+                       idp_x509_cert_pem = EXCLUDED.idp_x509_cert_pem,
+                       default_role = EXCLUDED.default_role,
+                       email_domains_json = EXCLUDED.email_domains_json,
+                       email_attribute = EXCLUDED.email_attribute,
+                       name_attribute = EXCLUDED.name_attribute,
+                       updated_at = EXCLUDED.updated_at"
+                ),
+                &[
+                    &config.org_id,
+                    &config.idp_entity_id,
+                    &config.idp_sso_url,
+                    &config.idp_x509_cert_pem,
+                    &config.default_role,
+                    &domains,
+                    &config.email_attribute,
+                    &config.name_attribute,
+                    &(config.created_at as i64),
+                    &(config.updated_at as i64),
+                ],
+            );
+            Ok(())
         }
 
         fn delete(&self, org_id: &str) -> bool {
@@ -493,7 +563,7 @@ mod tests {
     #[test]
     fn round_trip_upsert_get() {
         let s = store();
-        s.upsert(cfg("acme", vec!["acme.com"]));
+        s.upsert(cfg("acme", vec!["acme.com"])).unwrap();
         let got = s.get("acme").unwrap();
         assert_eq!(got.idp_sso_url, "https://acme.okta.com/sso");
         assert_eq!(got.email_domains, vec!["acme.com".to_string()]);
@@ -502,7 +572,7 @@ mod tests {
     #[test]
     fn upsert_replaces_on_conflict() {
         let s = store();
-        s.upsert(cfg("acme", vec!["old.com"]));
+        s.upsert(cfg("acme", vec!["old.com"])).unwrap();
         let mut updated = cfg("acme", vec!["new.com"]);
         updated.idp_sso_url = "https://acme.okta.com/sso2".into();
         updated.updated_at = 200;
@@ -516,8 +586,8 @@ mod tests {
     #[test]
     fn find_by_email_domain_walks_rows() {
         let s = store();
-        s.upsert(cfg("acme", vec!["acme.com", "acme.io"]));
-        s.upsert(cfg("globex", vec!["globex.com"]));
+        s.upsert(cfg("acme", vec!["acme.com", "acme.io"])).unwrap();
+        s.upsert(cfg("globex", vec!["globex.com"])).unwrap();
         assert_eq!(s.find_by_email_domain("ACME.IO").as_deref(), Some("acme"));
         assert_eq!(
             s.find_by_email_domain("globex.com").as_deref(),
@@ -529,7 +599,7 @@ mod tests {
     #[test]
     fn delete_removes_row() {
         let s = store();
-        s.upsert(cfg("acme", vec![]));
+        s.upsert(cfg("acme", vec![])).unwrap();
         assert!(s.delete("acme"));
         assert!(s.get("acme").is_none());
         assert!(!s.delete("acme"));
