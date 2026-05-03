@@ -1990,6 +1990,14 @@ pub(crate) fn handle(
     // every request.
     if let Some(provider_raw) = url.strip_prefix("/api/auth/oauth/refresh/") {
         if method == HttpMethod::Post {
+            // Auth check FIRST. The original ordering (provider-empty
+            // check before auth) leaked nothing exploitable but
+            // violated the principle that anonymous callers shouldn't
+            // be able to discriminate routes via 400 vs 401.
+            let user_id = match ctx.auth_ctx.user_id.as_deref() {
+                Some(u) => u.to_string(),
+                None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
+            };
             let provider = provider_raw.split('?').next().unwrap_or(provider_raw);
             if provider.is_empty() {
                 return Some((
@@ -1997,10 +2005,6 @@ pub(crate) fn handle(
                     json_error("MISSING_PROVIDER", "provider name is required"),
                 ));
             }
-            let user_id = match ctx.auth_ctx.user_id.as_deref() {
-                Some(u) => u.to_string(),
-                None => return Some((401, json_error("AUTH_REQUIRED", "Login required"))),
-            };
             // The user can have at most one account row per provider
             // (it's the natural key on AccountBackend), so finding by
             // user_id + provider is unambiguous. find_for_user filters

@@ -71,6 +71,29 @@ current="$(grep -E '^version = "[0-9]+\.[0-9]+\.[0-9]+".*x-release-please-versio
 	exit 1
 }
 
+# Re-run safety: if a previous invocation crashed mid-flight, the JS
+# packages will already carry the new version while Cargo.toml still
+# carries the OLD one (or vice versa). Either way, picking up where
+# we left off by computing target=$current+1 produces a version that's
+# *already in some files*. Detect the mismatch and refuse rather than
+# silently double-bumping.
+js_current=""
+for pkg in packages/sdk/package.json packages/functions/package.json packages/cli/package.json; do
+	if [[ -f "$pkg" ]]; then
+		v="$(grep -E '"version"\s*:\s*"[0-9]+\.[0-9]+\.[0-9]+"' "$pkg" | head -1 \
+			| sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+		js_current="$v"
+		break
+	fi
+done
+if [[ -n "$js_current" && "$js_current" != "$current" ]]; then
+	echo "error: version drift detected — Cargo.toml=$current but JS packages=$js_current." >&2
+	echo "       A previous release.sh run probably crashed partway through." >&2
+	echo "       Reconcile both files to the same version (git checkout, manual edit)" >&2
+	echo "       before re-running, or pass an explicit X.Y.Z target." >&2
+	exit 1
+fi
+
 # --- compute target version ----------------------------------------------
 
 if [[ "$bump" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -151,8 +174,13 @@ while IFS= read -r -d '' f; do
 	perl -pi -e "s/(\"\@pylonsync\/cli-[a-z0-9_-]+\":\s*\")[0-9]+\.[0-9]+\.[0-9]+(\")/\${1}$target\${2}/g" "$f"
 done < <(find packages/cli -maxdepth 2 -name package.json -print0)
 
-# 4. release-please manifest.
-perl -pi -e "s/(\"\.\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" .release-please-manifest.json
+# 4. release-please manifest. Bumps the `"." : "X.Y.Z"` line REGARDLESS
+# of what its current value is — matching against $current would silently
+# no-op when the manifest had drifted (it sat at 0.2.11 through the
+# 0.3.x line of releases because of this exact bug; the published
+# packages and the manifest disagreed for months). Now: any well-formed
+# semver in that slot gets rewritten to $target.
+perl -pi -e "s/(\"\.\"\s*:\s*\")[0-9]+\.[0-9]+\.[0-9]+(\")/\${1}$target\${2}/" .release-please-manifest.json
 
 # --- validate -------------------------------------------------------------
 #

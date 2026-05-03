@@ -3132,6 +3132,188 @@ mod auth_gate_tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Wave 8 / Wave 9 wire-level coverage. The matrix_check helper above
+    // builds a real RouterContext with stubbed services and calls
+    // route() — these tests assert that the new endpoints exist, are
+    // gated correctly, and surface the expected error status when the
+    // org isn't configured. Catches regressions at the dispatcher level
+    // (path matching, method gates, auth check ordering).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn oauth_refresh_endpoint_requires_auth() {
+        // Anon: 401 AUTH_REQUIRED.
+        // Guest: has a guest user_id, no linked OAuth account → 404
+        //   ACCOUNT_NOT_FOUND. The endpoint doesn't reject guests
+        //   explicitly because guests literally cannot have linked
+        //   accounts; the 404 is the more honest answer.
+        // Authed: same → 404 ACCOUNT_NOT_FOUND.
+        matrix_check(
+            HttpMethod::Post,
+            "/api/auth/oauth/refresh/google",
+            "",
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn oauth_refresh_rejects_empty_provider_segment() {
+        matrix_check(
+            HttpMethod::Post,
+            "/api/auth/oauth/refresh/",
+            "",
+            // Anon: hits auth check first → 401.
+            Expect::Rejected,
+            // Guest + Authed: 400 MISSING_PROVIDER (empty segment).
+            Expect::Eq(400),
+            Expect::Eq(400),
+        );
+    }
+
+    #[test]
+    fn org_sso_start_returns_404_when_unconfigured() {
+        // Public endpoint — no auth check. Org has no SSO config →
+        // 404 SSO_NOT_CONFIGURED for everyone.
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/orgs/some-org/sso/start?callback=https://app/cb",
+            "",
+            Expect::Eq(404),
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn org_sso_callback_returns_403_for_unknown_state() {
+        // Public, but state tokens are single-use + org-scoped. An
+        // unknown state token must 403 INVALID_SSO_STATE.
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/orgs/some-org/sso/callback?state=fake&code=fake",
+            "",
+            Expect::Eq(403),
+            Expect::Eq(403),
+            Expect::Eq(403),
+        );
+    }
+
+    #[test]
+    fn saml_start_returns_404_when_unconfigured() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/orgs/some-org/saml/start?callback=https://app/cb",
+            "",
+            Expect::Eq(404),
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn saml_acs_returns_404_when_unconfigured() {
+        // Public endpoint. Org with no SAML config → 404
+        // SAML_NOT_CONFIGURED before any form-body parse / signature
+        // verification. Confirms the dispatcher reaches the handler
+        // (vs returning 405 / 404 from path-matching).
+        matrix_check(
+            HttpMethod::Post,
+            "/api/auth/orgs/some-org/saml/acs",
+            "",
+            Expect::Eq(404),
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn sso_discover_returns_400_when_email_missing() {
+        // Public discovery endpoint. No email param → 400.
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/sso/discover",
+            "",
+            Expect::Eq(400),
+            Expect::Eq(400),
+            Expect::Eq(400),
+        );
+    }
+
+    #[test]
+    fn sso_discover_returns_404_when_no_org_claims_domain() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/sso/discover?email=user@nobody-claims-this.com",
+            "",
+            Expect::Eq(404),
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn sso_config_crud_requires_org_membership() {
+        // Anon → 401 AUTH_REQUIRED. Guest + authed pass the auth gate
+        // but fail the membership lookup → 404 ORG_NOT_FOUND. Same
+        // pattern as the existing org CRUD endpoints — confirmed by
+        // the matching shape in saml_config_crud_requires_org_membership.
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/orgs/some-org/sso",
+            "",
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+        matrix_check(
+            HttpMethod::Put,
+            "/api/auth/orgs/some-org/sso",
+            r#"{"issuer_url":"https://idp","client_id":"x","client_secret":"y"}"#,
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+        matrix_check(
+            HttpMethod::Delete,
+            "/api/auth/orgs/some-org/sso",
+            "",
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
+    #[test]
+    fn saml_config_crud_requires_org_membership() {
+        matrix_check(
+            HttpMethod::Get,
+            "/api/auth/orgs/some-org/saml",
+            "",
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+        matrix_check(
+            HttpMethod::Put,
+            "/api/auth/orgs/some-org/saml",
+            r#"{"idp_entity_id":"x","idp_sso_url":"https://idp","idp_x509_cert_pem":"y"}"#,
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+        matrix_check(
+            HttpMethod::Delete,
+            "/api/auth/orgs/some-org/saml",
+            "",
+            Expect::Rejected,
+            Expect::Eq(404),
+            Expect::Eq(404),
+        );
+    }
+
     // Keep the warning silencer until this is used.
     #[allow(dead_code)]
     const _TOUCH_ATOMIC_BOOL: AtomicBool = AtomicBool::new(false);

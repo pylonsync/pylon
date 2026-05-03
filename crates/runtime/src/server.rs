@@ -249,6 +249,24 @@ fn start_server(
     let _ = SERVER_HANDLE.set(Arc::clone(&server));
 
     let session_lifetime = runtime.manifest().auth.session.expires_in;
+    // Boot-time warning: per-org SSO client_secrets fall back to a
+    // `plain:` envelope when PYLON_SSO_ENCRYPTION_KEY is unset. The
+    // org_sso module's `seal_secret` doc claims operators are warned
+    // at startup; this is that warning. The first audience is
+    // production deployments running with SSO enabled but without the
+    // key set — a bad combo we want loud.
+    if std::env::var("PYLON_SSO_ENCRYPTION_KEY").ok().is_none()
+        && std::env::var("PYLON_DEV_MODE")
+            .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    {
+        tracing::warn!(
+            "[pylon] PYLON_SSO_ENCRYPTION_KEY is unset — per-org SSO + SAML \
+             secrets will be persisted in plaintext (`plain:` envelope). \
+             Set PYLON_SSO_ENCRYPTION_KEY to a 32-byte hex/base64 value \
+             for at-rest encryption."
+        );
+    }
     let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime);
     let session_store = auth_stores.session_store;
     let magic_codes = auth_stores.magic_codes;
