@@ -244,14 +244,7 @@ mod tests {
         let store = InMemoryTrustedDeviceStore::new();
         // Lifetime 0 => expires_at == now. is_expired() returns true.
         store.create(TrustedDevice::mint("u1", None, 0));
-        let token = store
-            .inner
-            .read()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
+        let token = store.inner.read().unwrap().keys().next().cloned().unwrap();
         assert!(store.find(&token).is_none());
     }
 
@@ -332,7 +325,7 @@ mod tests {
         let store = InMemoryTrustedDeviceStore::new();
         store.create(TrustedDevice::mint("u1", None, 0)); // expires immediately
         store.create(TrustedDevice::mint("u1", None, 3600)); // alive
-        // Trigger another create which prunes.
+                                                             // Trigger another create which prunes.
         store.create(TrustedDevice::mint("u2", None, 3600));
         let alive = store.list_for_user("u1");
         assert_eq!(alive.len(), 1, "expired row should be pruned");

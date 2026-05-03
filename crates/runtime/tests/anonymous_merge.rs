@@ -45,10 +45,7 @@ fn merge_manifest() -> AppManifest {
         entities: vec![
             entity(
                 "User",
-                vec![
-                    field("email", "string"),
-                    field("displayName", "string"),
-                ],
+                vec![field("email", "string"), field("displayName", "string")],
             ),
             entity(
                 "Cart",
@@ -82,10 +79,7 @@ fn transfer_moves_rows_across_entities_and_skips_decoys() {
         )
         .unwrap();
     let real_id = store
-        .insert(
-            "User",
-            &json!({ "email": "real@x", "displayName": "Real" }),
-        )
+        .insert("User", &json!({ "email": "real@x", "displayName": "Real" }))
         .unwrap();
 
     // Guest accumulates state.
@@ -162,8 +156,7 @@ fn empty_merge_returns_no_touched_entries() {
     let runtime = pylon_runtime::Runtime::in_memory(merge_manifest()).unwrap();
     let store: &dyn DataStore = &runtime;
     // Guest has no rows anywhere.
-    let result =
-        transfer_user_ownership(store, store.manifest(), "ghost-guest", "real-id", "User");
+    let result = transfer_user_ownership(store, store.manifest(), "ghost-guest", "real-id", "User");
     assert_eq!(result.rows_updated, 0);
     assert!(result.touched.is_empty());
     assert_eq!(result.entities_csv(), "");
@@ -174,16 +167,10 @@ fn entities_csv_format() {
     let runtime = pylon_runtime::Runtime::in_memory(merge_manifest()).unwrap();
     let store: &dyn DataStore = &runtime;
     let guest = store
-        .insert(
-            "User",
-            &json!({ "email": "g@x", "displayName": "G" }),
-        )
+        .insert("User", &json!({ "email": "g@x", "displayName": "G" }))
         .unwrap();
     let real = store
-        .insert(
-            "User",
-            &json!({ "email": "r@x", "displayName": "R" }),
-        )
+        .insert("User", &json!({ "email": "r@x", "displayName": "R" }))
         .unwrap();
     store
         .insert("Cart", &json!({ "userId": &guest, "note": "c1" }))

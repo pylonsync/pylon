@@ -112,9 +112,7 @@ impl TrustedDeviceStore for SqliteTrustedDeviceBackend {
                  WHERE id = ?1"
             ))
             .ok()?;
-        let device = stmt
-            .query_row(rusqlite::params![id], row_to_device)
-            .ok()?;
+        let device = stmt.query_row(rusqlite::params![id], row_to_device).ok()?;
         if device.is_expired() {
             return None;
         }
@@ -318,12 +316,9 @@ mod pg {
             let Ok(mut c) = self.client.lock() else {
                 return false;
             };
-            c.execute(
-                &format!("DELETE FROM {PG_TABLE} WHERE id = $1"),
-                &[&id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
+                .map(|n| n > 0)
+                .unwrap_or(false)
         }
 
         fn revoke_all_for_user(&self, user_id: &str) -> usize {

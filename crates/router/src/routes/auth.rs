@@ -1981,7 +1981,10 @@ pub(crate) fn handle(
         if ctx.auth_ctx.is_api_key_auth() {
             return Some((
                 403,
-                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Trusted devices require a session",
+                ),
             ));
         }
         let devices = ctx.trusted_devices.list_for_user(&user_id);
@@ -2017,7 +2020,10 @@ pub(crate) fn handle(
         if ctx.auth_ctx.is_api_key_auth() {
             return Some((
                 403,
-                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Trusted devices require a session",
+                ),
             ));
         }
         let removed = ctx.trusted_devices.revoke_all_for_user(&user_id);
@@ -2028,10 +2034,7 @@ pub(crate) fn handle(
             ctx.cookie_config
                 .clear_value_for(pylon_auth::trusted_device::TRUST_COOKIE_NAME),
         );
-        return Some((
-            200,
-            serde_json::json!({"revoked": removed}).to_string(),
-        ));
+        return Some((200, serde_json::json!({"revoked": removed}).to_string()));
     }
 
     // DELETE /api/auth/trusted-devices/<id> — revoke a single trusted-
@@ -2048,7 +2051,10 @@ pub(crate) fn handle(
         if ctx.auth_ctx.is_api_key_auth() {
             return Some((
                 403,
-                json_error("API_KEY_AUTH_FORBIDDEN", "Trusted devices require a session"),
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Trusted devices require a session",
+                ),
             ));
         }
         let id = &url["/api/auth/trusted-devices/".len()..];
@@ -2066,16 +2072,10 @@ pub(crate) fn handle(
             .map(|d| d.user_id == user_id)
             .unwrap_or(false);
         if !owned {
-            return Some((
-                404,
-                json_error("NOT_FOUND", "trusted device not found"),
-            ));
+            return Some((404, json_error("NOT_FOUND", "trusted device not found")));
         }
         let removed = ctx.trusted_devices.revoke_by_id(id);
-        return Some((
-            200,
-            serde_json::json!({"revoked": removed}).to_string(),
-        ));
+        return Some((200, serde_json::json!({"revoked": removed}).to_string()));
     }
 
     if url == "/api/auth/totp/disable" && method == HttpMethod::Post {
