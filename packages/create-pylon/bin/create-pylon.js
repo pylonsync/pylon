@@ -338,16 +338,19 @@ export default query({
 
 write(
 	"apps/api/functions/addTodo.ts",
-	`import { action, v } from "@pylonsync/functions";
+	`import { mutation, v } from "@pylonsync/functions";
 
 /**
- * Insert a new Todo. Runs as an action (not a mutation) so the
- * client can call it via POST /api/fn/addTodo and get the
- * inserted row back synchronously. The change-event broadcast
- * the runtime emits for the insert is what wakes up
- * \`useQuery("Todo")\` consumers without an explicit refetch.
+ * Insert a new Todo. Runs as a mutation — only mutation handlers
+ * receive a writable \`ctx.db\` (with \`insert\` / \`update\` / \`delete\`).
+ * Actions get a different ctx with \`runQuery\`/\`runMutation\` for
+ * cross-function calls but no direct DB write.
+ *
+ * The Pylon runtime broadcasts a row-change event after the insert
+ * commits so any \`useQuery("Todo")\` consumer auto-refreshes without
+ * an explicit refetch on the client side.
  */
-export default action({
+export default mutation({
 \targs: { title: v.string() },
 \tasync handler(ctx, args: { title: string }) {
 \t\tconst id = await ctx.db.insert("Todo", {

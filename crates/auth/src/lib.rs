@@ -2482,6 +2482,18 @@ impl AccountBackend for InMemoryAccountBackend {
 /// OAuth callback / API endpoints actually call.
 pub struct AccountStore {
     backend: Box<dyn AccountBackend>,
+    /// Per-(provider_id, account_id) mutex set used by
+    /// [`Self::ensure_fresh_access_token`] to serialize concurrent
+    /// refresh calls against the same account. Without this, two
+    /// callers refreshing simultaneously can both hit the provider's
+    /// token endpoint with the same refresh token; rotating providers
+    /// (Google, Auth0) invalidate the old token on the first refresh,
+    /// then the second refresh uses an already-dead token and the
+    /// account is permanently broken until the user re-OAuths.
+    ///
+    /// Mutex set grows with active refresh diversity; opportunistic
+    /// shrink on lock acquisition keeps it bounded.
+    refresh_locks: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
 }
 
 impl Default for AccountStore {
@@ -2494,10 +2506,14 @@ impl AccountStore {
     pub fn new() -> Self {
         Self {
             backend: Box::new(InMemoryAccountBackend::new()),
+            refresh_locks: Mutex::new(HashMap::new()),
         }
     }
     pub fn with_backend(backend: Box<dyn AccountBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            refresh_locks: Mutex::new(HashMap::new()),
+        }
     }
     pub fn upsert(&self, account: &Account) {
         self.backend.upsert(account);
