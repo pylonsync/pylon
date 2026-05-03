@@ -854,15 +854,15 @@ impl OAuthConfig {
 
 /// PKCE pair — the verifier stays server-side until token exchange,
 /// the (S256-hashed) challenge goes on the auth URL.
-struct PkcePair {
-    code_verifier: String,
-    code_challenge: String,
+pub struct PkcePair {
+    pub code_verifier: String,
+    pub code_challenge: String,
 }
 
 /// Generate a PKCE pair: random 43-char verifier + S256 challenge.
 /// RFC 7636 §4.1 permits 43–128 chars from `[A-Za-z0-9-._~]`. 32
 /// random bytes URL-base64-encoded comes out to exactly 43 chars.
-fn generate_pkce() -> PkcePair {
+pub fn generate_pkce() -> PkcePair {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);

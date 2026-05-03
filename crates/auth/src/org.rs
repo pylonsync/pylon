@@ -363,6 +363,28 @@ impl OrgStore {
         }
     }
 
+    /// Idempotent membership creation. If the user is already a member,
+    /// the existing role is preserved (we never DOWNGRADE an existing
+    /// admin to member just because they signed in via a path that
+    /// would normally create them as member). Returns the resulting
+    /// role.
+    ///
+    /// Used by Wave-8 per-org SSO auto-join + by other mechanisms that
+    /// add users to orgs without going through the invite flow.
+    pub fn add_member(&self, org_id: &str, user_id: &str, role: OrgRole) -> OrgRole {
+        if let Some(existing) = self.backend.get_membership(org_id, user_id) {
+            return existing.role;
+        }
+        let m = Membership {
+            org_id: org_id.to_string(),
+            user_id: user_id.to_string(),
+            role,
+            joined_at: now_secs(),
+        };
+        self.backend.put_membership(&m);
+        role
+    }
+
     pub fn remove_member(&self, org_id: &str, user_id: &str) -> bool {
         self.backend.delete_membership(org_id, user_id)
     }

@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
 pub mod org_backend;
+pub mod org_sso_backend;
 pub mod pg_loro_store;
 pub mod presence;
 pub mod pubsub;

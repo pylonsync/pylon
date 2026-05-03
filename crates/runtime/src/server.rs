@@ -262,6 +262,7 @@ fn start_server(
     let verification = auth_stores.verification;
     let audit = auth_stores.audit;
     let trusted_devices = auth_stores.trusted_devices;
+    let org_sso = auth_stores.org_sso;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
     let change_log = Arc::new(ChangeLog::new());
 
@@ -747,6 +748,7 @@ fn start_server(
         let vrf = Arc::clone(&verification);
         let aud = Arc::clone(&audit);
         let td = Arc::clone(&trusted_devices);
+        let osso = Arc::clone(&org_sso);
         let trusted_origins_ref = Arc::clone(&trusted_origins);
         let ca = Arc::clone(&cache);
         let ps = Arc::clone(&pubsub_broker);
@@ -2070,6 +2072,7 @@ fn start_server(
                     verification: &vrf,
                     audit: &aud,
                     trusted_devices: td.as_ref(),
+                    org_sso: osso.as_ref(),
                     policy_engine: &pe,
                     change_log: &cl,
                     notifier: &notifier,
@@ -2253,6 +2256,7 @@ struct AuthStores {
     verification: Arc<pylon_auth::verification::VerificationStore>,
     audit: Arc<pylon_auth::audit::AuditStore>,
     trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore>,
+    org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore>,
 }
 
 // Memoized env reads — auth resolver runs PER REQUEST so we can't
@@ -2325,6 +2329,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         verification: Arc::new(pylon_auth::verification::VerificationStore::new()),
         audit: Arc::new(pylon_auth::audit::AuditStore::new()),
         trusted_devices: Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new()),
+        org_sso: Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new()),
     }
 }
 
@@ -2396,6 +2401,14 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
                 Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
             }
         };
+    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> =
+        match crate::org_sso_backend::SqliteOrgSsoBackend::open(path) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] org-SSO SQLite backend unavailable: {e}");
+                Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2409,6 +2422,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         verification: Arc::new(verification),
         audit: Arc::new(audit),
         trusted_devices,
+        org_sso,
     }
 }
 
@@ -2485,6 +2499,14 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
                 Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
             }
         };
+    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> =
+        match crate::org_sso_backend::PostgresOrgSsoBackend::connect(url) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!("[pylon] PG org-SSO backend unavailable: {e}");
+                Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
+            }
+        };
     AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
@@ -2498,6 +2520,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         verification: Arc::new(verification),
         audit: Arc::new(audit),
         trusted_devices,
+        org_sso,
     }
 }
 

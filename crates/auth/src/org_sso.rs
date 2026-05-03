@@ -264,6 +264,129 @@ pub struct DiscoveredEndpoints {
     pub jwks_uri: String,
 }
 
+/// Complete an OIDC code exchange + userinfo fetch against a configured
+/// IdP. Wave 8 — handles the per-org SSO callback HTTP calls that
+/// pylon-router can't do directly (router has no http client).
+///
+/// Returns the resolved (email, display_name) on success. Errors carry
+/// a stable code for the route handler to surface in the redirect URL.
+pub fn complete_oidc_login(
+    config: &OrgSsoConfig,
+    code: &str,
+    pkce_verifier: &str,
+    redirect_uri: &str,
+) -> Result<(String, Option<String>), OrgSsoLoginError> {
+    let secret = unseal_secret(&config.client_secret_sealed)
+        .map_err(|e| OrgSsoLoginError::SecretUnreadable(e))?;
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={ruri}&client_id={cid}&client_secret={secret}&code_verifier={pkce}",
+        code = url_form(code),
+        ruri = url_form(redirect_uri),
+        cid = url_form(&config.client_id),
+        secret = url_form(&secret),
+        pkce = url_form(pkce_verifier),
+    );
+    let token_body = ureq::post(&config.token_endpoint)
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .timeout(std::time::Duration::from_secs(10))
+        .send_string(&body)
+        .map_err(|e| OrgSsoLoginError::TokenExchangeFailed(format!("{e}")))?
+        .into_string()
+        .map_err(|e| OrgSsoLoginError::TokenBodyReadFailed(format!("{e}")))?;
+    let token_json: serde_json::Value = serde_json::from_str(&token_body).map_err(|_| {
+        OrgSsoLoginError::TokenResponseNotJson(token_body[..token_body.len().min(200)].into())
+    })?;
+    let access_token = token_json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or(OrgSsoLoginError::NoAccessToken)?
+        .to_string();
+    let userinfo_body = ureq::get(&config.userinfo_endpoint)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| OrgSsoLoginError::UserinfoFetchFailed(format!("{e}")))?
+        .into_string()
+        .map_err(|e| OrgSsoLoginError::UserinfoBodyReadFailed(format!("{e}")))?;
+    let userinfo: serde_json::Value =
+        serde_json::from_str(&userinfo_body).unwrap_or(serde_json::Value::Null);
+    let email = userinfo
+        .get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .ok_or(OrgSsoLoginError::NoEmailClaim)?;
+    let name = userinfo
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Ok((email, name))
+}
+
+/// Stable codes for [`complete_oidc_login`] failures. Surfaced via the
+/// SSO callback's error-redirect URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrgSsoLoginError {
+    SecretUnreadable(String),
+    TokenExchangeFailed(String),
+    TokenBodyReadFailed(String),
+    TokenResponseNotJson(String),
+    NoAccessToken,
+    UserinfoFetchFailed(String),
+    UserinfoBodyReadFailed(String),
+    NoEmailClaim,
+}
+
+impl OrgSsoLoginError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SecretUnreadable(_) => "SSO_SECRET_UNREADABLE",
+            Self::TokenExchangeFailed(_) => "TOKEN_EXCHANGE_FAILED",
+            Self::TokenBodyReadFailed(_) => "TOKEN_BODY_READ_FAILED",
+            Self::TokenResponseNotJson(_) => "TOKEN_RESPONSE_NOT_JSON",
+            Self::NoAccessToken => "NO_ACCESS_TOKEN",
+            Self::UserinfoFetchFailed(_) => "USERINFO_FETCH_FAILED",
+            Self::UserinfoBodyReadFailed(_) => "USERINFO_BODY_READ_FAILED",
+            Self::NoEmailClaim => "NO_EMAIL_CLAIM",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::SecretUnreadable(e) => format!("could not read SSO secret: {e}"),
+            Self::TokenExchangeFailed(e) => format!("token exchange failed: {e}"),
+            Self::TokenBodyReadFailed(e) => format!("could not read token response: {e}"),
+            Self::TokenResponseNotJson(s) => format!("token response was not JSON: {s}"),
+            Self::NoAccessToken => "IdP did not return an access_token".into(),
+            Self::UserinfoFetchFailed(e) => format!("userinfo fetch failed: {e}"),
+            Self::UserinfoBodyReadFailed(e) => format!("could not read userinfo response: {e}"),
+            Self::NoEmailClaim => "IdP userinfo response missing `email`".into(),
+        }
+    }
+}
+
+/// Minimal application/x-www-form-urlencoded encoder for the token-
+/// exchange body. The auth crate has its own `url_encode` that's
+/// slightly more permissive (URI query syntax); for form bodies we
+/// want the strict-form encoding (space → `+`, etc.). Tiny inline
+/// helper to avoid exposing a sibling-namespaced encoder from the
+/// general OAuth path.
+fn url_form(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Mint a fresh SSO state token. 32 bytes of CSPRNG, base64url
 /// unpadded. Same strength as the global OAuth state.
 pub fn random_state() -> String {

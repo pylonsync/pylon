@@ -91,6 +91,269 @@ fn audit_oauth_login(ctx: &RouterContext, user_id: &str, provider: &str) {
     }
 }
 
+/// Wave-8 — `GET /api/auth/orgs/<org_id>/sso/start`. Reads the org's
+/// SSO config, validates the caller-supplied callback URLs against
+/// `PYLON_TRUSTED_ORIGINS`, mints a PKCE-protected state token, and
+/// 302s to the IdP's authorization endpoint.
+fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, String) {
+    let config = match ctx.org_sso.get(org_id) {
+        Some(c) => c,
+        None => {
+            return (
+                404,
+                json_error("SSO_NOT_CONFIGURED", "org has no SSO configured"),
+            )
+        }
+    };
+    let query = raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params = parse_query(query);
+    let callback = match params.get("callback") {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => {
+            return (
+                400,
+                json_error("MISSING_CALLBACK", "callback URL is required"),
+            )
+        }
+    };
+    let error_callback = params
+        .get("error_callback")
+        .cloned()
+        .unwrap_or_else(|| callback.clone());
+    // Reuse the global trusted-origins allowlist — same protection as
+    // the regular OAuth start endpoint. Without this, an attacker can
+    // direct the IdP redirect at any origin they control.
+    if let Err(e) = pylon_auth::validate_trusted_redirect(&callback, ctx.trusted_origins) {
+        return (
+            403,
+            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e:?}")),
+        );
+    }
+    if let Err(e) = pylon_auth::validate_trusted_redirect(&error_callback, ctx.trusted_origins) {
+        return (
+            403,
+            json_error(
+                "UNTRUSTED_ERROR_CALLBACK",
+                &format!("error_callback rejected: {e:?}"),
+            ),
+        );
+    }
+    let pkce = pylon_auth::generate_pkce();
+    let state = pylon_auth::org_sso::random_state();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    ctx.org_sso
+        .save_state(pylon_auth::org_sso::OrgSsoStateRecord {
+            state: state.clone(),
+            org_id: org_id.to_string(),
+            pkce_verifier: pkce.code_verifier,
+            callback_url: callback,
+            error_callback_url: error_callback,
+            created_at: now,
+        });
+    // Build redirect URI matching the callback endpoint we'll hit.
+    // Apps configure the IdP with this exact URL on their end.
+    let redirect_uri = match build_sso_redirect_uri(ctx, org_id) {
+        Some(u) => u,
+        None => {
+            return (
+                500,
+                json_error(
+                    "REDIRECT_URI_UNAVAILABLE",
+                    "set PYLON_PUBLIC_URL so SSO callbacks can reach the server",
+                ),
+            )
+        }
+    };
+    // OIDC authorization request: response_type=code, scope=openid email
+    // profile, S256 PKCE. `prompt=select_account` left to the IdP — most
+    // OIDC servers respect SP omission.
+    let target = format!(
+        "{auth}?response_type=code&client_id={cid}&redirect_uri={ruri}&scope={scope}&state={state}&code_challenge={chal}&code_challenge_method=S256",
+        auth = config.authorization_endpoint,
+        cid = url_encode(&config.client_id),
+        ruri = url_encode(&redirect_uri),
+        scope = url_encode("openid email profile"),
+        state = url_encode(&state),
+        chal = url_encode(&pkce.code_challenge),
+    );
+    ctx.add_response_header("Location", target);
+    (302, String::new())
+}
+
+/// Wave-8 — `GET /api/auth/orgs/<org_id>/sso/callback?code=…&state=…`.
+/// Single-use state consumption + token exchange + userinfo fetch +
+/// auto-join + session mint. On error: 302 to the operator-configured
+/// `error_callback_url`.
+fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, String) {
+    let query = raw.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params = parse_query(query);
+    let state_token = match params.get("state") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return (
+                400,
+                json_error("MISSING_STATE", "state parameter is required"),
+            )
+        }
+    };
+    let code = match params.get("code") {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => {
+            return (
+                400,
+                json_error("MISSING_CODE", "code parameter is required"),
+            )
+        }
+    };
+    let state_record = match ctx.org_sso.take_state(&state_token, org_id) {
+        Some(r) => r,
+        None => {
+            return (
+                403,
+                json_error(
+                    "INVALID_SSO_STATE",
+                    "state is unknown, expired, or for a different org",
+                ),
+            );
+        }
+    };
+    let config = match ctx.org_sso.get(org_id) {
+        Some(c) => c,
+        None => {
+            return (
+                404,
+                json_error("SSO_NOT_CONFIGURED", "org has no SSO configured"),
+            )
+        }
+    };
+    let redirect_uri = match build_sso_redirect_uri(ctx, org_id) {
+        Some(u) => u,
+        None => {
+            return (
+                500,
+                json_error(
+                    "REDIRECT_URI_UNAVAILABLE",
+                    "set PYLON_PUBLIC_URL so SSO callbacks can reach the server",
+                ),
+            )
+        }
+    };
+    let (email, name) = match pylon_auth::org_sso::complete_oidc_login(
+        &config,
+        &code,
+        &state_record.pkce_verifier,
+        &redirect_uri,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return sso_error_redirect(
+                ctx,
+                &state_record.error_callback_url,
+                e.code(),
+                &e.message(),
+            );
+        }
+    };
+    let display_name = name.unwrap_or_else(|| email.clone());
+    // Look up or create the User row by email — same pattern as the
+    // magic-code verify path.
+    let now = format!(
+        "{}Z",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let user_entity = ctx.store.manifest().auth.user.entity.clone();
+    let user_id = match ctx.store.lookup(&user_entity, "email", &email) {
+        Ok(Some(row)) => {
+            let id = row["id"].as_str().unwrap_or("").to_string();
+            // The IdP just vouched for the email; stamp emailVerified
+            // if it wasn't already.
+            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                let _ = ctx.store.update(
+                    &user_entity,
+                    &id,
+                    &serde_json::json!({ "emailVerified": now }),
+                );
+            }
+            id
+        }
+        _ => match ctx.store.insert(
+            &user_entity,
+            &serde_json::json!({
+                "email": &email,
+                "displayName": display_name,
+                "emailVerified": now,
+                "createdAt": now,
+            }),
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                return sso_error_redirect(
+                    ctx,
+                    &state_record.error_callback_url,
+                    "USER_CREATE_FAILED",
+                    &format!("{}: {}", e.code, e.message),
+                )
+            }
+        },
+    };
+    // Auto-join: idempotent. If the user is already a member of the
+    // org, leave the existing role alone (don't downgrade an admin to
+    // member just because they signed in via SSO again). Only add when
+    // there's no existing membership.
+    if ctx.orgs.role_of(org_id, &user_id).is_none() {
+        let role = pylon_auth::org::OrgRole::from_str(&config.default_role)
+            .unwrap_or(pylon_auth::org::OrgRole::Member);
+        ctx.orgs.add_member(org_id, &user_id, role);
+    }
+    // Mint session + audit + 302 to the caller's success URL.
+    let session = create_session_with_device(ctx, user_id.clone());
+    ctx.audit.log(
+        audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+            .user(user_id.clone())
+            .actor(user_id.clone())
+            .meta("method", "org_sso")
+            .meta("org_id", org_id.to_string())
+            .build(),
+    );
+    let cookie_value = ctx.cookie_config.set_value(&session.token);
+    ctx.add_response_header("Set-Cookie", cookie_value);
+    ctx.add_response_header("Location", state_record.callback_url);
+    (302, String::new())
+}
+
+/// Build the SSO callback URL the IdP redirects to. Sources:
+/// 1. `PYLON_PUBLIC_URL` env var (e.g. `https://api.pylonsync.com`) —
+///    operator-set base. Required when the request didn't carry an
+///    `Origin` or `X-Forwarded-Proto`/`X-Forwarded-Host` we trust.
+fn build_sso_redirect_uri(ctx: &RouterContext, org_id: &str) -> Option<String> {
+    let base = std::env::var("PYLON_PUBLIC_URL").ok()?;
+    let trimmed = base.trim_end_matches('/');
+    let _ = ctx;
+    Some(format!("{trimmed}/api/auth/orgs/{org_id}/sso/callback"))
+}
+
+fn sso_error_redirect(
+    ctx: &RouterContext,
+    error_url: &str,
+    code: &str,
+    msg: &str,
+) -> (u16, String) {
+    let sep = if error_url.contains('?') { '&' } else { '?' };
+    let target = format!(
+        "{error_url}{sep}sso_error={code}&sso_error_message={msg}",
+        code = url_encode(code),
+        msg = url_encode(&msg[..msg.len().min(200)]),
+    );
+    ctx.add_response_header("Location", target);
+    (302, String::new())
+}
+
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
@@ -2209,6 +2472,34 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"disabled": true}).to_string()));
     }
 
+    // ─── Per-org SSO public endpoints (unauthenticated) ────────────────
+    //
+    // GET /api/auth/orgs/<org_id>/sso/start
+    //   Mints a fresh PKCE-protected state record + redirects the
+    //   browser to the org's IdP authorization endpoint. Public — the
+    //   user is signing in, they don't have a session yet.
+    // GET /api/auth/orgs/<org_id>/sso/callback
+    //   Validates the state, exchanges the code at the org's IdP,
+    //   fetches userinfo, looks up or creates the User row, auto-joins
+    //   them to the org with the configured default role, and mints a
+    //   session.
+    if let Some(rest) = url.strip_prefix("/api/auth/orgs/") {
+        let path = rest.split('?').next().unwrap_or(rest);
+        // Two suffixes — /sso/start and /sso/callback. The bare /sso
+        // CRUD endpoints below need an authenticated caller and live
+        // in the auth-required block.
+        if let Some(org_id) = path.strip_suffix("/sso/start") {
+            if method == HttpMethod::Get {
+                return Some(handle_org_sso_start(ctx, org_id, rest));
+            }
+        }
+        if let Some(org_id) = path.strip_suffix("/sso/callback") {
+            if method == HttpMethod::Get {
+                return Some(handle_org_sso_callback(ctx, org_id, rest));
+            }
+        }
+    }
+
     // ─── Organizations + invites ───────────────────────────────────────
     //
     // POST   /api/auth/orgs                          create org
@@ -2335,6 +2626,156 @@ pub(crate) fn handle(
                     ));
                 }
                 let removed = ctx.orgs.delete(org_id);
+                return Some((200, serde_json::json!({"deleted": removed}).to_string()));
+            }
+            // ───── Wave-8 per-org SSO config CRUD ─────
+            // GET /api/auth/orgs/:id/sso — any member sees the redacted
+            // config (so the dashboard "SSO is active" badge works).
+            [_id, "sso"] if method == HttpMethod::Get => {
+                return Some(match ctx.org_sso.get(org_id) {
+                    Some(cfg) => {
+                        let r = cfg.redacted();
+                        (
+                            200,
+                            serde_json::json!({
+                                "configured": true,
+                                "issuer_url": r.issuer_url,
+                                "client_id": r.client_id,
+                                "default_role": r.default_role,
+                                "email_domains": r.email_domains,
+                                "authorization_endpoint": r.authorization_endpoint,
+                                "token_endpoint": r.token_endpoint,
+                                "userinfo_endpoint": r.userinfo_endpoint,
+                                "jwks_uri": r.jwks_uri,
+                                "created_at": r.created_at,
+                                "updated_at": r.updated_at,
+                            })
+                            .to_string(),
+                        )
+                    }
+                    None => (200, serde_json::json!({"configured": false}).to_string()),
+                });
+            }
+            // PUT /api/auth/orgs/:id/sso — owner-only. Discovers the
+            // IdP, encrypts the secret, persists.
+            [_id, "sso"] if method == HttpMethod::Put => {
+                if !caller_role.can_delete_org() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners can configure SSO"),
+                    ));
+                }
+                let data: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe(
+                                "INVALID_JSON",
+                                "Invalid request body",
+                                &format!("{e}"),
+                            ),
+                        ))
+                    }
+                };
+                let issuer = data
+                    .get("issuer_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let client_id = data
+                    .get("client_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let client_secret = data
+                    .get("client_secret")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if issuer.is_empty() || client_id.is_empty() || client_secret.is_empty() {
+                    return Some((
+                        400,
+                        json_error(
+                            "MISSING_FIELDS",
+                            "issuer_url + client_id + client_secret are all required",
+                        ),
+                    ));
+                }
+                let default_role = data
+                    .get("default_role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("member")
+                    .to_string();
+                if default_role.eq_ignore_ascii_case("owner") {
+                    // Hard rule — auto-joining as owner via IdP would
+                    // let an IdP misconfiguration silently hand over
+                    // control of the org.
+                    return Some((
+                        400,
+                        json_error(
+                            "BAD_DEFAULT_ROLE",
+                            "default_role must be `member` or `admin`, never `owner`",
+                        ),
+                    ));
+                }
+                let email_domains: Vec<String> = data
+                    .get("email_domains")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_ascii_lowercase())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let endpoints = match pylon_auth::org_sso::discover_endpoints(&issuer) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe(
+                                "DISCOVERY_FAILED",
+                                "Could not load IdP discovery doc",
+                                &e,
+                            ),
+                        ))
+                    }
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let existing_created_at =
+                    ctx.org_sso.get(org_id).map(|c| c.created_at).unwrap_or(now);
+                let cfg = pylon_auth::org_sso::OrgSsoConfig {
+                    org_id: org_id.to_string(),
+                    issuer_url: issuer,
+                    client_id,
+                    client_secret_sealed: pylon_auth::org_sso::seal_secret(&client_secret),
+                    default_role,
+                    email_domains,
+                    authorization_endpoint: endpoints.authorization_endpoint,
+                    token_endpoint: endpoints.token_endpoint,
+                    userinfo_endpoint: endpoints.userinfo_endpoint,
+                    jwks_uri: endpoints.jwks_uri,
+                    created_at: existing_created_at,
+                    updated_at: now,
+                };
+                ctx.org_sso.upsert(cfg);
+                return Some((200, serde_json::json!({"configured": true}).to_string()));
+            }
+            // DELETE /api/auth/orgs/:id/sso — owner-only.
+            [_id, "sso"] if method == HttpMethod::Delete => {
+                if !caller_role.can_delete_org() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners can delete SSO config"),
+                    ));
+                }
+                let removed = ctx.org_sso.delete(org_id);
                 return Some((200, serde_json::json!({"deleted": removed}).to_string()));
             }
             // /api/auth/orgs/:id/members
