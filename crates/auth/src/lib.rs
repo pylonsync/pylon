@@ -939,7 +939,7 @@ fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, Stri
 /// Covers both shapes echoed by real providers:
 ///   - form / query: `client_secret=sk_…`
 ///   - JSON: `"client_secret":"sk_…"` (Notion, Atlassian)
-fn sanitize_token_error(err: String) -> String {
+pub fn sanitize_token_error(err: String) -> String {
     const SENSITIVE: &[&str] = &[
         "client_secret",
         "code_verifier",

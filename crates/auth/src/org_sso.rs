@@ -766,9 +766,25 @@ impl OrgSsoLoginError {
     pub fn message(&self) -> String {
         match self {
             Self::SecretUnreadable(e) => format!("could not read SSO secret: {e}"),
-            Self::TokenExchangeFailed(e) => format!("token exchange failed: {e}"),
-            Self::TokenBodyReadFailed(e) => format!("could not read token response: {e}"),
-            Self::TokenResponseNotJson(s) => format!("token response was not JSON: {s}"),
+            // Wave-8 P2 fix: provider-side error responses sometimes
+            // echo the request back including the auth `code` /
+            // `client_secret` / `refresh_token`. Run through the
+            // central sanitize_token_error redactor before surfacing
+            // — without this the SSO error redirect can leak those
+            // values into the caller's error page URL bar and referrer
+            // logs.
+            Self::TokenExchangeFailed(e) => format!(
+                "token exchange failed: {}",
+                crate::sanitize_token_error(e.clone())
+            ),
+            Self::TokenBodyReadFailed(e) => format!(
+                "could not read token response: {}",
+                crate::sanitize_token_error(e.clone())
+            ),
+            Self::TokenResponseNotJson(s) => format!(
+                "token response was not JSON: {}",
+                crate::sanitize_token_error(s.clone())
+            ),
             Self::NoAccessToken => "IdP did not return an access_token".into(),
             Self::NoIdToken => "IdP did not return an id_token (request `openid` scope)".into(),
             Self::IdTokenInvalid(e) => format!("id_token malformed: {e}"),

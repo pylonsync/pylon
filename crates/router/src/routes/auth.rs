@@ -421,7 +421,23 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
             );
         }
     };
-    let sp_entity_id = std::env::var("PYLON_SAML_ENTITY_ID").unwrap_or_else(|_| acs_url.clone());
+    // Wave-9 P2 fix: refuse to fall back to acs_url when
+    // PYLON_SAML_ENTITY_ID is unset. Audience drift between start and
+    // ACS (operator changes PYLON_PUBLIC_URL between requests, or two
+    // replicas hold different values) silently breaks every in-flight
+    // login. Hard-fail at start time so operators see the misconfig.
+    let sp_entity_id = match std::env::var("PYLON_SAML_ENTITY_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            return (
+                500,
+                json_error(
+                    "SAML_ENTITY_ID_UNSET",
+                    "set PYLON_SAML_ENTITY_ID — required for stable AudienceRestriction across deploys",
+                ),
+            );
+        }
+    };
     let (request_id, xml) =
         pylon_auth::saml::build_authn_request(&sp_entity_id, &config.idp_sso_url, &acs_url);
     use rand::RngCore;
@@ -507,7 +523,23 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             );
         }
     };
-    let sp_entity_id = std::env::var("PYLON_SAML_ENTITY_ID").unwrap_or_else(|_| acs_url.clone());
+    // Wave-9 P2 fix: refuse to fall back to acs_url when
+    // PYLON_SAML_ENTITY_ID is unset. Audience drift between start and
+    // ACS (operator changes PYLON_PUBLIC_URL between requests, or two
+    // replicas hold different values) silently breaks every in-flight
+    // login. Hard-fail at start time so operators see the misconfig.
+    let sp_entity_id = match std::env::var("PYLON_SAML_ENTITY_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            return (
+                500,
+                json_error(
+                    "SAML_ENTITY_ID_UNSET",
+                    "set PYLON_SAML_ENTITY_ID — required for stable AudienceRestriction across deploys",
+                ),
+            );
+        }
+    };
     let assertion = match pylon_auth::saml::verify_and_parse_response(
         &config,
         &sp_entity_id,
