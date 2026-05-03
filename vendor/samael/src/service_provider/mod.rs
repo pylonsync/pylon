@@ -1,0 +1,807 @@
+use crate::crypto;
+#[cfg(feature = "xmlsec")]
+use crate::crypto::sign_url;
+use crate::crypto::{CertificateDer, Crypto, CryptoError, CryptoProvider, ReduceMode};
+use crate::metadata::{Endpoint, IndexedEndpoint, KeyDescriptor, NameIdFormat, SpSsoDescriptor};
+use crate::schema::{Assertion, Response};
+use crate::traits::ToXml;
+use crate::{
+    key_info::{KeyInfo, X509Data},
+    metadata::{ContactPerson, EncryptionMethod, EntityDescriptor, HTTP_POST_BINDING},
+    schema::{AuthnRequest, Issuer, NameIdPolicy},
+};
+use base64::{engine::general_purpose, Engine as _};
+use chrono::prelude::*;
+use chrono::Duration;
+use flate2::{write::DeflateEncoder, Compression};
+use quick_xml::{de::DeError, events::Event as XmlEvent, Reader};
+use std::fmt::Debug;
+use std::io::Write;
+use thiserror::Error;
+use url::Url;
+
+const SUBJECT_CONFIRMATION_METHOD_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(feature = "xmlsec")]
+use crate::schema::EncryptedAssertion;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error(
+        "SAML response destination does not match SP ACS URL. {:?} != {:?}",
+        response_destination,
+        sp_acs_url
+    )]
+    DestinationValidationError {
+        response_destination: Option<String>,
+        sp_acs_url: Option<String>,
+    },
+    #[error("SAML Assertion expired at: {}", time)]
+    AssertionExpired { time: String },
+    #[error("SAML Assertion is missing a bearer SubjectConfirmation")]
+    AssertionBearerSubjectConfirmationMissing,
+    #[error("SAML Assertion is missing SubjectConfirmationData")]
+    AssertionSubjectConfirmationMissing,
+    #[error("SAML Assertion SubjectConfirmation expired at: {}", time)]
+    AssertionSubjectConfirmationExpired { time: String },
+    #[error("SAML Assertion SubjectConfirmation is not valid until: {}", time)]
+    AssertionSubjectConfirmationExpiredBefore { time: String },
+    #[error(
+        "SAML Assertion Issuer does not match IDP entity ID: {:?} != {:?}",
+        issuer,
+        entity_id
+    )]
+    AssertionIssuerMismatch {
+        issuer: Option<String>,
+        entity_id: Option<String>,
+    },
+    #[error("SAML Assertion Condition expired at: {}", time)]
+    AssertionConditionExpired { time: String },
+    #[error("SAML Assertion Condition is not valid until: {}", time)]
+    AssertionConditionExpiredBefore { time: String },
+    #[error(
+        "SAML Assertion Condition has unfulfilled AudienceRequirement: {}",
+        requirement
+    )]
+    AssertionConditionAudienceRestrictionFailed { requirement: String },
+    #[error(
+        "SAML Assertion Recipient does not match SP ACS URL. {:?} != {:?}",
+        assertion_recipient,
+        sp_acs_url
+    )]
+    AssertionRecipientMismatch {
+        assertion_recipient: Option<String>,
+        sp_acs_url: Option<String>,
+    },
+    #[error(
+        "SAML Assertion 'InResponseTo' does not match any of the possible request IDs: {:?}",
+        possible_ids
+    )]
+    AssertionInResponseToInvalid { possible_ids: Vec<String> },
+    #[error(
+        "SAML Response 'InResponseTo' does not match any of the possible request IDs: {:?}",
+        possible_ids
+    )]
+    ResponseInResponseToInvalid { possible_ids: Vec<String> },
+    #[error(
+        "SAML Response Issuer does not match IDP entity ID: {:?} != {:?}",
+        issuer,
+        entity_id
+    )]
+    ResponseIssuerMismatch {
+        issuer: Option<String>,
+        entity_id: Option<String>,
+    },
+    #[error("SAML Response expired at: {}", time)]
+    ResponseExpired { time: String },
+    #[error("SAML Response StatusCode is not successful: {}", code)]
+    ResponseBadStatusCode { code: String },
+    #[error("Encrypted SAML Assertions are not yet supported")]
+    EncryptedAssertionsNotYetSupported,
+    #[error("SAML Response and all assertions must be signed")]
+    FailedToValidateSignature,
+    #[error("Failed to deserialize SAML response.")]
+    DeserializeResponseError,
+    #[error("Failed to parse cert '{}'. Assumed DER format.", cert)]
+    FailedToParseCert { cert: String },
+    #[error("Unexpected Error Occurred!")]
+    UnexpectedError,
+    #[error("Missing private key on service provider")]
+    MissingPrivateKeySP,
+    #[error("Missing encrypted key info")]
+    MissingEncryptedKeyInfo,
+    #[error("Missing encrypted value info")]
+    MissingEncryptedValueInfo,
+    #[error("Unsupported key encryption method for encrypted assertion: {method}")]
+    EncryptedAssertionKeyMethodUnsupported { method: String },
+    #[error("Unsupported value encryption method for encrypted assertion: {method}")]
+    EncryptedAssertionValueMethodUnsupported { method: String },
+    #[error("Encrypted assertion invalid")]
+    EncryptedAssertionInvalid,
+    #[error("Crypto provider error.")]
+    CryptoProviderError(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Failed to decrypt assertion")]
+    FailedToDecryptAssertion,
+    #[error("Tried to use an unsupported key format")]
+    UnsupportedKey,
+
+    #[error("Failed to parse SAMLResponse")]
+    FailedToParseSamlResponse(#[source] quick_xml::DeError),
+
+    #[error("Failed to parse reduced signed SAML assertion")]
+    FailedToParseSamlAssertion(#[source] Box<dyn std::error::Error>),
+
+    #[error("Error parsing the XML in the crypto provider")]
+    CryptoXmlError(#[source] CryptoError),
+
+    #[error("ACS url is missing")]
+    MissingAcsUrl,
+
+    #[error("SLO url is missing")]
+    MissingSloUrl,
+}
+
+impl From<CryptoError> for Error {
+    fn from(value: CryptoError) -> Self {
+        match value {
+            CryptoError::InvalidSignature
+            | CryptoError::Base64Error { .. }
+            | CryptoError::XmlMissingRootElement => Error::CryptoXmlError(value),
+            CryptoError::CryptoProviderError(error) => Error::CryptoProviderError(error),
+            _ => Error::CryptoProviderError(Box::new(value)),
+        }
+    }
+}
+
+#[derive(Builder, Clone)]
+#[builder(default, setter(into))]
+pub struct ServiceProvider {
+    pub entity_id: Option<String>,
+    pub key: Option<<Crypto as CryptoProvider>::PrivateKey>,
+    pub certificate: Option<CertificateDer>,
+    pub intermediates: Option<Vec<CertificateDer>>,
+    pub metadata_url: Option<String>,
+    pub acs_url: Option<String>,
+    pub slo_url: Option<String>,
+    pub idp_metadata: EntityDescriptor,
+    pub authn_name_id_format: Option<String>,
+    pub metadata_valid_duration: Option<Duration>,
+    pub force_authn: bool,
+    pub allow_idp_initiated: bool,
+    pub contact_person: Option<ContactPerson>,
+    pub max_issue_delay: Duration,
+    pub max_clock_skew: Duration,
+}
+
+impl Default for ServiceProvider {
+    fn default() -> Self {
+        ServiceProvider {
+            entity_id: None,
+            key: None,
+            certificate: None,
+            intermediates: None,
+            metadata_url: Some("http://localhost:8080/saml/metadata".to_string()),
+            acs_url: Some("http://localhost:8080/saml/acs".to_string()),
+            slo_url: Some("http://localhost:8080/saml/slo".to_string()),
+            idp_metadata: EntityDescriptor::default(),
+            authn_name_id_format: None,
+            metadata_valid_duration: None,
+            force_authn: false,
+            allow_idp_initiated: false,
+            contact_person: None,
+            max_issue_delay: Duration::seconds(90),
+            max_clock_skew: Duration::seconds(180),
+        }
+    }
+}
+
+impl ServiceProvider {
+    pub fn metadata(&self) -> Result<EntityDescriptor, Box<dyn std::error::Error>> {
+        let valid_duration = if let Some(duration) = self.metadata_valid_duration {
+            Some(duration)
+        } else {
+            Some(Duration::hours(48))
+        };
+
+        let valid_until = valid_duration.map(|d| Utc::now() + d);
+
+        let entity_id = if let Some(entity_id) = self.entity_id.clone() {
+            Some(entity_id)
+        } else {
+            self.metadata_url.clone()
+        };
+
+        let mut key_descriptors = vec![];
+        if let Some(cert) = &self.certificate {
+            let mut cert_bytes: Vec<u8> = cert.der_data().to_vec();
+            if let Some(intermediates) = &self.intermediates {
+                for intermediate in intermediates {
+                    cert_bytes.extend_from_slice(intermediate.der_data());
+                }
+            }
+            key_descriptors.push(KeyDescriptor {
+                encryption_methods: None,
+                key_use: Some("signing".to_string()),
+                key_info: KeyInfo {
+                    id: None,
+                    x509_data: Some(X509Data {
+                        certificates: vec![general_purpose::STANDARD.encode(&cert_bytes)],
+                    }),
+                },
+            });
+            key_descriptors.push(KeyDescriptor {
+                key_use: Some("signing".to_string()),
+                key_info: KeyInfo {
+                    id: None,
+                    x509_data: Some(X509Data {
+                        certificates: vec![general_purpose::STANDARD.encode(&cert_bytes)],
+                    }),
+                },
+                encryption_methods: Some(vec![
+                    EncryptionMethod {
+                        algorithm: "http://www.w3.org/2001/04/xmlenc#aes128-cbc".to_string(),
+                    },
+                    EncryptionMethod {
+                        algorithm: "http://www.w3.org/2001/04/xmlenc#aes192-cbc".to_string(),
+                    },
+                    EncryptionMethod {
+                        algorithm: "http://www.w3.org/2001/04/xmlenc#aes256-cbc".to_string(),
+                    },
+                    EncryptionMethod {
+                        algorithm: "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p".to_string(),
+                    },
+                ]),
+            })
+        }
+
+        let sso_sp_descriptor = SpSsoDescriptor {
+            protocol_support_enumeration: Some("urn:oasis:names:tc:SAML:2.0:protocol".to_string()),
+            key_descriptors: Some(key_descriptors),
+            valid_until,
+            single_logout_services: Some(vec![Endpoint {
+                binding: HTTP_POST_BINDING.to_string(),
+                location: self.slo_url.clone().ok_or(Error::MissingSloUrl)?,
+                response_location: self.slo_url.clone(),
+            }]),
+            authn_requests_signed: Some(false),
+            want_assertions_signed: Some(true),
+            assertion_consumer_services: vec![IndexedEndpoint {
+                binding: HTTP_POST_BINDING.to_string(),
+                location: self.acs_url.clone().ok_or(Error::MissingAcsUrl)?,
+                ..IndexedEndpoint::default()
+            }],
+
+            ..SpSsoDescriptor::default()
+        };
+
+        Ok(EntityDescriptor {
+            entity_id,
+            valid_until,
+            sp_sso_descriptors: Some(vec![sso_sp_descriptor]),
+            contact_person: self
+                .contact_person
+                .as_ref()
+                .map(|contact_person| vec![contact_person.clone()]),
+            ..EntityDescriptor::default()
+        })
+    }
+
+    fn name_id_format(&self) -> Option<String> {
+        self.authn_name_id_format.as_ref().map(|v| -> String {
+            if v.is_empty() {
+                NameIdFormat::TransientNameIDFormat.value().to_string()
+            } else {
+                v.to_string()
+            }
+        })
+    }
+
+    pub fn sso_binding_location(&self, binding: &str) -> Option<String> {
+        if let Some(idp_sso_descriptors) = &self.idp_metadata.idp_sso_descriptors {
+            for idp_sso_descriptor in idp_sso_descriptors {
+                for sso_service in &idp_sso_descriptor.single_sign_on_services {
+                    if sso_service.binding == binding {
+                        return Some(sso_service.location.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn slo_binding_location(&self, binding: &str) -> Option<String> {
+        if let Some(idp_sso_descriptors) = &self.idp_metadata.idp_sso_descriptors {
+            for idp_sso_descriptor in idp_sso_descriptors {
+                for single_logout_services in &idp_sso_descriptor.single_logout_services {
+                    if single_logout_services.binding == binding {
+                        return Some(single_logout_services.location.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn idp_signing_certs(&self) -> Result<Option<Vec<CertificateDer>>, Error> {
+        let mut result = vec![];
+        if let Some(idp_sso_descriptors) = &self.idp_metadata.idp_sso_descriptors {
+            for idp_sso_descriptor in idp_sso_descriptors {
+                for key_descriptor in &idp_sso_descriptor.key_descriptors {
+                    if key_descriptor
+                        .key_use
+                        .as_ref()
+                        .filter(|key_use| *key_use == "signing")
+                        .is_some()
+                    {
+                        result.append(&mut parse_certificates(key_descriptor)?);
+                    }
+                }
+            }
+            // No signing keys found, look for keys with no use specified
+            if result.is_empty() {
+                for idp_sso_descriptor in idp_sso_descriptors {
+                    for key_descriptor in &idp_sso_descriptor.key_descriptors {
+                        if key_descriptor.key_use.is_none()
+                            || key_descriptor.key_use == Some("".to_string())
+                        {
+                            result.append(&mut parse_certificates(key_descriptor)?);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        })
+    }
+
+    pub fn parse_base64_response(
+        &self,
+        encoded_resp: &str,
+        possible_request_ids: Option<&[&str]>,
+    ) -> Result<Assertion, Box<dyn std::error::Error>> {
+        let bytes = general_purpose::STANDARD.decode(encoded_resp)?;
+        let decoded = std::str::from_utf8(&bytes)?;
+        let assertion = self.parse_xml_response(decoded, possible_request_ids)?;
+        Ok(assertion)
+    }
+
+    pub fn parse_xml_response(
+        &self,
+        response_xml: &str,
+        possible_request_ids: Option<&[&str]>,
+    ) -> Result<Assertion, Error> {
+        self.parse_xml_response_with_mode(
+            response_xml,
+            possible_request_ids,
+            ReduceMode::ValidateAndMarkNoAncestors,
+        )
+    }
+
+    pub fn parse_xml_response_with_mode(
+        &self,
+        response_xml: &str,
+        possible_request_ids: Option<&[&str]>,
+        reduce_mode: ReduceMode,
+    ) -> Result<Assertion, Error> {
+        let (reduced_xml, reduced_from_verified_signature) =
+            if let Some(sign_certs) = self.idp_signing_certs()? {
+                (
+                    Crypto::reduce_xml_to_signed(response_xml, &sign_certs, reduce_mode)
+                        .map_err(|_e| Error::FailedToValidateSignature)?,
+                    true,
+                )
+            } else {
+                (String::from(response_xml), false)
+            };
+
+        match root_element_local_name(&reduced_xml).as_deref() {
+            Some("Response") => {
+                let response: Response = reduced_xml
+                    .parse()
+                    .map_err(Error::FailedToParseSamlResponse)?;
+                return self.validate_parsed_response(response, possible_request_ids);
+            }
+            Some("Assertion") if reduced_from_verified_signature => {
+                let assertion: Assertion = reduced_xml
+                    .parse()
+                    .map_err(Error::FailedToParseSamlAssertion)?;
+                self.validate_assertion(&assertion, possible_request_ids)?;
+                return Ok(assertion);
+            }
+            Some(root_name) => {
+                return Err(Error::FailedToParseSamlResponse(DeError::Custom(format!(
+                    "unexpected SAML root element `{root_name}`"
+                ))));
+            }
+            None => {}
+        }
+
+        let response_parse_error = reduced_xml
+            .parse::<Response>()
+            .expect_err("non-empty XML without a root element must fail to parse as Response");
+        Err(Error::FailedToParseSamlResponse(response_parse_error))
+    }
+
+    fn validate_parsed_response(
+        &self,
+        response: Response,
+        possible_request_ids: Option<&[&str]>,
+    ) -> Result<Assertion, Error> {
+        self.validate_destination(&response)?;
+        let mut request_id_valid = false;
+        if self.allow_idp_initiated {
+            request_id_valid = true;
+        } else if let (Some(in_response_to), Some(possible_request_ids)) =
+            (&response.in_response_to, possible_request_ids)
+        {
+            for req_id in possible_request_ids {
+                if req_id == in_response_to {
+                    request_id_valid = true;
+                }
+            }
+        }
+        if !request_id_valid {
+            return Err(Error::ResponseInResponseToInvalid {
+                possible_ids: possible_request_ids
+                    .into_iter()
+                    .flatten()
+                    .map(|e| e.to_string())
+                    .collect(),
+            });
+        }
+        if response.issue_instant + self.max_issue_delay < Utc::now() {
+            return Err(Error::ResponseExpired {
+                time: (response.issue_instant + self.max_issue_delay)
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            });
+        }
+        if let Some(issuer) = &response.issuer {
+            if issuer.value != self.idp_metadata.entity_id {
+                return Err(Error::ResponseIssuerMismatch {
+                    issuer: issuer.value.clone(),
+                    entity_id: self.idp_metadata.entity_id.clone(),
+                });
+            }
+        }
+        if let Some(status) = &response.status {
+            if let Some(status) = &status.status_code.value {
+                if status != "urn:oasis:names:tc:SAML:2.0:status:Success" {
+                    return Err(Error::ResponseBadStatusCode {
+                        code: status.clone(),
+                    });
+                }
+            }
+        }
+
+        if let Some(_encrypted_assertion) = &response.encrypted_assertion {
+            #[cfg(feature = "xmlsec")]
+            return self
+                .decrypt_assertion(_encrypted_assertion)
+                .and_then(|assertion| {
+                    self.validate_assertion(&assertion, possible_request_ids)
+                        .map(|()| assertion)
+                });
+
+            #[cfg(not(feature = "xmlsec"))]
+            Err(Error::EncryptedAssertionsNotYetSupported)
+        } else if let Some(assertion) = &response.assertion {
+            self.validate_assertion(assertion, possible_request_ids)?;
+            Ok(assertion.clone())
+        } else {
+            Err(Error::UnexpectedError)
+        }
+    }
+
+    #[cfg(feature = "xmlsec")]
+    fn decrypt_assertion(
+        &self,
+        encrypted_assertion: &EncryptedAssertion,
+    ) -> Result<Assertion, Error> {
+        let key = self.key.as_ref().ok_or(Error::MissingPrivateKeySP)?;
+
+        encrypted_assertion.decrypt(key)
+    }
+
+    fn validate_assertion(
+        &self,
+        assertion: &Assertion,
+        possible_request_ids: Option<&[&str]>,
+    ) -> Result<(), Error> {
+        if assertion.issue_instant + self.max_issue_delay < Utc::now() {
+            return Err(Error::AssertionExpired {
+                time: (assertion.issue_instant + self.max_issue_delay)
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            });
+        }
+        if assertion.issuer.value != self.idp_metadata.entity_id {
+            return Err(Error::AssertionIssuerMismatch {
+                issuer: assertion.issuer.value.clone(),
+                entity_id: self.idp_metadata.entity_id.clone(),
+            });
+        }
+        if let Some(conditions) = &assertion.conditions {
+            if let Some(not_before) = conditions.not_before {
+                if Utc::now() < not_before - self.max_clock_skew {
+                    return Err(Error::AssertionConditionExpiredBefore {
+                        time: (not_before - self.max_clock_skew)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    });
+                }
+            }
+            if let Some(not_on_or_after) = conditions.not_on_or_after {
+                if not_on_or_after + self.max_clock_skew < Utc::now() {
+                    return Err(Error::AssertionConditionExpired {
+                        time: (not_on_or_after + self.max_clock_skew)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    });
+                }
+            }
+            if let Some(audience_restrictions) = &conditions.audience_restrictions {
+                let mut valid = false;
+                if let Some(audience) = self.entity_id.clone().or_else(|| self.metadata_url.clone())
+                {
+                    for restriction in audience_restrictions {
+                        if restriction.audience.iter().any(|a| a == &audience) {
+                            valid = true;
+                        }
+                    }
+                    if !valid {
+                        return Err(Error::AssertionConditionAudienceRestrictionFailed {
+                            requirement: audience,
+                        });
+                    }
+                }
+            }
+        }
+
+        self.validate_assertion_subject_confirmation(assertion, possible_request_ids)?;
+
+        Ok(())
+    }
+
+    fn validate_assertion_subject_confirmation(
+        &self,
+        assertion: &Assertion,
+        possible_request_ids: Option<&[&str]>,
+    ) -> Result<(), Error> {
+        let confirmations = assertion
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.subject_confirmations.as_ref())
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let bearer_confirmations = confirmations
+            .iter()
+            .filter(|confirmation| {
+                confirmation.method.as_deref() == Some(SUBJECT_CONFIRMATION_METHOD_BEARER)
+            })
+            .collect::<Vec<_>>();
+
+        if bearer_confirmations.is_empty() {
+            return Err(Error::AssertionBearerSubjectConfirmationMissing);
+        }
+
+        let mut first_error = None;
+        for confirmation in bearer_confirmations {
+            let Some(data) = confirmation.subject_confirmation_data.as_ref() else {
+                first_error.get_or_insert(Error::AssertionSubjectConfirmationMissing);
+                continue;
+            };
+
+            if let Some(not_before) = data.not_before {
+                if Utc::now() < not_before - self.max_clock_skew {
+                    first_error.get_or_insert(Error::AssertionSubjectConfirmationExpiredBefore {
+                        time: (not_before - self.max_clock_skew)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    });
+                    continue;
+                }
+            }
+
+            if let Some(not_on_or_after) = data.not_on_or_after {
+                if not_on_or_after + self.max_clock_skew < Utc::now() {
+                    first_error.get_or_insert(Error::AssertionSubjectConfirmationExpired {
+                        time: (not_on_or_after + self.max_clock_skew)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    });
+                    continue;
+                }
+            } else {
+                first_error.get_or_insert(Error::AssertionSubjectConfirmationMissing);
+                continue;
+            }
+
+            if data.recipient.as_deref() != self.acs_url.as_deref() {
+                first_error.get_or_insert(Error::AssertionRecipientMismatch {
+                    assertion_recipient: data.recipient.clone(),
+                    sp_acs_url: self.acs_url.clone(),
+                });
+                continue;
+            }
+
+            if self.allow_idp_initiated {
+                return Ok(());
+            }
+
+            if let Some(possible_request_ids) = possible_request_ids {
+                let request_id_valid = data
+                    .in_response_to
+                    .as_deref()
+                    .is_some_and(|id| possible_request_ids.iter().any(|possible| possible == &id));
+                if request_id_valid {
+                    return Ok(());
+                }
+
+                first_error.get_or_insert(Error::AssertionInResponseToInvalid {
+                    possible_ids: possible_request_ids
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect(),
+                });
+                continue;
+            }
+
+            first_error.get_or_insert(Error::AssertionInResponseToInvalid {
+                possible_ids: Vec::new(),
+            });
+        }
+
+        Err(first_error.unwrap_or(Error::AssertionSubjectConfirmationMissing))
+    }
+
+    fn validate_destination(&self, response: &Response) -> Result<(), Error> {
+        if (response.signature.is_some() || response.destination.is_some())
+            && response.destination.as_deref() != self.acs_url.as_deref()
+        {
+            return Err(Error::DestinationValidationError {
+                response_destination: response.destination.clone(),
+                sp_acs_url: self.acs_url.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn make_authentication_request(
+        &self,
+        idp_url: &str,
+    ) -> Result<AuthnRequest, Box<dyn std::error::Error>> {
+        let entity_id = if let Some(entity_id) = self.entity_id.clone() {
+            Some(entity_id)
+        } else {
+            self.metadata_url.clone()
+        };
+
+        Ok(AuthnRequest {
+            assertion_consumer_service_url: self.acs_url.clone(),
+            destination: Some(idp_url.to_string()),
+            protocol_binding: Some(HTTP_POST_BINDING.to_string()),
+            id: format!("id-{}", rand::random::<u32>()),
+            issue_instant: Utc::now(),
+            version: "2.0".to_string(),
+            issuer: Some(Issuer {
+                format: Some("urn:oasis:names:tc:SAML:2.0:nameid-format:entity".to_string()),
+                value: entity_id,
+                ..Issuer::default()
+            }),
+            name_id_policy: self.name_id_format().map(|format| NameIdPolicy {
+                allow_create: Some(true),
+                format: Some(format),
+                ..NameIdPolicy::default()
+            }),
+            force_authn: Some(self.force_authn),
+            ..AuthnRequest::default()
+        })
+    }
+}
+
+fn root_element_local_name(xml: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+
+    loop {
+        match reader.read_event() {
+            Ok(XmlEvent::Start(start)) | Ok(XmlEvent::Empty(start)) => {
+                return Some(String::from_utf8_lossy(start.local_name().as_ref()).into_owned());
+            }
+            Ok(XmlEvent::Eof) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+fn parse_certificates(key_descriptor: &KeyDescriptor) -> Result<Vec<CertificateDer>, Error> {
+    key_descriptor
+        .key_info
+        .x509_data
+        .as_ref()
+        .map(|data| {
+            data.certificates
+                .iter()
+                .map(|cert| {
+                    crypto::decode_x509_cert(cert)
+                        .ok()
+                        .ok_or_else(|| Error::FailedToParseCert {
+                            cert: cert.to_string(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap_or(Ok(vec![]))
+}
+
+impl AuthnRequest {
+    pub fn post(&self, relay_state: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let encoded = general_purpose::STANDARD.encode(self.to_string()?.as_bytes());
+        if let Some(dest) = &self.destination {
+            Ok(Some(format!(
+                r#"
+            <form method="post" action="{}" id="SAMLRequestForm">
+                <input type="hidden" name="SAMLRequest" value="{}" />
+                <input type="hidden" name="RelayState" value="{}" />
+                <input id="SAMLSubmitButton" type="submit" value="Submit" />
+            </form>
+            <script>
+                document.getElementById('SAMLSubmitButton').style.visibility="hidden";
+                document.getElementById('SAMLRequestForm').submit();
+            </script>
+        "#,
+                dest, encoded, relay_state
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn redirect(&self, relay_state: &str) -> Result<Option<Url>, Box<dyn std::error::Error>> {
+        let mut compressed_buf = vec![];
+        {
+            let mut encoder = DeflateEncoder::new(&mut compressed_buf, Compression::default());
+            encoder.write_all(self.to_string()?.as_bytes())?;
+        }
+        let encoded = general_purpose::STANDARD.encode(&compressed_buf);
+
+        if let Some(destination) = self.destination.as_ref() {
+            let mut url: Url = destination.parse()?;
+            url.query_pairs_mut().append_pair("SAMLRequest", &encoded);
+            if !relay_state.is_empty() {
+                url.query_pairs_mut().append_pair("RelayState", relay_state);
+            }
+            Ok(Some(url))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // todo: how does this fit to the seperate crypto?
+    #[cfg(feature = "xmlsec")]
+    pub fn signed_redirect(
+        &self,
+        relay_state: &str,
+        private_key: &<Crypto as CryptoProvider>::PrivateKey,
+    ) -> Result<Option<Url>, Box<dyn std::error::Error>> {
+        let unsigned_url = self.redirect(relay_state)?;
+        match unsigned_url {
+            None => Ok(None),
+            Some(url) => {
+                let signed_url = sign_url(url, private_key)?;
+                Ok(Some(signed_url))
+            }
+        }
+    }
+
+    #[cfg(not(feature = "xmlsec"))]
+    pub fn signed_redirect(
+        &self,
+        _relay_state: &str,
+        _private_key: &<Crypto as CryptoProvider>::PrivateKey,
+    ) -> Result<Option<Url>, Box<dyn std::error::Error>> {
+        Err(Box::new(CryptoError::CryptoDisabled))
+    }
+}

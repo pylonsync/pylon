@@ -42,7 +42,11 @@ COPY crates/studio_api/web ./
 RUN bun run build
 
 # ---- Rust build stage -------------------------------------------------------
-FROM rust:${RUST_VERSION}-slim-bookworm AS rust-builder
+# Trixie (not bookworm) because samael 0.0.20 expects libxmlsec1 1.3.x's
+# `size_t`-typed `xmlSecSize`. Bookworm ships libxmlsec1 1.2.37 where
+# the type is `unsigned int` — bindgen emits `u32` and samael fails to
+# compile with `expected usize, found u32`. Trixie ships 1.3.x.
+FROM rust:${RUST_VERSION}-slim-trixie AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev ca-certificates \
@@ -78,7 +82,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /build/target/release/pylon /usr/local/bin/pylon
 
 # ---- Runtime image ----------------------------------------------------------
-FROM debian:bookworm-slim
+# Match the build stage on trixie so the linked libxmlsec1 ABI lines
+# up with what the binary was compiled against. Mixing bookworm runtime
+# with trixie-built binary would fail at dlopen time.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \

@@ -86,5 +86,15 @@ flate2 = "1"
 # when SAML is actually in use.
 samael = { version = "0.0.20", default-features = false, features = ["xmlsec"] }
 
+# samael 0.0.20's xmldsig.rs:87 passes `xmlSecBufferGetSize`'s return
+# value to `predigest_xml_from_raw_buffer(_: usize)` without a cast.
+# That works on libxmlsec1 1.3.x (where xmlSecSize is `size_t`/`usize`)
+# but breaks on 1.2.x (where it's `unsigned int`/`u32`) — which is what
+# Debian bookworm + Ubuntu noble + the Cargo publish dry-run all use.
+# Vendored copy has the one-line `as usize` cast so we can build against
+# either system version. Drop the patch when samael ships a fix upstream.
+[patch.crates-io]
+samael = { path = "vendor/samael" }
+
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"
