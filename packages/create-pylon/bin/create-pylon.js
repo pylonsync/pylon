@@ -283,6 +283,14 @@ const addTodo = action("addTodo", {
 \tinput: [{ name: "title", type: "string" }],
 });
 
+const toggleTodo = action("toggleTodo", {
+\tinput: [{ name: "id", type: "id(Todo)" }, { name: "done", type: "bool" }],
+});
+
+const deleteTodo = action("deleteTodo", {
+\tinput: [{ name: "id", type: "id(Todo)" }],
+});
+
 // ---------------------------------------------------------------------------
 // Policies — wide-open by default. Tighten for production.
 // ---------------------------------------------------------------------------
@@ -308,7 +316,7 @@ const manifest = buildManifest({
 \tversion: "0.0.1",
 \tentities: [Todo],
 \tqueries: [listTodos],
-\tactions: [addTodo],
+\tactions: [addTodo, toggleTodo, deleteTodo],
 \tpolicies: [todoPolicy],
 \troutes: [],
 });
@@ -331,6 +339,43 @@ export default query({
 \targs: {},
 \tasync handler(ctx) {
 \t\treturn await ctx.db.query("Todo", { $order: { createdAt: "desc" } });
+\t},
+});
+`,
+);
+
+write(
+	"apps/api/functions/toggleTodo.ts",
+	`import { mutation, v } from "@pylonsync/functions";
+
+/**
+ * Flip the \`done\` flag on a Todo. Mutation, not action — needs
+ * \`ctx.db.update\` which is only on writable ctx variants.
+ */
+export default mutation({
+\targs: { id: v.id("Todo"), done: v.bool() },
+\tasync handler(ctx, args: { id: string; done: boolean }) {
+\t\tawait ctx.db.update("Todo", args.id, { done: args.done });
+\t\treturn await ctx.db.get("Todo", args.id);
+\t},
+});
+`,
+);
+
+write(
+	"apps/api/functions/deleteTodo.ts",
+	`import { mutation, v } from "@pylonsync/functions";
+
+/**
+ * Remove a Todo row. Returns the row as it existed pre-delete so
+ * the client can show a "todo removed" toast or animate it out.
+ */
+export default mutation({
+\targs: { id: v.id("Todo") },
+\tasync handler(ctx, args: { id: string }) {
+\t\tconst snapshot = await ctx.db.get("Todo", args.id);
+\t\tawait ctx.db.delete("Todo", args.id);
+\t\treturn snapshot;
 \t},
 });
 `,
@@ -784,9 +829,11 @@ type Todo = {
 
 /**
  * Optimistic todo list — local state mirrors the server-fetched
- * initial list and prepends new rows on successful add. Wire
- * \`@pylonsync/react\`'s \`useQuery\` hook for full realtime updates
- * that re-render on every change-event push.
+ * initial list. Add prepends, toggle flips \`done\` in place, delete
+ * removes. Wire \`@pylonsync/react\`'s \`useQuery\` hook for full
+ * realtime updates that re-render on every change-event push (this
+ * scaffold uses plain fetch + local state to keep the demo dependency-
+ * free).
  */
 export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \tconst [todos, setTodos] = useState(initialTodos);
@@ -805,8 +852,41 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t});
 \t\t\tif (res.ok) {
 \t\t\t\tconst todo = (await res.json()) as Todo;
-\t\t\t\tsetTodos([todo, ...todos]);
+\t\t\t\tsetTodos((prev) => [todo, ...prev]);
 \t\t\t}
+\t\t});
+\t}
+
+\tasync function toggle(t: Todo) {
+\t\t// Optimistic flip — revert on server failure.
+\t\tconst next = !t.done;
+\t\tsetTodos((prev) =>
+\t\t\tprev.map((row) => (row.id === t.id ? { ...row, done: next } : row)),
+\t\t);
+\t\tstartTransition(async () => {
+\t\t\tconst res = await fetch("/api/fn/toggleTodo", {
+\t\t\t\tmethod: "POST",
+\t\t\t\theaders: { "Content-Type": "application/json" },
+\t\t\t\tbody: JSON.stringify({ id: t.id, done: next }),
+\t\t\t});
+\t\t\tif (!res.ok) {
+\t\t\t\tsetTodos((prev) =>
+\t\t\t\t\tprev.map((row) => (row.id === t.id ? { ...row, done: t.done } : row)),
+\t\t\t\t);
+\t\t\t}
+\t\t});
+\t}
+
+\tasync function remove(t: Todo) {
+\t\tconst snapshot = todos;
+\t\tsetTodos((prev) => prev.filter((row) => row.id !== t.id));
+\t\tstartTransition(async () => {
+\t\t\tconst res = await fetch("/api/fn/deleteTodo", {
+\t\t\t\tmethod: "POST",
+\t\t\t\theaders: { "Content-Type": "application/json" },
+\t\t\t\tbody: JSON.stringify({ id: t.id }),
+\t\t\t});
+\t\t\tif (!res.ok) setTodos(snapshot);
 \t\t});
 \t}
 
@@ -844,11 +924,30 @@ export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
 \t\t\t\t\t{todos.map((t) => (
 \t\t\t\t\t\t<li
 \t\t\t\t\t\t\tkey={t.id}
-\t\t\t\t\t\t\tclassName="flex items-center gap-3 px-4 py-3 text-sm"
+\t\t\t\t\t\t\tclassName="flex items-center gap-3 px-4 py-3 text-sm group"
 \t\t\t\t\t\t>
-\t\t\t\t\t\t\t<span className={t.done ? "line-through text-neutral-400" : ""}>
+\t\t\t\t\t\t\t<input
+\t\t\t\t\t\t\t\ttype="checkbox"
+\t\t\t\t\t\t\t\tchecked={t.done}
+\t\t\t\t\t\t\t\tonChange={() => toggle(t)}
+\t\t\t\t\t\t\t\tdisabled={pending}
+\t\t\t\t\t\t\t\tclassName="size-4 cursor-pointer"
+\t\t\t\t\t\t\t\taria-label={\\\`Mark "\${t.title}" as \${t.done ? "not done" : "done"}\\\`}
+\t\t\t\t\t\t\t/>
+\t\t\t\t\t\t\t<span
+\t\t\t\t\t\t\t\tclassName={\\\`flex-1 \${t.done ? "line-through text-neutral-400" : ""}\\\`}
+\t\t\t\t\t\t\t>
 \t\t\t\t\t\t\t\t{t.title}
 \t\t\t\t\t\t\t</span>
+\t\t\t\t\t\t\t<button
+\t\t\t\t\t\t\t\ttype="button"
+\t\t\t\t\t\t\t\tonClick={() => remove(t)}
+\t\t\t\t\t\t\t\tdisabled={pending}
+\t\t\t\t\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-red-500"
+\t\t\t\t\t\t\t\taria-label={\\\`Delete "\${t.title}"\\\`}
+\t\t\t\t\t\t\t>
+\t\t\t\t\t\t\t\tDelete
+\t\t\t\t\t\t\t</button>
 \t\t\t\t\t\t</li>
 \t\t\t\t\t))}
 \t\t\t\t</ul>
