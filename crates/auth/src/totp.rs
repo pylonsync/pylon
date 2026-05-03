@@ -77,8 +77,9 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
     if !blob.starts_with("enc:") {
         return Ok(blob.to_string());
     }
-    let key = std::env::var("PYLON_TOTP_ENCRYPTION_KEY")
-        .map_err(|_| "PYLON_TOTP_ENCRYPTION_KEY not set but stored secret is encrypted".to_string())?;
+    let key = std::env::var("PYLON_TOTP_ENCRYPTION_KEY").map_err(|_| {
+        "PYLON_TOTP_ENCRYPTION_KEY not set but stored secret is encrypted".to_string()
+    })?;
     let parts: Vec<&str> = blob.splitn(3, ':').collect();
     if parts.len() != 3 {
         return Err("totp seed: malformed enc blob".into());
@@ -106,8 +107,7 @@ fn derive_keystream(key: &[u8], nonce: &[u8], len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
     let mut counter: u32 = 0;
     while out.len() < len {
-        let mut mac =
-            HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
         mac.update(nonce);
         mac.update(&counter.to_be_bytes());
         let block = mac.finalize().into_bytes();
@@ -321,8 +321,8 @@ mod tests {
     fn hotp_matches_rfc4226_vectors() {
         let secret = b"12345678901234567890";
         let expected = [
-            "755224", "287082", "359152", "969429", "338314",
-            "254676", "287922", "162583", "399871", "520489",
+            "755224", "287082", "359152", "969429", "338314", "254676", "287922", "162583",
+            "399871", "520489",
         ];
         for (i, want) in expected.iter().enumerate() {
             assert_eq!(hotp(secret, i as u64, 6), *want, "counter {i}");
@@ -335,7 +335,11 @@ mod tests {
     fn totp_matches_rfc6238_vectors() {
         let secret = b"12345678901234567890";
         // (epoch_secs, expected_8_digit_code)
-        for (t, want) in [(59u64, "94287082"), (1111111109, "07081804"), (1234567890, "89005924")] {
+        for (t, want) in [
+            (59u64, "94287082"),
+            (1111111109, "07081804"),
+            (1234567890, "89005924"),
+        ] {
             assert_eq!(hotp(secret, t / 30, 8), want);
         }
     }
@@ -350,7 +354,9 @@ mod tests {
         ] {
             let enc = base32_encode(raw);
             // RFC 4648 base32 alphabet only.
-            assert!(enc.chars().all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
+            assert!(enc
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
             let dec = base32_decode(&enc).expect("decode");
             assert_eq!(dec, raw);
         }
@@ -401,7 +407,10 @@ mod tests {
     #[test]
     fn seal_unseal_round_trip_with_key() {
         let _g = ENV_LOCK.lock().unwrap();
-        std::env::set_var("PYLON_TOTP_ENCRYPTION_KEY", "test-encryption-key-do-not-reuse");
+        std::env::set_var(
+            "PYLON_TOTP_ENCRYPTION_KEY",
+            "test-encryption-key-do-not-reuse",
+        );
         let secret = "JBSWY3DPEHPK3PXP";
         let sealed = seal_secret(secret);
         assert!(sealed.starts_with("enc:"));
@@ -417,7 +426,10 @@ mod tests {
         // Migration path: existing plain base32 secrets stored before
         // the seal-at-rest change must still unseal to themselves.
         std::env::set_var("PYLON_TOTP_ENCRYPTION_KEY", "k");
-        assert_eq!(unseal_secret("JBSWY3DPEHPK3PXP").unwrap(), "JBSWY3DPEHPK3PXP");
+        assert_eq!(
+            unseal_secret("JBSWY3DPEHPK3PXP").unwrap(),
+            "JBSWY3DPEHPK3PXP"
+        );
         std::env::remove_var("PYLON_TOTP_ENCRYPTION_KEY");
     }
 

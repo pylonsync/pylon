@@ -62,11 +62,7 @@ impl DiscoveryDoc {
             response_types_supported: vec!["code".into()],
             subject_types_supported: vec!["public".into()],
             id_token_signing_alg_values_supported: vec!["RS256".into()],
-            scopes_supported: vec![
-                "openid".into(),
-                "email".into(),
-                "profile".into(),
-            ],
+            scopes_supported: vec!["openid".into(), "email".into(), "profile".into()],
             token_endpoint_auth_methods_supported: vec![
                 "client_secret_post".into(),
                 "client_secret_basic".into(),
@@ -178,10 +174,15 @@ mod tests {
     fn discovery_doc_uses_issuer_for_endpoints() {
         let doc = DiscoveryDoc::for_issuer("https://auth.example.com");
         assert_eq!(doc.issuer, "https://auth.example.com");
-        assert_eq!(doc.authorization_endpoint, "https://auth.example.com/oidc/authorize");
+        assert_eq!(
+            doc.authorization_endpoint,
+            "https://auth.example.com/oidc/authorize"
+        );
         assert_eq!(doc.token_endpoint, "https://auth.example.com/oidc/token");
         assert_eq!(doc.jwks_uri, "https://auth.example.com/oidc/jwks");
-        assert!(doc.id_token_signing_alg_values_supported.contains(&"RS256".to_string()));
+        assert!(doc
+            .id_token_signing_alg_values_supported
+            .contains(&"RS256".to_string()));
     }
 
     #[test]

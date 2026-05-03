@@ -55,7 +55,9 @@ pub enum RateLimitDecision {
     Allow,
     /// Caller exceeded the cap. `retry_after_secs` is a hint for the
     /// 429 `Retry-After` header.
-    Deny { retry_after_secs: u64 },
+    Deny {
+        retry_after_secs: u64,
+    },
 }
 
 /// Token-bucket counter — for each `(bucket, key)` we track the
@@ -196,7 +198,10 @@ mod tests {
         // Rotate IPs to exhaust per-account before per-IP.
         for i in 0..acct_cap {
             let ip = format!("10.0.0.{i}");
-            assert_eq!(rl.check(bucket, &ip, Some("victim@x.com")), RateLimitDecision::Allow);
+            assert_eq!(
+                rl.check(bucket, &ip, Some("victim@x.com")),
+                RateLimitDecision::Allow
+            );
         }
         let result = rl.check(bucket, "10.0.0.99", Some("victim@x.com"));
         assert!(matches!(result, RateLimitDecision::Deny { .. }));

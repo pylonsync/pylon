@@ -127,7 +127,6 @@ fn pg_advisory_key(s: &str) -> i32 {
 }
 
 impl PgLoroStore {
-
     /// Read-only hydrate — no FOR UPDATE lock. Used by `snapshot()`
     /// and `update_since()` which don't mutate. Hits the in-memory
     /// cache on a hit so repeated reads of the same row don't pay
@@ -299,12 +298,7 @@ impl PgLoroStore {
     /// rolled-back tx leaves no cache poison.
     ///
     /// On any read error we evict instead of caching stale state.
-    pub fn cache_after_commit<C: PgConn>(
-        &self,
-        conn: &mut C,
-        entity: &str,
-        row_id: &str,
-    ) {
+    pub fn cache_after_commit<C: PgConn>(&self, conn: &mut C, entity: &str, row_id: &str) {
         let snap_result = conn.query_opt(
             "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
             &[&entity, &row_id],
@@ -486,15 +480,14 @@ fn crdt_fields_for(
         if f.name == "id" {
             continue;
         }
-        let kind = pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| {
-            pylon_http::DataError {
+        let kind =
+            pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| pylon_http::DataError {
                 code: "INVALID_CRDT_FIELD".into(),
                 message: format!(
                     "{}.{}: {e} (declared type={}, crdt={:?})",
                     ent.name, f.name, f.field_type, f.crdt
                 ),
-            }
-        })?;
+            })?;
         out.push(pylon_crdt::CrdtField {
             name: f.name.clone(),
             kind,

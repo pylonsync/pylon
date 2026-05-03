@@ -11,13 +11,12 @@ pub mod job_store;
 pub mod jobs;
 pub mod log;
 pub mod loro_store;
-pub mod pg_loro_store;
 pub mod magic_code_backend;
 pub mod metrics;
 pub mod oauth_backend;
-pub mod org_backend;
-pub mod verification_backend;
 pub mod openapi;
+pub mod org_backend;
+pub mod pg_loro_store;
 pub mod presence;
 pub mod pubsub;
 pub mod rate_limit;
@@ -30,6 +29,7 @@ pub mod session_backend;
 pub mod shard_ws;
 pub mod sse;
 pub mod tls;
+pub mod verification_backend;
 pub mod workflow_store;
 pub mod workflows;
 pub mod ws;
@@ -284,12 +284,12 @@ impl Runtime {
         // path's `ensure_sidecar` call. Without this, the first
         // CRDT-mode write would error because `_pylon_crdt_snapshots`
         // doesn't exist yet on a fresh PG database.
-        store.with_client(|c| crate::pg_loro_store::ensure_sidecar(c)).map_err(|e| {
-            RuntimeError {
+        store
+            .with_client(|c| crate::pg_loro_store::ensure_sidecar(c))
+            .map_err(|e| RuntimeError {
                 code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
                 message: format!("ensure pg crdt sidecar: {e}"),
-            }
-        })?;
+            })?;
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
             .iter()
@@ -722,19 +722,21 @@ impl Runtime {
                 if let Some(obj) = row.as_object_mut() {
                     obj.insert("id".into(), serde_json::Value::String(id.clone()));
                 }
-                let result = pg.store.with_transaction_raw(|tx| -> Result<(), RuntimeError> {
-                    pg.crdt
-                        .apply_patch(tx, entity, &id, &crdt_fields, data)
-                        .map_err(|e| RuntimeError {
-                            code: "CRDT_APPLY_FAILED".into(),
-                            message: format!("crdt write {entity}/{id}: {e}"),
-                        })?;
-                    pylon_storage::pg_tx_store::tx_insert(tx, &self.manifest, entity, &row)
-                        .map(|_| ())
-                        .map_err(data_err_to_runtime)?;
-                    pg.crdt.cache_after_commit(tx, entity, &id);
-                    Ok(())
-                });
+                let result = pg
+                    .store
+                    .with_transaction_raw(|tx| -> Result<(), RuntimeError> {
+                        pg.crdt
+                            .apply_patch(tx, entity, &id, &crdt_fields, data)
+                            .map_err(|e| RuntimeError {
+                                code: "CRDT_APPLY_FAILED".into(),
+                                message: format!("crdt write {entity}/{id}: {e}"),
+                            })?;
+                        pylon_storage::pg_tx_store::tx_insert(tx, &self.manifest, entity, &row)
+                            .map(|_| ())
+                            .map_err(data_err_to_runtime)?;
+                        pg.crdt.cache_after_commit(tx, entity, &id);
+                        Ok(())
+                    });
                 if result.is_err() {
                     // Rollback drops the persisted snapshot, but the
                     // in-memory LoroDoc was mutated in-place by
@@ -981,38 +983,40 @@ impl Runtime {
                 // the next read re-hydrates from the (unchanged)
                 // sidecar.
                 let crdt_fields = self.crdt_fields_for(ent)?;
-                let result = pg.store.with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                    pg.crdt
-                        .apply_patch(tx, entity, id, &crdt_fields, data)
-                        .map_err(|e| RuntimeError {
-                            code: "CRDT_APPLY_FAILED".into(),
-                            message: format!("crdt update {entity}/{id}: {e}"),
-                        })?;
-                    let updated = pylon_storage::pg_tx_store::tx_update(
-                        tx,
-                        &self.manifest,
-                        entity,
-                        id,
-                        data,
-                    )
-                    .map_err(data_err_to_runtime)?;
-                    if !updated {
-                        // Roll back via Err so the snapshot doesn't
-                        // commit against a missing row.
-                        return Err(RuntimeError {
-                            code: "ENTITY_NOT_FOUND".into(),
-                            message: format!(
-                                "Update on {entity}/{id} found no row — refusing to commit \
+                let result = pg
+                    .store
+                    .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                        pg.crdt
+                            .apply_patch(tx, entity, id, &crdt_fields, data)
+                            .map_err(|e| RuntimeError {
+                                code: "CRDT_APPLY_FAILED".into(),
+                                message: format!("crdt update {entity}/{id}: {e}"),
+                            })?;
+                        let updated = pylon_storage::pg_tx_store::tx_update(
+                            tx,
+                            &self.manifest,
+                            entity,
+                            id,
+                            data,
+                        )
+                        .map_err(data_err_to_runtime)?;
+                        if !updated {
+                            // Roll back via Err so the snapshot doesn't
+                            // commit against a missing row.
+                            return Err(RuntimeError {
+                                code: "ENTITY_NOT_FOUND".into(),
+                                message: format!(
+                                    "Update on {entity}/{id} found no row — refusing to commit \
                                  a CRDT snapshot that would orphan."
-                            ),
-                        });
-                    }
-                    // Refresh the cache from the just-persisted
-                    // snapshot so post-commit reads on this process
-                    // skip the re-hydration round-trip.
-                    pg.crdt.cache_after_commit(tx, entity, id);
-                    Ok(updated)
-                });
+                                ),
+                            });
+                        }
+                        // Refresh the cache from the just-persisted
+                        // snapshot so post-commit reads on this process
+                        // skip the re-hydration round-trip.
+                        pg.crdt.cache_after_commit(tx, entity, id);
+                        Ok(updated)
+                    });
                 if result.is_err() {
                     pg.crdt.evict(entity, id);
                     // ENTITY_NOT_FOUND from the inner closure is the
@@ -1127,18 +1131,20 @@ impl Runtime {
                 // share one tx. Eviction of the in-memory cache runs
                 // AFTER commit so a rolled-back delete leaves the
                 // cache valid (the snapshot is still on disk).
-                let result = pg.store.with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                    tx.execute(
-                        "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
-                        &[&entity, &id],
-                    )
-                    .map_err(|e| RuntimeError {
-                        code: "CRDT_SIDECAR_DELETE_FAILED".into(),
-                        message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
-                    })?;
-                    pylon_storage::pg_tx_store::tx_delete(tx, &self.manifest, entity, id)
-                        .map_err(data_err_to_runtime)
-                });
+                let result = pg
+                    .store
+                    .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
+                        tx.execute(
+                            "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
+                            &[&entity, &id],
+                        )
+                        .map_err(|e| RuntimeError {
+                            code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                            message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
+                        })?;
+                        pylon_storage::pg_tx_store::tx_delete(tx, &self.manifest, entity, id)
+                            .map_err(data_err_to_runtime)
+                    });
                 // Evict regardless of whether tx_delete found a row —
                 // we issued the sidecar DELETE inside the same tx, so
                 // any cached doc is now stale even if the entity row
@@ -2355,9 +2361,7 @@ impl Runtime {
                 crdt: std::sync::Arc::clone(&pg_backend.crdt),
                 manifest: std::sync::Arc::new(self.manifest.clone()),
             });
-        pg_backend
-            .store
-            .with_transaction_crdt(crdt_hook, body)
+        pg_backend.store.with_transaction_crdt(crdt_hook, body)
     }
 
     pub(crate) fn pg_data_store(&self) -> Option<&pylon_storage::pg_datastore::PostgresDataStore> {

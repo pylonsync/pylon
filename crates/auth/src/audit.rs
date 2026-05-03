@@ -192,9 +192,7 @@ impl AuditEventBuilder {
         self
     }
     pub fn build(self) -> AuditEvent {
-        let action = self
-            .action
-            .unwrap_or(AuditAction::Custom("unknown".into()));
+        let action = self.action.unwrap_or(AuditAction::Custom("unknown".into()));
         AuditEvent {
             id: format!("evt_{}", random_token(20)),
             created_at: now_secs(),
@@ -253,8 +251,7 @@ impl AuditBackend for InMemoryAuditBackend {
         let mut out: Vec<AuditEvent> = g
             .iter()
             .filter(|e| {
-                e.user_id.as_deref() == Some(user_id)
-                    || e.actor_id.as_deref() == Some(user_id)
+                e.user_id.as_deref() == Some(user_id) || e.actor_id.as_deref() == Some(user_id)
             })
             .cloned()
             .collect();
@@ -446,14 +443,19 @@ mod tests {
             .meta("method", "oauth:google")
             .meta("device", "iPhone")
             .build();
-        assert_eq!(e.metadata.get("method").map(|s| s.as_str()), Some("oauth:google"));
+        assert_eq!(
+            e.metadata.get("method").map(|s| s.as_str()),
+            Some("oauth:google")
+        );
         assert_eq!(e.metadata.len(), 2);
     }
 
     #[test]
     fn custom_action_serializes_verbatim() {
-        let e = AuditEventBuilder::new(AuditAction::Custom("pylon.cloud.fly_machine_provision".into()))
-            .build();
+        let e = AuditEventBuilder::new(AuditAction::Custom(
+            "pylon.cloud.fly_machine_provision".into(),
+        ))
+        .build();
         assert_eq!(e.action.as_str(), "pylon.cloud.fly_machine_provision");
     }
 
@@ -462,9 +464,7 @@ mod tests {
         // System events without tenant context must never accidentally
         // surface in a tenant-scoped query.
         let s = AuditStore::new();
-        s.log(
-            AuditEventBuilder::new(AuditAction::Custom("system.tick".into())).build(),
-        );
+        s.log(AuditEventBuilder::new(AuditAction::Custom("system.tick".into())).build());
         assert_eq!(s.find_for_tenant("tenant_a", 100).len(), 0);
     }
 }

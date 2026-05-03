@@ -119,9 +119,7 @@ pub fn tx_update<C: PgConn>(
         "SELECT 1 FROM {} WHERE id = $1 FOR UPDATE",
         quote_ident_pub(entity)
     );
-    let locked = conn
-        .query_opt(&lock_sql, &[&id])
-        .map_err(pg_err_to_data)?;
+    let locked = conn.query_opt(&lock_sql, &[&id]).map_err(pg_err_to_data)?;
     if locked.is_none() {
         return Ok(false);
     }
@@ -154,10 +152,7 @@ pub fn tx_delete<C: PgConn>(
     entity: &str,
     id: &str,
 ) -> Result<bool, DataError> {
-    let sql = format!(
-        "DELETE FROM {} WHERE id = $1",
-        quote_ident_pub(entity)
-    );
+    let sql = format!("DELETE FROM {} WHERE id = $1", quote_ident_pub(entity));
     if let Some(cfg) = search_config_for(manifest, entity) {
         pg_search::apply_delete(conn, entity, id, &cfg).map_err(search_err_to_data)?;
     }
@@ -172,10 +167,7 @@ pub fn tx_get_by_id<C: PgConn>(
     entity: &str,
     id: &str,
 ) -> Result<Option<serde_json::Value>, DataError> {
-    let sql = format!(
-        "SELECT * FROM {} WHERE id = $1",
-        quote_ident_pub(entity)
-    );
+    let sql = format!("SELECT * FROM {} WHERE id = $1", quote_ident_pub(entity));
     let row = conn.query_opt(&sql, &[&id]).map_err(pg_err_to_data)?;
     Ok(row.map(|r| crate::postgres::row_to_json_pub(&r)))
 }
@@ -183,7 +175,10 @@ pub fn tx_get_by_id<C: PgConn>(
 /// Resolve the entity's `search:` config from the manifest. `None`
 /// means the entity isn't searchable — maintenance helpers
 /// short-circuit on `None`.
-pub fn search_config_for(manifest: &AppManifest, entity: &str) -> Option<crate::search::SearchConfig> {
+pub fn search_config_for(
+    manifest: &AppManifest,
+    entity: &str,
+) -> Option<crate::search::SearchConfig> {
     manifest
         .entities
         .iter()
@@ -383,11 +378,7 @@ impl<'a> Drop for PgTxStore<'a> {
         // postgres::Transaction's own Drop runs ROLLBACK. We need to
         // mirror that on the CRDT cache so any apply_patch'd docs
         // get re-hydrated next time.
-        let still_held = self
-            .tx
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
+        let still_held = self.tx.lock().map(|g| g.is_some()).unwrap_or(false);
         if !still_held {
             return;
         }
@@ -402,7 +393,6 @@ impl<'a> Drop for PgTxStore<'a> {
 }
 
 impl<'a> PgTxStore<'a> {
-
     /// Run `body` against the held transaction. Centralizes the
     /// "lock the mutex, check we still hold a tx" preamble.
     fn with_tx<F, T>(&self, body: F) -> Result<T, DataError>
@@ -429,7 +419,11 @@ impl<'a> DataStore for PgTxStore<'a> {
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         let manifest = self.manifest;
         if self.entity_is_crdt(entity) {
-            let hook = self.crdt_hook.as_ref().expect("entity_is_crdt implies hook present").clone();
+            let hook = self
+                .crdt_hook
+                .as_ref()
+                .expect("entity_is_crdt implies hook present")
+                .clone();
             let id = self.with_tx(|tx| -> Result<String, DataError> {
                 let projected_data = hook.before_insert(tx, entity, data)?;
                 let row = projected_data.as_ref().unwrap_or(data);
@@ -447,10 +441,7 @@ impl<'a> DataStore for PgTxStore<'a> {
     }
 
     fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
-        let sql = format!(
-            "SELECT * FROM {} ORDER BY id",
-            quote_ident_pub(entity)
-        );
+        let sql = format!("SELECT * FROM {} ORDER BY id", quote_ident_pub(entity));
         self.with_tx(|tx| {
             let rows = tx.query(sql.as_str(), &[]).map_err(pg_err_to_data)?;
             Ok(rows.iter().map(crate::postgres::row_to_json_pub).collect())
@@ -490,7 +481,11 @@ impl<'a> DataStore for PgTxStore<'a> {
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         let manifest = self.manifest;
         if self.entity_is_crdt(entity) {
-            let hook = self.crdt_hook.as_ref().expect("entity_is_crdt implies hook present").clone();
+            let hook = self
+                .crdt_hook
+                .as_ref()
+                .expect("entity_is_crdt implies hook present")
+                .clone();
             let updated = self.with_tx(|tx| -> Result<bool, DataError> {
                 hook.before_update(tx, entity, id, data)?;
                 let updated = tx_update(tx, manifest, entity, id, data)?;
@@ -518,7 +513,11 @@ impl<'a> DataStore for PgTxStore<'a> {
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
         let manifest = self.manifest;
         if self.entity_is_crdt(entity) {
-            let hook = self.crdt_hook.as_ref().expect("entity_is_crdt implies hook present").clone();
+            let hook = self
+                .crdt_hook
+                .as_ref()
+                .expect("entity_is_crdt implies hook present")
+                .clone();
             let deleted = self.with_tx(|tx| -> Result<bool, DataError> {
                 hook.before_delete(tx, entity, id)?;
                 tx_delete(tx, manifest, entity, id)
@@ -559,7 +558,9 @@ impl<'a> DataStore for PgTxStore<'a> {
             quote_ident_pub(field),
         );
         self.with_tx(|tx| {
-            let row = tx.query_opt(sql.as_str(), &[&value]).map_err(pg_err_to_data)?;
+            let row = tx
+                .query_opt(sql.as_str(), &[&value])
+                .map_err(pg_err_to_data)?;
             Ok(row.map(|r| crate::postgres::row_to_json_pub(&r)))
         })
     }

@@ -116,13 +116,10 @@ pub fn render(template: EmailTemplate, vars: &HashMap<&str, &str>) -> (String, S
     .ok()
     .filter(|s| !s.is_empty())
     .unwrap_or_else(|| template.default_subject().to_string());
-    let body_raw = std::env::var(format!(
-        "PYLON_EMAIL_TEMPLATE_{}_BODY",
-        template.env_key()
-    ))
-    .ok()
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| template.default_body().to_string());
+    let body_raw = std::env::var(format!("PYLON_EMAIL_TEMPLATE_{}_BODY", template.env_key()))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| template.default_body().to_string());
     (
         substitute(&subject_raw, template.allowed_vars(), vars),
         substitute(&body_raw, template.allowed_vars(), vars),

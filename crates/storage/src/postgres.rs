@@ -648,10 +648,9 @@ pub fn build_update_sql(
             // shape, but errors so the caller sees the bug.
             return Err(StorageError {
                 code: "PG_INVALID_UPDATE".into(),
-                message:
-                    "Updating the `id` column is not allowed — Pylon row ids are immutable; \
+                message: "Updating the `id` column is not allowed — Pylon row ids are immutable; \
                      drop the field from the patch."
-                        .into(),
+                    .into(),
             });
         }
         set_clauses.push(format!("{} = ${}", quote_ident(key), i + 2));
@@ -830,9 +829,8 @@ pub mod live {
 
         #[test]
         fn strips_libpq_only_sslmode_verify_full() {
-            let (cleaned, ssl) = parse_pg_url_ssl(
-                "postgres://u:p@h:5432/db?sslmode=verify-full&sslrootcert=system",
-            );
+            let (cleaned, ssl) =
+                parse_pg_url_ssl("postgres://u:p@h:5432/db?sslmode=verify-full&sslrootcert=system");
             assert!(ssl.use_tls);
             // verify-full normalized to require; sslrootcert dropped.
             assert_eq!(cleaned, "postgres://u:p@h:5432/db?sslmode=require");
@@ -854,9 +852,8 @@ pub mod live {
 
         #[test]
         fn unknown_params_pass_through() {
-            let (cleaned, _) = parse_pg_url_ssl(
-                "postgres://h/db?application_name=pylon&connect_timeout=5",
-            );
+            let (cleaned, _) =
+                parse_pg_url_ssl("postgres://h/db?application_name=pylon&connect_timeout=5");
             assert!(cleaned.contains("application_name=pylon"));
             assert!(cleaned.contains("connect_timeout=5"));
         }
@@ -865,9 +862,7 @@ pub mod live {
         fn sslrootcert_alone_enables_tls() {
             // Rare but valid — sslrootcert=system implies TLS even
             // without an explicit sslmode.
-            let (cleaned, ssl) = parse_pg_url_ssl(
-                "postgres://h/db?sslrootcert=system",
-            );
+            let (cleaned, ssl) = parse_pg_url_ssl("postgres://h/db?sslrootcert=system");
             assert!(ssl.use_tls);
             // No sslmode synthesized — the postgres crate defaults
             // to `prefer` which happily upgrades to our TLS connector.

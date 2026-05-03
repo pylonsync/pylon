@@ -222,10 +222,7 @@ impl VerificationStore {
             consumed_at: None,
         };
         self.backend.put(&token);
-        MintedToken {
-            token,
-            plaintext,
-        }
+        MintedToken { token, plaintext }
     }
 
     /// Look up + consume a plaintext token. Returns the matching
@@ -292,8 +289,8 @@ fn hash_token(plaintext: &str) -> String {
     // path narrows by `prefix` then by `token_hash` then by `kind`).
     let pepper = std::env::var("PYLON_API_KEY_PEPPER")
         .unwrap_or_else(|_| "pylon-dev-api-key-pepper-not-for-production".into());
-    let mut mac = HmacSha256::new_from_slice(pepper.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(pepper.as_bytes()).expect("HMAC accepts any key length");
     mac.update(plaintext.as_bytes());
     let out = mac.finalize().into_bytes();
     use std::fmt::Write;
@@ -319,12 +316,7 @@ mod tests {
     #[test]
     fn mint_and_consume_round_trip() {
         let store = VerificationStore::new();
-        let minted = store.mint(
-            TokenKind::PasswordReset,
-            "alice@example.com",
-            None,
-            None,
-        );
+        let minted = store.mint(TokenKind::PasswordReset, "alice@example.com", None, None);
         let consumed = store
             .consume(&minted.plaintext, TokenKind::PasswordReset)
             .expect("consume");
@@ -336,7 +328,9 @@ mod tests {
     fn consume_is_single_use() {
         let store = VerificationStore::new();
         let minted = store.mint(TokenKind::MagicLink, "a@b.com", None, None);
-        store.consume(&minted.plaintext, TokenKind::MagicLink).unwrap();
+        store
+            .consume(&minted.plaintext, TokenKind::MagicLink)
+            .unwrap();
         let err = store
             .consume(&minted.plaintext, TokenKind::MagicLink)
             .unwrap_err();
@@ -360,7 +354,10 @@ mod tests {
     fn unknown_token_returns_not_found() {
         let store = VerificationStore::new();
         let err = store
-            .consume("nonexistent_plaintext_xxxxxxxxxxxxxxxxxxxx", TokenKind::PasswordReset)
+            .consume(
+                "nonexistent_plaintext_xxxxxxxxxxxxxxxxxxxx",
+                TokenKind::PasswordReset,
+            )
             .unwrap_err();
         assert_eq!(err, VerificationError::NotFound);
     }

@@ -149,7 +149,10 @@ impl Default for InMemoryOrgBackend {
 
 impl OrgBackend for InMemoryOrgBackend {
     fn put_org(&self, org: &Org) {
-        self.orgs.lock().unwrap().insert(org.id.clone(), org.clone());
+        self.orgs
+            .lock()
+            .unwrap()
+            .insert(org.id.clone(), org.clone());
     }
     fn get_org(&self, id: &str) -> Option<Org> {
         self.orgs.lock().unwrap().get(id).cloned()
@@ -157,10 +160,7 @@ impl OrgBackend for InMemoryOrgBackend {
     fn delete_org(&self, id: &str) -> bool {
         let removed = self.orgs.lock().unwrap().remove(id).is_some();
         if removed {
-            self.memberships
-                .lock()
-                .unwrap()
-                .retain(|(o, _), _| o != id);
+            self.memberships.lock().unwrap().retain(|(o, _), _| o != id);
             self.invites
                 .lock()
                 .unwrap()
@@ -522,14 +522,12 @@ mod tests {
         store.set_role(&c.id, "u1", OrgRole::Member);
         // u1 owns A and isn't in C yet — set_role only updates an
         // existing membership, so add it via the backend.
-        store
-            .backend
-            .put_membership(&Membership {
-                org_id: c.id.clone(),
-                user_id: "u1".into(),
-                role: OrgRole::Member,
-                joined_at: 1,
-            });
+        store.backend.put_membership(&Membership {
+            org_id: c.id.clone(),
+            user_id: "u1".into(),
+            role: OrgRole::Member,
+            joined_at: 1,
+        });
         let list = store.list_for_user("u1");
         assert_eq!(list.len(), 2);
         let names: Vec<_> = list.iter().map(|(o, _)| o.name.clone()).collect();
@@ -564,12 +562,7 @@ mod tests {
     fn accept_invite_creates_membership() {
         let store = OrgStore::new();
         let org = store.create("Acme", "owner-1");
-        let invited = store.create_invite(
-            &org.id,
-            "newbie@example.com",
-            OrgRole::Admin,
-            "owner-1",
-        );
+        let invited = store.create_invite(&org.id, "newbie@example.com", OrgRole::Admin, "owner-1");
         let m = store
             .accept_invite(&invited.token, "user-2", "newbie@example.com")
             .expect("accept");
@@ -584,8 +577,7 @@ mod tests {
     fn accept_invite_rejects_wrong_email() {
         let store = OrgStore::new();
         let org = store.create("Acme", "owner-1");
-        let invited =
-            store.create_invite(&org.id, "alice@example.com", OrgRole::Member, "owner-1");
+        let invited = store.create_invite(&org.id, "alice@example.com", OrgRole::Member, "owner-1");
         let err = store
             .accept_invite(&invited.token, "user-2", "bob@example.com")
             .unwrap_err();

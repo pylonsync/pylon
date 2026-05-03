@@ -1022,7 +1022,8 @@ fn start_server(
         // pk. check happens BEFORE looks_like_jwt because an api-key
         // token also has 3 dot-separated segments and would otherwise
         // be misrouted.
-        let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token.is_some()
+        let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token
+            .is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
                 auth_token.as_deref().unwrap_or("").as_bytes(),
@@ -2228,14 +2229,22 @@ struct AuthStores {
 // should use process-level isolation, not in-process mutation.
 fn jwt_secret() -> Option<&'static String> {
     static CELL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| std::env::var("PYLON_JWT_SECRET").ok().filter(|s| !s.is_empty()))
-        .as_ref()
+    CELL.get_or_init(|| {
+        std::env::var("PYLON_JWT_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+    })
+    .as_ref()
 }
 
 fn jwt_issuer() -> Option<&'static String> {
     static CELL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| std::env::var("PYLON_JWT_ISSUER").ok().filter(|s| !s.is_empty()))
-        .as_ref()
+    CELL.get_or_init(|| {
+        std::env::var("PYLON_JWT_ISSUER")
+            .ok()
+            .filter(|s| !s.is_empty())
+    })
+    .as_ref()
 }
 
 fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
@@ -2411,14 +2420,14 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::org::OrgStore::new()
         }
     };
-    let verification =
-        match crate::verification_backend::PostgresVerificationBackend::connect(url) {
-            Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
-            Err(e) => {
-                tracing::warn!("[pylon] PG verification backend unavailable: {e}");
-                pylon_auth::verification::VerificationStore::new()
-            }
-        };
+    let verification = match crate::verification_backend::PostgresVerificationBackend::connect(url)
+    {
+        Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
+        Err(e) => {
+            tracing::warn!("[pylon] PG verification backend unavailable: {e}");
+            pylon_auth::verification::VerificationStore::new()
+        }
+    };
     let audit = match crate::audit_backend::PostgresAuditBackend::connect(url) {
         Ok(b) => pylon_auth::audit::AuditStore::with_backend(Box::new(b)),
         Err(e) => {

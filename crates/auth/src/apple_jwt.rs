@@ -87,9 +87,8 @@ fn es256_sign(key_pem_or_path: &str, msg: &[u8]) -> Result<Vec<u8>, String> {
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
     let rng = SystemRandom::new();
-    let key_pair =
-        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &rng)
-            .map_err(|e| format!("apple key parse: {e}"))?;
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &rng)
+        .map_err(|e| format!("apple key parse: {e}"))?;
     let sig = key_pair
         .sign(&rng, msg)
         .map_err(|e| format!("apple key sign: {e}"))?;

@@ -723,7 +723,9 @@ pub mod builtin {
         display_name: "PayPal",
         auth_url: "https://www.paypal.com/connect",
         token_url: "https://api-m.paypal.com/v1/oauth2/token",
-        userinfo_url: Some("https://api-m.paypal.com/v1/identity/openidconnect/userinfo?schema=openid"),
+        userinfo_url: Some(
+            "https://api-m.paypal.com/v1/identity/openidconnect/userinfo?schema=openid",
+        ),
         scopes: "openid email profile",
         scope_separator: " ",
         client_id_param: "client_id",
@@ -781,7 +783,7 @@ pub mod builtin {
     pub static GENERIC_OIDC: ProviderSpec = ProviderSpec {
         id: "oidc",
         display_name: "OpenID Connect",
-        auth_url: "",  // resolved from discovery doc
+        auth_url: "", // resolved from discovery doc
         token_url: "",
         userinfo_url: None,
         scopes: "openid email profile",
@@ -1049,8 +1051,11 @@ mod tests {
         for spec in builtin::all() {
             assert!(!spec.auth_url.is_empty(), "{}: missing auth_url", spec.id);
             assert!(!spec.token_url.is_empty(), "{}: missing token_url", spec.id);
-            assert!(!spec.scopes.is_empty() || spec.id == "notion" || spec.id == "vercel",
-                "{}: empty scopes (only Notion/Vercel are allowed empty)", spec.id);
+            assert!(
+                !spec.scopes.is_empty() || spec.id == "notion" || spec.id == "vercel",
+                "{}: empty scopes (only Notion/Vercel are allowed empty)",
+                spec.id
+            );
         }
     }
 
@@ -1115,7 +1120,10 @@ mod tests {
         }"#;
         let doc = OidcDiscoveryDoc::parse(json).expect("parse");
         assert_eq!(doc.issuer, "https://acme.auth0.com/");
-        assert_eq!(doc.authorization_endpoint, "https://acme.auth0.com/authorize");
+        assert_eq!(
+            doc.authorization_endpoint,
+            "https://acme.auth0.com/authorize"
+        );
         assert_eq!(doc.token_endpoint, "https://acme.auth0.com/oauth/token");
         assert_eq!(
             doc.userinfo_endpoint.as_deref(),

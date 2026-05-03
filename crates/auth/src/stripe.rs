@@ -80,7 +80,11 @@ impl StripeConfig {
     /// you already store `stripeCustomerId` on the user/org row, pass
     /// it instead — `retrieve_or_create` does the lookup-or-create
     /// dance based on which field is populated.
-    pub fn create_customer(&self, email: &str, name: Option<&str>) -> Result<StripeCustomer, String> {
+    pub fn create_customer(
+        &self,
+        email: &str,
+        name: Option<&str>,
+    ) -> Result<StripeCustomer, String> {
         let mut body = format!("email={}", url_encode(email));
         if let Some(n) = name {
             body.push_str("&name=");
@@ -249,14 +253,18 @@ pub fn verify_webhook(
         return Err(WebhookError::MissingSignature);
     }
     // ±5min tolerance, Stripe's documented default.
-    let diff = if now_secs > ts { now_secs - ts } else { ts - now_secs };
+    let diff = if now_secs > ts {
+        now_secs - ts
+    } else {
+        ts - now_secs
+    };
     if diff > 5 * 60 {
         return Err(WebhookError::StaleTimestamp);
     }
 
     // Signed payload = "<ts>." + body
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(format!("{ts}.").as_bytes());
     mac.update(body);
     let expected = mac.finalize().into_bytes();
@@ -343,10 +351,7 @@ fn parse_event(body: serde_json::Value) -> BillingEvent {
                 .unwrap_or("")
                 .to_string(),
         },
-        _ => BillingEvent::Other {
-            event_type,
-            body,
-        },
+        _ => BillingEvent::Other { event_type, body },
     }
 }
 

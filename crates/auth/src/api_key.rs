@@ -106,7 +106,10 @@ impl Default for InMemoryApiKeyBackend {
 
 impl ApiKeyBackend for InMemoryApiKeyBackend {
     fn put(&self, key: &ApiKey) {
-        self.keys.lock().unwrap().insert(key.id.clone(), key.clone());
+        self.keys
+            .lock()
+            .unwrap()
+            .insert(key.id.clone(), key.clone());
     }
     fn get(&self, id: &str) -> Option<ApiKey> {
         self.keys.lock().unwrap().get(id).cloned()
@@ -267,8 +270,8 @@ fn parse_token(token: &str) -> Option<(String, String)> {
         return None;
     }
     let id_body = &id_part[4..]; // strip "key_"
-    // 24 random bytes → base64url-no-pad → 32 chars.
-    // 32 random bytes → base64url-no-pad → 43 chars.
+                                 // 24 random bytes → base64url-no-pad → 32 chars.
+                                 // 32 random bytes → base64url-no-pad → 43 chars.
     if id_body.len() != 32 || secret.len() != 43 {
         return None;
     }
@@ -307,8 +310,8 @@ fn hash_secret(secret: &str) -> String {
     // we already trade-off env reads vs cache complexity elsewhere.
     let pepper = std::env::var("PYLON_API_KEY_PEPPER")
         .unwrap_or_else(|_| "pylon-dev-api-key-pepper-not-for-production".into());
-    let mut mac = HmacSha256::new_from_slice(pepper.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(pepper.as_bytes()).expect("HMAC accepts any key length");
     mac.update(secret.as_bytes());
     let out = mac.finalize().into_bytes();
     use std::fmt::Write;
@@ -334,8 +337,12 @@ mod tests {
     #[test]
     fn create_and_verify_roundtrip() {
         let store = ApiKeyStore::new();
-        let (plaintext, key) =
-            store.create("user_1".into(), "test".into(), Some("read,write".into()), None);
+        let (plaintext, key) = store.create(
+            "user_1".into(),
+            "test".into(),
+            Some("read,write".into()),
+            None,
+        );
         assert!(plaintext.starts_with("pk.key_"));
         let verified = store.verify(&plaintext).expect("verify");
         assert_eq!(verified.id, key.id);
@@ -376,8 +383,7 @@ mod tests {
     #[test]
     fn expired_key_rejected() {
         let store = ApiKeyStore::new();
-        let (plaintext, _) =
-            store.create("u".into(), "n".into(), None, Some(now_secs() - 1));
+        let (plaintext, _) = store.create("u".into(), "n".into(), None, Some(now_secs() - 1));
         let err = store.verify(&plaintext).unwrap_err();
         assert!(matches!(err, ApiKeyVerifyError::Expired));
     }
@@ -439,7 +445,12 @@ mod tests {
         // non-base64url chars
         assert!(parse_token(&format!("pk.key_{}.{}", "@".repeat(32), "b".repeat(43))).is_none());
         // extra dots / segments (codex P3)
-        assert!(parse_token(&format!("pk.key_{}.{}.junk", "a".repeat(32), "b".repeat(43))).is_none());
+        assert!(parse_token(&format!(
+            "pk.key_{}.{}.junk",
+            "a".repeat(32),
+            "b".repeat(43)
+        ))
+        .is_none());
     }
 
     /// Regression: id and secret are base64url which contains `_` and
@@ -452,7 +463,9 @@ mod tests {
         // Run a handful of times to defeat lucky-RNG flakes.
         for _ in 0..20 {
             let (plaintext, key) = store.create("u".into(), "n".into(), None, None);
-            let verified = store.verify(&plaintext).expect("base64url body must verify");
+            let verified = store
+                .verify(&plaintext)
+                .expect("base64url body must verify");
             assert_eq!(verified.id, key.id);
         }
     }

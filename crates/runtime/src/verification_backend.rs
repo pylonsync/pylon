@@ -162,13 +162,8 @@ impl VerificationBackend for SqliteVerificationBackend {
 
 fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerificationToken> {
     let kind_raw: String = row.get(1)?;
-    let kind = kind_from_str(&kind_raw).map_err(|e| {
-        rusqlite::Error::InvalidColumnType(
-            1,
-            e,
-            rusqlite::types::Type::Text,
-        )
-    })?;
+    let kind = kind_from_str(&kind_raw)
+        .map_err(|e| rusqlite::Error::InvalidColumnType(1, e, rusqlite::types::Type::Text))?;
     Ok(VerificationToken {
         id: row.get(0)?,
         kind,

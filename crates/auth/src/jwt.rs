@@ -104,9 +104,7 @@ pub fn mint(secret: &[u8], claims: &JwtClaims) -> String {
     if !claims.roles.is_empty() {
         claims_obj.insert(
             "https://pylonsync.com/roles".into(),
-            serde_json::Value::Array(
-                claims.roles.iter().cloned().map(Into::into).collect(),
-            ),
+            serde_json::Value::Array(claims.roles.iter().cloned().map(Into::into).collect()),
         );
     }
     let header_b64 = base64_url(serde_json::to_vec(&header).unwrap());
@@ -121,7 +119,11 @@ pub fn mint(secret: &[u8], claims: &JwtClaims) -> String {
 
 /// Verify + decode a JWT. Checks signature, alg, expiry, and issuer
 /// (when supplied). Returns the parsed claims or a structured error.
-pub fn verify(token: &str, secret: &[u8], expected_issuer: Option<&str>) -> Result<JwtClaims, JwtError> {
+pub fn verify(
+    token: &str,
+    secret: &[u8],
+    expected_issuer: Option<&str>,
+) -> Result<JwtClaims, JwtError> {
     let mut parts = token.split('.');
     let header_b64 = parts.next().ok_or(JwtError::Malformed)?;
     let claims_b64 = parts.next().ok_or(JwtError::Malformed)?;
@@ -269,8 +271,8 @@ mod tests {
         // mint's debug_assert.
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
-        let claims = URL_SAFE_NO_PAD
-            .encode(br#"{"sub":"user-1","iat":1,"exp":2,"iss":"pylon-test"}"#);
+        let claims =
+            URL_SAFE_NO_PAD.encode(br#"{"sub":"user-1","iat":1,"exp":2,"iss":"pylon-test"}"#);
         let signing_input = format!("{header}.{claims}");
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
@@ -328,8 +330,14 @@ mod tests {
 
     #[test]
     fn malformed_token_rejected() {
-        assert_eq!(verify("not.a.jwt.too-many-parts", b"k", None), Err(JwtError::Malformed));
-        assert_eq!(verify("only-one-part", b"k", None), Err(JwtError::Malformed));
+        assert_eq!(
+            verify("not.a.jwt.too-many-parts", b"k", None),
+            Err(JwtError::Malformed)
+        );
+        assert_eq!(
+            verify("only-one-part", b"k", None),
+            Err(JwtError::Malformed)
+        );
         assert_eq!(verify("", b"k", None), Err(JwtError::Malformed));
     }
 
@@ -357,7 +365,8 @@ mod tests {
     /// shape, so the dispatcher MUST disambiguate via the prefix.
     #[test]
     fn pk_token_overlaps_jwt_shape_dispatcher_must_check_prefix_first() {
-        let pk_like = "pk.key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let pk_like =
+            "pk.key_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         assert!(pk_like.starts_with("pk."));
         assert!(looks_like_jwt(pk_like));
     }

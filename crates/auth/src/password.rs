@@ -193,9 +193,18 @@ mod tests {
         let body = "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n\
                     003D68EB55068C33ACE09247EE4C639306B:3\r\n\
                     012345678901234567890123456789012345:42\r\n";
-        assert_eq!(parse_hibp_range(body, "012345678901234567890123456789012345"), 42);
-        assert_eq!(parse_hibp_range(body, "0018A45C4D1DEF81644B54AB7F969B88D65"), 1);
-        assert_eq!(parse_hibp_range(body, "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEF"), 0);
+        assert_eq!(
+            parse_hibp_range(body, "012345678901234567890123456789012345"),
+            42
+        );
+        assert_eq!(
+            parse_hibp_range(body, "0018A45C4D1DEF81644B54AB7F969B88D65"),
+            1
+        );
+        assert_eq!(
+            parse_hibp_range(body, "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEF"),
+            0
+        );
     }
 
     #[test]

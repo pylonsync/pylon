@@ -458,8 +458,7 @@ impl DataStore for PostgresDataStore {
                                     .map(|s| s.to_string());
                                 if let Some(fk) = fk_value {
                                     if rel.many {
-                                        let sub_filter =
-                                            serde_json::json!({ &rel.field: &fk });
+                                        let sub_filter = serde_json::json!({ &rel.field: &fk });
                                         if let Ok(related) =
                                             self.query_filtered(&rel.target, &sub_filter)
                                         {

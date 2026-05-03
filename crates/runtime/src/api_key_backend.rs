@@ -246,12 +246,9 @@ mod pg {
                 Ok(c) => c,
                 Err(_) => return false,
             };
-            c.execute(
-                &format!("DELETE FROM {PG_TABLE} WHERE id = $1"),
-                &[&id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
+                .map(|n| n > 0)
+                .unwrap_or(false)
         }
 
         fn list_for_user(&self, user_id: &str) -> Vec<ApiKey> {

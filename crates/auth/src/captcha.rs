@@ -178,19 +178,44 @@ mod tests {
 
     #[test]
     fn provider_from_str_recognizes_aliases() {
-        assert_eq!(CaptchaProvider::from_str("hcaptcha"), Some(CaptchaProvider::HCaptcha));
-        assert_eq!(CaptchaProvider::from_str("HCAPTCHA"), Some(CaptchaProvider::HCaptcha));
-        assert_eq!(CaptchaProvider::from_str("turnstile"), Some(CaptchaProvider::Turnstile));
-        assert_eq!(CaptchaProvider::from_str("cloudflare"), Some(CaptchaProvider::Turnstile));
-        assert_eq!(CaptchaProvider::from_str("recaptcha"), Some(CaptchaProvider::ReCaptcha));
-        assert_eq!(CaptchaProvider::from_str("google"), Some(CaptchaProvider::ReCaptcha));
+        assert_eq!(
+            CaptchaProvider::from_str("hcaptcha"),
+            Some(CaptchaProvider::HCaptcha)
+        );
+        assert_eq!(
+            CaptchaProvider::from_str("HCAPTCHA"),
+            Some(CaptchaProvider::HCaptcha)
+        );
+        assert_eq!(
+            CaptchaProvider::from_str("turnstile"),
+            Some(CaptchaProvider::Turnstile)
+        );
+        assert_eq!(
+            CaptchaProvider::from_str("cloudflare"),
+            Some(CaptchaProvider::Turnstile)
+        );
+        assert_eq!(
+            CaptchaProvider::from_str("recaptcha"),
+            Some(CaptchaProvider::ReCaptcha)
+        );
+        assert_eq!(
+            CaptchaProvider::from_str("google"),
+            Some(CaptchaProvider::ReCaptcha)
+        );
         assert_eq!(CaptchaProvider::from_str("nope"), None);
     }
 
     #[test]
     fn endpoints_are_https() {
-        for p in [CaptchaProvider::HCaptcha, CaptchaProvider::Turnstile, CaptchaProvider::ReCaptcha] {
-            assert!(p.endpoint().starts_with("https://"), "endpoint must be https");
+        for p in [
+            CaptchaProvider::HCaptcha,
+            CaptchaProvider::Turnstile,
+            CaptchaProvider::ReCaptcha,
+        ] {
+            assert!(
+                p.endpoint().starts_with("https://"),
+                "endpoint must be https"
+            );
         }
     }
 

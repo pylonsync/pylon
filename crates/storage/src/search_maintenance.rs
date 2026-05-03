@@ -14,7 +14,9 @@ use roaring::RoaringBitmap;
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::search::{deserialize_bitmap, merge_row, serialize_bitmap, stringify_facet, SearchConfig};
+use crate::search::{
+    deserialize_bitmap, merge_row, serialize_bitmap, stringify_facet, SearchConfig,
+};
 use crate::StorageError;
 
 // ---------------------------------------------------------------------------

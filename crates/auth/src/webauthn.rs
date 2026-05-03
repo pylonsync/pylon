@@ -189,11 +189,7 @@ impl PasskeyStore {
     /// Take + validate a stored challenge. Returns the matching record
     /// iff the challenge exists, hasn't expired, and matches the
     /// expected `kind`.
-    pub fn take_challenge(
-        &self,
-        challenge: &str,
-        kind: ChallengeKind,
-    ) -> Option<PasskeyChallenge> {
+    pub fn take_challenge(&self, challenge: &str, kind: ChallengeKind) -> Option<PasskeyChallenge> {
         let mut map = self.challenges.lock().unwrap();
         let entry = map.remove(challenge)?;
         if entry.expires_at <= now_secs() || entry.kind != kind {
@@ -383,8 +379,7 @@ pub fn verify_assertion(
             // Ed25519 — just X (32 bytes).
             let pubkey_bytes =
                 cose_eddsa_x(&stored.public_key).ok_or(WebauthnError::UnsupportedAlg)?;
-            let pubkey =
-                signature::UnparsedPublicKey::new(&signature::ED25519, &pubkey_bytes);
+            let pubkey = signature::UnparsedPublicKey::new(&signature::ED25519, &pubkey_bytes);
             pubkey
                 .verify(&signing_input, input.signature)
                 .map_err(|_| WebauthnError::SignatureMismatch)?;
@@ -540,9 +535,7 @@ impl<'a> CborParser<'a> {
             3 => {
                 let len = self.read_arg(additional)? as usize;
                 let s = self.take(len)?;
-                Some(CborVal::Text(
-                    std::str::from_utf8(s).ok()?.to_string(),
-                ))
+                Some(CborVal::Text(std::str::from_utf8(s).ok()?.to_string()))
             }
             4 => {
                 let len = self.read_arg(additional)? as usize;

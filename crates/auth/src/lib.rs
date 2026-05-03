@@ -622,21 +622,32 @@ impl OAuthConfig {
         let cfg = self.provider_cfg();
 
         // Apple — identity lives in the id_token, not a userinfo endpoint.
-        if matches!(spec.userinfo_parser(), provider::UserinfoParser::AppleIdToken) {
-            let token = id_token
-                .ok_or("apple login requires the id_token from the token response")?;
+        if matches!(
+            spec.userinfo_parser(),
+            provider::UserinfoParser::AppleIdToken
+        ) {
+            let token =
+                id_token.ok_or("apple login requires the id_token from the token response")?;
             return parse_apple_id_token(token, &self.provider);
         }
 
         // Linear is GraphQL — the userinfo "GET" is actually a POST
         // with a fixed query.
-        if matches!(spec.userinfo_parser(), provider::UserinfoParser::LinearGraphql) {
+        if matches!(
+            spec.userinfo_parser(),
+            provider::UserinfoParser::LinearGraphql
+        ) {
             return fetch_linear_userinfo(&self.provider, access_token);
         }
 
         let url = match spec.userinfo_url() {
             Some(u) => provider::resolve_endpoint(u, &cfg),
-            None => return Err(format!("provider {} has no userinfo endpoint", self.provider)),
+            None => {
+                return Err(format!(
+                    "provider {} has no userinfo endpoint",
+                    self.provider
+                ))
+            }
         };
         let out = match spec.userinfo_method() {
             provider::UserinfoMethod::Get => http_get_bearer(&url, access_token),
@@ -967,8 +978,8 @@ fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo,
         .send_string(body)
         .map_err(|e| format!("linear graphql: {e}"))?;
     let out = resp.into_string().map_err(|e| format!("read body: {e}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(&out)
-        .map_err(|e| format!("linear graphql not JSON: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("linear graphql not JSON: {e}"))?;
     let viewer = parsed
         .pointer("/data/viewer")
         .ok_or("linear graphql: no /data/viewer")?;
@@ -982,7 +993,10 @@ fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo,
         .and_then(|v| v.as_str())
         .ok_or("linear graphql: no email")?
         .to_string();
-    let name = viewer.get("name").and_then(|v| v.as_str()).map(String::from);
+    let name = viewer
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     Ok(UserInfo {
         provider: provider.to_string(),
         provider_account_id,
@@ -1291,9 +1305,8 @@ impl OAuthRegistry {
                 Err(_) if spec.id == "apple" => String::new(),
                 Err(_) => continue,
             };
-            let redirect_uri = std::env::var(format!("{prefix}_REDIRECT")).unwrap_or_else(|_| {
-                format!("http://localhost:3000/api/auth/callback/{}", spec.id)
-            });
+            let redirect_uri = std::env::var(format!("{prefix}_REDIRECT"))
+                .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{}", spec.id));
             let scopes_override = std::env::var(format!("{prefix}_SCOPES")).ok();
             let tenant = std::env::var(format!("{prefix}_TENANT")).ok();
 
@@ -2427,11 +2440,8 @@ mod tests {
 
     #[test]
     fn from_api_key_carries_scope_metadata() {
-        let ctx = AuthContext::from_api_key(
-            "user-1".into(),
-            "key_abc".into(),
-            Some("read,write".into()),
-        );
+        let ctx =
+            AuthContext::from_api_key("user-1".into(), "key_abc".into(), Some("read,write".into()));
         assert!(ctx.is_authenticated());
         assert!(ctx.is_api_key_auth());
         assert_eq!(ctx.user_id.as_deref(), Some("user-1"));
@@ -2770,7 +2780,9 @@ mod tests {
             oidc_issuer: Some(issuer.into()),
             ..Default::default()
         };
-        assert!(cfg.auth_url().starts_with("https://acme.test.invalid/authorize?"));
+        assert!(cfg
+            .auth_url()
+            .starts_with("https://acme.test.invalid/authorize?"));
         assert_eq!(cfg.token_url(), "https://acme.test.invalid/oauth/token");
         assert_eq!(cfg.userinfo_url(), "https://acme.test.invalid/userinfo");
     }
@@ -2816,8 +2828,8 @@ mod tests {
             "email": "user@privaterelay.appleid.com",
             "email_verified": "true",
         });
-        let claims_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(claims.to_string().as_bytes());
+        let claims_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
         let id_token = format!("{header}.{claims_b64}.signature_ignored");
 
         let cfg = OAuthConfig {
@@ -2892,7 +2904,10 @@ mod tests {
         // Comma-separated, url-encoded → "user.info.basic%2Cvideo.list"
         assert!(auth.contains("user.info.basic%2Cvideo.list"), "got: {auth}");
         // Should NOT use the standard space separator.
-        assert!(!auth.contains("user.info.basic%20video.list"), "got: {auth}");
+        assert!(
+            !auth.contains("user.info.basic%20video.list"),
+            "got: {auth}"
+        );
     }
 
     /// P2: `code` MUST be url-encoded in the token-exchange body.
@@ -2940,8 +2955,14 @@ mod tests {
         assert!(!scrubbed.contains("sk_jsonleak"), "got: {scrubbed}");
         assert!(!scrubbed.contains("rt_abcxyz"), "got: {scrubbed}");
         assert!(!scrubbed.contains("ey.payload.sig"), "got: {scrubbed}");
-        assert!(scrubbed.contains(r#""client_secret":"***""#), "got: {scrubbed}");
-        assert!(scrubbed.contains(r#""refresh_token":"***""#), "got: {scrubbed}");
+        assert!(
+            scrubbed.contains(r#""client_secret":"***""#),
+            "got: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains(r#""refresh_token":"***""#),
+            "got: {scrubbed}"
+        );
         assert!(scrubbed.contains(r#""id_token":"***""#), "got: {scrubbed}");
         assert!(scrubbed.contains("invalid_grant"));
     }
@@ -2954,7 +2975,10 @@ mod tests {
     fn sanitize_token_error_handles_utf8() {
         let raw = "HTTP 400: ⚠️ provider says the secret is wrong: client_secret=sk_x";
         let scrubbed = sanitize_token_error(raw.into());
-        assert!(scrubbed.contains("⚠️"), "non-ASCII chars must survive: {scrubbed}");
+        assert!(
+            scrubbed.contains("⚠️"),
+            "non-ASCII chars must survive: {scrubbed}"
+        );
         assert!(!scrubbed.contains("sk_x"));
         assert!(scrubbed.contains("client_secret=***"));
     }
@@ -2971,7 +2995,9 @@ mod tests {
             "token_endpoint": "https://acme.test/token",
             "token_endpoint_auth_methods_supported": ["client_secret_post"]
         }"#;
-        let spec = provider::OidcDiscoveryDoc::parse(json_post).unwrap().into_spec();
+        let spec = provider::OidcDiscoveryDoc::parse(json_post)
+            .unwrap()
+            .into_spec();
         assert!(matches!(
             spec.token_exchange,
             provider::TokenExchangeShape::Standard

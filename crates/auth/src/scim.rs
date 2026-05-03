@@ -72,7 +72,11 @@ pub struct ScimName {
     pub formatted: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "givenName")]
     pub given_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "familyName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "familyName"
+    )]
     pub family_name: Option<String>,
 }
 
@@ -194,13 +198,11 @@ mod tests {
                 given_name: Some("Alice".into()),
                 family_name: Some("Liddell".into()),
             }),
-            emails: vec![
-                ScimEmail {
-                    value: "alice@example.com".into(),
-                    primary: Some(true),
-                    kind: Some("work".into()),
-                },
-            ],
+            emails: vec![ScimEmail {
+                value: "alice@example.com".into(),
+                primary: Some(true),
+                kind: Some("work".into()),
+            }],
             display_name: None,
             schemas: default_user_schemas(),
         }

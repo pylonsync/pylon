@@ -346,15 +346,28 @@ mod tests {
         let got = b.find_for_user("u1", 10);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].user_id.as_deref(), Some("u1"));
-        assert_eq!(got[0].metadata.get("method").map(|s| s.as_str()), Some("password"));
+        assert_eq!(
+            got[0].metadata.get("method").map(|s| s.as_str()),
+            Some("password")
+        );
         assert!(got[0].success);
     }
 
     #[test]
     fn sqlite_tenant_isolation() {
         let b = SqliteAuditBackend::in_memory().unwrap();
-        b.append(&AuditEventBuilder::new(AuditAction::SignIn).tenant("a").user("u1").build());
-        b.append(&AuditEventBuilder::new(AuditAction::SignIn).tenant("b").user("u2").build());
+        b.append(
+            &AuditEventBuilder::new(AuditAction::SignIn)
+                .tenant("a")
+                .user("u1")
+                .build(),
+        );
+        b.append(
+            &AuditEventBuilder::new(AuditAction::SignIn)
+                .tenant("b")
+                .user("u2")
+                .build(),
+        );
         assert_eq!(b.find_for_tenant("a", 10).len(), 1);
         assert_eq!(b.find_for_tenant("b", 10).len(), 1);
         assert_eq!(b.find_for_tenant("c", 10).len(), 0);

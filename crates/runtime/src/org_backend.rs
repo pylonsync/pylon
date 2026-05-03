@@ -430,7 +430,12 @@ mod pg {
                          VALUES ($1, $2, $3, $4)
                          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name"
                     ),
-                    &[&org.id, &org.name, &org.created_by, &(org.created_at as i64)],
+                    &[
+                        &org.id,
+                        &org.name,
+                        &org.created_by,
+                        &(org.created_at as i64),
+                    ],
                 );
             }
         }
@@ -465,12 +470,9 @@ mod pg {
                 &format!("DELETE FROM {INVITES_TABLE} WHERE org_id = $1"),
                 &[&id],
             );
-            c.execute(
-                &format!("DELETE FROM {ORGS_TABLE} WHERE id = $1"),
-                &[&id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            c.execute(&format!("DELETE FROM {ORGS_TABLE} WHERE id = $1"), &[&id])
+                .map(|n| n > 0)
+                .unwrap_or(false)
         }
 
         fn list_orgs_for_user(&self, user_id: &str) -> Vec<(Org, OrgRole)> {
@@ -513,7 +515,12 @@ mod pg {
                          VALUES ($1, $2, $3, $4)
                          ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role"
                     ),
-                    &[&m.org_id, &m.user_id, &role_to_str(m.role), &(m.joined_at as i64)],
+                    &[
+                        &m.org_id,
+                        &m.user_id,
+                        &role_to_str(m.role),
+                        &(m.joined_at as i64),
+                    ],
                 );
             }
         }

@@ -311,9 +311,7 @@ pub fn run_search<C: PgConn>(
         if !config.sortable.iter().any(|s| s == field) {
             return Err(StorageError::new(
                 "INVALID_SORT_FIELD",
-                &format!(
-                    "sort field \"{field}\" is not in the entity's `sortable` config"
-                ),
+                &format!("sort field \"{field}\" is not in the entity's `sortable` config"),
             ));
         }
     }
@@ -371,9 +369,7 @@ pub fn run_search<C: PgConn>(
     };
 
     // ---- Total ---------------------------------------------------------
-    let total_sql = format!(
-        "SELECT COUNT(*) FROM {entity_quoted} e{join_clause}{where_clause}"
-    );
+    let total_sql = format!("SELECT COUNT(*) FROM {entity_quoted} e{join_clause}{where_clause}");
     let total: i64 = {
         let pg_params = box_params(&params);
         let row = conn
@@ -393,9 +389,7 @@ pub fn run_search<C: PgConn>(
     let select_cols = if has_query {
         // Surface ts_rank as `_rank` so callers can re-rank or display
         // relevance. Same idea as Meilisearch's `_score`.
-        format!(
-            "e.*, ts_rank(f.tsv, plainto_tsquery({lang}, $1)) AS _rank"
-        )
+        format!("e.*, ts_rank(f.tsv, plainto_tsquery({lang}, $1)) AS _rank")
     } else {
         "e.*".to_string()
     };

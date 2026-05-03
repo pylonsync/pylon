@@ -756,7 +756,10 @@ fn crdt_snapshot_roundtrips_on_postgres() {
     use pylon_http::DataStore;
     let rt = crdt_runtime(&url);
     let id = rt
-        .insert("Note", &serde_json::json!({"title": "hello", "body": "world"}))
+        .insert(
+            "Note",
+            &serde_json::json!({"title": "hello", "body": "world"}),
+        )
         .unwrap();
 
     // Snapshot returns the encoded LoroDoc bytes — non-empty after a
@@ -764,7 +767,10 @@ fn crdt_snapshot_roundtrips_on_postgres() {
     let snap = DataStore::crdt_snapshot(&rt, "Note", &id)
         .expect("crdt_snapshot")
         .expect("Some(snap)");
-    assert!(!snap.is_empty(), "snapshot should be non-empty after insert");
+    assert!(
+        !snap.is_empty(),
+        "snapshot should be non-empty after insert"
+    );
 
     // Sidecar row exists.
     let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
@@ -791,8 +797,10 @@ fn crdt_insert_failure_rolls_back_snapshot() {
     // Force the entity insert to fail with an unknown column. Anything
     // that breaks the SQL after `apply_patch` succeeds works as the
     // probe; this is the easiest one to trigger from outside.
-    let bad_insert =
-        rt.insert("Note", &serde_json::json!({"title": "x", "definitely_not_a_column": 1}));
+    let bad_insert = rt.insert(
+        "Note",
+        &serde_json::json!({"title": "x", "definitely_not_a_column": 1}),
+    );
     assert!(bad_insert.is_err(), "insert should have failed");
 
     // Sidecar must have NO row for any Note id — the failed insert's
@@ -837,8 +845,8 @@ fn crdt_apply_update_reprojects_to_postgres_row() {
     peer.commit();
     let update = encode_snapshot(&peer);
 
-    let new_snap = DataStore::crdt_apply_update(&rt, "Note", &id, &update)
-        .expect("crdt_apply_update");
+    let new_snap =
+        DataStore::crdt_apply_update(&rt, "Note", &id, &update).expect("crdt_apply_update");
     assert!(!new_snap.is_empty());
 
     // The materialized row's title column should now reflect the
@@ -885,7 +893,7 @@ fn fts_runtime(url: &str) -> Runtime {
                 text: vec!["name".into(), "description".into()],
                 facets: vec!["brand".into()],
                 sortable: vec![],
-            language: None,
+                language: None,
             }),
         }],
         ..empty_manifest()
@@ -944,8 +952,14 @@ fn aggregate_inside_pg_mutation_tx_sees_pending_writes() {
     let store: &PostgresDataStore = rt.pg_data_store_for_tests();
     let count = store
         .with_transaction::<_, serde_json::Value, pylon_http::DataError>(|s| {
-            s.insert("User", &serde_json::json!({"email": "a@x.com", "name": "a"}))?;
-            s.insert("User", &serde_json::json!({"email": "b@x.com", "name": "b"}))?;
+            s.insert(
+                "User",
+                &serde_json::json!({"email": "a@x.com", "name": "a"}),
+            )?;
+            s.insert(
+                "User",
+                &serde_json::json!({"email": "b@x.com", "name": "b"}),
+            )?;
             // Aggregate runs through the held tx — must see both
             // pending inserts even though they haven't committed yet.
             s.aggregate("User", &serde_json::json!({"count": "*"}))
@@ -1041,7 +1055,10 @@ fn pgtxstore_crdt_hook_persists_sidecar_on_insert() {
     let rt = crdt_runtime(&url);
     let id = rt
         .run_in_pg_mutation_tx_for_tests::<_, String, pylon_http::DataError>(|store| {
-            store.insert("Note", &serde_json::json!({"title": "via-mutation", "body": "x"}))
+            store.insert(
+                "Note",
+                &serde_json::json!({"title": "via-mutation", "body": "x"}),
+            )
         })
         .expect("with_transaction_crdt insert");
 
@@ -1094,7 +1111,10 @@ fn pg_transact_maintains_crdt_sidecar_for_crdt_entities() {
         )
         .unwrap()
         .get(0);
-    assert_eq!(count, 1, "transact insert on crdt:true entity must create sidecar row");
+    assert_eq!(
+        count, 1,
+        "transact insert on crdt:true entity must create sidecar row"
+    );
 
     // crdt_snapshot returns non-empty bytes.
     let snap = DataStore::crdt_snapshot(&rt, "Note", &id).unwrap().unwrap();
@@ -1112,10 +1132,17 @@ fn pg_update_rejects_id_mutation() {
     };
     let rt = fresh_runtime(&url);
     let id = rt
-        .insert("User", &serde_json::json!({"email": "z@x.com", "name": "z"}))
+        .insert(
+            "User",
+            &serde_json::json!({"email": "z@x.com", "name": "z"}),
+        )
         .unwrap();
     let err = rt
-        .update("User", &id, &serde_json::json!({"id": "different-id", "name": "z2"}))
+        .update(
+            "User",
+            &id,
+            &serde_json::json!({"id": "different-id", "name": "z2"}),
+        )
         .unwrap_err();
     assert_eq!(err.code, "PG_INVALID_UPDATE");
 }
@@ -1131,8 +1158,10 @@ fn fts_insert_failure_rolls_back_shadow_row() {
         return;
     };
     let rt = fts_runtime(&url);
-    let bad =
-        rt.insert("Product", &serde_json::json!({"name": "x", "definitely_not_a_column": 1}));
+    let bad = rt.insert(
+        "Product",
+        &serde_json::json!({"name": "x", "definitely_not_a_column": 1}),
+    );
     assert!(bad.is_err(), "insert should have failed");
 
     let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
@@ -1192,6 +1221,8 @@ fn fts_search_returns_matched_rows_on_postgres() {
     // Facet exclusion: the brand facet should report Atlas:1 even
     // though we didn't filter on brand. The non-matching Summit row
     // is excluded by the text query, not by the facet.
-    let facets = result["facetCounts"]["brand"].as_object().expect("brand facets");
+    let facets = result["facetCounts"]["brand"]
+        .as_object()
+        .expect("brand facets");
     assert_eq!(facets["Atlas"], 1);
 }

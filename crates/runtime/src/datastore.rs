@@ -559,15 +559,17 @@ impl DataStore for Runtime {
             // Single-read; with_client is fine here. PgLoroStore's
             // hydrate-on-miss + per-row Mutex ensures consistent
             // bytes even under concurrent applies on other threads.
-            let snap = pg_backend.store.with_client(|client| -> Result<Vec<u8>, DataError> {
-                pg_backend
-                    .crdt
-                    .snapshot(client, entity, row_id)
-                    .map_err(|e| DataError {
-                        code: "CRDT_SNAPSHOT_FAILED".into(),
-                        message: format!("snapshot {entity}/{row_id}: {e}"),
-                    })
-            })?;
+            let snap = pg_backend
+                .store
+                .with_client(|client| -> Result<Vec<u8>, DataError> {
+                    pg_backend
+                        .crdt
+                        .snapshot(client, entity, row_id)
+                        .map_err(|e| DataError {
+                            code: "CRDT_SNAPSHOT_FAILED".into(),
+                            message: format!("snapshot {entity}/{row_id}: {e}"),
+                        })
+                })?;
             return Ok(Some(snap));
         }
         let ent = self
@@ -645,64 +647,69 @@ impl DataStore for Runtime {
             // — a failure between them desynced the layers, and the
             // broadcast snapshot might not reflect what actually
             // landed on disk.
-            let result = pg_backend.store.with_transaction_raw(|tx| -> Result<Vec<u8>, DataError> {
-                let projected = pg_backend
-                    .crdt
-                    .apply_remote_update(tx, entity, row_id, &crdt_fields, update)
-                    .map_err(|e| {
-                        // Distinguish decode errors (malformed client
-                        // bytes — caller's fault, 400) from apply
-                        // errors (schema mismatch, also caller's
-                        // fault but a different shape). The CRDT
-                        // route maps CRDT_DECODE_FAILED → 400, so
-                        // unmapped errors land as 500 — codex
-                        // flagged the asymmetry vs the SQLite path.
-                        let code = match &e {
-                            crate::loro_store::LoroStoreError::Decode(_) => "CRDT_DECODE_FAILED",
-                            _ => "CRDT_APPLY_FAILED",
-                        };
-                        DataError {
-                            code: code.into(),
-                            message: format!("crdt apply update {entity}/{row_id}: {e}"),
-                        }
-                    })?;
-                let updated = pylon_storage::pg_tx_store::tx_update(
-                    tx,
-                    self.manifest(),
-                    entity,
-                    row_id,
-                    &projected,
-                )?;
-                if !updated {
-                    // Same orphan guard as Runtime::update — refuse
-                    // to commit a snapshot for a row that doesn't
-                    // exist. Peer pushed an update for a row this
-                    // replica's never seen.
-                    return Err(DataError {
-                        code: "ENTITY_NOT_FOUND".into(),
-                        message: format!(
-                            "Peer-pushed CRDT update targets {entity}/{row_id} which has \
+            let result =
+                pg_backend
+                    .store
+                    .with_transaction_raw(|tx| -> Result<Vec<u8>, DataError> {
+                        let projected = pg_backend
+                            .crdt
+                            .apply_remote_update(tx, entity, row_id, &crdt_fields, update)
+                            .map_err(|e| {
+                                // Distinguish decode errors (malformed client
+                                // bytes — caller's fault, 400) from apply
+                                // errors (schema mismatch, also caller's
+                                // fault but a different shape). The CRDT
+                                // route maps CRDT_DECODE_FAILED → 400, so
+                                // unmapped errors land as 500 — codex
+                                // flagged the asymmetry vs the SQLite path.
+                                let code = match &e {
+                                    crate::loro_store::LoroStoreError::Decode(_) => {
+                                        "CRDT_DECODE_FAILED"
+                                    }
+                                    _ => "CRDT_APPLY_FAILED",
+                                };
+                                DataError {
+                                    code: code.into(),
+                                    message: format!("crdt apply update {entity}/{row_id}: {e}"),
+                                }
+                            })?;
+                        let updated = pylon_storage::pg_tx_store::tx_update(
+                            tx,
+                            self.manifest(),
+                            entity,
+                            row_id,
+                            &projected,
+                        )?;
+                        if !updated {
+                            // Same orphan guard as Runtime::update — refuse
+                            // to commit a snapshot for a row that doesn't
+                            // exist. Peer pushed an update for a row this
+                            // replica's never seen.
+                            return Err(DataError {
+                                code: "ENTITY_NOT_FOUND".into(),
+                                message: format!(
+                                    "Peer-pushed CRDT update targets {entity}/{row_id} which has \
                              no materialized row — refusing to commit an orphan snapshot."
-                        ),
+                                ),
+                            });
+                        }
+                        // Read the snapshot back from the tx, bypassing the
+                        // cache — a prior `crdt_snapshot()` call could have
+                        // populated the cache with bytes that predate this
+                        // peer update, and broadcasting them would silently
+                        // omit the just-applied change. Codex flagged this.
+                        let snap = crate::pg_loro_store::PgLoroStore::read_snapshot_via_conn(
+                            tx, entity, row_id,
+                        )
+                        .map_err(|e| DataError {
+                            code: "CRDT_SNAPSHOT_FAILED".into(),
+                            message: format!("post-update snapshot {entity}/{row_id}: {e}"),
+                        })?;
+                        // Refresh the cache so the next reader on this
+                        // process skips the round-trip.
+                        pg_backend.crdt.cache_after_commit(tx, entity, row_id);
+                        Ok(snap)
                     });
-                }
-                // Read the snapshot back from the tx, bypassing the
-                // cache — a prior `crdt_snapshot()` call could have
-                // populated the cache with bytes that predate this
-                // peer update, and broadcasting them would silently
-                // omit the just-applied change. Codex flagged this.
-                let snap = crate::pg_loro_store::PgLoroStore::read_snapshot_via_conn(tx, entity, row_id)
-                    .map_err(|e| DataError {
-                        code: "CRDT_SNAPSHOT_FAILED".into(),
-                        message: format!(
-                            "post-update snapshot {entity}/{row_id}: {e}"
-                        ),
-                    })?;
-                // Refresh the cache so the next reader on this
-                // process skips the round-trip.
-                pg_backend.crdt.cache_after_commit(tx, entity, row_id);
-                Ok(snap)
-            });
             if result.is_err() {
                 // Same cache-coherency hygiene as Runtime::insert /
                 // update — the in-memory doc absorbed the peer's
@@ -1818,7 +1825,11 @@ impl FnOpsImpl {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    if ts > now { (ts - now) / 1000 } else { 0 }
+                    if ts > now {
+                        (ts - now) / 1000
+                    } else {
+                        0
+                    }
                 }
                 _ => 0,
             };
@@ -1902,12 +1913,11 @@ impl pylon_router::FnOps for FnOpsImpl {
                     // PgLoroStore + persists the snapshot in the same
                     // tx. Without this, codex-flagged: TS mutation
                     // writes on CRDT entities desync from the sidecar.
-                    let crdt_hook: std::sync::Arc<
-                        dyn pylon_storage::pg_tx_store::PgCrdtHook,
-                    > = std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
-                        crdt: std::sync::Arc::clone(&pg_backend.crdt),
-                        manifest: std::sync::Arc::new(self.runtime.manifest().clone()),
-                    });
+                    let crdt_hook: std::sync::Arc<dyn pylon_storage::pg_tx_store::PgCrdtHook> =
+                        std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
+                            crdt: std::sync::Arc::clone(&pg_backend.crdt),
+                            manifest: std::sync::Arc::new(self.runtime.manifest().clone()),
+                        });
 
                     let pg = &pg_backend.store;
                     let tx_result: Result<
@@ -2198,14 +2208,16 @@ pub fn try_spawn_functions(
         // buffer is `Some` and we defer.
         let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
             let slot = cell.borrow();
-            slot.as_ref().map(|b| {
-                b.borrow_mut().push(PendingSchedule {
-                    fn_name: fn_name.to_string(),
-                    args: args.clone(),
-                    delay_ms,
-                    run_at,
-                });
-            }).is_some()
+            slot.as_ref()
+                .map(|b| {
+                    b.borrow_mut().push(PendingSchedule {
+                        fn_name: fn_name.to_string(),
+                        args: args.clone(),
+                        delay_ms,
+                        run_at,
+                    });
+                })
+                .is_some()
         });
         if buffered {
             // No real job-id yet — the actual enqueue happens after

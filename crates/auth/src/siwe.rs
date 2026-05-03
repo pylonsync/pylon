@@ -109,10 +109,7 @@ impl NonceStore {
         rand::thread_rng().fill_bytes(&mut bytes);
         // EIP-4361 says nonce is `[A-Za-z0-9]{8,}`. Hex-encode our
         // random bytes (32 chars) — well within the allowed alphabet.
-        let nonce: String = bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let nonce: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let key = address.to_ascii_lowercase();
         let expires_at = now_secs() + 5 * 60;
         self.nonces
@@ -179,11 +176,7 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
         .strip_suffix(" wants you to sign in with your Ethereum account:")
         .ok_or(SiweError::Malformed)?
         .to_string();
-    let address = lines
-        .next()
-        .ok_or(SiweError::Malformed)?
-        .trim()
-        .to_string();
+    let address = lines.next().ok_or(SiweError::Malformed)?.trim().to_string();
     if !address.starts_with("0x") || address.len() != 42 {
         return Err(SiweError::Malformed);
     }
@@ -229,16 +222,16 @@ pub fn parse_message(text: &str) -> Result<SiweMessage, SiweError> {
     let mut in_resources = false;
 
     let process = |line: &str,
-                       uri: &mut Option<String>,
-                       version: &mut Option<String>,
-                       chain_id: &mut Option<u64>,
-                       nonce: &mut Option<String>,
-                       issued_at: &mut Option<String>,
-                       expiration_time: &mut Option<String>,
-                       not_before: &mut Option<String>,
-                       request_id: &mut Option<String>,
-                       resources: &mut Vec<String>,
-                       in_resources: &mut bool| {
+                   uri: &mut Option<String>,
+                   version: &mut Option<String>,
+                   chain_id: &mut Option<u64>,
+                   nonce: &mut Option<String>,
+                   issued_at: &mut Option<String>,
+                   expiration_time: &mut Option<String>,
+                   not_before: &mut Option<String>,
+                   request_id: &mut Option<String>,
+                   resources: &mut Vec<String>,
+                   in_resources: &mut bool| {
         if let Some(v) = line.strip_prefix("URI:") {
             *uri = Some(v.trim().to_string());
             *in_resources = false;
@@ -393,8 +386,8 @@ pub fn recover_address(message: &SiweMessage, signature_hex: &str) -> Result<Str
     to_hash.extend_from_slice(signed_text.as_bytes());
     let digest = keccak256(&to_hash);
 
-    let sig_bytes = decode_hex(signature_hex.trim_start_matches("0x"))
-        .map_err(|_| SiweError::BadSignature)?;
+    let sig_bytes =
+        decode_hex(signature_hex.trim_start_matches("0x")).map_err(|_| SiweError::BadSignature)?;
     if sig_bytes.len() != 65 {
         return Err(SiweError::BadSignature);
     }
@@ -713,7 +706,11 @@ mod tests {
 
         // 3. Sign the EIP-191 personal_sign envelope.
         let signed_text = serialize_for_signing(&m);
-        let envelope = format!("\x19Ethereum Signed Message:\n{}{}", signed_text.len(), signed_text);
+        let envelope = format!(
+            "\x19Ethereum Signed Message:\n{}{}",
+            signed_text.len(),
+            signed_text
+        );
         let mut h = Keccak256::new();
         h.update(envelope.as_bytes());
         let digest = h.finalize();
@@ -724,8 +721,7 @@ mod tests {
         let sig_hex = format!("0x{}", bytes_to_hex(&sig_bytes));
 
         // 4. Verify recovers the same address.
-        let recovered =
-            verify(&store, &m, &sig_hex, "example.com").expect("real-sig verify");
+        let recovered = verify(&store, &m, &sig_hex, "example.com").expect("real-sig verify");
         assert_eq!(recovered, address.to_ascii_lowercase());
     }
 
