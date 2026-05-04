@@ -48,7 +48,14 @@ import { Checkbox } from "@pylonsync/example-ui/checkbox";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { cn } from "@pylonsync/example-ui/utils";
 
-const BASE_URL = "http://localhost:4321";
+// Pylon backend URL. Read from Vite at build time so production
+// bundles ship with the deployed Pylon hostname baked in. Set
+// VITE_PYLON_URL on Vercel (or your host) to e.g.
+// https://pylon-chat.fly.dev. Falls back to localhost so `bun
+// run dev` works without any env config.
+const BASE_URL =
+  (import.meta as { env?: { VITE_PYLON_URL?: string } }).env?.VITE_PYLON_URL ??
+  "http://localhost:4321";
 // Give this app its own namespace so chat's auth + replica don't clobber
 // any other Pylon app served from the same browser origin.
 init({ baseUrl: BASE_URL, appName: "chat" });
