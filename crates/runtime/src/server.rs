@@ -2103,47 +2103,19 @@ fn start_server(
             || url == "/studio/")
             && method == Method::Get
         {
-            if !is_dev && !auth_ctx.is_admin {
-                // Browser-friendly: send to /studio/login for HTML callers,
-                // 401 JSON for everyone else (curl, CLI, etc).
-                let accept = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Accept"))
-                    .map(|h| h.value.as_str().to_string())
-                    .unwrap_or_default();
-                if accept.contains("text/html") {
-                    let response = with_security_headers(
-                        Response::from_string("")
-                            .with_status_code(303u16)
-                            .with_header(Header::from_bytes("Location", "/studio/login").unwrap()),
-                    );
-                    let _ = request.respond(response);
-                    mt.record_request("GET", 303);
-                    continue;
-                }
-                let body = json_error(
-                    "AUTH_REQUIRED",
-                    "/studio requires admin auth in production (set PYLON_ADMIN_TOKEN and pass it as Bearer, or sign in at /studio/login)",
-                );
-                let response = with_security_headers(
-                    Response::from_string(&body)
-                        .with_status_code(401u16)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "application/json").unwrap(),
-                        )
-                        .with_header(
-                            Header::from_bytes(
-                                "Access-Control-Allow-Origin",
-                                cors_origin.as_bytes().to_vec(),
-                            )
-                            .unwrap(),
-                        ),
-                );
-                let _ = request.respond(response);
-                mt.record_request("GET", 401);
-                continue;
-            }
+            // Studio HTML is served unconditionally — the React app's
+            // <SignInDialog> handles the admin gate at the JS layer
+            // by submitting to POST /studio/login. Pre-gating here
+            // meant browser callers got a JSON 401 with no path
+            // forward (Authorization headers can't be set without an
+            // extension). The /api/* + /studio/extensions.js gates
+            // still enforce admin downstream so the bundle can't
+            // actually fetch anything sensitive without auth.
+            //
+            // The HTML carries the public manifest shape (entity
+            // names, policy names, route shapes) which is fine to
+            // disclose — it matches what /api/manifest exposes
+            // publicly anyway.
             // Derive the public base URL from the request's Host header +
             // X-Forwarded-Proto (Fly / any HTTPS terminator sets this).
             // Hardcoding `http://localhost:{port}` here meant the studio

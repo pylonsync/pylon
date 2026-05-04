@@ -31,9 +31,42 @@ export function SignInDialog({
 		setError(null);
 		setBusy(true);
 		try {
-			await signIn(token.trim());
-			setToken("");
-			onOpenChange(false);
+			// Cookie path: POST to /studio/login. Server verifies the
+			// token, sets an HttpOnly admin cookie, returns 303. We
+			// fetch with redirect:"manual" so we can read non-2xx as a
+			// useful error and keep the dialog open. On success the
+			// cookie is set; reload so every Studio data fetch picks
+			// up the new auth without threading an "auth changed"
+			// event through every component.
+			//
+			// Falls back to the legacy Bearer + localStorage path if
+			// /studio/login 404s — keeps Studio usable against older
+			// pylon versions.
+			const body = new URLSearchParams({ token: token.trim() });
+			const res = await fetch("/studio/login", {
+				method: "POST",
+				body,
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				credentials: "include",
+				redirect: "manual",
+			});
+			if (res.status === 303 || res.ok) {
+				setToken("");
+				onOpenChange(false);
+				window.location.reload();
+				return;
+			}
+			if (res.status === 404) {
+				await signIn(token.trim());
+				setToken("");
+				onOpenChange(false);
+				return;
+			}
+			if (res.status === 401) {
+				setError("Invalid admin token.");
+				return;
+			}
+			setError(`Sign-in failed (HTTP ${res.status}).`);
 		} catch (err) {
 			if (err instanceof ApiError) {
 				setError(`${err.code}: ${err.message}`);
