@@ -2141,7 +2141,9 @@ fn start_server(
             let response = with_security_headers(
                 Response::from_string("")
                     .with_status_code(303u16)
-                    .with_header(Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap())
+                    .with_header(
+                        Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
+                    )
                     .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
             );
             let _ = request.respond(response);
@@ -2188,11 +2190,8 @@ fn start_server(
                         Response::from_string(html)
                             .with_status_code(403u16)
                             .with_header(
-                                Header::from_bytes(
-                                    "Content-Type",
-                                    "text/html; charset=utf-8",
-                                )
-                                .unwrap(),
+                                Header::from_bytes("Content-Type", "text/html; charset=utf-8")
+                                    .unwrap(),
                             ),
                     );
                     let _ = request.respond(response);
@@ -2215,7 +2214,9 @@ fn start_server(
                 let response = with_security_headers(
                     Response::from_string("")
                         .with_status_code(303u16)
-                        .with_header(Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap()),
+                        .with_header(
+                            Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
+                        ),
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 303);
