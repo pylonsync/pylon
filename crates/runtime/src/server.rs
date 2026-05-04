@@ -1045,6 +1045,17 @@ fn start_server(
                     pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
                 })
         };
+        // Studio admin cookie — set by POST /studio/login when the
+        // user submits the right PYLON_ADMIN_TOKEN. Stored under
+        // `${app_name}_admin` so it doesn't collide with the regular
+        // session cookie. When present + matches admin_token, the
+        // dispatcher returns AuthContext::admin() (handled below).
+        let admin_cookie_name = format!("{}_admin", &runtime.manifest().name);
+        let admin_cookie_token: Option<String> = request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+            .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &admin_cookie_name));
         let auth_token: Option<String> = bearer_token.or(cookie_token);
         // Token dispatcher (in priority order):
         //   1. Admin token → AuthContext::admin
@@ -1056,11 +1067,22 @@ fn start_server(
         // be misrouted.
         let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token
             .is_some()
+            && admin_cookie_token.is_some()
+            && pylon_auth::constant_time_eq(
+                admin_cookie_token.as_deref().unwrap_or("").as_bytes(),
+                admin_token.as_deref().unwrap_or("").as_bytes(),
+            ) {
+            // Studio admin cookie matched. Same auth as Bearer admin —
+            // we just got here via the /studio/login form instead of an
+            // Authorization header.
+            Ok(pylon_auth::AuthContext::admin())
+        } else if admin_token.is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
                 auth_token.as_deref().unwrap_or("").as_bytes(),
                 admin_token.as_deref().unwrap_or("").as_bytes(),
-            ) {
+            )
+        {
             Ok(pylon_auth::AuthContext::admin())
         } else if let Some(t) = auth_token.as_deref() {
             if t.starts_with("pk.") {
@@ -1982,14 +2004,127 @@ fn start_server(
         // Serving a WWW-Authenticate Basic realm isn't useful here because
         // admin auth is bearer-token based. Callers get a 401 and should
         // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
+        // Studio login form. Browsers can't easily set Authorization
+        // headers, so this is the path users hit when they visit
+        // /studio without admin auth — the 401 below redirects here.
+        // POST takes the token, sets the admin cookie, redirects to
+        // /studio. GET renders the form.
+        if url == "/studio/login" && method == Method::Get {
+            let html = studio_login_html(None);
+            let response = with_security_headers(
+                Response::from_string(html)
+                    .with_status_code(200u16)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+        if url == "/studio/login" && method == Method::Post {
+            let mut body_bytes = Vec::new();
+            let _ = request.as_reader().read_to_end(&mut body_bytes);
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            // form is `token=<value>` URL-encoded
+            let submitted = body_str
+                .split('&')
+                .filter_map(|p| p.split_once('='))
+                .find(|(k, _)| *k == "token")
+                .map(|(_, v)| {
+                    // URL-decode the basic case (+ and %xx). The token
+                    // is base64url-ish so + isn't really expected, but
+                    // safe to handle.
+                    let decoded = v.replace('+', " ");
+                    percent_decode_str(&decoded)
+                })
+                .unwrap_or_default();
+            let admin = admin_token.as_deref().unwrap_or("");
+            if admin.is_empty() {
+                let html = studio_login_html(Some(
+                    "Studio is not configured for admin auth (PYLON_ADMIN_TOKEN unset on this Pylon).",
+                ));
+                let response = with_security_headers(
+                    Response::from_string(html)
+                        .with_status_code(503u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 503);
+                continue;
+            }
+            if !pylon_auth::constant_time_eq(submitted.as_bytes(), admin.as_bytes()) {
+                let html = studio_login_html(Some("Invalid admin token."));
+                let response = with_security_headers(
+                    Response::from_string(html)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 401);
+                continue;
+            }
+            // Token verified. Set the admin cookie + redirect.
+            let admin_cookie = format!(
+                "{}={}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800",
+                admin_cookie_name, submitted,
+            );
+            let response = with_security_headers(
+                Response::from_string("")
+                    .with_status_code(303u16)
+                    .with_header(Header::from_bytes("Location", "/studio").unwrap())
+                    .with_header(Header::from_bytes("Set-Cookie", admin_cookie).unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", 303);
+            continue;
+        }
+        if url == "/studio/logout" && (method == Method::Get || method == Method::Post) {
+            let cleared = format!(
+                "{}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
+                admin_cookie_name,
+            );
+            let response = with_security_headers(
+                Response::from_string("")
+                    .with_status_code(303u16)
+                    .with_header(Header::from_bytes("Location", "/studio/login").unwrap())
+                    .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 303);
+            continue;
+        }
+
         let (status, response_body, content_type, is_studio, extra_headers) = if (url == "/studio"
             || url == "/studio/")
             && method == Method::Get
         {
             if !is_dev && !auth_ctx.is_admin {
+                // Browser-friendly: send to /studio/login for HTML callers,
+                // 401 JSON for everyone else (curl, CLI, etc).
+                let accept = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Accept"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default();
+                if accept.contains("text/html") {
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(303u16)
+                            .with_header(Header::from_bytes("Location", "/studio/login").unwrap()),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 303);
+                    continue;
+                }
                 let body = json_error(
                     "AUTH_REQUIRED",
-                    "/studio requires admin auth in production (set PYLON_ADMIN_TOKEN and pass it as Bearer)",
+                    "/studio requires admin auth in production (set PYLON_ADMIN_TOKEN and pass it as Bearer, or sign in at /studio/login)",
                 );
                 let response = with_security_headers(
                     Response::from_string(&body)
@@ -2312,6 +2447,100 @@ fn start_server(
 
 fn json_error(code: &str, message: &str) -> String {
     pylon_router::json_error(code, message)
+}
+
+/// Render the Studio login HTML form. Plain HTML (no framework) so it
+/// renders without any JS dependency — important because /studio's
+/// own JS runs only AFTER admin auth is established. The form POSTs
+/// `token=<value>` to /studio/login.
+///
+/// Style is intentionally minimal: a single centered card. Pylon's
+/// design tokens aren't reachable from a static HTML string, so the
+/// styling is inline and conservative.
+fn studio_login_html(error: Option<&str>) -> String {
+    let err_html = error
+        .map(|e| {
+            format!(
+                r#"<div style="margin:12px 0;padding:10px 12px;border:1px solid #f4a4a4;background:#fff5f5;border-radius:6px;color:#a40000;font:14px/1.4 ui-sans-serif,system-ui;">{}</div>"#,
+                escape_html(e),
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pylon Studio · sign in</title>
+<style>
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
+  .card {{ width: 360px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+  h1 {{ margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }}
+  p.lead {{ margin: 0 0 16px; color: #666; font-size: 13px; }}
+  label {{ display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin: 12px 0 6px; }}
+  input[type=password] {{ width: 100%; box-sizing: border-box; padding: 8px 10px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid #d4d2cd; border-radius: 6px; background: #fafafa; }}
+  input[type=password]:focus {{ outline: none; border-color: #2a5fdf; background: #fff; }}
+  button {{ margin-top: 16px; width: 100%; padding: 9px 12px; background: #2a5fdf; color: #fff; border: 0; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }}
+  button:hover {{ background: #1f4cb8; }}
+  .hint {{ margin-top: 16px; font-size: 11.5px; color: #888; }}
+  code {{ font-family: ui-monospace, monospace; font-size: 11.5px; background: #f4f3f0; padding: 1px 4px; border-radius: 3px; }}
+</style>
+</head>
+<body>
+<form class="card" method="POST" action="/studio/login" autocomplete="off">
+  <h1>Studio</h1>
+  <p class="lead">Sign in with your Pylon admin token.</p>
+  {err_html}
+  <label for="token">Admin token</label>
+  <input id="token" name="token" type="password" autofocus required>
+  <button type="submit">Sign in</button>
+  <div class="hint">Set on the server as <code>PYLON_ADMIN_TOKEN</code>.</div>
+</form>
+</body>
+</html>"#,
+    )
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Tiny URL-decoder for the studio login form's `token=…` field.
+/// Handles `%xx` escapes; `+` → space conversion happens at the
+/// caller. Doesn't allocate when there's nothing to decode.
+fn percent_decode_str(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Bundle of the four auth-state stores. Built in one place so backend
