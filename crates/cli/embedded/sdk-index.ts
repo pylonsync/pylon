@@ -510,6 +510,18 @@ export type AuthConfig = {
     expose?: string[];
     /** Additional fields stripped (combined with default `passwordHash` + `_*`). */
     hide?: string[];
+    /**
+     * Field on the User row that, when truthy, lifts the session's
+     * `auth.is_admin = true`. Examples: `"isAdmin"` (bool column),
+     * `"role"` (string equal to "admin"), `"roles"` (array containing
+     * "admin"). Default unset — only `PYLON_ADMIN_TOKEN` grants admin.
+     *
+     * Set this when you want platform admins to sign in with their
+     * regular account (Studio gates on `is_admin`, dashboards can
+     * branch on it, etc.). The env-token path keeps working as the
+     * bootstrap / CI escape hatch.
+     */
+    adminField?: string;
   };
   session?: {
     /** New session lifetime in seconds. Default 30 days. */
@@ -532,6 +544,7 @@ export type ManifestAuthConfig = {
     entity: string;
     expose: string[];
     hide: string[];
+    admin_field?: string;
   };
   session: {
     expires_in: number;
@@ -557,6 +570,7 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
       entity: cfg.user?.entity ?? "User",
       expose: cfg.user?.expose ?? [],
       hide: cfg.user?.hide ?? [],
+      ...(cfg.user?.adminField ? { admin_field: cfg.user.adminField } : {}),
     },
     session: {
       expires_in: cfg.session?.expiresIn ?? 30 * 24 * 60 * 60,
@@ -592,3 +606,48 @@ export function buildManifest(options: {
     auth: options.auth ?? auth(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Studio configuration — re-exports
+// ---------------------------------------------------------------------------
+
+export {
+  defineStudioConfig,
+  defineStudioExtensions,
+  type BrandConfig,
+  type ThemeConfig,
+  type ThemeAccent,
+  type ThemeAppearance,
+  type IconName,
+  type SidebarConfig,
+  type SidebarSection,
+  type SidebarItem,
+  type SidebarPageItem,
+  type SidebarResourceItem,
+  type SidebarLinkItem,
+  type SidebarHeadingItem,
+  type SidebarFooter,
+  type SidebarFooterCard,
+  type SidebarFooterCustom,
+  type ResourceConfig,
+  type ResourceListConfig,
+  type ColumnConfig,
+  type ColumnRenderer,
+  type RendererKind,
+  type RendererText,
+  type RendererAvatar,
+  type RendererBadge,
+  type RendererDate,
+  type RendererLink,
+  type RendererBoolean,
+  type RendererNumber,
+  type RendererJson,
+  type RendererCustom,
+  type BulkAction,
+  type RowAction,
+  type PageConfig,
+  type StudioConfig,
+  type StudioCellRendererProps,
+  type StudioPageProps,
+  type StudioExtensions,
+} from "./studio";
