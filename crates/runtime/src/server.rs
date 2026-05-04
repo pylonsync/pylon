@@ -241,8 +241,21 @@ fn start_server(
     // if nothing was registered.
     pylon_observability::run_tracing_hook();
 
-    let addr = format!("0.0.0.0:{port}");
-    let server = Server::http(&addr).map_err(|e| format!("Failed to start server: {e}"))?;
+    // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by
+    // default) IPv4-mapped connections to the same socket. Without
+    // this, a v4-only `0.0.0.0:port` bind silently breaks Fly.io —
+    // their fly-proxy reaches machines via the private IPv6 net,
+    // sees no listener, and reports "no known healthy instances".
+    // Falls back to v4-only when v6 isn't available (older test
+    // environments without IPv6 socket support).
+    let addr = format!("[::]:{port}");
+    let server = match Server::http(&addr) {
+        Ok(s) => s,
+        Err(_) => {
+            let v4_addr = format!("0.0.0.0:{port}");
+            Server::http(&v4_addr).map_err(|e| format!("Failed to start server: {e}"))?
+        }
+    };
     let server = Arc::new(server);
 
     // Stash a handle so `request_shutdown()` can unblock the loop.
