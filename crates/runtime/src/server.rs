@@ -2223,24 +2223,38 @@ fn start_server(
                 continue;
             }
 
-            // Derive the public base URL from the request's Host header +
-            // X-Forwarded-Proto (Fly / any HTTPS terminator sets this).
-            // Hardcoding `http://localhost:{port}` here meant the studio
-            // HTML served from pylon-crm.fly.dev tried to fetch
-            // http://localhost:4321/api/* from the browser, which CSP
-            // rightly blocks.
-            let host = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Host"))
-                .map(|h| h.value.as_str().to_string())
+            // Derive the public base URL from the request's headers.
+            // Prefer X-Forwarded-Host over Host because reverse proxies
+            // (Vercel external rewrites, Cloudflare Workers, ALBs) may
+            // pass the upstream host in Host while preserving the
+            // original public host in X-Forwarded-Host. Without this,
+            // a Pylon backend behind cloud.example.com → api.example.com
+            // serves the studio bundle wired to api.example.com — the
+            // browser then makes cross-origin fetches that get killed
+            // by CSP AND drop the user's same-origin session cookie.
+            // Same fix logic for the scheme.
+            let mut x_fwd_host: Option<String> = None;
+            let mut req_host: Option<String> = None;
+            let mut x_fwd_proto: Option<String> = None;
+            for h in request.headers().iter() {
+                if h.field.equiv("X-Forwarded-Host") {
+                    x_fwd_host = Some(h.value.as_str().to_string());
+                } else if h.field.equiv("Host") {
+                    req_host = Some(h.value.as_str().to_string());
+                } else if h.field.equiv("X-Forwarded-Proto") {
+                    x_fwd_proto = Some(h.value.as_str().to_string());
+                }
+            }
+            let host = x_fwd_host
+                .or(req_host)
                 .unwrap_or_else(|| format!("localhost:{port}"));
-            let scheme = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("X-Forwarded-Proto"))
-                .map(|h| h.value.as_str().to_string())
-                .unwrap_or_else(|| "http".to_string());
+            let scheme = x_fwd_proto.unwrap_or_else(|| {
+                if host.starts_with("localhost") {
+                    "http".to_string()
+                } else {
+                    "https".to_string()
+                }
+            });
             let base = format!("{scheme}://{host}");
             let studio_cfg = rt.studio_config();
             let html = pylon_studio_api::generate_studio_html(rt.manifest(), &studio_cfg, &base);
