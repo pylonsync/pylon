@@ -64,12 +64,17 @@ export function StudioLayout({
 	const { me, hasToken, loading, signOut } = useAuth();
 	const [signInOpen, setSignInOpen] = useState(false);
 	const isAdmin = !!me?.is_admin;
+	// Cookie-authed users don't have a Bearer token in localStorage but
+	// /api/auth/me resolves their session and sets `me.user_id`. Treat
+	// "has a resolved session" as authed. hasToken is OR'd in for the
+	// Bearer path so legacy admin-token signins still register.
+	const isAuthed = !!me?.user_id || hasToken;
 
 	const sections = useMemo(() => resolveNav(config, MANIFEST), [config]);
 	const footer = useMemo(() => defaultFooter(config.sidebar), [config.sidebar]);
 
 	// Block the main content area for unauthenticated callers.
-	const requireAuth = !loading && !hasToken;
+	const requireAuth = !loading && !isAuthed;
 
 	const crumbs = useMemo<BreadcrumbCrumb[]>(() => {
 		const head: BreadcrumbCrumb = {
@@ -118,7 +123,7 @@ export function StudioLayout({
 						)}
 						<SidebarMenu className="px-2 pb-2">
 							<SidebarMenuItem>
-								{hasToken ? (
+								{isAuthed ? (
 									<DropdownMenu>
 										<DropdownMenuTrigger asChild>
 											<SidebarMenuButton tooltip="Account">
@@ -174,7 +179,7 @@ export function StudioLayout({
 					<header className="flex h-14 shrink-0 items-center gap-3 border-b px-6">
 						<Breadcrumbs crumbs={crumbs} />
 						<div className="ml-auto flex items-center gap-2">
-							{!hasToken && (
+							{!isAuthed && (
 								<Button
 									size="sm"
 									variant="outline"
@@ -183,7 +188,7 @@ export function StudioLayout({
 									<LogIn className="size-3.5" /> Sign in
 								</Button>
 							)}
-							{hasToken && (
+							{isAuthed && (
 								<Badge variant={isAdmin ? "default" : "secondary"}>
 									{isAdmin ? "Admin" : "Signed in"}
 								</Badge>

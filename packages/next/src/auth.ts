@@ -86,7 +86,21 @@ export function startOAuthLogin(
 	opts: StartOAuthLoginOptions = {},
 ): void {
 	const origin = window.location.origin;
-	const successUrl = opts.successUrl ?? `${origin}/dashboard`;
+	// Honor ?next=<path> on the current URL so that when the framework's
+	// /studio gate (or any other proxy.ts auth bounce) sends the user
+	// here with `?next=/studio`, the OAuth flow lands them back on
+	// /studio instead of the generic /dashboard. Same-origin only —
+	// reject absolute URLs and protocol-relative paths to close the
+	// open-redirect vector.
+	const nextParam =
+		typeof window !== "undefined"
+			? new URLSearchParams(window.location.search).get("next")
+			: null;
+	const safeNext =
+		nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
+			? `${origin}${nextParam}`
+			: null;
+	const successUrl = opts.successUrl ?? safeNext ?? `${origin}/dashboard`;
 	const errorUrl = opts.errorUrl ?? `${origin}/login`;
 	const params = new URLSearchParams({
 		redirect: "1",
