@@ -1170,6 +1170,46 @@ fn start_server(
                 }
             }
         }
+        // Per-user admin: if manifest sets auth.user.admin_field, look
+        // up the user record and lift is_admin when that field is
+        // truthy. Apps with a User.isAdmin column (or "admin" role)
+        // configure this so platform admins sign in with their regular
+        // account and Studio respects the role — no shared admin token
+        // to share + rotate. PYLON_ADMIN_TOKEN still works as the
+        // bootstrap path for fresh deploys with no User rows yet.
+        if !auth_ctx.is_admin {
+            if let Some(uid) = auth_ctx.user_id.as_deref() {
+                if let Some(field) = runtime
+                    .manifest()
+                    .auth
+                    .user
+                    .admin_field
+                    .as_deref()
+                    .filter(|f| !f.is_empty())
+                {
+                    let user_entity = runtime.manifest().auth.user.entity.as_str();
+                    use pylon_http::DataStore as _;
+                    if let Ok(Some(row)) = runtime.get_by_id(user_entity, uid) {
+                        let truthy = match row.get(field) {
+                            Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+                            Some(v) if v.is_string() => {
+                                let s = v.as_str().unwrap_or("").to_ascii_lowercase();
+                                s == "true" || s == "1" || s == "admin"
+                            }
+                            Some(v) if v.is_number() => v.as_i64().map(|n| n != 0).unwrap_or(false),
+                            Some(v) if v.is_array() => v
+                                .as_array()
+                                .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
+                                .unwrap_or(false),
+                            _ => false,
+                        };
+                        if truthy {
+                            auth_ctx.is_admin = true;
+                        }
+                    }
+                }
+            }
+        }
         let auth_ctx = auth_ctx;
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---

@@ -415,5 +415,24 @@
       "allowDelete": "auth.userId != null",
       "entity": "Watch"
     }
-  ]
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "trusted_origins": []
+  }
 }

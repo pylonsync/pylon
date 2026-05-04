@@ -153,6 +153,24 @@ pub struct ManifestAuthUserConfig {
     /// secrets stored on the User row.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
+    /// Field name on the User row that, when truthy, marks the
+    /// session as `auth.is_admin = true`. Default unset (only the
+    /// PYLON_ADMIN_TOKEN env-bearer path grants admin). When set,
+    /// resolving a session cookie loads the user, reads this field,
+    /// and lifts is_admin if it's `true`/`1`/non-empty.
+    ///
+    /// Apps that want per-user admin (Studio access for specific
+    /// User rows instead of a shared bootstrap token) set this to
+    /// `"isAdmin"` (or whichever bool field they store on User).
+    /// Pylon-cloud uses this so platform admins sign in with their
+    /// regular account and Studio respects the role.
+    ///
+    /// Bootstrap pattern: PYLON_ADMIN_TOKEN keeps working for CI /
+    /// fresh deploys with no User rows yet. The two paths are
+    /// additive — admin token OR matching admin field both grant
+    /// `is_admin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_field: Option<String>,
 }
 
 impl Default for ManifestAuthUserConfig {
@@ -161,6 +179,7 @@ impl Default for ManifestAuthUserConfig {
             entity: default_user_entity(),
             expose: Vec::new(),
             hide: Vec::new(),
+            admin_field: None,
         }
     }
 }

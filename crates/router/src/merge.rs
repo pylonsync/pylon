@@ -172,6 +172,7 @@ mod tests {
                     entity: "User".into(),
                     expose: vec![],
                     hide: vec![],
+                    admin_field: None,
                 },
                 ..Default::default()
             },

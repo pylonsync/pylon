@@ -7,6 +7,7 @@
     "dev": "pylon dev"
   },
   "dependencies": {
+    "@pylonsync/cli": "^0.3.23",
     "@pylonsync/functions": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sdk": "workspace:*"
