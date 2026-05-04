@@ -37,6 +37,12 @@ pub struct StudioConfig {
     /// is set.
     #[serde(default)]
     pub has_extensions: bool,
+    /// URL to redirect unauthenticated `/studio` callers to. Apps with
+    /// their own login page (Pylon Cloud, dashboards) point this at
+    /// their existing flow so users don't see the built-in admin-token
+    /// form. The framework appends `?next=/studio`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

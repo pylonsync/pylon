@@ -2128,10 +2128,20 @@ fn start_server(
                 "{}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
                 admin_cookie_name,
             );
+            // Send the user back to wherever they'd go to sign in.
+            // For cookie-authed cloud users this is the host's
+            // /login page — they need to sign in as a different
+            // (admin) account, not paste an admin token.
+            let target = rt
+                .studio_config()
+                .login_url
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/studio/login".to_string());
             let response = with_security_headers(
                 Response::from_string("")
                     .with_status_code(303u16)
-                    .with_header(Header::from_bytes("Location", "/studio/login").unwrap())
+                    .with_header(Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap())
                     .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
             );
             let _ = request.respond(response);
@@ -2143,19 +2153,75 @@ fn start_server(
             || url == "/studio/")
             && method == Method::Get
         {
-            // Studio HTML is served unconditionally — the React app's
-            // <SignInDialog> handles the admin gate at the JS layer
-            // by submitting to POST /studio/login. Pre-gating here
-            // meant browser callers got a JSON 401 with no path
-            // forward (Authorization headers can't be set without an
-            // extension). The /api/* + /studio/extensions.js gates
-            // still enforce admin downstream so the bundle can't
-            // actually fetch anything sensitive without auth.
+            // Three-state Studio gate. The React bundle ships the full
+            // manifest (entity names, function names, policy names) at
+            // build time; serving it to anyone but admins leaks the
+            // entire data-model shape, AND drops the user into a dead
+            // "paste your admin token" dialog that doesn't match how
+            // most production apps actually authenticate operators.
             //
-            // The HTML carries the public manifest shape (entity
-            // names, policy names, route shapes) which is fine to
-            // disclose — it matches what /api/manifest exposes
-            // publicly anyway.
+            // Cases:
+            //   1. is_admin: serve the studio HTML (bundle loads
+            //      normally; React calls /api/auth/me and renders
+            //      admin tabs).
+            //   2. authed-but-not-admin: serve a small "access denied"
+            //      HTML page with a logout link. No point sending them
+            //      back to a login they're already past.
+            //   3. anonymous: 303 redirect. Prefer the app's
+            //      `studio.config.ts -> loginUrl` (e.g. Pylon Cloud's
+            //      `/login` dashboard page) so users land on the real
+            //      email/password form and the existing session cookie
+            //      lifts them via `auth.user.adminField` on the way
+            //      back. Falls back to `/studio/login` (the built-in
+            //      admin-token form) for stand-alone Pylon apps.
+            //
+            // Dev mode is exempt — `pylon dev` is single-user local and
+            // pre-gating here is just friction.
+            if !is_dev && !auth_ctx.is_admin {
+                let studio_cfg = rt.studio_config();
+                if auth_ctx.user_id.is_some() {
+                    // Authed but not admin. Render a static page so the
+                    // user understands they can't escalate by reloading
+                    // — they need a different account.
+                    let html = studio_no_access_html();
+                    let response = with_security_headers(
+                        Response::from_string(html)
+                            .with_status_code(403u16)
+                            .with_header(
+                                Header::from_bytes(
+                                    "Content-Type",
+                                    "text/html; charset=utf-8",
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 403);
+                    continue;
+                }
+                let target = studio_cfg
+                    .login_url
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        // Append ?next=/studio so the host app can
+                        // bounce back. Keep it dumb — no query parsing
+                        // because most app login URLs don't already
+                        // carry a query.
+                        let sep = if s.contains('?') { '&' } else { '?' };
+                        format!("{s}{sep}next=/studio")
+                    })
+                    .unwrap_or_else(|| "/studio/login".to_string());
+                let response = with_security_headers(
+                    Response::from_string("")
+                        .with_status_code(303u16)
+                        .with_header(Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap()),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 303);
+                continue;
+            }
+
             // Derive the public base URL from the request's Host header +
             // X-Forwarded-Proto (Fly / any HTTPS terminator sets this).
             // Hardcoding `http://localhost:{port}` here meant the studio
@@ -2512,6 +2578,40 @@ fn studio_login_html(error: Option<&str>) -> String {
 </body>
 </html>"#,
     )
+}
+
+/// "You're signed in but not an admin" page. Rendered when the /studio
+/// gate sees a resolved user without is_admin — the user has a working
+/// session, so we don't bounce them back through login. Instead we tell
+/// them what's wrong and offer a logout link to switch accounts. Plain
+/// HTML so it doesn't depend on the Studio bundle (which we're refusing
+/// to serve).
+fn studio_no_access_html() -> String {
+    r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pylon Studio · access denied</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  .card { width: 420px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); text-align: center; }
+  h1 { margin: 0 0 8px; font-size: 18px; letter-spacing: -0.01em; }
+  p { margin: 0 0 12px; color: #555; font-size: 13px; }
+  a.btn { display: inline-block; margin-top: 12px; padding: 8px 14px; background: #2a5fdf; color: #fff; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; }
+  a.btn:hover { background: #1f4cb8; }
+  .muted { color: #888; font-size: 11.5px; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Studio access denied</h1>
+  <p>Your account is signed in but doesn't have admin privileges on this Pylon.</p>
+  <a class="btn" href="/studio/logout">Sign out and try a different account</a>
+  <div class="muted">Need access? Ask whoever runs this Pylon to mark your account as admin.</div>
+</div>
+</body>
+</html>"##.to_string()
 }
 
 fn escape_html(s: &str) -> String {

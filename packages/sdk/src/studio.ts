@@ -349,6 +349,22 @@ export interface StudioConfig {
    * present in the project, so users rarely set it explicitly.
    */
   hasExtensions?: boolean;
+  /**
+   * URL to send unauthenticated callers to when they hit `/studio`.
+   * Lets a host app (Pylon Cloud, an enterprise dashboard) point the
+   * Studio gate at its own email/password login page instead of the
+   * built-in `/studio/login` admin-token form.
+   *
+   * The framework appends `?next=/studio` so the host app can redirect
+   * back after sign-in. Authenticated-but-not-admin users still see
+   * the framework's "access denied" page (no point sending them back
+   * to a login they're already past).
+   *
+   * Example: `loginUrl: "/login"` — cloud.pylonsync.com handles `/login`
+   * at the dashboard, and the user's existing session cookie lifts
+   * them to admin via `auth.user.adminField` on the way back.
+   */
+  loginUrl?: string;
 }
 
 /**
