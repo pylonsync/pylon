@@ -532,43 +532,59 @@ fn start_server(
     // Bearer <session>`. The combination of `*` + credentials is a spec
     // violation that some browsers tolerate, and even when they don't it
     // lets any origin drive bearer-auth APIs.
-    let cors_origin = match std::env::var("PYLON_CORS_ORIGIN") {
+    let cors_origin_env = match std::env::var("PYLON_CORS_ORIGIN") {
         Ok(v) => v,
         Err(_) if is_dev => "*".to_string(),
         Err(_) => {
             return Err(
                 "PYLON_CORS_ORIGIN must be set in production (non-dev mode). \
-                Set it to your frontend's origin, or set PYLON_DEV_MODE=true \
-                for local development."
+                Set it to your frontend's origin (or comma-separated list), \
+                or set PYLON_DEV_MODE=true for local development."
                     .into(),
             );
         }
     };
-    if !is_dev && cors_origin == "*" {
+    if !is_dev && cors_origin_env == "*" {
         return Err("PYLON_CORS_ORIGIN=\"*\" is refused in production mode. \
-            Set it to an explicit origin (https://app.example.com)."
+            Set it to an explicit origin (https://app.example.com), or a \
+            comma-separated list."
             .into());
+    }
+    // PYLON_CORS_ORIGIN supports a comma-separated allowlist so a single
+    // backend can serve multiple frontends (apex + custom domain, dev +
+    // staging + prod, etc.). Per-request we echo back the matching
+    // entry from the request's Origin header — without that, browsers
+    // reject the response because Access-Control-Allow-Origin must be
+    // exactly one value (or `*`), not a list.
+    let cors_allowlist: Vec<String> = cors_origin_env
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cors_allowlist.is_empty() {
+        return Err("PYLON_CORS_ORIGIN parsed to an empty allowlist".into());
+    }
+    // Validate each entry is a valid HTTP header value so per-request
+    // header construction never panics on bad bytes.
+    for origin in &cors_allowlist {
+        if Header::from_bytes(
+            "Access-Control-Allow-Origin",
+            origin.as_bytes().to_vec(),
+        )
+        .is_err()
+        {
+            return Err(format!(
+                "PYLON_CORS_ORIGIN entry {origin:?} contains bytes that are not a valid HTTP header value"
+            ));
+        }
     }
     // Browsers forbid combining `Access-Control-Allow-Origin: *` with
     // `Access-Control-Allow-Credentials: true`. Cookie-based auth needs
-    // credentials, so we only emit the credentials header when the origin
-    // is specific. In dev with `*` we lose cookies-from-cross-origin
-    // (acceptable: dev typically uses same-origin proxying), but we
-    // refuse to send a header combo browsers will reject either way.
-    let allow_credentials = cors_origin != "*";
-    // Validate the origin once so per-request header construction can never
-    // panic on bad bytes. Previously every `Header::from_bytes(...).unwrap()`
-    // was a potential request-triggered DoS via env misconfiguration.
-    if Header::from_bytes(
-        "Access-Control-Allow-Origin",
-        cors_origin.as_bytes().to_vec(),
-    )
-    .is_err()
-    {
-        return Err(format!(
-            "PYLON_CORS_ORIGIN={cors_origin:?} contains bytes that are not a valid HTTP header value"
-        ));
-    }
+    // credentials, so we only emit credentials when the allowlist
+    // doesn't include `*` (which would force the wildcard-no-credentials
+    // path).
+    let allow_credentials = !cors_allowlist.iter().any(|o| o == "*");
+    let cors_allowlist = Arc::new(cors_allowlist);
 
     // Admin token: read once at startup, not per-request.
     let admin_token: Option<String> = std::env::var("PYLON_ADMIN_TOKEN").ok();
@@ -616,8 +632,11 @@ fn start_server(
         Err(_) => {
             if is_dev {
                 vec!["*".to_string()]
-            } else if cors_origin != "*" {
-                vec![cors_origin.clone()]
+            } else if !cors_allowlist.iter().any(|o| o == "*") {
+                // Inherit the full CORS allowlist as trusted origins
+                // for CSRF purposes — every origin allowed for fetch
+                // is also allowed to drive a cross-origin POST.
+                cors_allowlist.iter().cloned().collect()
             } else {
                 // Non-dev + wildcard was already rejected, but guard anyway.
                 vec![]
@@ -798,7 +817,29 @@ fn start_server(
         let we = Arc::clone(&workflow_engine);
         let fn_ops_ref = fn_ops_maybe.clone();
         let shards_ref = shard_registry.clone();
-        let cors_origin = cors_origin.clone();
+        // Compute the per-request CORS origin to echo back: match the
+        // request's Origin header against the allowlist; fall back to
+        // the first allowlist entry on miss (which the browser then
+        // rejects, which is what we want — never silently let a wrong
+        // origin through). Wildcard allowlist short-circuits to "*".
+        let cors_origin: String = {
+            let req_origin = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Origin"))
+                .map(|h| h.value.as_str().to_string());
+            if cors_allowlist.iter().any(|o| o == "*") {
+                "*".to_string()
+            } else {
+                match req_origin {
+                    Some(o) if cors_allowlist.iter().any(|a| *a == o) => o,
+                    _ => cors_allowlist
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "null".to_string()),
+                }
+            }
+        };
         let cookie_config = Arc::clone(&cookie_config);
         let allow_credentials = allow_credentials;
         let is_dev = is_dev;
