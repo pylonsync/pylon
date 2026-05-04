@@ -92,6 +92,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Runtime shared libs for samael's SAML XMLDSig verification path —
     # the binary dynamically links against these at startup.
     libxml2 libxmlsec1 libxmlsec1-openssl \
+    # sqlite3 CLI: Pylon Cloud's getProjectDatabaseStats shells in via
+    # the Fly Machines exec API to read table + row counts off the
+    # customer's /data/pylon.db. Without this, the dashboard's
+    # Database tab silently shows 0 tables / 0 rows.
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
     && ln -s /usr/local/bin/bun /usr/bin/bun
