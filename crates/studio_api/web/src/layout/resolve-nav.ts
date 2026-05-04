@@ -198,7 +198,7 @@ export function defaultFooter(config: SidebarConfig | undefined) {
 			title: "Pylon Studio",
 			description:
 				"Configure brand, resources, and theme via studio.config.ts",
-			action: { label: "Read the docs", href: "https://github.com/pylon-tools/pylon" },
+			action: { label: "Read the docs", href: "https://docs.pylonsync.com" },
 		}
 	);
 }
