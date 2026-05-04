@@ -75,3 +75,4 @@ REVIEW.*.md
 
 # Roadmap is tracked in private planning, not the public repo.
 ROADMAP.md
+.deepsec/
