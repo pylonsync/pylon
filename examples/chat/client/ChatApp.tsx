@@ -53,12 +53,31 @@ import { cn } from "@pylonsync/example-ui/utils";
 // VITE_PYLON_URL on Vercel (or your host) to e.g.
 // https://pylon-chat.fly.dev. Falls back to localhost so `bun
 // run dev` works without any env config.
-const BASE_URL =
-  (import.meta as { env?: { VITE_PYLON_URL?: string } }).env?.VITE_PYLON_URL ??
-  "http://localhost:4321";
+type ViteEnv = {
+  VITE_PYLON_URL?: string;
+  VITE_PYLON_WS_URL?: string;
+};
+const env = (import.meta as { env?: ViteEnv }).env ?? {};
+const BASE_URL = env.VITE_PYLON_URL ?? "http://localhost:4321";
+// WS hub URL. Pylon's runtime listens on port+1 (4322) on a
+// separate TCP listener — the HTTP server doesn't yet multiplex
+// Upgrade: websocket on the main port. In production (Pylon
+// Cloud), the Fly machine exposes that as wss://<host>:4322.
+// VITE_PYLON_WS_URL overrides everything for self-hosted setups
+// behind a reverse proxy that DOES multiplex.
+const WS_URL =
+  env.VITE_PYLON_WS_URL ?? deriveWsUrl(BASE_URL);
+function deriveWsUrl(base: string): string {
+  const url = new URL(base);
+  const scheme = url.protocol === "https:" ? "wss" : "ws";
+  // Local dev: http://localhost:4321 → ws://localhost:4322.
+  // Prod: https://app.fly.dev → wss://app.fly.dev:4322.
+  const port = url.port ? Number(url.port) + 1 : 4322;
+  return `${scheme}://${url.hostname}:${port}`;
+}
 // Give this app its own namespace so chat's auth + replica don't clobber
 // any other Pylon app served from the same browser origin.
-init({ baseUrl: BASE_URL, appName: "chat" });
+init({ baseUrl: BASE_URL, appName: "chat", wsUrl: WS_URL });
 configureClient({ baseUrl: BASE_URL, appName: "chat" });
 
 // ---------------------------------------------------------------------------
