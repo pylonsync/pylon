@@ -567,12 +567,7 @@ fn start_server(
     // Validate each entry is a valid HTTP header value so per-request
     // header construction never panics on bad bytes.
     for origin in &cors_allowlist {
-        if Header::from_bytes(
-            "Access-Control-Allow-Origin",
-            origin.as_bytes().to_vec(),
-        )
-        .is_err()
-        {
+        if Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes().to_vec()).is_err() {
             return Err(format!(
                 "PYLON_CORS_ORIGIN entry {origin:?} contains bytes that are not a valid HTTP header value"
             ));
