@@ -1,5 +1,68 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// Rolling per-minute buckets for the request count + error count.
+/// Sized for the Studio Overview's "last 60 minutes" sparkline. Cheap
+/// to update (one mutex lock + two array bumps per request) and tiny
+/// (~960 bytes). The Mutex-guarded path runs once per request,
+/// dwarfed by everything else in the dispatch — not a hot-path
+/// concern.
+const ROLLUP_MINUTES: usize = 60;
+
+struct RequestBuckets {
+	/// Wall-clock minute (epoch seconds / 60) the head bucket
+	/// represents. We rotate when the current minute moves past this.
+	head_minute: u64,
+	/// Total + errors per minute, ring-buffered. `requests[0]` is the
+	/// most recent minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago.
+	requests: [u64; ROLLUP_MINUTES],
+	errors: [u64; ROLLUP_MINUTES],
+}
+
+impl RequestBuckets {
+	fn new() -> Self {
+		Self {
+			head_minute: 0,
+			requests: [0; ROLLUP_MINUTES],
+			errors: [0; ROLLUP_MINUTES],
+		}
+	}
+
+	/// Bump the current-minute bucket. Rotates the ring when the wall
+	/// clock crosses a minute boundary. Drops samples if we go more
+	/// than ROLLUP_MINUTES minutes idle (sparkline shows zeros for
+	/// missing slots — accurate).
+	fn record(&mut self, status: u16) {
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map(|d| d.as_secs() / 60)
+			.unwrap_or(0);
+		if self.head_minute == 0 {
+			self.head_minute = now;
+		}
+		let advance = now.saturating_sub(self.head_minute) as usize;
+		if advance > 0 {
+			let shift = advance.min(ROLLUP_MINUTES);
+			// Shift ring right by `shift` slots, zeroing the freed head.
+			self.requests.rotate_right(shift);
+			self.errors.rotate_right(shift);
+			for i in 0..shift {
+				self.requests[i] = 0;
+				self.errors[i] = 0;
+			}
+			self.head_minute = now;
+		}
+		self.requests[0] = self.requests[0].saturating_add(1);
+		if !(200..400).contains(&status) {
+			self.errors[0] = self.errors[0].saturating_add(1);
+		}
+	}
+
+	fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
+		(self.requests.to_vec(), self.errors.to_vec())
+	}
+}
 
 /// Per-HTTP-method request counters.
 pub struct MethodCounters {
@@ -42,6 +105,9 @@ pub struct Metrics {
     pub requests_ok: AtomicU64,
     pub requests_err: AtomicU64,
     pub requests_by_method: MethodCounters,
+    /// Rolling 60-minute window for the Studio Overview sparkline.
+    /// Mutex-guarded because we rotate the ring on minute boundaries.
+    request_buckets: Mutex<RequestBuckets>,
     start_time: Instant,
 }
 
@@ -80,6 +146,7 @@ impl Metrics {
             requests_ok: AtomicU64::new(0),
             requests_err: AtomicU64::new(0),
             requests_by_method: MethodCounters::new(),
+            request_buckets: Mutex::new(RequestBuckets::new()),
             start_time: Instant::now(),
         }
     }
@@ -102,6 +169,12 @@ impl Metrics {
             self.requests_err.fetch_add(1, Ordering::Relaxed);
         }
         self.requests_by_method.increment(method);
+        // Rolling sparkline buckets. Lock for the rotation + bump;
+        // contention is fine — `record_request` already serializes
+        // through one tracing::info! per call.
+        if let Ok(mut buckets) = self.request_buckets.lock() {
+            buckets.record(status);
+        }
 
         // Pull the per-request context if set. We log even without it
         // (just method + status) so callers that haven't been wired
@@ -126,14 +199,24 @@ impl Metrics {
         self.start_time.elapsed().as_secs()
     }
 
-    /// Return a JSON snapshot of all current metrics.
+    /// Return a JSON snapshot of all current metrics, including the
+    /// rolling 60-minute requests + errors series used by the Studio
+    /// Overview sparkline. Index 0 is the current minute (partial),
+    /// index 59 is 59 minutes ago.
     pub fn snapshot(&self) -> serde_json::Value {
+        let (requests_per_min, errors_per_min) = self
+            .request_buckets
+            .lock()
+            .map(|b| b.snapshot())
+            .unwrap_or((vec![0; ROLLUP_MINUTES], vec![0; ROLLUP_MINUTES]));
         serde_json::json!({
             "uptime_secs": self.uptime_secs(),
             "requests": {
                 "total": self.requests_total.load(Ordering::Relaxed),
                 "ok": self.requests_ok.load(Ordering::Relaxed),
                 "error": self.requests_err.load(Ordering::Relaxed),
+                "per_minute": requests_per_min,
+                "errors_per_minute": errors_per_min,
             },
             "methods": {
                 "GET": self.requests_by_method.get.load(Ordering::Relaxed),

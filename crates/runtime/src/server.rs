@@ -930,7 +930,68 @@ fn start_server(
             let (body, content_type) = if prefers_prometheus {
                 (mt.prometheus(), "text/plain; version=0.0.4")
             } else {
-                (mt.snapshot().to_string(), "application/json")
+                // Augment the bare HTTP snapshot with live operational
+                // stats so the Studio Overview can render jobs/workflows/
+                // ws/sse without N more round-trips. Each accessor is a
+                // cheap atomic load or single mutex snapshot — fine to
+                // call on every /metrics fetch.
+                let mut snap = mt.snapshot();
+                if let Some(obj) = snap.as_object_mut() {
+                    let job_stats = job_queue.stats();
+                    obj.insert(
+                        "jobs".to_string(),
+                        serde_json::json!({
+                            "pending": job_stats.pending,
+                            "running": job_stats.running,
+                            "completed": job_stats.completed,
+                            "failed": job_stats.failed,
+                            "dead": job_stats.dead,
+                            "handlers": job_stats.handlers,
+                        }),
+                    );
+                    // Bucket workflow instances by their status variant
+                    // for the dashboard. One pass over the in-memory list;
+                    // workflows are bounded by max_history so this is
+                    // O(few thousand) at worst.
+                    let mut wf_pending = 0usize;
+                    let mut wf_running = 0usize;
+                    let mut wf_waiting = 0usize;
+                    let mut wf_sleeping = 0usize;
+                    let mut wf_completed = 0usize;
+                    let mut wf_failed = 0usize;
+                    let mut wf_cancelled = 0usize;
+                    for inst in workflow_engine.list(None) {
+                        match inst.status {
+                            crate::workflows::WorkflowStatus::Pending => wf_pending += 1,
+                            crate::workflows::WorkflowStatus::Running => wf_running += 1,
+                            crate::workflows::WorkflowStatus::WaitingForEvent => wf_waiting += 1,
+                            crate::workflows::WorkflowStatus::Sleeping => wf_sleeping += 1,
+                            crate::workflows::WorkflowStatus::Completed => wf_completed += 1,
+                            crate::workflows::WorkflowStatus::Failed => wf_failed += 1,
+                            crate::workflows::WorkflowStatus::Cancelled => wf_cancelled += 1,
+                        }
+                    }
+                    obj.insert(
+                        "workflows".to_string(),
+                        serde_json::json!({
+                            "pending": wf_pending,
+                            "running": wf_running,
+                            "waiting": wf_waiting,
+                            "sleeping": wf_sleeping,
+                            "completed": wf_completed,
+                            "failed": wf_failed,
+                            "cancelled": wf_cancelled,
+                        }),
+                    );
+                    obj.insert(
+                        "realtime".to_string(),
+                        serde_json::json!({
+                            "ws_connections": ws_hub.client_count(),
+                            "sse_connections": sse_hub.client_count(),
+                        }),
+                    );
+                }
+                (snap.to_string(), "application/json")
             };
             let response = with_security_headers(
                 Response::from_string(&body)
