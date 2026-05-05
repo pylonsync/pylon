@@ -391,43 +391,43 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.40",
+      "version": "0.3.41",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.40",
-        "@pylonsync/cli-darwin-x64": "0.3.40",
-        "@pylonsync/cli-linux-arm64": "0.3.40",
-        "@pylonsync/cli-linux-x64": "0.3.40",
+        "@pylonsync/cli-darwin-arm64": "0.3.41",
+        "@pylonsync/cli-darwin-x64": "0.3.41",
+        "@pylonsync/cli-linux-arm64": "0.3.41",
+        "@pylonsync/cli-linux-x64": "0.3.41",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.3.40",
+      "version": "0.3.41",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.40",
+      "version": "0.3.41",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -459,7 +459,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.40",
+      "version": "0.3.41",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -475,7 +475,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.40",
+      "version": "0.3.41",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -507,11 +507,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.40",
+      "version": "0.3.41",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
