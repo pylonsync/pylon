@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon World3D — 3D multiplayer avatar world.
  *

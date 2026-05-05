@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Trade — live market dashboard.
  *

@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Lot detail — bidding interface for a timed lot. Live bid history,
  * countdown timer, and a bid form. Closing-soon state pulses red.

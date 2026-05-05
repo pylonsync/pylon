@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Live auction room — auctioneer's stage on the left, current lot
  * spotlight in the center, lot order on the right. The auctioneer

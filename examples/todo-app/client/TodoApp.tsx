@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Todo — the canonical hello-world.
  *
@@ -41,7 +43,7 @@ import {
 } from "@pylonsync/example-ui/select";
 import { cn } from "@pylonsync/example-ui/utils";
 
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
+const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "todo-app" });
 configureClient({ baseUrl: BASE_URL, appName: "todo-app" });
 

@@ -13,7 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { configureClient, db, storageKey } from "@pylonsync/react";
 import type { AuthUser } from "./types";
 
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
+const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
 
 type StoredAuth = {
   token: string | null;

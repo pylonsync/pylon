@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Account — bid history + watchlist for the current user.
  */

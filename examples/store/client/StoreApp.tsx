@@ -31,9 +31,9 @@ import { ensureGuestSession, useAuth } from "./lib/auth";
 import { useCart } from "./lib/cart";
 import { navigate } from "./lib/util";
 
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
+const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
 const WS_URL =
-  import.meta.env.VITE_PYLON_WS_URL ??
+  process.env.NEXT_PUBLIC_PYLON_WS_URL ??
   (BASE_URL.startsWith("https://")
     ? `${BASE_URL.replace(/^https:/, "wss:").replace(/\/$/, "")}:4322`
     : undefined);

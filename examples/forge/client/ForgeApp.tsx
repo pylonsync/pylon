@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Forge — collaborative 3D scene editor.
  *

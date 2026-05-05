@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Dallas Door Designs — custom residential entry doors, designed, fabricated,
  *
@@ -22,9 +24,9 @@ import {
 //   VITE_PYLON_URL    = https://pylon-erp.fly.dev
 //   VITE_PYLON_WS_URL = wss://pylon-erp.fly.dev:4322
 // Local dev picks up port+1 (4322) from the pylon dev output.
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
+const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
 const WS_URL =
-  import.meta.env.VITE_PYLON_WS_URL ??
+  process.env.NEXT_PUBLIC_PYLON_WS_URL ??
   (BASE_URL.startsWith("https://")
     ? `${BASE_URL.replace(/^https:/, "wss:").replace(/\/$/, "")}:4322`
     : undefined);

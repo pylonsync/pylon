@@ -10,11 +10,14 @@
     "examples/*/web"
   ],
   "devDependencies": {
+    "turbo": "^2.5.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "bun run --filter '*' --if-present build",
-    "check": "bun run --filter '*' --if-present check"
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "check": "turbo check",
+    "lint": "turbo lint"
   },
   "overrides": {
     "@types/react": "^19.2.0",

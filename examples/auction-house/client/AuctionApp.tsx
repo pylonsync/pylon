@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Auction House — timed + live auctions with many lots.
  *
@@ -26,7 +28,7 @@ import { UserMenu } from "./UserMenu";
 import { ensureGuestSession, useAuth } from "./lib/auth";
 import { navigate } from "./lib/util";
 
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
+const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "auction-house" });
 
 type Route =

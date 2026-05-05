@@ -1,3 +1,5 @@
+"use client";
+
 import { useEffect, useRef, useState } from "react";
 import { LogOut, User as UserIcon, Wallet } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";

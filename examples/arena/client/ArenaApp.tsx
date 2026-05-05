@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Arena — mass-multiplayer dot simulation.
  *

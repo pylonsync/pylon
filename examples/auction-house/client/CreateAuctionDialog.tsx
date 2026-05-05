@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Host an auction — title, description, kind, schedule, lot list.
  * Calls `createAuction` server function which atomically creates the

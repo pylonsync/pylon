@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Bench — in-browser load test dashboard.
  *

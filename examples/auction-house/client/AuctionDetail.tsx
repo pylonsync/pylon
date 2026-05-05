@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Auction detail — banner + lot grid for a timed auction. Each lot
  * card shows current bid, time remaining, and links to its dedicated

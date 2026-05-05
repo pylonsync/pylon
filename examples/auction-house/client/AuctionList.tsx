@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Homepage — featured + upcoming + ended auctions.
  *

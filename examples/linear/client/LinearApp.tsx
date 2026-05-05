@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * Pylon Linear clone — org → teams → issues + cycles + projects +
  * comments. Keyboard-driven: j/k navigate, c create, ⌘K command
