@@ -61,6 +61,9 @@ export type {
 export { useSession } from "./useSession";
 export type { UseSessionReturn, ResolvedSession } from "./useSession";
 
+export { useSyncStatus } from "./useSyncStatus";
+export type { SyncConnectionStatus } from "./useSyncStatus";
+
 // One-liner API
 export { db, init } from "./db";
 

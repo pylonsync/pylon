@@ -483,12 +483,39 @@ function newUuidLike(): string {
   return `cl_${t}_${rand}`;
 }
 
+/**
+ * Coarse connection state for UI consumers.
+ *
+ * - `connecting`   — engine is starting up; first WS handshake hasn't
+ *                    completed yet. Apps typically render their initial
+ *                    skeleton during this state.
+ * - `connected`    — WS is open and we've stayed open long enough to
+ *                    consider it stable (5s on the wire). Live queries
+ *                    are receiving real-time updates.
+ * - `reconnecting` — WS dropped (network blip, Fly autostop) and the
+ *                    engine is backing off + retrying. Live queries
+ *                    keep returning the last-known data; mutations
+ *                    queue locally and replay on the next connect.
+ * - `offline`      — engine has been stopped via `engine.stop()` or
+ *                    was never started. No retries pending.
+ *
+ * The `useSyncStatus` hook in `@pylonsync/react` subscribes to this
+ * via the existing store notify channel so re-renders happen
+ * automatically without a separate event bus.
+ */
+export type SyncConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "offline";
+
 export class SyncEngine {
   private config: SyncEngineConfig;
   private cursor: SyncCursor = { last_seq: 0 };
   private running = false;
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _connectionStatus: SyncConnectionStatus = "offline";
   /** Monotonic attempt counter for exponential backoff. Reset to 0 on a
    *  successful connection so the next reconnect starts fresh rather than
    *  inheriting the previous storm's cooldown. */
@@ -598,6 +625,27 @@ export class SyncEngine {
     return this._resolvedSession;
   }
 
+  /**
+   * Coarse connection state (see `SyncConnectionStatus`). Updated as
+   * the WS opens/closes and reconnect attempts run; subscribers re-
+   * render via the same store notify channel as live queries, so
+   * `useSyncStatus` is just a thin reader.
+   */
+  connectionStatus(): SyncConnectionStatus {
+    return this._connectionStatus;
+  }
+
+  /**
+   * Mutate connection status + notify subscribers. Idempotent — same-
+   * status calls are a no-op so the WS onopen → connected transition
+   * doesn't spam re-renders during a stable connection.
+   */
+  private setConnectionStatus(next: SyncConnectionStatus): void {
+    if (this._connectionStatus === next) return;
+    this._connectionStatus = next;
+    this.store.notify();
+  }
+
   /** Sync key-value adapter for hot-path state (token, client_id). */
   readonly storage: import("./storage").Storage;
 
@@ -639,6 +687,7 @@ export class SyncEngine {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.setConnectionStatus("connecting");
 
     // Load persisted data if available.
     const shouldPersist = this.config.persist !== false && typeof indexedDB !== "undefined";
@@ -747,6 +796,7 @@ export class SyncEngine {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.setConnectionStatus("offline");
   }
 
   /** Connect to the WebSocket server for real-time updates. */
@@ -778,6 +828,12 @@ export class SyncEngine {
     // reconnect loop fire at ~2/sec forever. Only call the connection
     // "stable" after it's stayed up long enough to have been doing work.
     this.ws.onopen = () => {
+      // We only flip to "connected" once the socket actually opens.
+      // The 5s stable-window timer below decides when to RESET the
+      // backoff; status flips immediately because UI consumers want
+      // to clear the "reconnecting" indicator the moment data starts
+      // flowing again.
+      this.setConnectionStatus("connected");
       if (this.wsStableTimer) clearTimeout(this.wsStableTimer);
       this.wsStableTimer = setTimeout(() => {
         this.reconnectAttempts = 0;
@@ -855,6 +911,12 @@ export class SyncEngine {
       if (this.wsStableTimer) {
         clearTimeout(this.wsStableTimer);
         this.wsStableTimer = null;
+      }
+      // Surface the disconnect to UI consumers immediately. If
+      // `running` flipped to false (engine stopped), `stop()` already
+      // set "offline" — don't override that.
+      if (this.running) {
+        this.setConnectionStatus("reconnecting");
       }
       this.scheduleReconnect();
     };
