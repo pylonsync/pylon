@@ -11,57 +11,57 @@ use std::time::Instant;
 const ROLLUP_MINUTES: usize = 60;
 
 struct RequestBuckets {
-	/// Wall-clock minute (epoch seconds / 60) the head bucket
-	/// represents. We rotate when the current minute moves past this.
-	head_minute: u64,
-	/// Total + errors per minute, ring-buffered. `requests[0]` is the
-	/// most recent minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago.
-	requests: [u64; ROLLUP_MINUTES],
-	errors: [u64; ROLLUP_MINUTES],
+    /// Wall-clock minute (epoch seconds / 60) the head bucket
+    /// represents. We rotate when the current minute moves past this.
+    head_minute: u64,
+    /// Total + errors per minute, ring-buffered. `requests[0]` is the
+    /// most recent minute, `requests[ROLLUP_MINUTES-1]` is 59 minutes ago.
+    requests: [u64; ROLLUP_MINUTES],
+    errors: [u64; ROLLUP_MINUTES],
 }
 
 impl RequestBuckets {
-	fn new() -> Self {
-		Self {
-			head_minute: 0,
-			requests: [0; ROLLUP_MINUTES],
-			errors: [0; ROLLUP_MINUTES],
-		}
-	}
+    fn new() -> Self {
+        Self {
+            head_minute: 0,
+            requests: [0; ROLLUP_MINUTES],
+            errors: [0; ROLLUP_MINUTES],
+        }
+    }
 
-	/// Bump the current-minute bucket. Rotates the ring when the wall
-	/// clock crosses a minute boundary. Drops samples if we go more
-	/// than ROLLUP_MINUTES minutes idle (sparkline shows zeros for
-	/// missing slots — accurate).
-	fn record(&mut self, status: u16) {
-		let now = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.map(|d| d.as_secs() / 60)
-			.unwrap_or(0);
-		if self.head_minute == 0 {
-			self.head_minute = now;
-		}
-		let advance = now.saturating_sub(self.head_minute) as usize;
-		if advance > 0 {
-			let shift = advance.min(ROLLUP_MINUTES);
-			// Shift ring right by `shift` slots, zeroing the freed head.
-			self.requests.rotate_right(shift);
-			self.errors.rotate_right(shift);
-			for i in 0..shift {
-				self.requests[i] = 0;
-				self.errors[i] = 0;
-			}
-			self.head_minute = now;
-		}
-		self.requests[0] = self.requests[0].saturating_add(1);
-		if !(200..400).contains(&status) {
-			self.errors[0] = self.errors[0].saturating_add(1);
-		}
-	}
+    /// Bump the current-minute bucket. Rotates the ring when the wall
+    /// clock crosses a minute boundary. Drops samples if we go more
+    /// than ROLLUP_MINUTES minutes idle (sparkline shows zeros for
+    /// missing slots — accurate).
+    fn record(&mut self, status: u16) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() / 60)
+            .unwrap_or(0);
+        if self.head_minute == 0 {
+            self.head_minute = now;
+        }
+        let advance = now.saturating_sub(self.head_minute) as usize;
+        if advance > 0 {
+            let shift = advance.min(ROLLUP_MINUTES);
+            // Shift ring right by `shift` slots, zeroing the freed head.
+            self.requests.rotate_right(shift);
+            self.errors.rotate_right(shift);
+            for i in 0..shift {
+                self.requests[i] = 0;
+                self.errors[i] = 0;
+            }
+            self.head_minute = now;
+        }
+        self.requests[0] = self.requests[0].saturating_add(1);
+        if !(200..400).contains(&status) {
+            self.errors[0] = self.errors[0].saturating_add(1);
+        }
+    }
 
-	fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
-		(self.requests.to_vec(), self.errors.to_vec())
-	}
+    fn snapshot(&self) -> (Vec<u64>, Vec<u64>) {
+        (self.requests.to_vec(), self.errors.to_vec())
+    }
 }
 
 /// Per-HTTP-method request counters.

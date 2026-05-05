@@ -901,8 +901,9 @@ fn start_server(
                 // platform can pull stats without holding the customer's
                 // full admin token, and either can rotate independently.
                 let admin_bytes = admin_token.as_deref().unwrap_or("").as_bytes();
-                let metrics_token_owned =
-                    std::env::var("PYLON_METRICS_TOKEN").ok().unwrap_or_default();
+                let metrics_token_owned = std::env::var("PYLON_METRICS_TOKEN")
+                    .ok()
+                    .unwrap_or_default();
                 let metrics_bytes = metrics_token_owned.as_bytes();
                 let auth_ok = request.headers().iter().any(|h| {
                     let name = h.field.as_str().as_str();
