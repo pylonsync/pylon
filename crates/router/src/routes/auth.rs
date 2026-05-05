@@ -5210,40 +5210,14 @@ pub(crate) fn handle(
 
 /// Project a User row down to the fields safe for `/api/auth/session`.
 ///
-/// Defaults strip `passwordHash` + anything starting with `_`
-/// (framework-internal). The manifest's `auth.user.expose` /
-/// `auth.user.hide` config refines this:
-/// - `expose` (allowlist): when non-empty, ONLY listed fields appear
-///   (`id` is always included). Useful for apps with strict client
-///   schemas.
-/// - `hide` (blocklist): additional fields to strip on top of defaults.
-///   Use for app-specific secrets stored on the User row.
+/// Thin wrapper around the crate-shared `maybe_project_user_row` —
+/// kept here so the `/api/auth/session` call site reads the same as
+/// before, but now every read path that surfaces a User row
+/// (entity GET/LIST, sync change events, etc.) goes through the same
+/// projection. See `crate::maybe_project_user_row` for the field rules.
 fn project_user_row(
     row: serde_json::Value,
     cfg: &pylon_kernel::ManifestAuthUserConfig,
 ) -> serde_json::Value {
-    let serde_json::Value::Object(obj) = row else {
-        return row;
-    };
-    let filtered: serde_json::Map<String, serde_json::Value> = obj
-        .into_iter()
-        .filter(|(k, _)| {
-            if k == "id" {
-                return true; // always include id
-            }
-            // Allowlist takes precedence: only `expose` fields pass.
-            if !cfg.expose.is_empty() && !cfg.expose.iter().any(|f| f == k) {
-                return false;
-            }
-            // Default + manifest blocklist.
-            if k == "passwordHash" || k.starts_with('_') {
-                return false;
-            }
-            if cfg.hide.iter().any(|f| f == k) {
-                return false;
-            }
-            true
-        })
-        .collect();
-    serde_json::Value::Object(filtered)
+    crate::maybe_project_user_row(&cfg.entity, row, cfg)
 }

@@ -38,6 +38,20 @@ pub(crate) fn handle(
                         pylon_policy::PolicyResult::Allowed
                     )
                 });
+                // Field-level redaction for User rows. Without this a
+                // permissive User read policy (needed for cross-user
+                // displayName lookups in chat-style apps) leaks
+                // `passwordHash` through the change feed even though
+                // `/api/auth/session` strips it.
+                let auth_user = &ctx.store.manifest().auth.user;
+                for ev in resp.changes.iter_mut() {
+                    if ev.entity == auth_user.entity {
+                        if let Some(data) = ev.data.take() {
+                            ev.data =
+                                Some(crate::maybe_project_user_row(&ev.entity, data, auth_user));
+                        }
+                    }
+                }
                 return Some((
                     200,
                     serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into()),

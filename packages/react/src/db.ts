@@ -42,9 +42,16 @@ let _started = false;
  * import { init } from "@pylonsync/react";
  * init({ baseUrl: "http://localhost:4321" });
  * ```
+ *
+ * Omitting `baseUrl` in a browser context falls back to
+ * `window.location.origin` — the right answer for same-origin
+ * deployments (Next.js + Vercel rewrites, embedded SPA). Passing an
+ * explicit `baseUrl` always wins. We deliberately do NOT default to
+ * `http://localhost:4321` in browsers — that footgun caused production
+ * dashboards to fire requests at the engineer's dev port.
  */
 export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) {
-  _sync = createSyncEngine(config?.baseUrl ?? "http://localhost:4321", config);
+  _sync = createSyncEngine(config?.baseUrl, config);
   _started = false;
   // Keep the React-side helpers in sync — a single init() should fully
   // namespace this app's storage without a separate configureClient call.
@@ -56,7 +63,13 @@ export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) 
 
 function getSync(): SyncEngine {
   if (!_sync) {
-    _sync = createSyncEngine("http://localhost:4321");
+    // Lazy fallback for callers that never invoked init(). Same
+    // resolution rules as init: browser → window.location.origin,
+    // SSR → localhost:4321 (the pylon dev default). The browser case
+    // is critical: without it a useQuery hook that fires before the
+    // app's SyncProvider effect lands would leak `localhost:4321`
+    // requests in production.
+    _sync = createSyncEngine();
   }
   if (!_started) {
     _started = true;

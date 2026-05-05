@@ -1532,13 +1532,29 @@ export async function getServerData(
 // Convenience factory
 // ---------------------------------------------------------------------------
 
-/** Create a sync engine connected to the pylon dev server. */
+/**
+ * Create a sync engine connected to the pylon backend.
+ *
+ * Default `baseUrl` resolution order:
+ *  1. Explicit `baseUrl` argument — wins always.
+ *  2. `window.location.origin` when running in a browser — same-origin
+ *     deployments (Next.js + Vercel rewrites, embedded SPA, etc.) want
+ *     this and forgetting to pass it should NOT silently leak
+ *     `localhost:4321` requests in production.
+ *  3. `http://localhost:4321` — the `pylon dev` default for SSR /
+ *     non-browser callers (Node scripts, tests).
+ */
 export function createSyncEngine(
-  baseUrl = "http://localhost:4321",
+  baseUrl?: string,
   options?: Partial<SyncEngineConfig>,
 ): SyncEngine {
+  const resolved =
+    baseUrl ??
+    (typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : "http://localhost:4321");
   return new SyncEngine({
     ...(options ?? {}),
-    baseUrl,
+    baseUrl: resolved,
   });
 }

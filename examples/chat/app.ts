@@ -122,6 +122,22 @@ const ReadMarker = entity(
 // poking the raw URL. Server functions still provide extra validation but
 // are no longer the sole line of defense.
 
+// User reads need to span the whole org so message author lookups
+// (db.useQueryOne<User>("User", message.authorId)) can render display
+// names + avatars for other people. Without an explicit policy here
+// the framework falls back to self-row only, which makes every
+// other user's name render as "…" forever. passwordHash is dropped
+// via the auth.user.hide manifest config below — never ships to the
+// client regardless of this policy.
+const userPolicy = policy({
+  name: "user_directory_read",
+  entity: "User",
+  allowRead: "auth.userId != null",
+  // Updates restricted to own row — display name / avatar changes
+  // shouldn't let a member rewrite another user's profile.
+  allowUpdate: "auth.userId == data.id",
+});
+
 const channelPolicy = policy({
   name: "channel_ownership",
   entity: "Channel",
@@ -167,6 +183,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [
+    userPolicy,
     channelPolicy,
     messagePolicy,
     reactionPolicy,

@@ -1219,6 +1219,12 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
         }
     };
 
+    let auth_user = &store.manifest().auth.user;
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| maybe_project_user_row(entity, r, auth_user))
+        .collect();
+
     if paginated {
         let p = page.unwrap_or(1);
         let pp = per_page.unwrap_or(25);
@@ -1318,10 +1324,13 @@ fn parse_query_value(s: &str) -> serde_json::Value {
 
 pub(crate) fn handle_get(store: &dyn DataStore, entity: &str, id: &str) -> (u16, String) {
     match store.get_by_id(entity, id) {
-        Ok(Some(row)) => (
-            200,
-            serde_json::to_string(&row).unwrap_or_else(|_| "{}".into()),
-        ),
+        Ok(Some(row)) => {
+            let projected = maybe_project_user_row(entity, row, &store.manifest().auth.user);
+            (
+                200,
+                serde_json::to_string(&projected).unwrap_or_else(|_| "{}".into()),
+            )
+        }
         Ok(None) => (
             404,
             json_error("NOT_FOUND", &format!("{entity} with id \"{id}\" not found")),
@@ -1657,6 +1666,59 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
         "purged_at": pylon_kernel::util::now_iso(),
     });
     (200, resp.to_string())
+}
+
+/// Project a User-entity row down to the safe-for-client field set,
+/// honoring the manifest's `auth.user.expose`/`hide` config. Defaults
+/// strip `passwordHash` + anything starting with `_`.
+///
+/// Use this on every read path that can return a User row (entity GET,
+/// entity LIST, sync change events, etc.). Without it, a permissive
+/// User read policy — required for cross-user displayName lookups in
+/// chat-style apps — would also leak `passwordHash`.
+///
+/// Non-User entities pass through unchanged; the projection only
+/// fires when `entity == auth_user.entity`.
+pub(crate) fn maybe_project_user_row(
+    entity: &str,
+    row: serde_json::Value,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+) -> serde_json::Value {
+    if entity != auth_user.entity {
+        return row;
+    }
+    project_user_fields(row, auth_user)
+}
+
+/// Same projection logic as `crate::routes::auth::project_user_row`,
+/// but lifted here so non-auth routes can use it. Callers must have
+/// already confirmed the row belongs to the User entity.
+fn project_user_fields(
+    row: serde_json::Value,
+    cfg: &pylon_kernel::ManifestAuthUserConfig,
+) -> serde_json::Value {
+    let serde_json::Value::Object(obj) = row else {
+        return row;
+    };
+    let filtered: serde_json::Map<String, serde_json::Value> = obj
+        .into_iter()
+        .filter(|(k, _)| {
+            if k == "id" {
+                return true;
+            }
+            if !cfg.expose.is_empty() && !cfg.expose.iter().any(|f| f == k) {
+                return false;
+            }
+            if k == "passwordHash" || k.starts_with('_') {
+                return false;
+            }
+            if cfg.hide.iter().any(|f| f == k) {
+                return false;
+            }
+            true
+        })
+        .collect();
+    serde_json::Value::Object(filtered)
 }
 
 /// Gate a route behind admin auth. Returns `Some(error_response)` if the
@@ -3674,5 +3736,221 @@ mod auth_gate_tests {
             m.policies[0].allow_read.as_deref(),
             Some("auth.userId == data.ownerId")
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: User-row field projection on EVERY read path.
+//
+// Apps that need cross-user displayName lookups (chat-style UIs) have to
+// register a permissive User read policy. Without field-level redaction
+// that would also leak `passwordHash` through the change feed and the
+// raw entity API. These tests pin the framework default — strip
+// `passwordHash` + `_*` even when the policy says "allow read of every
+// row" — across all the read paths that surface User rows.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod user_projection_tests {
+    use super::*;
+    use pylon_kernel::{ManifestAuthUserConfig, MANIFEST_VERSION};
+
+    fn cfg(expose: &[&str], hide: &[&str]) -> ManifestAuthUserConfig {
+        ManifestAuthUserConfig {
+            entity: "User".into(),
+            expose: expose.iter().map(|s| s.to_string()).collect(),
+            hide: hide.iter().map(|s| s.to_string()).collect(),
+            admin_field: None,
+        }
+    }
+
+    fn user_row() -> serde_json::Value {
+        serde_json::json!({
+            "id": "u-1",
+            "email": "alice@example.com",
+            "displayName": "Alice",
+            "passwordHash": "$argon2id$v=19$super-secret",
+            "_internalFlag": true,
+            "secretToken": "tok-xyz",
+        })
+    }
+
+    #[test]
+    fn defaults_strip_passwordHash_and_underscore_fields() {
+        let projected = maybe_project_user_row("User", user_row(), &cfg(&[], &[]));
+        let obj = projected.as_object().unwrap();
+        assert!(obj.contains_key("id"));
+        assert!(obj.contains_key("email"));
+        assert!(obj.contains_key("displayName"));
+        assert!(!obj.contains_key("passwordHash"), "passwordHash leaked");
+        assert!(!obj.contains_key("_internalFlag"), "_internalFlag leaked");
+        // App-specific secrets without an explicit hide stay readable —
+        // the framework can't know `secretToken` is sensitive. That's
+        // what the manifest's `auth.user.hide` config is for.
+        assert!(obj.contains_key("secretToken"));
+    }
+
+    #[test]
+    fn manifest_hide_strips_app_specific_secrets() {
+        let projected = maybe_project_user_row("User", user_row(), &cfg(&[], &["secretToken"]));
+        let obj = projected.as_object().unwrap();
+        assert!(!obj.contains_key("secretToken"));
+        // Defaults still apply on top of the hide list.
+        assert!(!obj.contains_key("passwordHash"));
+    }
+
+    #[test]
+    fn expose_allowlist_drops_everything_else() {
+        let projected = maybe_project_user_row("User", user_row(), &cfg(&["displayName"], &[]));
+        let obj = projected.as_object().unwrap();
+        assert!(obj.contains_key("id"), "id always included");
+        assert!(obj.contains_key("displayName"));
+        assert!(!obj.contains_key("email"));
+        assert!(!obj.contains_key("passwordHash"));
+    }
+
+    #[test]
+    fn non_user_entity_passes_through_untouched() {
+        let row = serde_json::json!({
+            "id": "m-1",
+            "body": "hi",
+            "passwordHash": "looks-sensitive-but-isnt-a-user-row",
+        });
+        let projected = maybe_project_user_row("Message", row.clone(), &cfg(&[], &[]));
+        // The framework only redacts the configured User entity.
+        // Other entities flow through verbatim — application code is
+        // responsible for keeping non-User secrets out of read schemas.
+        assert_eq!(projected, row);
+    }
+
+    #[test]
+    fn handle_get_strips_passwordHash_from_user_response() {
+        struct LeakyUserStore {
+            manifest: pylon_kernel::AppManifest,
+        }
+        impl pylon_http::DataStore for LeakyUserStore {
+            fn manifest(&self) -> &pylon_kernel::AppManifest {
+                &self.manifest
+            }
+            fn insert(
+                &self,
+                _e: &str,
+                _d: &serde_json::Value,
+            ) -> Result<String, pylon_http::DataError> {
+                Ok("u-1".into())
+            }
+            fn get_by_id(
+                &self,
+                entity: &str,
+                id: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                if entity == "User" && id == "u-1" {
+                    return Ok(Some(serde_json::json!({
+                        "id": "u-1",
+                        "email": "alice@example.com",
+                        "displayName": "Alice",
+                        "passwordHash": "$argon2id$v=19$super-secret",
+                    })));
+                }
+                Ok(None)
+            }
+            fn list(&self, _e: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(vec![])
+            }
+            fn list_after(
+                &self,
+                _e: &str,
+                _a: Option<&str>,
+                _l: usize,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(vec![])
+            }
+            fn update(
+                &self,
+                _e: &str,
+                _i: &str,
+                _d: &serde_json::Value,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn delete(&self, _e: &str, _i: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn lookup(
+                &self,
+                _e: &str,
+                _f: &str,
+                _v: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                Ok(None)
+            }
+            fn link(
+                &self,
+                _e: &str,
+                _i: &str,
+                _r: &str,
+                _t: &str,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn unlink(&self, _e: &str, _i: &str, _r: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn query_filtered(
+                &self,
+                _e: &str,
+                _f: &serde_json::Value,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(vec![])
+            }
+            fn query_graph(
+                &self,
+                _q: &serde_json::Value,
+            ) -> Result<serde_json::Value, pylon_http::DataError> {
+                Ok(serde_json::json!({}))
+            }
+            fn aggregate(
+                &self,
+                _e: &str,
+                _s: &serde_json::Value,
+            ) -> Result<serde_json::Value, pylon_http::DataError> {
+                Ok(serde_json::json!({}))
+            }
+            fn transact(
+                &self,
+                _o: &[serde_json::Value],
+            ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
+                Ok((true, vec![]))
+            }
+            fn search(
+                &self,
+                _e: &str,
+                _q: &serde_json::Value,
+            ) -> Result<serde_json::Value, pylon_http::DataError> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let manifest = pylon_kernel::AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let store = LeakyUserStore { manifest };
+        let (status, body) = handle_get(&store, "User", "u-1");
+        assert_eq!(status, 200);
+        assert!(
+            !body.contains("passwordHash"),
+            "passwordHash leaked through handle_get response: {body}"
+        );
+        // Confirm the projection is field-strip, not full-redact —
+        // displayName must still come through so chat UIs render.
+        assert!(body.contains("displayName"));
+        assert!(body.contains("Alice"));
     }
 }

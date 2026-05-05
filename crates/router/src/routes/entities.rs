@@ -63,6 +63,7 @@ pub(crate) fn handle(
                 // row-filtering drops some entries.
                 return Some(match ctx.store.list_after(entity_name, after, limit + 1) {
                     Ok(rows) => {
+                        let auth_user = &ctx.store.manifest().auth.user;
                         let filtered: Vec<serde_json::Value> = rows
                             .into_iter()
                             .filter(|row| {
@@ -75,6 +76,7 @@ pub(crate) fn handle(
                                     pylon_policy::PolicyResult::Allowed
                                 )
                             })
+                            .map(|row| crate::maybe_project_user_row(entity_name, row, auth_user))
                             .collect();
                         let has_more = filtered.len() > limit;
                         let page: Vec<serde_json::Value> =
