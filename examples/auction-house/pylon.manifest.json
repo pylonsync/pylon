@@ -111,6 +111,12 @@
           "unique": false
         },
         {
+          "name": "dedupTag",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
           "name": "createdAt",
           "type": "datetime",
           "optional": false,
@@ -136,6 +142,13 @@
           "name": "by_creator",
           "fields": [
             "creatorId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_dedup_tag",
+          "fields": [
+            "dedupTag"
           ],
           "unique": false
         }

@@ -2328,6 +2328,25 @@ fn start_server(
             continue;
         }
 
+        // HEAD /studio: respond 200 with empty body. Health checks
+        // (Fly probes, uptime monitors, Vercel rewrite warmups) commonly
+        // probe with HEAD; without this they get 404 and the dashboard
+        // metrics show a phantom error rate. Skipping the full studio
+        // HTML generation keeps the probe path cheap, and per RFC 7231
+        // a HEAD response MUST omit the body anyway.
+        if (url == "/studio" || url == "/studio/") && method == Method::Head {
+            let response = with_security_headers(
+                Response::from_string("")
+                    .with_status_code(200u16)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("HEAD", 200);
+            continue;
+        }
+
         let (status, response_body, content_type, is_studio, extra_headers) = if (url == "/studio"
             || url == "/studio/")
             && method == Method::Get

@@ -25,6 +25,7 @@ export interface Auction {
   endsAt: string;
   currentLotId?: string;
   bannerColor?: string;
+  dedupTag?: string;
   createdAt: string;
 }
 

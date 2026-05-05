@@ -54,6 +54,10 @@ const Auction = entity(
     endsAt: field.datetime(),
     currentLotId: field.string().optional(),
     bannerColor: field.string().optional(),
+    // Optional dedup token. Set by the daily-auction cron to
+    // YYYY-MM-DD so a re-run on the same UTC day is a no-op. Real
+    // user-created auctions leave it null.
+    dedupTag: field.string().optional(),
     createdAt: field.datetime(),
   },
   {
@@ -61,6 +65,7 @@ const Auction = entity(
       { name: "by_status", fields: ["status"], unique: false },
       { name: "by_starts_at", fields: ["startsAt"], unique: false },
       { name: "by_creator", fields: ["creatorId"], unique: false },
+      { name: "by_dedup_tag", fields: ["dedupTag"], unique: false },
     ],
     search: {
       text: ["title", "description"],
