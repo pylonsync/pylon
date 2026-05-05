@@ -935,10 +935,7 @@ fn start_server(
                     let cookie_token = request
                         .headers()
                         .iter()
-                        .find(|h| {
-                            h.field.as_str() == "Cookie"
-                                || h.field.as_str() == "cookie"
-                        })
+                        .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
                         .and_then(|h| {
                             pylon_auth::extract_session_cookie(
                                 h.value.as_str(),
@@ -963,14 +960,9 @@ fn start_server(
                         use pylon_http::DataStore as _;
                         match runtime.get_by_id(user_entity, uid) {
                             Ok(Some(row)) => match row.get(field) {
-                                Some(v) if v.is_boolean() => {
-                                    v.as_bool().unwrap_or(false)
-                                }
+                                Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
                                 Some(v) if v.is_string() => {
-                                    let s = v
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_ascii_lowercase();
+                                    let s = v.as_str().unwrap_or("").to_ascii_lowercase();
                                     s == "true" || s == "1" || s == "admin"
                                 }
                                 _ => false,
