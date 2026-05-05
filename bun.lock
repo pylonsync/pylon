@@ -391,43 +391,43 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.41",
+      "version": "0.3.42",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.41",
-        "@pylonsync/cli-darwin-x64": "0.3.41",
-        "@pylonsync/cli-linux-arm64": "0.3.41",
-        "@pylonsync/cli-linux-x64": "0.3.41",
+        "@pylonsync/cli-darwin-arm64": "0.3.42",
+        "@pylonsync/cli-darwin-x64": "0.3.42",
+        "@pylonsync/cli-linux-arm64": "0.3.42",
+        "@pylonsync/cli-linux-x64": "0.3.42",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.3.41",
+      "version": "0.3.42",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.41",
+      "version": "0.3.42",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -459,7 +459,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.41",
+      "version": "0.3.42",
       "devDependencies": {
         "@types/react": "^19.0.0",
         "next": "^16.0.0",
@@ -475,7 +475,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.41",
+      "version": "0.3.42",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -507,11 +507,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.41",
+      "version": "0.3.42",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -1086,7 +1086,7 @@
 
     "jest-worker": ["jest-worker@29.7.0", "", { "dependencies": { "@types/node": "*", "jest-util": "^29.7.0", "merge-stream": "^2.0.0", "supports-color": "^8.0.0" } }, "sha512-eIz2msL/EzL9UFTFFx7jBTkeZfku0yUAyZZZmJ93H2TYEiroIx2PQjEXcwYtYl8zXCxb+PAmA2hLIt/6ZEkPHw=="],
 
-    "jiti": ["jiti@2.6.1", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ=="],
+    "jiti": ["jiti@2.7.0", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ=="],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
