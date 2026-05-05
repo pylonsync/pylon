@@ -895,21 +895,34 @@ fn start_server(
         // Dev mode stays open so local Prometheus scrapers just work.
         if url == "/metrics" && method == Method::Get {
             if !is_dev {
+                // /metrics accepts EITHER PYLON_ADMIN_TOKEN (operator path)
+                // OR PYLON_METRICS_TOKEN (read-only path used by Pylon
+                // Cloud's per-project Overview). Two tokens so a hosting
+                // platform can pull stats without holding the customer's
+                // full admin token, and either can rotate independently.
                 let admin_bytes = admin_token.as_deref().unwrap_or("").as_bytes();
-                let auth_ok = !admin_bytes.is_empty()
-                    && request.headers().iter().any(|h| {
-                        let name = h.field.as_str().as_str();
-                        name.eq_ignore_ascii_case("Authorization")
-                            && h.value
-                                .as_str()
-                                .strip_prefix("Bearer ")
-                                .map(|t| pylon_auth::constant_time_eq(t.as_bytes(), admin_bytes))
-                                .unwrap_or(false)
-                    });
+                let metrics_token_owned =
+                    std::env::var("PYLON_METRICS_TOKEN").ok().unwrap_or_default();
+                let metrics_bytes = metrics_token_owned.as_bytes();
+                let auth_ok = request.headers().iter().any(|h| {
+                    let name = h.field.as_str().as_str();
+                    if !name.eq_ignore_ascii_case("Authorization") {
+                        return false;
+                    }
+                    let token = match h.value.as_str().strip_prefix("Bearer ") {
+                        Some(t) => t,
+                        None => return false,
+                    };
+                    let admin_match = !admin_bytes.is_empty()
+                        && pylon_auth::constant_time_eq(token.as_bytes(), admin_bytes);
+                    let metrics_match = !metrics_bytes.is_empty()
+                        && pylon_auth::constant_time_eq(token.as_bytes(), metrics_bytes);
+                    admin_match || metrics_match
+                });
                 if !auth_ok {
                     let body = json_error(
                         "UNAUTHORIZED",
-                        "/metrics requires admin bearer token in non-dev mode",
+                        "/metrics requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",
                     );
                     let response = with_security_headers(
                         Response::from_string(&body)
