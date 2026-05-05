@@ -701,12 +701,16 @@ fn start_server(
     // returns None on deny. The caller (handle_crdt_control) treats
     // None as "don't subscribe" — so a denied client can't sit on a
     // subscription waiting for a future write to leak state.
-    {
-        let hub = Arc::clone(&ws_hub);
-        let sessions = Arc::clone(&session_store);
+    // Build the CRDT snapshot-fetcher closure once and share it with
+    // both WebSocket entry points: the dedicated `:4322` listener AND
+    // the HTTP-multiplexed `/api/sync/ws` route on the main port. The
+    // closure does the policy + storage round-trip when a client sends
+    // `crdt-subscribe` so a denied client can't sit on a subscription
+    // waiting for a future write to leak state.
+    let snapshot_fetcher: crate::ws::SnapshotFetcher = {
         let runtime_for_fetcher = Arc::clone(&runtime);
         let pe_for_fetcher = Arc::clone(&policy_engine);
-        let fetcher: crate::ws::SnapshotFetcher = Arc::new(move |auth_ctx, entity, row_id| {
+        Arc::new(move |auth_ctx, entity, row_id| {
             use pylon_http::DataStore;
             // Fetch the row first so the policy engine can evaluate
             // row-level predicates (`data.authorId == auth.userId`
@@ -733,7 +737,12 @@ fn start_server(
                 &snap,
             )
             .ok()
-        });
+        })
+    };
+    {
+        let hub = Arc::clone(&ws_hub);
+        let sessions = Arc::clone(&session_store);
+        let fetcher = snapshot_fetcher.clone();
         std::thread::spawn(move || {
             crate::ws::start_ws_server(hub, sessions, ws_port, Some(fetcher));
         });
@@ -861,6 +870,53 @@ fn start_server(
             // thread-local to emit method/url/status/duration in one
             // line, like Next.js's `GET /login 200 in 27ms`).
             crate::metrics::set_current_request(&url, request_started_at);
+        }
+
+        // --- WebSocket multiplex on the main HTTP port ---
+        //
+        // Reverse proxies that pass `Upgrade: websocket` through (Cloudflare,
+        // Caddy, recent Vercel rewrites) can't reach `:4322` — they only
+        // see the public 443. Accepting `wss://<host>/api/sync/ws` here
+        // means clients don't need a separate WS host config: the same
+        // origin serves HTTP + WS, the framework's deriveWsUrl in
+        // @pylonsync/sync defaults to this path, and the dedicated `:4322`
+        // listener stays as a fallback for raw-TCP deployments.
+        //
+        // Path is /api/sync/ws so it sits under existing `/api/*` rewrite
+        // rules without forcing operators to add a new proxy entry.
+        if url == "/api/sync/ws" && method == Method::Get {
+            if let Some(upgrade_req) = crate::ws::inspect_ws_upgrade(request.headers()) {
+                let hub = Arc::clone(&ws_hub);
+                let sessions = Arc::clone(&session_store);
+                let fetcher = snapshot_fetcher.clone();
+                std::thread::Builder::new()
+                    .name("ws-upgrade".into())
+                    .stack_size(64 * 1024)
+                    .spawn(move || {
+                        crate::ws::handle_http_upgrade(
+                            request,
+                            upgrade_req,
+                            hub,
+                            sessions,
+                            Some(fetcher),
+                        );
+                    })
+                    .ok();
+                mt.record_request("GET", 101);
+                continue;
+            }
+            // Missing Upgrade headers — fall through to a plain 400.
+            let response = with_security_headers(
+                Response::from_string(json_error(
+                    "BAD_UPGRADE",
+                    "Sec-WebSocket-Key + Upgrade headers required",
+                ))
+                .with_status_code(400u16)
+                .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 400);
+            continue;
         }
 
         // --- Health check: fast path before auth or body parsing ---

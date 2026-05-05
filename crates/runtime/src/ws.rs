@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -8,9 +9,20 @@ use std::time::Duration;
 use pylon_auth::SessionStore;
 use pylon_sync::ChangeEvent;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tungstenite::protocol::Role;
 use tungstenite::{accept_hdr_with_config, protocol::WebSocketConfig, Message, WebSocket};
 
 use crate::ip_limit::IpConnCounter;
+
+/// Marker trait that lets the WS hub hold sockets from multiple
+/// origins behind the same handle: native TCP connections from the
+/// dedicated `:4322` listener AND HTTP-upgraded streams that bubble
+/// up from tiny_http when a client multiplexes WS on the main port.
+///
+/// `Send + 'static` are required because reader threads own the
+/// stream and broadcasts cross threads via the shard channels.
+pub trait WsStream: Read + Write + Send + 'static {}
+impl<T: Read + Write + Send + 'static> WsStream for T {}
 
 // ---------------------------------------------------------------------------
 // CRDT subscription manager
@@ -168,7 +180,7 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// brief — O(count of clients in shard)), then grabs each client's
 /// individual mutex to do the `socket.send`. Contention is now per-
 /// client instead of per-shard.
-type ClientSocket = Arc<Mutex<WebSocket<TcpStream>>>;
+type ClientSocket = Arc<Mutex<WebSocket<Box<dyn WsStream>>>>;
 
 /// A single shard holding a subset of WebSocket clients.
 ///
@@ -185,7 +197,7 @@ impl Shard {
         }
     }
 
-    fn add(&self, id: u64, ws: WebSocket<TcpStream>) -> ClientSocket {
+    fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>) -> ClientSocket {
         let handle = Arc::new(Mutex::new(ws));
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -504,7 +516,7 @@ impl WsHub {
     /// Assign a client to a shard via round-robin and register it.
     /// Returns `(id, socket_handle)` — the caller keeps the handle and uses
     /// it for reads; the shard also keeps an Arc clone for broadcasts.
-    fn add_client(&self, ws: WebSocket<TcpStream>) -> (u64, ClientSocket) {
+    fn add_client(&self, ws: WebSocket<Box<dyn WsStream>>) -> (u64, ClientSocket) {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
@@ -678,6 +690,12 @@ fn handle_ws_connection(
         max_frame_size: Some(max_frame),
         ..Default::default()
     };
+    // Box the TcpStream as a `WsStream` so the hub can hold native and
+    // HTTP-upgraded clients behind the same handle. Tungstenite owns
+    // the boxed stream after the handshake; the dyn dispatch overhead
+    // is one virtual call per socket op and not measurable next to
+    // the actual network I/O.
+    let stream: Box<dyn WsStream> = Box::new(stream);
     let ws = match accept_hdr_with_config(
         stream,
         move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
@@ -726,6 +744,25 @@ fn handle_ws_connection(
     // a custom error response, and we already have the socket open for
     // a clean close frame.
     let token = token_slot.lock().unwrap().clone();
+    run_authenticated_session(ws, hub, sessions, token, snapshot_fetcher);
+}
+
+/// Take an already-handshaken WebSocket, resolve its bearer token,
+/// and run the per-client message loop. Shared between the dedicated
+/// `:4322` listener and the HTTP-multiplexed entry point on the main
+/// port — both arrive here once the WS handshake is done and the
+/// only remaining work is auth + the message pump.
+///
+/// Sends a clean close frame with a Policy code on auth failure so
+/// the client can surface a sensible error instead of a generic
+/// network drop.
+fn run_authenticated_session(
+    ws: WebSocket<Box<dyn WsStream>>,
+    hub: Arc<WsHub>,
+    sessions: Arc<SessionStore>,
+    token: Option<String>,
+    snapshot_fetcher: Option<SnapshotFetcher>,
+) {
     let auth_ctx = sessions.resolve(token.as_deref());
     if auth_ctx.user_id.is_none() && !auth_ctx.is_admin {
         let mut ws = ws;
@@ -940,6 +977,162 @@ fn percent_decode_token(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+// ---------------------------------------------------------------------------
+// HTTP-multiplexed WebSocket entry point
+//
+// The dedicated `:4322` listener stays — single-port deploys (Vercel
+// rewrites, naive reverse proxies that don't pass through `Upgrade`)
+// can still rely on a separate WS port. But for proxies that DO carry
+// the upgrade through (Cloudflare, Caddy, modern Vercel rewrites),
+// running WS on the same `:4321` port the HTTP server uses means the
+// `wss://<host>/api/sync/ws` URL just works without per-deployment
+// config.
+//
+// Flow:
+//   1. server.rs detects `Upgrade: websocket` on a /api/sync/ws GET
+//      and hands the tiny_http::Request here along with the bearer
+//      token already extracted from headers / subprotocol.
+//   2. We compute Sec-WebSocket-Accept ourselves (sha1 + base64 of
+//      the client's Sec-WebSocket-Key + the magic GUID), build a
+//      101 response, and call request.upgrade("websocket", response)
+//      which writes the response and hijacks the underlying socket.
+//   3. The hijacked stream wraps in WebSocket::from_raw_socket
+//      (bypassing tungstenite's accept handshake — we already did it).
+//   4. From there the per-client lifecycle is identical to the
+//      :4322 path via `run_authenticated_session`.
+// ---------------------------------------------------------------------------
+
+const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// Compute the `Sec-WebSocket-Accept` header value per RFC 6455 §4.2.2.
+/// Returns a base64-encoded sha1 of `<client-key><GUID>`.
+fn ws_accept_value(client_key: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(client_key.as_bytes());
+    hasher.update(WS_GUID);
+    let digest = hasher.finalize();
+    STANDARD.encode(digest)
+}
+
+/// Result of inspecting an incoming HTTP request for a WS upgrade.
+pub struct WsUpgradeRequest {
+    pub sec_key: String,
+    pub bearer_token: Option<String>,
+    /// First subprotocol from `Sec-WebSocket-Protocol` we want to
+    /// echo back. Browsers refuse the connection if a subprotocol
+    /// they offered isn't echoed.
+    pub chosen_protocol: Option<String>,
+}
+
+/// Pull the headers we need to perform a WS upgrade. Returns `None`
+/// when the request isn't a WebSocket upgrade attempt (no
+/// `Sec-WebSocket-Key`).
+pub fn inspect_ws_upgrade(headers: &[tiny_http::Header]) -> Option<WsUpgradeRequest> {
+    let mut sec_key: Option<String> = None;
+    let mut upgrade_ok = false;
+    let mut bearer_token: Option<String> = None;
+    let mut chosen_protocol: Option<String> = None;
+    for h in headers {
+        let name = h.field.as_str().as_str().to_ascii_lowercase();
+        let value = h.value.as_str();
+        if name == "sec-websocket-key" {
+            sec_key = Some(value.to_string());
+        } else if name == "upgrade" && value.eq_ignore_ascii_case("websocket") {
+            upgrade_ok = true;
+        } else if name == "authorization" {
+            if let Some(tok) = value.strip_prefix("Bearer ") {
+                bearer_token = Some(tok.to_string());
+            }
+        } else if name == "sec-websocket-protocol" {
+            for proto in value.split(',').map(str::trim) {
+                if let Some(encoded) = proto.strip_prefix("bearer.") {
+                    if let Some(decoded) = percent_decode_token(encoded) {
+                        if bearer_token.is_none() {
+                            bearer_token = Some(decoded);
+                        }
+                        chosen_protocol = Some(proto.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if !upgrade_ok {
+        return None;
+    }
+    sec_key.map(|sec_key| WsUpgradeRequest {
+        sec_key,
+        bearer_token,
+        chosen_protocol,
+    })
+}
+
+/// Hijack a tiny_http request as a WebSocket. Writes the 101
+/// response, takes ownership of the raw stream, wraps in tungstenite
+/// without re-handshaking, and runs the standard per-client loop.
+/// Spawn this on its own thread — the loop blocks on `socket.read()`.
+pub fn handle_http_upgrade(
+    request: tiny_http::Request,
+    upgrade: WsUpgradeRequest,
+    hub: Arc<WsHub>,
+    sessions: Arc<SessionStore>,
+    snapshot_fetcher: Option<SnapshotFetcher>,
+) {
+    let accept = ws_accept_value(&upgrade.sec_key);
+    let mut response = tiny_http::Response::empty(101)
+        .with_header(tiny_http::Header::from_bytes(&b"Upgrade"[..], &b"websocket"[..]).unwrap())
+        .with_header(tiny_http::Header::from_bytes(&b"Connection"[..], &b"Upgrade"[..]).unwrap())
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Sec-WebSocket-Accept"[..], accept.as_bytes()).unwrap(),
+        );
+    if let Some(proto) = &upgrade.chosen_protocol {
+        if let Ok(h) =
+            tiny_http::Header::from_bytes(&b"Sec-WebSocket-Protocol"[..], proto.as_bytes())
+        {
+            response = response.with_header(h);
+        }
+    }
+    let stream = request.upgrade("websocket", response);
+    // tiny_http hands back `Box<dyn ReadWrite + Send>`; that satisfies
+    // our `WsStream` blanket impl. Tungstenite never sees a raw socket
+    // here — we already wrote the 101 above.
+    let stream: Box<dyn WsStream> = Box::new(WsStreamAdapter(stream));
+    let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16 * 1024 * 1024);
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(max_frame),
+        max_frame_size: Some(max_frame),
+        ..Default::default()
+    };
+    let ws = WebSocket::from_raw_socket(stream, Role::Server, Some(ws_config));
+    run_authenticated_session(ws, hub, sessions, upgrade.bearer_token, snapshot_fetcher);
+}
+
+/// Adapter so a `Box<dyn tiny_http::ReadWrite + Send>` satisfies our
+/// `WsStream` bound. tiny_http's ReadWrite is just `Read + Write`
+/// without the `+ Send` part exposed in the trait, so we wrap with
+/// a thin newtype to forward the I/O.
+struct WsStreamAdapter(Box<dyn tiny_http::ReadWrite + Send>);
+
+impl Read for WsStreamAdapter {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for WsStreamAdapter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
 }
 
 #[cfg(test)]

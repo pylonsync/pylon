@@ -35,6 +35,11 @@ serde_json = { workspace = true }
 tiny_http = { workspace = true }
 tungstenite = { workspace = true }
 tracing = { workspace = true }
+# WebSocket handshake on the multiplexed HTTP port: sha1 + base64
+# compute Sec-WebSocket-Accept ourselves so tiny_http can hijack the
+# socket without going back through tungstenite's accept path.
+sha1 = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

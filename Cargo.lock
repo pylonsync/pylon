@@ -2240,6 +2240,7 @@ dependencies = [
 name = "pylon-runtime"
 version = "0.3.43"
 dependencies = [
+ "base64",
  "postgres",
  "pylon-auth",
  "pylon-crdt",
@@ -2259,6 +2260,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "tiny_http",
  "tracing",

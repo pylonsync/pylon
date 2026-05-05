@@ -1015,23 +1015,21 @@ export class SyncEngine {
     const isHttps = url.protocol === "https:";
     const scheme = isHttps ? "wss" : "ws";
 
-    // HTTPS deploys (Fly/Vercel/Cloudflare) terminate TLS at a single
-    // public port — we can't assume port+1 is exposed. Callers should
-    // override via `wsUrl` in the sync-engine config (or set
-    // VITE_PYLON_WS_URL in Vite apps) when the WebSocket listens on a
-    // different hostname or a separate Fly service.
+    // Production HTTPS deploys: multiplex WS on the same origin via
+    // `/api/sync/ws`. The Pylon runtime accepts the Upgrade on its
+    // main HTTP port (4321), so any reverse proxy that already
+    // forwards `/api/*` carries the WebSocket through too. No
+    // separate WS port to expose, no per-deployment wsUrl env var.
     //
-    // If the base URL has an explicit port (e.g. http://localhost:4321)
-    // we keep the historical port+1 convention — that's what `pylon dev`
-    // hands to the developer on a single box. Otherwise we assume the
-    // WebSocket is reachable at the same hostname on the same scheme
-    // (most production proxies multiplex WS on 443 via the Upgrade
-    // header, and a future pylon build will do the same).
+    // Local dev (`pylon dev` on `http://localhost:4321`) keeps the
+    // legacy port+1 fallback so existing tutorials still work without
+    // touching their app config — the dedicated `:4322` listener is
+    // still running there too.
     if (url.port) {
       const port = parseInt(url.port, 10);
       return `${scheme}://${url.hostname}:${port + 1}`;
     }
-    return `${scheme}://${url.hostname}`;
+    return `${scheme}://${url.host}/api/sync/ws`;
   }
 
   /**
