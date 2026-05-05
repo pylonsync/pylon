@@ -895,17 +895,20 @@ fn start_server(
         // Dev mode stays open so local Prometheus scrapers just work.
         if url == "/metrics" && method == Method::Get {
             if !is_dev {
-                // /metrics accepts EITHER PYLON_ADMIN_TOKEN (operator path)
-                // OR PYLON_METRICS_TOKEN (read-only path used by Pylon
-                // Cloud's per-project Overview). Two tokens so a hosting
-                // platform can pull stats without holding the customer's
-                // full admin token, and either can rotate independently.
+                // /metrics accepts THREE auth paths:
+                //   1. PYLON_ADMIN_TOKEN bearer  — operator / Prometheus
+                //   2. PYLON_METRICS_TOKEN bearer — Pylon Cloud's
+                //      per-project read-only path
+                //   3. Session cookie resolving to a user with
+                //      auth.user.adminField = true — lets cookie-authed
+                //      Studio admins poll /metrics from the dashboard
+                //      without holding the bare admin token.
                 let admin_bytes = admin_token.as_deref().unwrap_or("").as_bytes();
                 let metrics_token_owned = std::env::var("PYLON_METRICS_TOKEN")
                     .ok()
                     .unwrap_or_default();
                 let metrics_bytes = metrics_token_owned.as_bytes();
-                let auth_ok = request.headers().iter().any(|h| {
+                let bearer_ok = request.headers().iter().any(|h| {
                     let name = h.field.as_str().as_str();
                     if !name.eq_ignore_ascii_case("Authorization") {
                         return false;
@@ -920,7 +923,65 @@ fn start_server(
                         && pylon_auth::constant_time_eq(token.as_bytes(), metrics_bytes);
                     admin_match || metrics_match
                 });
-                if !auth_ok {
+                let cookie_admin_ok = if bearer_ok {
+                    false
+                } else {
+                    // Session-cookie resolution. Mirrors the auth dispatcher
+                    // path (line ~1192) but inline so we can gate /metrics
+                    // before the full request handler runs. Reads the
+                    // session token from the configured cookie name,
+                    // looks up the session, then checks the User row's
+                    // adminField (per manifest's auth.user.adminField).
+                    let cookie_token = request
+                        .headers()
+                        .iter()
+                        .find(|h| {
+                            h.field.as_str() == "Cookie"
+                                || h.field.as_str() == "cookie"
+                        })
+                        .and_then(|h| {
+                            pylon_auth::extract_session_cookie(
+                                h.value.as_str(),
+                                &cookie_config.name,
+                            )
+                        });
+                    let session_user_id = cookie_token
+                        .as_deref()
+                        .and_then(|t| session_store.get(t))
+                        .map(|s| s.user_id);
+                    if let (Some(uid), Some(field)) = (
+                        session_user_id.as_deref(),
+                        runtime
+                            .manifest()
+                            .auth
+                            .user
+                            .admin_field
+                            .as_deref()
+                            .filter(|f| !f.is_empty()),
+                    ) {
+                        let user_entity = runtime.manifest().auth.user.entity.as_str();
+                        use pylon_http::DataStore as _;
+                        match runtime.get_by_id(user_entity, uid) {
+                            Ok(Some(row)) => match row.get(field) {
+                                Some(v) if v.is_boolean() => {
+                                    v.as_bool().unwrap_or(false)
+                                }
+                                Some(v) if v.is_string() => {
+                                    let s = v
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_ascii_lowercase();
+                                    s == "true" || s == "1" || s == "admin"
+                                }
+                                _ => false,
+                            },
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                };
+                if !bearer_ok && !cookie_admin_ok {
                     let body = json_error(
                         "UNAUTHORIZED",
                         "/metrics requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",

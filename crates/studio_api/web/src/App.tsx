@@ -21,17 +21,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 const config = resolveConfig();
 
 export default function App() {
-	// Default route: first resource in the sidebar config, else first
-	// manifest entity, else the overview page.
+	// Default route: the Overview page. The dashboard's first hit
+	// should land on the operational dashboard (live requests sparkline,
+	// jobs/workflows panels) — not on whatever entity happens to be
+	// first in the sidebar. Customers can pick a different default by
+	// configuring sidebar.sections in studio.config.ts; if explicit,
+	// honor that. Otherwise overview wins.
 	const initial = useMemo<StudioRoute>(() => {
-		const firstResource = config.sidebar?.sections
+		const explicitFirstPage = config.sidebar?.sections
 			?.flatMap((s) => s.items)
-			.find((i) => i.type === "resource");
-		if (firstResource && firstResource.type === "resource") {
-			return { kind: "resource", entity: firstResource.entity };
-		}
-		if (MANIFEST.entities[0]) {
-			return { kind: "resource", entity: MANIFEST.entities[0].name };
+			.find((i) => i.type === "page");
+		if (explicitFirstPage && explicitFirstPage.type === "page") {
+			return { kind: "page", id: explicitFirstPage.id };
 		}
 		return { kind: "page", id: "overview" };
 	}, []);
