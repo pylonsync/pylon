@@ -16,6 +16,19 @@ const config: NextConfig = {
     "@pylonsync/example-ui",
   ],
   images: { unoptimized: true },
+  // Enable WebAssembly module imports (needed by loro-crdt's bundler
+  // entry which does `import * as wasm from './loro_wasm_bg.wasm'`).
+  // Webpack 5 gates WASM behind an experiment flag; without it the
+  // import errors out at build time.
+  //
+  // Why webpack and not Turbopack: Turbopack on Next 16 + Vercel
+  // double-encodes the WASM URL when Vercel appends its `?dpl=` cache-
+  // bust query, producing 404s on prod (the encoded `?` lands in the
+  // chunk filename literally). Webpack emits a clean URL.
+  webpack(config) {
+    config.experiments = { ...config.experiments, asyncWebAssembly: true };
+    return config;
+  },
 };
 
 export default config;
