@@ -1,6 +1,13 @@
 import type { NextConfig } from "next";
 
-const PYLON_BASE_URL = process.env.PYLON_BASE_URL ?? "http://localhost:4321";
+// Resolve the API base URL from whichever env var the deployer set.
+// `NEXT_PUBLIC_PYLON_URL` is what the framework's misconfig warning
+// tells users to set, so it wins. `PYLON_BASE_URL` is honored for
+// older deploys. Local dev falls back to the default Pylon port.
+const PYLON_BASE_URL =
+  process.env.NEXT_PUBLIC_PYLON_URL ??
+  process.env.PYLON_BASE_URL ??
+  "http://localhost:4321";
 
 const config: NextConfig = {
   env: {
