@@ -1,27 +1,9 @@
-import { Nav } from "@/components/nav";
-import { Hero } from "@/components/hero";
-import { DemoSection } from "@/components/demo";
-import { Features } from "@/components/features";
-import { Plugins } from "@/components/plugins";
-import { Scale } from "@/components/scale";
-import { Compare } from "@/components/compare";
-import { Unusual } from "@/components/unusual";
-import { Quickstart } from "@/components/quickstart";
-import { Footer } from "@/components/footer";
+import { LandingPage } from "./landing-page";
 
+// pylonsync.com homepage. Sourced from a Claude Design handoff — the
+// implementation lives in landing-page.tsx so the route file stays a
+// thin entry-point and the design ships as a single client component
+// (it owns the live-data simulation in the hero product mock).
 export default function Home() {
-  return (
-    <>
-      <Nav />
-      <Hero />
-      <DemoSection />
-      <Features />
-      <Plugins />
-      <Scale />
-      <Compare />
-      <Unusual />
-      <Quickstart />
-      <Footer />
-    </>
-  );
+  return <LandingPage />;
 }
