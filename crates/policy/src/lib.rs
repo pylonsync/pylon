@@ -115,7 +115,11 @@ impl PolicyEngine {
         auth: &AuthContext,
         data: Option<&serde_json::Value>,
     ) -> PolicyResult {
-        // Admin bypasses all policies.
+        // Admin bypasses all policies. PYLON_ADMIN_TOKEN sessions, the
+        // user-row admin field (`auth.user.adminField` config), and the
+        // Studio admin cookie all set is_admin — they all skip the
+        // allowlist below so migrations / Studio / ops scripts work
+        // without writing a wildcard policy.
         if auth.is_admin {
             return PolicyResult::Allowed;
         }
@@ -126,18 +130,42 @@ impl PolicyEngine {
             .filter(|p| p.entity.as_deref() == Some(entity_name))
             .collect();
 
+        // Default-deny: an entity with NO policy is admin-only. The
+        // alternative (default-allow) is the same Supabase RLS footgun
+        // — devs ship with PII tables wide open because they forgot to
+        // write a policy. Apps that genuinely want a public entity
+        // declare `policy({entity: "X", allow: "true"})` explicitly.
+        //
+        // Pylon-internal scaffolding entities (anything starting with
+        // an underscore — `_PylonSchemaVersion`, `_PylonJobs`,
+        // `_PylonWorkflows`, etc.) bypass the gate. Apps don't write
+        // policies for framework-owned tables, and the public API
+        // doesn't expose them anyway.
         if policies.is_empty() {
-            return PolicyResult::Allowed;
+            if entity_name.starts_with('_') {
+                return PolicyResult::Allowed;
+            }
+            return PolicyResult::Denied {
+                policy_name: "_default_deny".into(),
+                reason: format!(
+                    "No policy registered for entity \"{entity_name}\" — default-deny refuses access. Register a policy via policy({{entity: \"{entity_name}\", ...}}) or `policy({{entity: \"{entity_name}\", allow: \"true\"}})` for an intentionally-public entity."
+                ),
+            };
         }
 
+        // Each policy on this entity acts as an additional gate. We
+        // need at least ONE policy with an applicable allow expression
+        // that evaluates true; an action with NO matching expression
+        // anywhere defaults to deny (closes the second Supabase-style
+        // hole where partial policies — `allowRead` only — silently
+        // permitted writes).
+        let mut any_rule_for_action = false;
         for policy in &policies {
             let expr = Self::expr_for(policy, action);
-            // Empty expression means "no rule at this level" — skip. A
-            // policy without any applicable rule defers to the next
-            // policy rather than silently denying.
             if expr.is_empty() {
                 continue;
             }
+            any_rule_for_action = true;
             match evaluate_allow(expr, auth, data, None) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
@@ -152,6 +180,22 @@ impl PolicyEngine {
                 }
                 PolicyResult::Allowed => {}
             }
+        }
+
+        if !any_rule_for_action {
+            return PolicyResult::Denied {
+                policy_name: "_default_deny".into(),
+                reason: format!(
+                    "Entity \"{entity_name}\" has policies but no rule covering action \"{}\" — default-deny refuses access. Add allow{} (or a wildcard `allow`) to one of the entity's policies.",
+                    action.as_str(),
+                    match action {
+                        EntityAction::Read => "Read",
+                        EntityAction::Insert => "Insert",
+                        EntityAction::Update => "Update",
+                        EntityAction::Delete => "Delete",
+                    }
+                ),
+            };
         }
 
         PolicyResult::Allowed
@@ -1251,12 +1295,122 @@ mod tests {
     }
 
     #[test]
-    fn no_policies_allows_access() {
+    fn no_policies_denies_access_default_deny() {
         let engine = PolicyEngine::from_manifest(&test_manifest());
-        let auth = AuthContext::anonymous();
-        // User entity has no policies.
-        let result = engine.check_entity_read("User", &auth, None);
+        // User entity has no policies in the test manifest. Default-
+        // deny refuses access for non-admin callers — the alternative
+        // (default-allow) is the Supabase RLS footgun where a forgotten
+        // policy ships PII publicly.
+        let anon = AuthContext::anonymous();
+        let result = engine.check_entity_read("User", &anon, None);
+        assert!(
+            !result.is_allowed(),
+            "anonymous must be denied without a policy"
+        );
+
+        let user = AuthContext::authenticated("user-1".into());
+        let result = engine.check_entity_read("User", &user, None);
+        assert!(
+            !result.is_allowed(),
+            "authenticated user must also be denied without a policy"
+        );
+
+        // Admin still bypasses — needed for migrations + Studio.
+        let admin = AuthContext::admin();
+        let result = engine.check_entity_read("User", &admin, None);
+        assert!(
+            result.is_allowed(),
+            "admin must bypass the default-deny gate"
+        );
+    }
+
+    #[test]
+    fn underscore_entities_bypass_default_deny() {
+        let engine = PolicyEngine::from_manifest(&test_manifest());
+        let anon = AuthContext::anonymous();
+        // Pylon-internal scaffolding tables (underscore-prefixed) are
+        // exempt from the gate so the framework can bootstrap without
+        // every app having to write a policy for `_PylonSchemaVersion`,
+        // `_PylonJobs`, etc.
+        let result = engine.check_entity_read("_PylonSchemaVersion", &anon, None);
         assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn missing_action_rule_defaults_to_deny() {
+        // Build a manifest with a Todo policy that ONLY defines
+        // allow_read — allow_insert/update/delete are all unset.
+        // Pre-fix: writes were silently allowed. Post-fix: missing
+        // rule = deny.
+        let m = AppManifest {
+            manifest_version: 1,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![pylon_kernel::ManifestPolicy {
+                name: "todo_read_only".into(),
+                entity: Some("Todo".into()),
+                allow_read: Some("auth.userId != null".into()),
+                ..Default::default()
+            }],
+            auth: Default::default(),
+        };
+        let engine = PolicyEngine::from_manifest(&m);
+        let user = AuthContext::authenticated("user-1".into());
+
+        // Read works (rule is present).
+        let read = engine.check_entity_read("Todo", &user, None);
+        assert!(read.is_allowed());
+
+        // Insert/update/delete have no rule → deny.
+        let insert = engine.check_entity_insert("Todo", &user, None);
+        assert!(
+            !insert.is_allowed(),
+            "insert must be denied without an allow_insert rule"
+        );
+        let update = engine.check_entity_update("Todo", &user, None);
+        assert!(
+            !update.is_allowed(),
+            "update must be denied without an allow_update rule"
+        );
+        let delete = engine.check_entity_delete("Todo", &user, None);
+        assert!(
+            !delete.is_allowed(),
+            "delete must be denied without an allow_delete rule"
+        );
+    }
+
+    #[test]
+    fn wildcard_allow_opens_intentionally_public_entity() {
+        // Apps that genuinely want a public table declare a policy
+        // with `allow: "true"`. This is the explicit opt-in to the
+        // pre-fix default behavior, scoped to one entity.
+        let m = AppManifest {
+            manifest_version: 1,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![pylon_kernel::ManifestPolicy {
+                name: "public_blog".into(),
+                entity: Some("Post".into()),
+                allow: "true".into(),
+                ..Default::default()
+            }],
+            auth: Default::default(),
+        };
+        let engine = PolicyEngine::from_manifest(&m);
+        let anon = AuthContext::anonymous();
+        let result = engine.check_entity_read("Post", &anon, None);
+        assert!(
+            result.is_allowed(),
+            "wildcard allow must permit anonymous reads"
+        );
     }
 
     #[test]

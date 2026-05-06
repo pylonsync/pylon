@@ -223,6 +223,17 @@ const orgScoped = (name: string) =>
     allowDelete: "auth.tenantId == data.orgId",
   });
 
+// User reads are open to any authenticated caller so the issue board
+// can render assignee names + avatars across users. Updates restricted
+// to own row. Required under default-deny — without it the assignee
+// pickers and comment authors would all render as dashes.
+const userPolicy = policy({
+  name: "user_directory_read",
+  entity: "User",
+  allowRead: "auth.userId != null",
+  allowUpdate: "auth.userId == data.id",
+});
+
 const organizationPolicy = policy({
   name: "organization_access",
   entity: "Organization",
@@ -261,6 +272,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [
+    userPolicy,
     organizationPolicy,
     orgMemberPolicy,
     orgScoped("Team"),

@@ -172,6 +172,19 @@ const membershipPolicy = policy({
   allowDelete: "auth.userId == data.userId",
 });
 
+// Read markers are personal — only the owner reads/writes their own
+// markers. Required policy under default-deny: without it the client's
+// `db.useQuery<ReadMarker>` would 403 silently and unread counts
+// would never compute.
+const readMarkerPolicy = policy({
+  name: "read_marker_self",
+  entity: "ReadMarker",
+  allowRead: "auth.userId == data.userId",
+  allowInsert: "auth.userId == data.userId",
+  allowUpdate: "auth.userId == data.userId",
+  allowDelete: "auth.userId == data.userId",
+});
+
 // ---------------------------------------------------------------------------
 // Manifest
 // ---------------------------------------------------------------------------
@@ -188,6 +201,7 @@ const manifest = buildManifest({
     messagePolicy,
     reactionPolicy,
     membershipPolicy,
+    readMarkerPolicy,
   ],
   routes: [],
 });

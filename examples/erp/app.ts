@@ -338,6 +338,20 @@ const orgScoped = (entity: string) =>
     allowDelete: "auth.tenantId == data.orgId",
   });
 
+// User reads are open to any authenticated caller — the dashboard
+// renders names + emails of teammates on quote/order rows. Updates
+// are own-row only so a member can't rewrite a colleague's profile.
+// Required under default-deny: without it the framework would 403
+// every cross-user lookup and team UI would render dashes everywhere.
+// (passwordHash + `_*` fields are stripped via auth.user.hide on the
+// auth side — see crates/router/src/lib.rs:maybe_project_user_row.)
+const userPolicy = policy({
+  name: "user_directory_read",
+  entity: "User",
+  allowRead: "auth.userId != null",
+  allowUpdate: "auth.userId == data.id",
+});
+
 // Organization reads are broader — a user might be invited to an org
 // before they've "selected" it, so gating on tenantId would hide the row
 // that lets the client render the switcher.
@@ -398,6 +412,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [
+    userPolicy,
     organizationPolicy,
     orgMemberPolicy,
     orgInvitePolicy,
