@@ -590,9 +590,23 @@ impl<'a> RouterContext<'a> {
     /// the JSON token in the body and ignore the missing cookie.
     /// Origin allowlisting is enforced at the runtime CSRF layer for
     /// state-changing methods, so handlers don't need to re-check here.
+    ///
+    /// When `cookie_config.domain` is set (e.g. `.pylonsync.com` for
+    /// cross-subdomain SSO), we ALSO emit a Set-Cookie that expires
+    /// any host-only cookie of the same name. This is the cleanup for
+    /// a class of bug that bites whenever an operator flips
+    /// `PYLON_COOKIE_DOMAIN` after launch: browsers hang onto the old
+    /// narrower-scoped cookie and send BOTH on every request, with
+    /// the server arbitrarily picking one per request — causing
+    /// intermittent auth failures and policy denials. Without this
+    /// guard, the only fix is "clear all your cookies and sign in
+    /// again," which is unworkable for a real product.
     pub fn maybe_set_session_cookie(&self, token: &str) {
         if self.request_origin().is_some() {
             self.add_response_header("Set-Cookie", self.cookie_config.set_value(token));
+            if let Some(clear) = self.cookie_config.host_only_clear_value() {
+                self.add_response_header("Set-Cookie", clear);
+            }
         }
     }
 }

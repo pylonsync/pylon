@@ -1031,11 +1031,28 @@ pub struct WsUpgradeRequest {
 /// Pull the headers we need to perform a WS upgrade. Returns `None`
 /// when the request isn't a WebSocket upgrade attempt (no
 /// `Sec-WebSocket-Key`).
-pub fn inspect_ws_upgrade(headers: &[tiny_http::Header]) -> Option<WsUpgradeRequest> {
+///
+/// Bearer-token resolution priority (matches the HTTP request loop):
+///   1. `Authorization: Bearer <token>` header (native clients)
+///   2. `Sec-WebSocket-Protocol: bearer.<percent-encoded-token>` (browsers
+///      can't set Authorization on WebSocket, so the SDK encodes the token
+///      as a subprotocol name)
+///   3. `Cookie: <session_cookie_name>=<token>` (browsers using cookie
+///      auth — required for the Pylon Cloud dashboard's WS multiplex,
+///      otherwise the WS upgrade lands as anonymous and the auth gate
+///      closes the socket immediately, producing a tight reconnect loop)
+///
+/// Pass `cookie_name` so the framework's cookie-config-driven name
+/// (`<app>_session` by default) works without a magic constant here.
+pub fn inspect_ws_upgrade(
+    headers: &[tiny_http::Header],
+    cookie_name: &str,
+) -> Option<WsUpgradeRequest> {
     let mut sec_key: Option<String> = None;
     let mut upgrade_ok = false;
     let mut bearer_token: Option<String> = None;
     let mut chosen_protocol: Option<String> = None;
+    let mut cookie_header: Option<String> = None;
     for h in headers {
         let name = h.field.as_str().as_str().to_ascii_lowercase();
         let value = h.value.as_str();
@@ -1059,6 +1076,16 @@ pub fn inspect_ws_upgrade(headers: &[tiny_http::Header]) -> Option<WsUpgradeRequ
                     }
                 }
             }
+        } else if name == "cookie" {
+            cookie_header = Some(value.to_string());
+        }
+    }
+    // Cookie fallback runs ONLY if no bearer was found via the
+    // header / subprotocol path — bearer wins so explicit auth can
+    // override the ambient cookie when both are present.
+    if bearer_token.is_none() {
+        if let Some(cookies) = cookie_header.as_deref() {
+            bearer_token = pylon_auth::extract_session_cookie(cookies, cookie_name);
         }
     }
     if !upgrade_ok {

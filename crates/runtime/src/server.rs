@@ -885,7 +885,9 @@ fn start_server(
         // Path is /api/sync/ws so it sits under existing `/api/*` rewrite
         // rules without forcing operators to add a new proxy entry.
         if url == "/api/sync/ws" && method == Method::Get {
-            if let Some(upgrade_req) = crate::ws::inspect_ws_upgrade(request.headers()) {
+            if let Some(upgrade_req) =
+                crate::ws::inspect_ws_upgrade(request.headers(), &cookie_config.name)
+            {
                 let hub = Arc::clone(&ws_hub);
                 let sessions = Arc::clone(&session_store);
                 let fetcher = snapshot_fetcher.clone();

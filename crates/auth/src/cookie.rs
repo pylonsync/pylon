@@ -149,6 +149,31 @@ impl CookieConfig {
         self.build(name, "", 0)
     }
 
+    /// Build a Set-Cookie value that EXPIRES the host-only variant of
+    /// the session cookie (no `Domain=` attribute). Used as a one-shot
+    /// guard when this config is broader than the previous one — e.g.
+    /// after flipping `PYLON_COOKIE_DOMAIN=.pylonsync.com` from unset,
+    /// browsers still hold a host-only cookie at the narrower scope
+    /// (`cloud.pylonsync.com`), and both cookies get sent at once,
+    /// causing the server to alternate between them per request.
+    ///
+    /// Returns `None` when this config has no domain set — there's no
+    /// broader/narrower relationship to clean up.
+    pub fn host_only_clear_value(&self) -> Option<String> {
+        if self.domain.is_none() {
+            return None;
+        }
+        let mut s = format!("{}=; Path={}", self.name, self.path);
+        s.push_str("; HttpOnly");
+        if self.secure {
+            s.push_str("; Secure");
+        }
+        s.push_str("; SameSite=");
+        s.push_str(self.same_site.as_str());
+        s.push_str("; Max-Age=0");
+        Some(s)
+    }
+
     fn build(&self, name: &str, value: &str, max_age: u64) -> String {
         let mut s = format!("{}={}; Path={}", name, value, self.path);
         if let Some(domain) = &self.domain {
