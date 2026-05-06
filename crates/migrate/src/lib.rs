@@ -427,11 +427,18 @@ fn add_column_sql(entity_name: &str, field: &ManifestField, dialect: Dialect) ->
 fn create_index_sql(entity_name: &str, idx: &ManifestIndex) -> String {
     let unique_kw = if idx.unique { "UNIQUE " } else { "" };
     let quoted_fields: Vec<String> = idx.fields.iter().map(|f| quote_ident(f)).collect();
+    let where_part = idx
+        .where_clause
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" WHERE {s}"))
+        .unwrap_or_default();
     format!(
-        "CREATE {unique_kw}INDEX IF NOT EXISTS {} ON {} ({})",
+        "CREATE {unique_kw}INDEX IF NOT EXISTS {} ON {} ({}){}",
         quote_ident(&idx.name),
         quote_ident(entity_name),
-        quoted_fields.join(", ")
+        quoted_fields.join(", "),
+        where_part,
     )
 }
 
@@ -488,6 +495,7 @@ mod tests {
             name: name.into(),
             fields: fields.into_iter().map(|f| f.into()).collect(),
             unique,
+            where_clause: None,
         }
     }
 

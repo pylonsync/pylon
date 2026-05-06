@@ -133,22 +133,32 @@ pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     )
 }
 
-/// Generate a Postgres CREATE INDEX statement.
+/// Generate a Postgres CREATE INDEX statement. When `where_clause` is
+/// `Some`, emits a partial index — Postgres calls this a "partial
+/// index" and uses identical `CREATE [UNIQUE] INDEX … WHERE` syntax
+/// to SQLite. Predicate is passed through verbatim; do NOT
+/// interpolate user input.
 pub fn create_index_sql(
     entity_name: &str,
     index_name: &str,
     fields: &[String],
     unique: bool,
+    where_clause: Option<&str>,
 ) -> String {
     let unique_str = if unique { "UNIQUE " } else { "" };
     let full_index_name = format!("{}_{}", entity_name, index_name);
     let quoted_fields: Vec<String> = fields.iter().map(|f| quote_ident(f)).collect();
+    let where_part = where_clause
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" WHERE {s}"))
+        .unwrap_or_default();
     format!(
-        "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+        "CREATE {}INDEX IF NOT EXISTS {} ON {} ({}){}",
         unique_str,
         quote_ident(&full_index_name),
         quote_ident(entity_name),
-        quoted_fields.join(", ")
+        quoted_fields.join(", "),
+        where_part,
     )
 }
 
@@ -188,6 +198,7 @@ impl StorageAdapter for PostgresAdapter {
                     name: index.name.clone(),
                     fields: index.fields.clone(),
                     unique: index.unique,
+                    where_clause: index.where_clause.clone(),
                 });
             }
         }
@@ -252,8 +263,15 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 name,
                 fields,
                 unique,
+                where_clause,
             } => {
-                statements.push(create_index_sql(entity, name, fields, *unique));
+                statements.push(create_index_sql(
+                    entity,
+                    name,
+                    fields,
+                    *unique,
+                    where_clause.as_deref(),
+                ));
             }
             SchemaOperation::CreateSearchIndex { entity, config } => {
                 #[cfg(feature = "postgres-live")]
@@ -1946,6 +1964,7 @@ mod tests {
                         name: "by_user".into(),
                         fields: vec!["userId".into()],
                         unique: false,
+                        where_clause: None,
                     }],
                     relations: vec![],
                     search: None,
@@ -2021,7 +2040,7 @@ mod tests {
 
     #[test]
     fn create_index_sql_unique() {
-        let sql = create_index_sql("User", "by_email", &["email".into()], true);
+        let sql = create_index_sql("User", "by_email", &["email".into()], true, None);
         assert_eq!(
             sql,
             "CREATE UNIQUE INDEX IF NOT EXISTS \"User_by_email\" ON \"User\" (\"email\")"
@@ -2030,10 +2049,25 @@ mod tests {
 
     #[test]
     fn create_index_sql_non_unique() {
-        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false);
+        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false, None);
         assert_eq!(
             sql,
             "CREATE INDEX IF NOT EXISTS \"Todo_by_user\" ON \"Todo\" (\"userId\")"
+        );
+    }
+
+    #[test]
+    fn create_index_sql_partial() {
+        let sql = create_index_sql(
+            "Organization",
+            "uniq_hobby_owner",
+            &["createdBy".into()],
+            true,
+            Some("plan = 'hobby'"),
+        );
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"Organization_uniq_hobby_owner\" ON \"Organization\" (\"createdBy\") WHERE plan = 'hobby'"
         );
     }
 

@@ -114,6 +114,30 @@ export interface IndexDefinition {
   name: string;
   fields: string[];
   unique: boolean;
+  /**
+   * Optional SQL predicate. When set, the framework emits a *partial*
+   * index — `CREATE [UNIQUE] INDEX … WHERE <predicate>` — so the index
+   * (and any uniqueness constraint) only applies to rows matching the
+   * predicate.
+   *
+   * Use case: enforce "max 1 hobby-tier org per user" without breaking
+   * paid users who legitimately own many orgs:
+   *
+   * ```ts
+   * indexes: [{
+   *   name: "uniq_hobby_owner",
+   *   fields: ["createdBy"],
+   *   unique: true,
+   *   where: "plan = 'hobby'",
+   * }]
+   * ```
+   *
+   * The predicate is passed straight through to the database. Both
+   * SQLite and Postgres accept this syntax — write SQL the underlying
+   * engine understands. Pylon does NOT validate or escape this string,
+   * so DO NOT interpolate user input here.
+   */
+  where?: string;
 }
 
 export interface RelationDefinition {
@@ -294,6 +318,8 @@ export interface ManifestIndex {
   name: string;
   fields: string[];
   unique: boolean;
+  /** Optional partial-index predicate — see `IndexDefinition.where`. */
+  where?: string;
 }
 
 export interface ManifestRelation {
@@ -394,6 +420,7 @@ export function entitiesToManifest(
         name: idx.name,
         fields: idx.fields,
         unique: idx.unique,
+        ...(idx.where ? { where: idx.where } : {}),
       })),
     };
     if (e.relations && e.relations.length > 0) {

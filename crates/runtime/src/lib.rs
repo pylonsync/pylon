@@ -2593,6 +2593,7 @@ mod tests {
                     name: "user_email".into(),
                     fields: vec!["email".into()],
                     unique: true,
+                    where_clause: None,
                 }],
                 relations: vec![],
                 search: None,

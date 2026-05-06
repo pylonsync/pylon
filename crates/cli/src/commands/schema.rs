@@ -755,9 +755,20 @@ fn format_operation(op: &pylon_storage::SchemaOperation) -> String {
             name,
             fields,
             unique,
+            where_clause,
         } => {
             let u = if *unique { " UNIQUE" } else { "" };
-            format!("ADD{u} index {}.{} [{}]", entity, name, fields.join(", "))
+            let w = where_clause
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| format!(" WHERE {s}"))
+                .unwrap_or_default();
+            format!(
+                "ADD{u} index {}.{} [{}]{w}",
+                entity,
+                name,
+                fields.join(", ")
+            )
         }
         RemoveIndex { entity, name } => {
             format!("REMOVE index {}.{}", entity, name)

@@ -657,6 +657,7 @@ mod tests {
                         name: "email_idx".into(),
                         fields: vec!["email".into()],
                         unique: true,
+                        where_clause: None,
                     }],
                     relations: vec![],
                     search: None,

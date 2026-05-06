@@ -296,6 +296,7 @@ mod tests {
                         name: "by_author".into(),
                         fields: vec!["authorId".into()],
                         unique: false,
+                        where_clause: None,
                     }],
                     relations: vec![],
                     search: None,

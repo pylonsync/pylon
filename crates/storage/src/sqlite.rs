@@ -88,22 +88,32 @@ pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     )
 }
 
-/// Generate a CREATE INDEX statement.
+/// Generate a CREATE INDEX statement. When `where_clause` is `Some`,
+/// emits a partial index — `CREATE [UNIQUE] INDEX … WHERE <pred>` —
+/// so uniqueness only applies to rows matching the predicate. Both
+/// SQLite and Postgres accept the same syntax for this, so the
+/// predicate is passed through verbatim.
 pub fn create_index_sql(
     entity_name: &str,
     index_name: &str,
     fields: &[String],
     unique: bool,
+    where_clause: Option<&str>,
 ) -> String {
     let unique_str = if unique { "UNIQUE " } else { "" };
     let full_index_name = format!("{}_{}", entity_name, index_name);
     let quoted_fields: Vec<String> = fields.iter().map(|f| quote_ident(f)).collect();
+    let where_part = where_clause
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!(" WHERE {s}"))
+        .unwrap_or_default();
     format!(
-        "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+        "CREATE {}INDEX IF NOT EXISTS {} ON {} ({}){}",
         unique_str,
         quote_ident(&full_index_name),
         quote_ident(entity_name),
-        quoted_fields.join(", ")
+        quoted_fields.join(", "),
+        where_part,
     )
 }
 
@@ -524,8 +534,10 @@ impl SqliteAdapter {
                     name,
                     fields,
                     unique,
+                    where_clause,
                 } => {
-                    let sql = create_index_sql(entity, name, fields, *unique);
+                    let sql =
+                        create_index_sql(entity, name, fields, *unique, where_clause.as_deref());
                     self.conn.execute(&sql, []).map_err(|e| StorageError {
                         code: "SQLITE_EXEC_FAILED".into(),
                         message: format!("Failed to create index {entity}.{name}: {e}"),
@@ -794,6 +806,7 @@ mod tests {
                     name: "by_email".into(),
                     fields: vec!["email".into()],
                     unique: true,
+                    where_clause: None,
                 }],
                 relations: vec![],
                 search: None,
@@ -832,7 +845,7 @@ mod tests {
 
     #[test]
     fn create_index_sql_basic() {
-        let sql = create_index_sql("User", "by_email", &["email".into()], true);
+        let sql = create_index_sql("User", "by_email", &["email".into()], true, None);
         assert_eq!(
             sql,
             "CREATE UNIQUE INDEX IF NOT EXISTS \"User_by_email\" ON \"User\" (\"email\")"
@@ -841,10 +854,28 @@ mod tests {
 
     #[test]
     fn create_index_sql_non_unique() {
-        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false);
+        let sql = create_index_sql("Todo", "by_user", &["userId".into()], false, None);
         assert_eq!(
             sql,
             "CREATE INDEX IF NOT EXISTS \"Todo_by_user\" ON \"Todo\" (\"userId\")"
+        );
+    }
+
+    #[test]
+    fn create_index_sql_partial() {
+        // Partial unique index: enforces uniqueness only for rows
+        // matching the predicate. Used by createOrganization to cap
+        // hobby tier at 1 org per user without restricting paid tiers.
+        let sql = create_index_sql(
+            "Organization",
+            "uniq_hobby_owner",
+            &["createdBy".into()],
+            true,
+            Some("plan = 'hobby'"),
+        );
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"Organization_uniq_hobby_owner\" ON \"Organization\" (\"createdBy\") WHERE plan = 'hobby'"
         );
     }
 

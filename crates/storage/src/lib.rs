@@ -94,6 +94,12 @@ pub enum SchemaOperation {
         name: String,
         fields: Vec<String>,
         unique: bool,
+        /// Optional partial-index predicate (`CREATE … WHERE <pred>`).
+        /// Empty / None = full index; otherwise the SQL is appended
+        /// verbatim to the CREATE INDEX. Set this for "max one row
+        /// per scope" constraints that depend on a column value
+        /// (e.g. `plan = 'hobby'`).
+        where_clause: Option<String>,
     },
     RemoveIndex {
         entity: String,
@@ -210,6 +216,7 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                         name: index.name.clone(),
                         fields: index.fields.clone(),
                         unique: index.unique,
+                        where_clause: index.where_clause.clone(),
                     });
                 }
                 if let Some(cfg) = &entity.search {
@@ -280,6 +287,7 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                             name: index.name.clone(),
                             fields: index.fields.clone(),
                             unique: index.unique,
+                            where_clause: index.where_clause.clone(),
                         });
                     }
                 }
@@ -436,6 +444,7 @@ impl StorageAdapter for DryRunAdapter {
                     name: index.name.clone(),
                     fields: index.fields.clone(),
                     unique: index.unique,
+                    where_clause: index.where_clause.clone(),
                 });
             }
         }
@@ -505,6 +514,7 @@ impl StorageAdapter for DiffAdapter {
                         name: index.name.clone(),
                         fields: index.fields.clone(),
                         unique: index.unique,
+                        where_clause: index.where_clause.clone(),
                     });
                 }
             }
@@ -554,6 +564,7 @@ impl StorageAdapter for DiffAdapter {
                             name: index.name.clone(),
                             fields: index.fields.clone(),
                             unique: index.unique,
+                            where_clause: index.where_clause.clone(),
                         });
                     }
                 }
@@ -638,6 +649,7 @@ mod tests {
             name: "by_email".into(),
             fields: vec!["email".into()],
             unique: true,
+            where_clause: None,
         });
         let plan = adapter.plan_schema(&manifest).unwrap();
 
@@ -648,11 +660,13 @@ mod tests {
                 name,
                 fields,
                 unique,
+                where_clause,
             } => {
                 assert_eq!(entity, "User");
                 assert_eq!(name, "by_email");
                 assert_eq!(fields, &vec!["email".to_string()]);
                 assert!(unique);
+                assert!(where_clause.is_none());
             }
             other => panic!("expected AddIndex, got: {other:?}"),
         }
@@ -787,6 +801,7 @@ mod tests {
                     name: "idx".into(),
                     fields: vec!["email".into()],
                     unique: true,
+                    where_clause: None,
                 },
                 SchemaOperation::Noop,
             ],
@@ -1002,6 +1017,7 @@ mod tests {
                     name: "by_email".into(),
                     fields: vec!["email".into()],
                     unique: true,
+                    where_clause: None,
                 }],
                 relations: vec![],
                 search: None,

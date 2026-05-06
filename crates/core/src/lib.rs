@@ -417,6 +417,17 @@ pub struct ManifestIndex {
     pub name: String,
     pub fields: Vec<String>,
     pub unique: bool,
+    /// Optional SQL predicate that turns this into a *partial* index.
+    /// Both SQLite and Postgres support `CREATE [UNIQUE] INDEX … WHERE`,
+    /// which lets the same index enforce different cardinality rules
+    /// for different rows — e.g. a unique constraint on
+    /// `(createdBy)` only when `plan = 'hobby'`, so a single user can
+    /// own multiple paid orgs but only one hobby org.
+    ///
+    /// Skipped on serialize when None so existing manifests stay
+    /// byte-for-byte identical.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "where")]
+    pub where_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
