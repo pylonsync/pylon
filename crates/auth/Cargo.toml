@@ -42,3 +42,11 @@ sha3 = { workspace = true }
 flate2 = { workspace = true }
 # SAML 2.0 + XMLDSig signature verification.
 samael = { workspace = true }
+# Force vendored OpenSSL for samael's transitive openssl-sys dep.
+# Without this, cross-compiling the macOS x86_64 binary from arm64
+# CI runners fails because pkg-config can't find a cross OpenSSL,
+# which has been blocking @pylonsync/cli npm publishes since v0.3.24
+# (the dispatcher requires all 4 platform binaries). `vendored`
+# bundles OpenSSL source and builds it for the target — no system
+# OpenSSL needed on either side of the cross.
+openssl = { version = "0.10", features = ["vendored"] }
