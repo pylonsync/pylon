@@ -167,15 +167,20 @@ pub(crate) fn handle(
                 }
             };
 
-            // Refuse internal-only functions over HTTP. The TS define
-            // API exposes `internal: true` for helper mutations that
-            // shouldn't be reachable directly (e.g. ones that trust
-            // their args without re-checking caller authority because
-            // they assume a wrapping action verified everything).
-            // Same 404 shape as "not registered" — probing can't
-            // confirm the name exists.
+            // Refuse internal-only functions over HTTP for non-admin
+            // callers. The TS define API exposes `internal: true` for
+            // helper mutations that shouldn't be reachable directly
+            // (e.g. ones that trust their args without re-checking
+            // caller authority because they assume a wrapping action
+            // verified everything). Same 404 shape as "not registered"
+            // — probing can't confirm the name exists.
+            //
+            // Admin sessions (PYLON_ADMIN_TOKEN, or `auth.user.adminField`
+            // sessions, or the Studio admin cookie) bypass the gate so
+            // operators can manually kick crons + debug helper functions
+            // from Studio without round-tripping through the scheduler.
             match fn_ops.get_fn(fn_name) {
-                Some(def) if def.internal => {
+                Some(def) if def.internal && !ctx.auth_ctx.is_admin => {
                     return Some((
                         404,
                         json_error(
