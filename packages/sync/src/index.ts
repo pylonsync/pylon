@@ -688,6 +688,7 @@ export class SyncEngine {
     if (this.running) return;
     this.running = true;
     this.setConnectionStatus("connecting");
+    warnIfMisconfigured(this.config.baseUrl);
 
     // Load persisted data if available.
     const shouldPersist = this.config.persist !== false && typeof indexedDB !== "undefined";
@@ -1591,6 +1592,43 @@ export async function getServerData(
 // ---------------------------------------------------------------------------
 // Convenience factory
 // ---------------------------------------------------------------------------
+
+/**
+ * One-shot guard: detect the most common production misconfig — a
+ * deployed app running on HTTPS with `baseUrl` still pointing at a
+ * `localhost` API. Symptom in the wild: blank screen, "Failed to
+ * fetch" in DevTools, browser blocking mixed-content WS upgrades.
+ *
+ * The check fires once per page load and is browser-only (server-
+ * side renders see localhost as a legitimate target). It's a loud
+ * `console.error` block — surfaces in DevTools, Vercel deploy logs,
+ * and Sentry-style trackers — but doesn't throw, so existing apps
+ * can't lock up on a misconfigured deploy.
+ */
+let warnedMisconfig = false;
+function warnIfMisconfigured(baseUrl: string): void {
+  if (warnedMisconfig) return;
+  if (typeof window === "undefined") return;
+  const pageHttps = window.location?.protocol === "https:";
+  const apiLocalhost =
+    /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/.test(baseUrl);
+  if (!pageHttps || !apiLocalhost) return;
+  warnedMisconfig = true;
+  // eslint-disable-next-line no-console
+  console.error(
+    "[pylon] Misconfigured deployment:\n" +
+      "  Page is on " + window.location.origin + " (https)\n" +
+      "  Pylon baseUrl is " + baseUrl + " (localhost)\n" +
+      "\n" +
+      "Likely cause: NEXT_PUBLIC_PYLON_URL (or your framework's equivalent)\n" +
+      "is unset in this deployment. The client falls back to localhost,\n" +
+      "and every API request fails with 'Failed to fetch'.\n" +
+      "\n" +
+      "Fix: set NEXT_PUBLIC_PYLON_URL=https://<your-pylon-host> in the\n" +
+      "deployment env, then redeploy. If your dashboard proxies /api/*\n" +
+      "to the backend same-origin, set it to '' (empty string) instead.",
+  );
+}
 
 /**
  * Create a sync engine connected to the pylon backend.

@@ -52,31 +52,19 @@ import { cn } from "@pylonsync/example-ui/utils";
 
 // Pylon backend URL. Read from Vite at build time so production
 // bundles ship with the deployed Pylon hostname baked in. Set
-// VITE_PYLON_URL on Vercel (or your host) to e.g.
-// https://pylon-chat.fly.dev. Falls back to localhost so `bun
-// run dev` works without any env config.
-type ViteEnv = {
-  VITE_PYLON_URL?: string;
-  VITE_PYLON_WS_URL?: string;
-};
-const env = (import.meta as { env?: ViteEnv }).env ?? {};
-const BASE_URL = env.VITE_PYLON_URL ?? "http://localhost:4321";
-// WS hub URL. Pylon's runtime listens on port+1 (4322) on a
-// separate TCP listener — the HTTP server doesn't yet multiplex
-// Upgrade: websocket on the main port. In production (Pylon
-// Cloud), the Fly machine exposes that as wss://<host>:4322.
-// VITE_PYLON_WS_URL overrides everything for self-hosted setups
-// behind a reverse proxy that DOES multiplex.
-const WS_URL =
-  env.VITE_PYLON_WS_URL ?? deriveWsUrl(BASE_URL);
-function deriveWsUrl(base: string): string {
-  const url = new URL(base);
-  const scheme = url.protocol === "https:" ? "wss" : "ws";
-  // Local dev: http://localhost:4321 → ws://localhost:4322.
-  // Prod: https://app.fly.dev → wss://app.fly.dev:4322.
-  const port = url.port ? Number(url.port) + 1 : 4322;
-  return `${scheme}://${url.hostname}:${port}`;
-}
+// NEXT_PUBLIC_PYLON_URL on Vercel (or your host) to e.g.
+// https://pylon-chat-api.fly.dev. Falls back to localhost so
+// `bun dev` works without any env config — the framework's
+// init() warns loudly when it detects a production HTTPS host
+// pointing at a localhost API, so a missing env var on Vercel
+// surfaces as a console banner instead of silent failure.
+const BASE_URL =
+  process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
+// WS hub URL. With framework v0.3.44+ Pylon multiplexes WS on the
+// main HTTP port via /api/sync/ws; @pylonsync/sync's deriveWsUrl
+// picks that up automatically when wsUrl isn't set. Override here
+// only if you are behind a proxy that does not pass Upgrade headers.
+const WS_URL = process.env.NEXT_PUBLIC_PYLON_WS_URL || undefined;
 // Give this app its own namespace so chat's auth + replica don't clobber
 // any other Pylon app served from the same browser origin.
 init({ baseUrl: BASE_URL, appName: "chat", wsUrl: WS_URL });
