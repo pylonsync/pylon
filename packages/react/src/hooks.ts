@@ -1,6 +1,6 @@
 "use client";
 
-import { SyncEngine, type Row } from "@pylonsync/sync";
+import { SyncEngine, generateId, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { callFn, getBaseUrl, getReactStorage, storageKey } from "./index";
 
@@ -275,6 +275,61 @@ export interface UseMutationReturn<TArgs, TResult> {
 }
 
 /**
+ * Builder for the optimistic ghost row painted in the local store
+ * before the server function returns. Receives the args passed to
+ * `mutate()` plus a `ctx` object the framework fills in for you:
+ *
+ * - `ctx.id`  — the freshly-minted Pylon-shaped row id (40-char hex)
+ *               that the framework also threads into the mutation
+ *               args as `_optimisticId`. Use this as the row's `id`
+ *               so the optimistic ghost and the canonical broadcast
+ *               share the same `row_id` and the WS update is an
+ *               in-place merge instead of a delete-then-replace flash.
+ * - `ctx.now` — `new Date().toISOString()` evaluated once, so the
+ *               optimistic ghost has a `createdAt` that's stable
+ *               across the same gesture.
+ *
+ * Return either a single `{ entity, data }` for the common one-row
+ * case or an array for mutations that touch multiple entities (e.g.
+ * an "accept invite" that inserts a Membership AND an AuditLog row).
+ */
+export interface OptimisticContext {
+  id: string;
+  now: string;
+}
+export type OptimisticChange = { entity: string; data: Row };
+export type OptimisticBuilder<TArgs> = (
+  args: TArgs,
+  ctx: OptimisticContext,
+) => OptimisticChange | OptimisticChange[];
+
+export interface UseMutationOptions<TArgs> {
+  token?: string;
+  /**
+   * Paint a row into the local store immediately, before the server
+   * function returns. The row uses `ctx.id` as its `id` and the
+   * framework threads that id through the mutation args as
+   * `_optimisticId` — your server function should accept it and pass
+   * it on to `ctx.db.insert("Entity", { id: args._optimisticId, ... })`
+   * (the runtime honors caller-supplied ids for any 40-char hex value).
+   *
+   * The WS broadcast that follows will carry the same `row_id`, so the
+   * canonical row lands as a field-level merge on top of the
+   * optimistic ghost — no flash, no temp-row swap, no manual cleanup.
+   *
+   * On rejection, the optimistic insert is rolled back without leaving
+   * a tombstone, so retrying the mutation works.
+   */
+  optimistic?: OptimisticBuilder<TArgs>;
+  /**
+   * Active sync engine. Required when `optimistic` is set so the hook
+   * can paint the ghost into the right store; ignored otherwise. The
+   * `db.useMutation` wrapper supplies this automatically via `getSync`.
+   */
+  sync?: SyncEngine;
+}
+
+/**
  * Hook for calling a server-side mutation/action function.
  *
  * ```tsx
@@ -287,16 +342,27 @@ export interface UseMutationReturn<TArgs, TResult> {
  *   if (result.accepted) alert("Bid placed!");
  * };
  * ```
+ *
+ * For optimistic UI, pass an `optimistic` builder. See
+ * `OptimisticBuilder` above for the contract.
  */
 export function useMutation<TArgs = Record<string, unknown>, TResult = unknown>(
   fnName: string,
-  options: { token?: string } = {}
+  options: UseMutationOptions<TArgs> = {}
 ): UseMutationReturn<TArgs, TResult> {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<TResult | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const tokenRef = useRef(options.token);
   tokenRef.current = options.token;
+  // Stash the optimistic builder + sync handle in refs so changes
+  // between renders don't blow away in-flight mutations. The mutate
+  // closure reads through the ref so every call sees the latest
+  // builder without needing to re-bind the callback.
+  const optimisticRef = useRef(options.optimistic);
+  optimisticRef.current = options.optimistic;
+  const syncRef = useRef(options.sync);
+  syncRef.current = options.sync;
 
   // mounted guard: a mutate() kicked off right before unmount used to
   // resolve after cleanup and call set{Data,Error,Loading} on a dead
@@ -314,15 +380,53 @@ export function useMutation<TArgs = Record<string, unknown>, TResult = unknown>(
     async (args: TArgs): Promise<TResult> => {
       if (mounted.current) setLoading(true);
       if (mounted.current) setError(null);
+
+      // Paint the optimistic ghost(s) before kicking off the server
+      // call. The id we mint here goes into both the ghost and the
+      // mutation args (as `_optimisticId`) so the canonical row that
+      // arrives over the WS shares the same `row_id` — the local
+      // store treats the broadcast as an in-place merge rather than a
+      // new row, and the UI doesn't flash through "ghost → empty →
+      // canonical" while we wait for the server response.
+      let serverArgs = args as TArgs & { _optimisticId?: string };
+      let optimisticIds: Array<{ entity: string; id: string }> = [];
+      const sync = syncRef.current;
+      const builder = optimisticRef.current;
+      if (builder && sync) {
+        const id = generateId();
+        const now = new Date().toISOString();
+        const out = builder(args, { id, now });
+        const changes = Array.isArray(out) ? out : [out];
+        for (const change of changes) {
+          // Force the row's `id` to the framework-minted one even if
+          // the builder forgot — the ghost MUST share the row id with
+          // the canonical for the merge to land cleanly.
+          sync.store.optimisticInsertWithId(change.entity, id, {
+            ...change.data,
+            id,
+          });
+          optimisticIds.push({ entity: change.entity, id });
+        }
+        serverArgs = { ...args, _optimisticId: id };
+      }
+
       try {
         const result = await callFn<TResult>(
           fnName,
-          args as Record<string, unknown>,
+          serverArgs as Record<string, unknown>,
           { token: tokenRef.current }
         );
         if (mounted.current) setData(result);
         return result;
       } catch (e) {
+        // Roll back optimistic ghosts without leaving a tombstone — a
+        // retry of the same mutation must not be blocked by a dead
+        // tombstone seq from this rejected attempt.
+        if (sync) {
+          for (const { entity, id } of optimisticIds) {
+            sync.store.rollbackOptimisticInsert(entity, id);
+          }
+        }
         const err = e instanceof Error ? e : new Error(String(e));
         if (mounted.current) setError(err);
         throw err;

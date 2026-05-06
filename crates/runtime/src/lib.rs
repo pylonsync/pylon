@@ -779,8 +779,8 @@ impl Runtime {
             // failure between them desynced the layers.
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
-                let id = generate_id();
-                // Inject the generated id so build_insert_sql reuses
+                let id = resolve_or_generate_id(data)?;
+                // Inject the resolved id so build_insert_sql reuses
                 // it — keeps the snapshot key and the row id aligned.
                 let mut row = data.clone();
                 if let Some(obj) = row.as_object_mut() {
@@ -822,7 +822,7 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_write_conn()?;
 
-        let id = generate_id();
+        let id = resolve_or_generate_id(data)?;
 
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
@@ -882,9 +882,27 @@ impl Runtime {
             let params: Vec<&dyn rusqlite::types::ToSql> =
                 values.iter().map(|v| v.as_ref()).collect();
             conn.execute(&sql, params.as_slice())
-                .map_err(|e| RuntimeError {
-                    code: "INSERT_FAILED".into(),
-                    message: format!("Insert into {entity} failed: {e}"),
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    // PK collision on a client-provided id (or, rare,
+                    // a generator collision) — surface as a typed code
+                    // so optimistic-mutation retry logic can tell this
+                    // apart from a generic write failure and either
+                    // re-issue with a fresh id or merge with the row
+                    // already present. Match `<entity>.id` specifically
+                    // so collisions on other UNIQUE columns (email,
+                    // slug, …) keep their generic INSERT_FAILED code.
+                    let code = if msg.contains(&format!(
+                        "UNIQUE constraint failed: {entity}.id"
+                    )) {
+                        "OPTIMISTIC_ID_CONFLICT"
+                    } else {
+                        "INSERT_FAILED"
+                    };
+                    RuntimeError {
+                        code: code.into(),
+                        message: format!("Insert into {entity} failed: {e}"),
+                    }
                 })?;
 
             // Search-index maintenance lives inside the same tx so a
@@ -1626,7 +1644,7 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
-        let id = generate_id();
+        let id = resolve_or_generate_id(data)?;
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Insert data must be a JSON object".into(),
@@ -1655,9 +1673,17 @@ impl Runtime {
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         conn.execute(&sql, params.as_slice())
-            .map_err(|e| RuntimeError {
-                code: "INSERT_FAILED".into(),
-                message: format!("Insert into {entity} failed: {e}"),
+            .map_err(|e| {
+                let msg = e.to_string();
+                let code = if msg.contains("UNIQUE constraint failed") {
+                    "OPTIMISTIC_ID_CONFLICT"
+                } else {
+                    "INSERT_FAILED"
+                };
+                RuntimeError {
+                    code: code.into(),
+                    message: format!("Insert into {entity} failed: {e}"),
+                }
             })?;
 
         // Faceted-search maintenance in the same transaction. Skipped
@@ -2498,6 +2524,54 @@ fn generate_id() -> String {
     format!("{nanos:032x}{seq:08x}")
 }
 
+/// Honor a caller-supplied `id` if it's well-formed, otherwise generate
+/// one. This is the entry point for client-provided ids on optimistic
+/// mutations: the React `useMutation({ optimistic })` hook generates a
+/// Pylon-shaped id with `@pylonsync/sync`'s `generateId()`, threads it
+/// through the mutation args, and the server function passes it on to
+/// `ctx.db.insert("Entity", { id, ... })`. By accepting the id here the
+/// optimistic ghost the client painted and the canonical row the WS
+/// broadcast carries share the same `row_id`, so the local store's
+/// merge is a no-op instead of a delete-then-replace flash.
+///
+/// Format check is conservative — exactly 40 lowercase hex chars, the
+/// same shape `generate_id` produces. This rejects ULIDs, UUIDs, slugs,
+/// and "user_42" style ids that would silently break cursor pagination
+/// (which assumes lex-sortable fixed-width ids; see `generate_id`'s doc
+/// comment for why).
+fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
+    let obj = match data.as_object() {
+        Some(o) => o,
+        None => return Ok(generate_id()),
+    };
+    match obj.get("id") {
+        None | Some(serde_json::Value::Null) => Ok(generate_id()),
+        Some(serde_json::Value::String(s)) => {
+            if !is_valid_pylon_id(s) {
+                return Err(RuntimeError {
+                    code: "INVALID_ID".into(),
+                    message: format!(
+                        "client-provided `id` must be a 40-char lowercase hex string \
+                         (use generateId() from @pylonsync/sync). Got: {s:?}"
+                    ),
+                });
+            }
+            Ok(s.clone())
+        }
+        Some(other) => Err(RuntimeError {
+            code: "INVALID_ID".into(),
+            message: format!(
+                "Insert data carried a non-string `id` value: {other}. \
+                 Pylon row ids are always 40-char hex strings."
+            ),
+        }),
+    }
+}
+
+fn is_valid_pylon_id(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Convert a `serde_json::Value` to a boxed `ToSql` for rusqlite.
 fn json_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
     match val {
@@ -2643,6 +2717,79 @@ mod tests {
             .unwrap();
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["email"], "a@b.com");
+    }
+
+    /// Optimistic-mutation contract: a well-formed client-provided id
+    /// is used verbatim for the inserted row, so the optimistic ghost
+    /// the client painted and the canonical broadcast share the same
+    /// `row_id` and the WS update is an in-place merge.
+    #[test]
+    fn insert_honors_client_provided_id() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let client_id = "0123456789abcdef0123456789abcdef01234567";
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({
+                    "id": client_id,
+                    "email": "client@example.com",
+                    "displayName": "C",
+                }),
+            )
+            .unwrap();
+        assert_eq!(id, client_id, "runtime must echo client-provided id");
+        let row = rt.get_by_id("User", client_id).unwrap().unwrap();
+        assert_eq!(row["email"], "client@example.com");
+    }
+
+    /// A client-provided id that doesn't match Pylon's 40-char hex
+    /// shape gets rejected before it touches the database. Without
+    /// this guard, ULIDs and slugs would corrupt cursor pagination
+    /// (which assumes lex-sortable fixed-width ids).
+    #[test]
+    fn insert_rejects_malformed_client_id() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let err = rt
+            .insert(
+                "User",
+                &serde_json::json!({
+                    "id": "01HX9YPK0V3J6Y0K7X2KZ8RQGT", // ULID — 26 chars
+                    "email": "ulid@example.com",
+                    "displayName": "U",
+                }),
+            )
+            .expect_err("ULID must be rejected");
+        assert_eq!(err.code, "INVALID_ID");
+    }
+
+    /// PK collision on a client-provided id surfaces as a typed
+    /// OPTIMISTIC_ID_CONFLICT — distinct from a generic INSERT_FAILED
+    /// — so retry logic on the client can mint a fresh id and re-issue
+    /// instead of treating the collision as a fatal write error.
+    #[test]
+    fn insert_id_collision_returns_typed_error() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let client_id = "fedcba9876543210fedcba9876543210fedcba98";
+        rt.insert(
+            "User",
+            &serde_json::json!({
+                "id": client_id,
+                "email": "first@example.com",
+                "displayName": "First",
+            }),
+        )
+        .unwrap();
+        let err = rt
+            .insert(
+                "User",
+                &serde_json::json!({
+                    "id": client_id,
+                    "email": "second@example.com",
+                    "displayName": "Second",
+                }),
+            )
+            .expect_err("duplicate id must fail");
+        assert_eq!(err.code, "OPTIMISTIC_ID_CONFLICT");
     }
 
     /// Regression: when a new field is added in the middle of a manifest,

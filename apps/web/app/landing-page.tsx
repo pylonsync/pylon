@@ -1277,35 +1277,34 @@ export function LandingPage() {
 				{/* AI AGENT SKILL */}
 				<section className="block" id="skill" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
-						<div className="eyebrow">AI-native</div>
+						<div className="eyebrow">Claude Code skill</div>
 						<h2 className="h2">Your coding agent <span className="serif">already knows Pylon.</span></h2>
-						<p className="section-lede">A skill bundle ships with the SDK. Claude Code, Codex, and Cursor pick up the schema conventions, the policy DSL, and the function runtime — so they generate code that compiles, not code that looks like it should.</p>
+						<p className="section-lede">One markdown file teaches Claude Code the schema model, the policy DSL, the server-function runtime, and the React client. Drop it into <code>~/.claude/skills/pylon/</code> and Claude generates code that compiles instead of code that looks like it should.</p>
 
 						<div className="qs-wrap" style={{ marginTop: 64 }}>
 							<div className="qs-term">
 								<div className="head">
 									<div className="dots"><i /><i /><i /></div>
-									<span>my-app — claude code</span>
+									<span>install pylon skill</span>
 								</div>
 								<div className="body">
-									<div><span className="pr">❯</span> claude /skill add pylon</div>
-									<div><span className="ok">  ✓ Loaded pylon-skill.md (1,847 lines)</span></div>
-									<div><span className="dim">  Schema conventions, policy DSL, ctx.* helpers</span></div>
-									<div><span className="pr">❯</span> claude &quot;add a comments entity to my Order schema&quot;</div>
-									<div><span className="info">  → reading schema.ts, policies.ts</span></div>
-									<div><span className="ok">  ✓ Generated Comment entity with composite indexes</span></div>
-									<div><span className="ok">  ✓ Wired Order.read policy to inherit on Comment</span></div>
-									<div><span className="ok">  ✓ Regenerated typed client</span></div>
-									<div><span className="dim">  &quot;ready when you are&quot;</span></div>
+									<div><span className="pr">❯</span> mkdir -p ~/.claude/skills/pylon</div>
+									<div><span className="pr">❯</span> curl -fsSL https://pylonsync.com/pylon-skill.md \</div>
+									<div>{"      "}&gt; ~/.claude/skills/pylon/SKILL.md</div>
+									<div><span className="ok">  ✓ Wrote 523 lines</span></div>
+									<div><span className="dim">    Schema · policies · functions · React · deploy</span></div>
+									<div>&nbsp;</div>
+									<div><span className="dim">  # Restart Claude Code; the skill auto-loads</span></div>
+									<div><span className="dim">  # whenever you work on a Pylon project.</span></div>
 									<div><span className="pr">❯</span><span className="blink" /></div>
 								</div>
 							</div>
 
 							<div className="qs-steps">
-								<div className="qs-step"><div className="n">SK</div><div><h5>One file, every agent</h5><p><code>pylon-skill.md</code> teaches the schema-first model, the policy compiler, and the function runtime — the same conventions Pylon&apos;s own type system enforces.</p></div></div>
-								<div className="qs-step"><div className="n">CC</div><div><h5>Claude Code native</h5><p>Drop the skill into <code>.claude/skills/</code> and it&apos;s loaded on every session. Includes regression tests so the agent self-checks.</p></div></div>
-								<div className="qs-step"><div className="n">CX</div><div><h5>Codex &amp; Cursor</h5><p>Same skill file, mounted as <code>AGENTS.md</code> or <code>.cursor/rules</code>. The conventions are tool-agnostic by design.</p></div></div>
-								<div className="qs-step"><div className="n">→</div><div><h5>Stays in sync</h5><p>Skill updates ship with each Pylon release. New primitives, new patterns — your agents pick them up automatically.</p></div></div>
+								<div className="qs-step"><div className="n">01</div><div><h5>One file, the whole framework</h5><p>523 lines of conventions — schema shape, policy expressions, <code>ctx.*</code> helpers, manifest behaviors, deploy paths. The same handbook the maintainers write to.</p></div></div>
+								<div className="qs-step"><div className="n">02</div><div><h5>User-wide or project-scoped</h5><p>Save to <code>~/.claude/skills/pylon/SKILL.md</code> for every project, or <code>.claude/skills/pylon/SKILL.md</code> committed alongside one app.</p></div></div>
+								<div className="qs-step"><div className="n">03</div><div><h5>Stays current with the framework</h5><p>The skill lives at <code>pylonsync.com/pylon-skill.md</code> and ships with each Pylon release. Re-curl when a new version drops.</p></div></div>
+								<div className="qs-step"><div className="n">→</div><div><h5>Read it first</h5><p>Full install instructions and the whole skill rendered inline at <a href="/skill" style={{ color: "var(--accent)" }}>pylonsync.com/skill</a>.</p></div></div>
 							</div>
 						</div>
 					</div>

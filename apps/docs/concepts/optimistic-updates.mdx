@@ -1,0 +1,122 @@
+---
+title: Optimistic updates
+description: "Local-first UI without the flash."
+---
+
+A mutation that paints its result into the UI **before** the server confirms is an **optimistic update**. Pylon's sync engine ships first-class support for the pattern — the optimistic ghost and the canonical row share an id, so the WebSocket broadcast lands as a field-level merge instead of a delete-then-replace flash.
+
+```tsx
+import { db } from "@pylonsync/react";
+
+const send = db.useMutation<
+  { channelId: string; body: string },
+  { messageId: string }
+>("sendMessage", {
+  optimistic: (args, ctx) => ({
+    entity: "Message",
+    data: {
+      id: ctx.id,
+      channelId: args.channelId,
+      authorId: me.id,
+      body: args.body,
+      createdAt: ctx.now,
+    },
+  }),
+});
+
+await send.mutate({ channelId, body });
+```
+
+The user sees their message appear instantly. The canonical row arrives over the WebSocket a beat later and merges in place — no flash, no temp-row swap, no manual cleanup.
+
+## How it works
+
+1. `useMutation` calls `optimistic(args, ctx)` to build the ghost row. `ctx.id` is a freshly-minted Pylon-shaped row id (40-char hex); `ctx.now` is a stable timestamp for the gesture.
+2. The hook paints the ghost into the local store via `optimisticInsertWithId`. Live queries re-render immediately.
+3. The hook calls the server function with the original args **plus** `_optimisticId: ctx.id`.
+4. The server function passes `args._optimisticId` into `ctx.db.insert("Entity", { id, ... })`. The runtime validates the id is well-formed and uses it verbatim.
+5. The change log emits a broadcast with `row_id = ctx.id`. It arrives at the client over the WebSocket and the local store treats it as an idempotent merge — same `row_id`, fields refreshed.
+6. **On rejection**, the optimistic ghost is rolled back without leaving a tombstone, so retrying the mutation works.
+
+## The server function
+
+To accept optimistic ids, your mutation needs one extra arg:
+
+```ts
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: {
+    channelId: v.id("Channel"),
+    body: v.string(),
+    _optimisticId: v.optional(v.string()),
+  },
+  async handler(ctx, args) {
+    const messageId = await ctx.db.insert("Message", {
+      ...(args._optimisticId ? { id: args._optimisticId } : {}),
+      channelId: args.channelId,
+      authorId: ctx.auth.userId,
+      body: args.body,
+      createdAt: new Date().toISOString(),
+    });
+    return { messageId };
+  },
+});
+```
+
+The runtime validates `_optimisticId` is a 40-char lowercase hex string (the shape `generateId()` produces). Anything else returns an `INVALID_ID` error before the row is inserted.
+
+If two clients somehow mint the same id, the second insert fails with a typed `OPTIMISTIC_ID_CONFLICT` error code so retry logic can mint a fresh id and try again.
+
+## Multiple rows in one gesture
+
+Some mutations touch more than one entity — accepting an invite, for example, inserts a Membership row AND an AuditLog row. Return an array from the builder:
+
+```tsx
+const acceptInvite = db.useMutation<{ inviteId: string }, { membershipId: string }>(
+  "acceptInvite",
+  {
+    optimistic: (args, ctx) => [
+      {
+        entity: "Membership",
+        data: { id: ctx.id, userId: me.id, /* … */ },
+      },
+      {
+        entity: "AuditLog",
+        data: { id: ctx.id, action: "invite.accept", actorId: me.id, at: ctx.now },
+      },
+    ],
+  },
+);
+```
+
+All ghosts use the same `ctx.id`, so they're rolled back together on rejection.
+
+## When NOT to use it
+
+Optimistic updates are a UX win when the server almost always succeeds. Skip them when:
+
+- The mutation can fail in ways the user must see immediately (e.g. payment, ID verification). Showing the ghost only to remove it 200ms later is worse than a small spinner.
+- The server transforms the data significantly (e.g. computes a slug, generates a thumbnail, runs through an AI). The ghost would be visibly different from the canonical, defeating the point.
+- The feature is rarely-used (settings dialogs, admin pages). The complexity isn't worth the polish.
+
+For everything else — chat, comments, todos, likes, reactions, drag-and-drop reorders — local-first optimistic is the default, and it's one prop.
+
+## Manual control
+
+For mutations that don't fit the `useMutation` shape (background syncs, multi-step flows), the underlying primitives are exported from `@pylonsync/sync`:
+
+```ts
+import { generateId } from "@pylonsync/sync";
+
+const id = generateId();
+db.sync.store.optimisticInsertWithId("Message", id, { id, body, /* … */ });
+
+try {
+  await myCustomFlow({ id, body });
+} catch {
+  db.sync.store.rollbackOptimisticInsert("Message", id);
+}
+```
+
+`rollbackOptimisticInsert` removes the ghost without leaving a tombstone, so a future legitimate insert with the same id (e.g. eventual consistency from a workflow) isn't blocked.

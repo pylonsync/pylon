@@ -255,6 +255,46 @@ export class LocalStore {
     return tempId;
   }
 
+  /**
+   * Apply an optimistic insert with a caller-provided id.
+   *
+   * Used by `useMutation({ optimistic })`: the React hook generates a
+   * Pylon-shaped id (40-char hex via `generateId()`), threads it
+   * through the mutation args as `_optimisticId`, and the server
+   * function honors it on `ctx.db.insert("Entity", { id, ... })`.
+   * Because the optimistic ghost and the canonical row share the same
+   * `row_id`, the WS broadcast that follows the mutation lands as a
+   * field-level merge on top of the optimistic — no delete-then-replace
+   * flash, no temp-row swap.
+   *
+   * Different from `optimisticInsert` (above) which mints a `_pending_`
+   * id the server can't possibly know about. Use that for fire-and-
+   * forget UI affordances, and this one whenever the canonical insert
+   * needs to map back to the same row.
+   */
+  optimisticInsertWithId(entity: string, id: string, data: Row): void {
+    if (!this.tables.has(entity)) {
+      this.tables.set(entity, new Map());
+    }
+    this.tables.get(entity)!.set(id, { ...data, id });
+    this.notify();
+  }
+
+  /**
+   * Roll back an optimistic insert without leaving a tombstone.
+   *
+   * Counterpart to `optimisticInsertWithId`. When a mutation rejects,
+   * we want the ghost row gone but we do NOT want a tombstone — a
+   * future legitimate insert with the same id (e.g. user retries the
+   * mutation, or a workflow eventually creates the row) must not be
+   * blocked. `optimisticDelete` records a MAX_SAFE_INTEGER tombstone
+   * which is the wrong semantic here; this is just a plain remove.
+   */
+  rollbackOptimisticInsert(entity: string, id: string): void {
+    const removed = this.tables.get(entity)?.delete(id);
+    if (removed) this.notify();
+  }
+
   /** Apply an optimistic update. */
   optimisticUpdate(entity: string, id: string, data: Partial<Row>): void {
     const table = this.tables.get(entity);
@@ -460,6 +500,37 @@ export interface SyncEngineConfig {
  * Generate a stable client_id. Prefers a persisted id from `storage`
  * (so a reload keeps the same identifier) and falls back to a fresh UUID.
  */
+/**
+ * Generate a Pylon-shaped row id (40-char lowercase hex).
+ *
+ * Mirrors the runtime's `generate_id` shape: 32 hex of milliseconds
+ * since epoch (extended to nanos so it lex-sorts alongside server-
+ * generated ids) + 8 hex of a per-tab counter. Lex-sortable, monotonic
+ * within a tab, statistically unique across tabs (the timestamp
+ * disambiguates almost every cross-tab collision; the counter handles
+ * the rest within a single tick).
+ *
+ * Used by `useMutation({ optimistic })` to mint client-side ids that
+ * the runtime will accept verbatim — so the optimistic ghost and the
+ * canonical row share the same `row_id` and the WS broadcast is an
+ * idempotent merge instead of a delete-then-replace flash.
+ *
+ * Apps can call this directly when they need a stable id earlier than
+ * the mutation (e.g. to reference the row from another optimistic
+ * insert in the same gesture).
+ */
+let idCounter = 0;
+export function generateId(): string {
+  // BigInt to dodge the 2^53 ceiling — `Date.now() * 1_000_000` busts
+  // Number.MAX_SAFE_INTEGER for any timestamp past 1973. Hex output is
+  // padded to 32 chars so it lex-sorts at width boundaries (a 39-char
+  // id sorts before a 40-char one even when the suffix is larger,
+  // which would corrupt cursor pagination).
+  const nanos = BigInt(Date.now()) * 1_000_000n;
+  const seq = idCounter++ >>> 0;
+  return nanos.toString(16).padStart(32, "0") + seq.toString(16).padStart(8, "0");
+}
+
 function generateClientId(storage: import("./storage").Storage): string {
   const key = "pylon:client_id";
   const existing = storage.get(key);

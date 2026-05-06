@@ -1902,46 +1902,33 @@ function ThreadComposer({
   const [body, setBody] = useState("");
   const send = db.useMutation<
     { channelId: string; body: string; parentMessageId: string },
-    unknown
-  >("sendMessage");
+    { messageId: string }
+  >("sendMessage", {
+    // First-class optimistic: ghost row painted into the local store
+    // immediately, framework threads `_optimisticId` through to the
+    // server function, canonical insert merges in-place via the WS
+    // broadcast — no flash, no manual cleanup.
+    optimistic: (args, ctx) => ({
+      entity: "Message",
+      data: {
+        id: ctx.id,
+        channelId: args.channelId,
+        authorId: currentUser.id,
+        parentMessageId: args.parentMessageId,
+        body: args.body,
+        createdAt: ctx.now,
+      },
+    }),
+  });
 
   async function submit() {
     const text = body.trim();
     if (!text) return;
     setBody("");
-
-    const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const store = db.sync.store;
-    store.applyChange({
-      seq: 0,
-      entity: "Message",
-      row_id: tempId,
-      kind: "insert",
-      data: {
-        id: tempId,
-        channelId,
-        authorId: currentUser.id,
-        parentMessageId: parentId,
-        body: text,
-        createdAt: new Date().toISOString(),
-      },
-      timestamp: "",
-    });
-    store.notify();
-
     try {
       await send.mutate({ channelId, body: text, parentMessageId: parentId });
     } catch (e) {
       console.error("reply failed", e);
-    } finally {
-      store.applyChange({
-        seq: 0,
-        entity: "Message",
-        row_id: tempId,
-        kind: "delete",
-        timestamp: "",
-      });
-      store.notify();
     }
   }
 
@@ -2083,8 +2070,24 @@ function Composer({
   const [body, setBody] = useState("");
   const send = db.useMutation<
     { channelId: string; body: string },
-    unknown
-  >("sendMessage");
+    { messageId: string }
+  >("sendMessage", {
+    // Ghost the message into the local store before the server
+    // confirms — the WS broadcast carries the same row id and
+    // overwrites in-place, so the user sees their message instantly
+    // and there's no flash when the canonical row arrives.
+    optimistic: (args, ctx) => ({
+      entity: "Message",
+      data: {
+        id: ctx.id,
+        channelId: args.channelId,
+        authorId: currentUser.id,
+        parentMessageId: null,
+        body: args.body,
+        createdAt: ctx.now,
+      },
+    }),
+  });
   const { setPresence } = useRoom(`channel:${channelId}`, currentUser.id, {
     initialPresence: { displayName: currentUser.displayName, typing: false },
   });
@@ -2104,39 +2107,12 @@ function Composer({
     if (!text) return;
     setBody("");
     setPresence({ displayName: currentUser.displayName, typing: false });
-
-    const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const store = db.sync.store;
-    store.applyChange({
-      seq: 0,
-      entity: "Message",
-      row_id: tempId,
-      kind: "insert",
-      data: {
-        id: tempId,
-        channelId,
-        authorId: currentUser.id,
-        parentMessageId: null,
-        body: text,
-        createdAt: new Date().toISOString(),
-      },
-      timestamp: "",
-    });
-    store.notify();
-
+    // The optimistic ghost dance lives in the sync engine now — see
+    // db.useMutation's `optimistic` option. The Composer just sends.
     try {
       await send.mutate({ channelId, body: text });
     } catch (e) {
       console.error("send failed", e);
-    } finally {
-      store.applyChange({
-        seq: 0,
-        entity: "Message",
-        row_id: tempId,
-        kind: "delete",
-        timestamp: "",
-      });
-      store.notify();
     }
   }
 

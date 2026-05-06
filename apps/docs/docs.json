@@ -40,6 +40,7 @@
               "concepts/policies",
               "concepts/functions",
               "concepts/live-queries",
+              "concepts/optimistic-updates",
               "concepts/search"
             ]
           },

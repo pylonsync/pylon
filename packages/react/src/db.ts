@@ -106,11 +106,38 @@ export const db = {
    * const placeBid = db.useMutation<{lotId: string}, {accepted: boolean}>("placeBid");
    * await placeBid.mutate({ lotId: "x", amount: 150 });
    * ```
+   *
+   * For optimistic UI, pass an `optimistic` builder — the framework
+   * paints the row into the local store immediately, threads a
+   * matching id through to the server function, and reconciles the
+   * canonical broadcast as an in-place merge. See
+   * docs/concepts/optimistic-updates for the full pattern.
+   *
+   * ```tsx
+   * const send = db.useMutation<{channelId: string; body: string}, {messageId: string}>(
+   *   "sendMessage",
+   *   {
+   *     optimistic: (args, ctx) => ({
+   *       entity: "Message",
+   *       data: { id: ctx.id, ...args, authorId: me.id, createdAt: ctx.now },
+   *     }),
+   *   }
+   * );
+   * ```
    */
   useMutation<TArgs = Record<string, unknown>, TResult = unknown>(
-    fnName: string
+    fnName: string,
+    options: { optimistic?: import("./hooks").OptimisticBuilder<TArgs> } = {}
   ): UseMutationReturn<TArgs, TResult> {
-    return useMutationHook<TArgs, TResult>(fnName);
+    // db.useMutation is the "I'm using the global sync engine" path —
+    // surface getSync() to the underlying hook so the optimistic
+    // ghost gets painted into the right store. Apps reaching for the
+    // raw `useMutation(fnName, { optimistic, sync })` for a non-global
+    // engine still work; this is just the ergonomic default.
+    return useMutationHook<TArgs, TResult>(fnName, {
+      optimistic: options.optimistic,
+      sync: getSync(),
+    });
   },
 
   /** Paginated live query with loadMore(). */
