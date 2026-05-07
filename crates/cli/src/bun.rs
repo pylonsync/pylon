@@ -26,24 +26,30 @@ pub fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
+        // The actual TypeError / SyntaxError from the user's schema lives
+        // in stderr (Bun) or sometimes stdout (manifest builder errors).
+        // Prior versions stuffed this into `hint`, but the dev watcher's
+        // error printer only renders `message` — so the user saw
+        // "bun run schema.ts exited with status 1" with no clue what
+        // went wrong. Inline the detail into `message` so it shows up
+        // regardless of which printer is used.
         let detail = if !stderr.is_empty() {
-            stderr.trim().to_string()
+            stderr.trim()
         } else {
-            stdout.trim().to_string()
+            stdout.trim()
+        };
+        let exit_code = output.status.code().unwrap_or(-1);
+        let message = if detail.is_empty() {
+            format!("Schema evaluation of `{entry_file}` failed (exit {exit_code}). No output captured — try running it manually to debug.")
+        } else {
+            format!("Schema evaluation of `{entry_file}` failed (exit {exit_code}):\n\n{detail}")
         };
         return Err(Diagnostic {
             severity: Severity::Error,
-            code: "BUN_EXIT".into(),
-            message: format!(
-                "bun run {entry_file} exited with status {}",
-                output.status.code().unwrap_or(-1)
-            ),
+            code: "SCHEMA_EVAL_FAILED".into(),
+            message,
             span: None,
-            hint: if detail.is_empty() {
-                None
-            } else {
-                Some(detail)
-            },
+            hint: Some(format!("Reproduce locally with: bun run {entry_file}")),
         });
     }
 

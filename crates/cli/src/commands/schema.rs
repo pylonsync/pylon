@@ -303,25 +303,26 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
-    let manifest_path = match positional.first() {
-        Some(p) => *p,
-        None => {
-            print_diagnostics(
-                &[Diagnostic {
-                    severity: Severity::Error,
-                    code: "PUSH_MISSING_MANIFEST".into(),
-                    message: "No manifest path provided".into(),
-                    span: None,
-                    hint: Some(
-                        "Usage: pylon schema push <manifest> --dry-run|--sqlite <path> [--from <old>]"
-                            .into(),
-                    ),
-                }],
-                json_mode,
-            );
-            return ExitCode::Usage;
-        }
-    };
+    // Default to `pylon.manifest.json` (what `pylon codegen` writes by
+    // default) when no positional arg is given. Removes the need for
+    // every project to spell it out in `package.json`.
+    let manifest_path = positional.first().copied().unwrap_or("pylon.manifest.json");
+    if !std::path::Path::new(manifest_path).exists() {
+        print_diagnostics(
+            &[Diagnostic {
+                severity: Severity::Error,
+                code: "PUSH_MISSING_MANIFEST".into(),
+                message: format!("Manifest not found: {manifest_path}"),
+                span: None,
+                hint: Some(
+                    "Run `pylon codegen` first to generate pylon.manifest.json, or pass an explicit path."
+                        .into(),
+                ),
+            }],
+            json_mode,
+        );
+        return ExitCode::Usage;
+    }
 
     // Load and validate the target manifest.
     let manifest = match load_manifest(manifest_path) {

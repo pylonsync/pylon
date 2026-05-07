@@ -85,21 +85,33 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let entry_file = match positional.first() {
         Some(f) => f.to_string(),
         None => {
-            if Path::new("app.ts").exists() {
-                "app.ts".to_string()
-            } else {
-                print_diagnostics(
-                    &[Diagnostic {
-                        severity: Severity::Error,
-                        code: "DEV_NO_ENTRY".into(),
-                        message: "No entry file provided and no app.ts found in current directory"
-                            .into(),
-                        span: None,
-                        hint: Some("Usage: pylon dev [app.ts] [--once]".into()),
-                    }],
-                    json_mode,
-                );
-                return ExitCode::Usage;
+            // Auto-discover the entry file. Both `app.ts` and `schema.ts`
+            // are conventional names; the create-pylon templates use
+            // `app.ts`, but several of Eric's downstream apps (yapless,
+            // pulse-therapy) named theirs `schema.ts` before the
+            // convention settled. Supporting both removes the need for
+            // every package.json to spell out `pylon dev schema.ts`
+            // explicitly.
+            const CANDIDATES: &[&str] = &["app.ts", "schema.ts"];
+            match CANDIDATES.iter().find(|c| Path::new(c).exists()) {
+                Some(f) => (*f).to_string(),
+                None => {
+                    print_diagnostics(
+                        &[Diagnostic {
+                            severity: Severity::Error,
+                            code: "DEV_NO_ENTRY".into(),
+                            message:
+                                "No entry file provided and neither app.ts nor schema.ts found in current directory"
+                                    .into(),
+                            span: None,
+                            hint: Some(
+                                "Usage: pylon dev [app.ts | schema.ts] [--once]".into(),
+                            ),
+                        }],
+                        json_mode,
+                    );
+                    return ExitCode::Usage;
+                }
             }
         }
     };
@@ -461,7 +473,15 @@ fn run_rebuild_and_get_manifest(
                     diagnostics: vec![diag],
                 });
             } else {
-                eprintln!("[{n}] Error: {}", diag.message);
+                // Print message, then hint on its own line. Prior version
+                // dropped the hint silently — schema TypeErrors landed in
+                // hint via run_bun_codegen and the user saw a useless
+                // "exited with status 1" line. Now inline diagnostic
+                // formatting matches the rest of the CLI.
+                eprintln!("[{n}] {} {}", diag.severity, diag.message);
+                if let Some(hint) = &diag.hint {
+                    eprintln!("    hint: {hint}");
+                }
             }
             return None;
         }

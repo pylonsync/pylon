@@ -31,25 +31,26 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
-    let manifest_path = match positional.first() {
-        Some(p) => *p,
-        None => {
-            print_diagnostics(
-                &[Diagnostic {
-                    severity: Severity::Error,
-                    code: "CODEGEN_CLIENT_NO_MANIFEST".into(),
-                    message: "No manifest path provided".into(),
-                    span: None,
-                    hint: Some(
-                        "Usage: pylon codegen client <manifest> [--target ts|swift] --out <path>"
-                            .into(),
-                    ),
-                }],
-                json_mode,
-            );
-            return ExitCode::Usage;
-        }
-    };
+    // Default to `pylon.manifest.json` (matches `pylon codegen`'s
+    // default output path). Removes the need for projects to spell out
+    // `pylon codegen client pylon.manifest.json` in package.json.
+    let manifest_path = positional.first().copied().unwrap_or("pylon.manifest.json");
+    if !Path::new(manifest_path).exists() {
+        print_diagnostics(
+            &[Diagnostic {
+                severity: Severity::Error,
+                code: "CODEGEN_CLIENT_NO_MANIFEST".into(),
+                message: format!("Manifest not found: {manifest_path}"),
+                span: None,
+                hint: Some(
+                    "Run `pylon codegen` first to generate pylon.manifest.json, or pass an explicit path."
+                        .into(),
+                ),
+            }],
+            json_mode,
+        );
+        return ExitCode::Usage;
+    }
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -75,6 +76,20 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             );
             return ExitCode::Usage;
         }
+    };
+
+    // Default to `pylon.client.ts` / `pylon.client.swift` based on
+    // target. Same rationale as `pylon codegen`: every project ends up
+    // writing the same `--out pylon.client.ts` flag, so make it the
+    // default. Pass `--out -` to print to stdout.
+    let default_out = match target {
+        "swift" => "pylon.client.swift",
+        _ => "pylon.client.ts",
+    };
+    let out_path: Option<&str> = match out_path {
+        Some("-") => None,
+        Some(p) => Some(p),
+        None => Some(default_out),
     };
 
     match out_path {
