@@ -114,6 +114,46 @@ html, body { background: #fafaf9; color: #18181b; }
   box-shadow: 0 1px 0 var(--line-2);
 }
 
+.pylon-landing .nav-burger {
+  display: none;
+  width: 36px; height: 36px;
+  border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--bg-card);
+  align-items: center; justify-content: center;
+  flex-direction: column; gap: 4px;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background .15s ease, border-color .15s ease;
+}
+.pylon-landing .nav-burger:hover { background: var(--bg-alt); }
+.pylon-landing .nav-burger span {
+  display: block; width: 16px; height: 1.5px;
+  background: var(--ink); border-radius: 2px;
+  transition: transform .2s ease, opacity .15s ease;
+}
+.pylon-landing .nav.menu-open .nav-burger span:nth-child(1) { transform: translateY(5.5px) rotate(45deg); }
+.pylon-landing .nav.menu-open .nav-burger span:nth-child(2) { opacity: 0; }
+.pylon-landing .nav.menu-open .nav-burger span:nth-child(3) { transform: translateY(-5.5px) rotate(-45deg); }
+
+.pylon-landing .nav-sheet {
+  display: none;
+  position: absolute; top: 100%; left: 0; right: 0;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  flex-direction: column;
+  padding: 8px 20px 14px;
+  z-index: 49;
+}
+.pylon-landing .nav-sheet a {
+  display: block; padding: 12px 4px;
+  font-size: 15px; color: var(--text);
+  border-bottom: 1px solid var(--line);
+}
+.pylon-landing .nav-sheet a:last-child { border-bottom: none; }
+.pylon-landing .nav-sheet .sheet-signin { color: var(--accent); font-weight: 500; }
+.pylon-landing .nav.menu-open .nav-sheet { display: flex; }
+
 /* === HERO === */
 .pylon-landing .hero { padding: 96px 0 0; position: relative; overflow: hidden; }
 .pylon-landing .hero-grid-bg {
@@ -595,6 +635,7 @@ html, body { background: #fafaf9; color: #18181b; }
   .pylon-landing .qs-wrap { grid-template-columns: 1fr; }
   .pylon-landing .foot-grid { grid-template-columns: 1fr 1fr; }
   .pylon-landing .nav-links { display: none; }
+  .pylon-landing .nav-burger { display: inline-flex; }
   .pylon-landing .hero-meta-row { grid-template-columns: 1fr 1fr; }
   .pylon-landing .logos .row { grid-template-columns: repeat(3, 1fr); }
 }
@@ -1092,6 +1133,7 @@ export function LandingPage() {
 	const [orderCount, setOrderCount] = useState(1284);
 	const [clientCount, setClientCount] = useState(47);
 	const [flashIdx, setFlashIdx] = useState<number | null>(null);
+	const [menuOpen, setMenuOpen] = useState(false);
 	const [events, setEvents] = useState<Array<{ k: string; v: string }>>([
 		{ k: "db.insert <em>Order</em>", v: "+1" },
 		{ k: "policy.check", v: "ok" },
@@ -1131,9 +1173,9 @@ export function LandingPage() {
 			<style dangerouslySetInnerHTML={{ __html: DESIGN_CSS }} />
 			<div className="pylon-landing">
 				{/* NAV */}
-				<nav className="nav">
+				<nav className={`nav${menuOpen ? " menu-open" : ""}`}>
 					<div className="shell nav-inner">
-						<Link className="brand" href="/">
+						<Link className="brand" href="/" onClick={() => setMenuOpen(false)}>
 							<PylonMark size={20} style={{ color: "var(--ink)" }} />
 							Pylon
 						</Link>
@@ -1148,7 +1190,25 @@ export function LandingPage() {
 						<div className="nav-cta">
 							<Link className="btn ghost" href="https://cloud.pylonsync.com/login">Sign in</Link>
 							<Link className="btn dark" href="https://cloud.pylonsync.com/signup">Start building →</Link>
+							<button
+								type="button"
+								className="nav-burger"
+								aria-label={menuOpen ? "Close menu" : "Open menu"}
+								aria-expanded={menuOpen}
+								onClick={() => setMenuOpen((v) => !v)}
+							>
+								<span /><span /><span />
+							</button>
 						</div>
+					</div>
+					<div className="nav-sheet" aria-hidden={!menuOpen}>
+						<a href="#features" onClick={() => setMenuOpen(false)}>Product</a>
+						<a href="#primitives" onClick={() => setMenuOpen(false)}>Primitives</a>
+						<a href="https://docs.pylonsync.com">Docs</a>
+						<a href="https://github.com/pylonsync/pylon/releases">Changelog</a>
+						<a href="#deploy" onClick={() => setMenuOpen(false)}>Pricing</a>
+						<a href="#compare" onClick={() => setMenuOpen(false)}>Compare</a>
+						<a href="https://cloud.pylonsync.com/login" className="sheet-signin">Sign in →</a>
 					</div>
 				</nav>
 
