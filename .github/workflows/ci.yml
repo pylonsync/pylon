@@ -172,6 +172,24 @@ jobs:
       - run: bun run --filter '*' typecheck || true
         continue-on-error: true
 
+  # End-to-end gate for @pylonsync/create-pylon. Catches the regression
+  # that shipped 0.3.50 broken: real tabs in bin/create-pylon.js were
+  # mangled into literal `\t` text, Node SyntaxError'd on parse, and
+  # any inside-template `\\t` sequences emitted literal "\t" into
+  # scaffolded TypeScript files. Runs on every PR and push so we
+  # never publish a non-runnable scaffold again.
+  create-pylon-smoke:
+    name: create-pylon scaffold smoke test
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bash tools/smoke-create-pylon.sh
+
   audit:
     name: cargo audit
     needs: changes
@@ -219,7 +237,7 @@ jobs:
 
   ci-passed:
     name: CI passed
-    needs: [changes, fmt, clippy, test, build, typescript, audit, swift]
+    needs: [changes, fmt, clippy, test, build, typescript, create-pylon-smoke, audit, swift]
     if: always()
     runs-on: ubuntu-latest
     steps:
