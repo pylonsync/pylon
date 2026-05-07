@@ -54,12 +54,19 @@ html, body { background: #fafaf9; color: #18181b; }
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: rgba(255, 91, 31, .18);
 }
 .pylon-landing * { box-sizing: border-box; }
 .pylon-landing .mono { font-family: "Geist Mono", ui-monospace, monospace; }
 .pylon-landing .serif { font-family: "Instrument Serif", "Times New Roman", serif; font-style: italic; }
 .pylon-landing a { color: inherit; text-decoration: none; }
 .pylon-landing button { font-family: inherit; cursor: pointer; }
+.pylon-landing a, .pylon-landing button { touch-action: manipulation; }
+.pylon-landing a:focus-visible, .pylon-landing button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
 .pylon-landing img { max-width: 100%; display: block; }
 
 .pylon-landing .shell { max-width: 1280px; margin: 0 auto; padding: 0 32px; }
@@ -78,7 +85,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .brand .logomark { width: 22px; height: 22px; position: relative; }
 .pylon-landing .brand .logomark svg { width: 100%; height: 100%; display: block; }
 .pylon-landing .nav-links { display: flex; gap: 4px; list-style: none; padding: 0; margin: 0; font-size: 13.5px; }
-.pylon-landing .nav-links li a { display: inline-block; padding: 6px 12px; border-radius: 8px; color: var(--text-2); transition: all .15s ease; }
+.pylon-landing .nav-links li a { display: inline-block; padding: 6px 12px; border-radius: 8px; color: var(--text-2); transition: color .15s ease, background .15s ease; }
 .pylon-landing .nav-links li a:hover { color: var(--text); background: var(--bg-alt); }
 .pylon-landing .nav-cta { display: flex; gap: 8px; align-items: center; }
 .pylon-landing .btn {
@@ -86,7 +93,7 @@ html, body { background: #fafaf9; color: #18181b; }
   padding: 8px 14px; border-radius: 8px;
   font-size: 13.5px; font-weight: 500;
   border: 1px solid transparent;
-  transition: all .15s ease;
+  transition: background .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
   font-feature-settings: "ss01";
   text-decoration: none;
   background: transparent; color: inherit;
@@ -161,12 +168,16 @@ html, body { background: #fafaf9; color: #18181b; }
   padding: 7px 12px 7px 14px; border-radius: 8px;
   font-family: "Geist Mono", monospace; font-size: 13px;
   color: var(--text); box-shadow: var(--shadow-sm);
+  max-width: 100%;
+  min-width: 0;
 }
-.pylon-landing .term-pill .prompt { color: var(--text-3); }
+.pylon-landing .term-pill .prompt { color: var(--text-3); flex-shrink: 0; }
+.pylon-landing .term-pill .cmd-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pylon-landing .term-pill .copy {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; border-radius: 5px; color: var(--text-3);
   background: var(--bg-alt);
+  flex: 0 0 24px;
 }
 
 .pylon-landing .hero-text { text-align: left; position: relative; max-width: 880px; }
@@ -297,8 +308,9 @@ html, body { background: #fafaf9; color: #18181b; }
   0% { background: var(--accent-soft); }
   100% { background: transparent; }
 }
-.pylon-landing .tbl-row .id { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2); }
-.pylon-landing .tbl-row .name { display: flex; align-items: center; gap: 8px; }
+.pylon-landing .tbl-head > *, .pylon-landing .tbl-row > * { min-width: 0; }
+.pylon-landing .tbl-row .id { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pylon-landing .tbl-row .name { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pylon-landing .tbl-row .avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-alt); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-2); font-weight: 500; }
 .pylon-landing .status-pill {
   display: inline-flex; align-items: center; gap: 6px;
@@ -415,6 +427,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .schema-body { display: grid; grid-template-columns: 36px 1fr; min-height: 360px; }
 .pylon-landing .schema-gutter { background: var(--bg-alt); border-right: 1px solid var(--line); font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); padding: 14px 8px; text-align: right; line-height: 1.65; }
 .pylon-landing .schema-code { font-family: "Geist Mono", monospace; font-size: 12.5px; line-height: 1.65; padding: 14px 16px; color: var(--text); background: var(--bg-card); }
+.pylon-landing .schema-code pre { overflow-x: auto; }
 .pylon-landing .schema-code .k { color: #a155b9; }
 .pylon-landing .schema-code .s { color: #2e7d32; }
 .pylon-landing .schema-code .t { color: #c9420f; }
@@ -474,7 +487,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .prim p code { font-family: "Geist Mono", monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
 
 /* === DEPLOY LANES === */
-.pylon-landing .lanes { margin-top: 64px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-card); }
+.pylon-landing .lanes { margin-top: 64px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-card); }
 .pylon-landing .lane { padding: 28px 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; position: relative; transition: background .2s ease; }
 .pylon-landing .lane:last-child { border-right: none; }
 .pylon-landing .lane:hover { background: #fdfcfa; }
@@ -585,6 +598,437 @@ html, body { background: #fafaf9; color: #18181b; }
   .pylon-landing .hero-meta-row { grid-template-columns: 1fr 1fr; }
   .pylon-landing .logos .row { grid-template-columns: repeat(3, 1fr); }
 }
+
+@media (max-width: 720px) {
+  .pylon-landing .shell,
+  .pylon-landing .shell-wide {
+    padding: 0 20px;
+  }
+
+  .pylon-landing .nav-inner {
+    gap: 12px;
+    padding: 12px 0;
+  }
+
+  .pylon-landing .brand {
+    flex-shrink: 0;
+  }
+
+  .pylon-landing .nav-cta {
+    min-width: 0;
+  }
+
+  .pylon-landing .nav-cta .btn.ghost {
+    display: none;
+  }
+
+  .pylon-landing .nav-cta .btn {
+    white-space: nowrap;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .pylon-landing .hero {
+    padding-top: 56px;
+  }
+
+  .pylon-landing h1.h1 {
+    font-size: 44px;
+    line-height: 1.02;
+    max-width: 11ch;
+    margin: 24px 0 20px;
+  }
+
+  .pylon-landing .hero p.lede {
+    font-size: 17px;
+    line-height: 1.52;
+    margin-bottom: 28px;
+  }
+
+  .pylon-landing .hero-ctas {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pylon-landing .hero-ctas .btn,
+  .pylon-landing .hero-ctas .term-pill,
+  .pylon-landing .cta-block .ctas .btn,
+  .pylon-landing .cta-block .ctas .term-pill {
+    width: 100%;
+    justify-content: center;
+    min-height: 42px;
+  }
+
+  .pylon-landing .term-pill {
+    padding-right: 10px;
+  }
+
+  .pylon-landing .hero-meta-row {
+    margin-top: 44px;
+    gap: 18px 16px;
+    padding: 18px 0;
+  }
+
+  .pylon-landing .hero-meta-row .item .v {
+    font-size: 15px;
+  }
+
+  .pylon-landing .product-frame {
+    margin-top: 44px;
+    border-radius: 12px;
+  }
+
+  .pylon-landing .product-chrome {
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .pylon-landing .product-chrome .dots {
+    gap: 5px;
+  }
+
+  .pylon-landing .product-chrome .dots i {
+    width: 9px;
+    height: 9px;
+  }
+
+  .pylon-landing .product-chrome .url {
+    min-width: 0;
+    max-width: none;
+    padding: 0 10px;
+  }
+
+  .pylon-landing .product-chrome .url span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pylon-landing .product-chrome .right {
+    display: none;
+  }
+
+  .pylon-landing .product-body {
+    display: block;
+    min-height: auto;
+  }
+
+  .pylon-landing .app-side,
+  .pylon-landing .app-aside {
+    display: none;
+  }
+
+  .pylon-landing .app-main {
+    padding: 16px;
+  }
+
+  .pylon-landing .app-main .crumb {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pylon-landing .app-main h2.app-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 19px;
+    margin-bottom: 14px;
+  }
+
+  .pylon-landing .metrics {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .pylon-landing .metric {
+    min-height: 96px;
+    padding-right: 76px;
+  }
+
+  .pylon-landing .metric .num {
+    font-size: 24px;
+  }
+
+  .pylon-landing .metric .spark {
+    width: 52px;
+    opacity: .75;
+  }
+
+  .pylon-landing .tbl-head {
+    display: none;
+  }
+
+  .pylon-landing .tbl-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 12px;
+    padding: 13px 14px;
+  }
+
+  .pylon-landing .tbl-row .name {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pylon-landing .tbl-row > :nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .pylon-landing .tbl-row > :nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+    font-weight: 500;
+    text-align: right;
+  }
+
+  .pylon-landing .tbl-row > :nth-child(4) {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .pylon-landing .tbl-row > :nth-child(5) {
+    grid-column: 2;
+    grid-row: 3;
+    text-align: right;
+  }
+
+  .pylon-landing .logos {
+    margin-top: 56px;
+    padding: 28px 0;
+  }
+
+  .pylon-landing .logos .row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px 16px;
+  }
+
+  .pylon-landing section.block {
+    padding: 76px 0;
+  }
+
+  .pylon-landing h2.h2 {
+    font-size: 36px;
+    line-height: 1.08;
+  }
+
+  .pylon-landing .section-lede {
+    font-size: 16px;
+    margin-bottom: 0;
+  }
+
+  .pylon-landing .feature-row,
+  .pylon-landing .feature-row.flip {
+    gap: 30px;
+    margin-top: 52px;
+  }
+
+  .pylon-landing .feature-copy h3 {
+    font-size: 26px;
+  }
+
+  .pylon-landing .feature-copy p {
+    font-size: 15px;
+  }
+
+  .pylon-landing .feature-bullets li {
+    font-size: 14px;
+  }
+
+  .pylon-landing .schema-art {
+    overflow-x: auto;
+  }
+
+  .pylon-landing .schema-tabs,
+  .pylon-landing .schema-body {
+    min-width: 540px;
+  }
+
+  .pylon-landing .schema-tabs .tab {
+    flex: 0 0 auto;
+  }
+
+  .pylon-landing .schema-body {
+    min-height: 320px;
+  }
+
+  .pylon-landing .live-art,
+  .pylon-landing .policy-art {
+    padding: 16px;
+  }
+
+  .pylon-landing .live-art .row-set .r {
+    grid-template-columns: 68px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 7px 8px;
+    font-size: 11px;
+  }
+
+  .pylon-landing .live-art .row-set .r .lbl {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pylon-landing .policy-art .pcard {
+    grid-template-columns: 22px minmax(0, 1fr);
+    align-items: flex-start;
+  }
+
+  .pylon-landing .policy-art .pcard .badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .pylon-landing .policy-art .pcard .rule {
+    overflow-wrap: anywhere;
+  }
+
+  .pylon-landing .prims,
+  .pylon-landing .lanes,
+  .pylon-landing .qs-wrap,
+  .pylon-landing .foot-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pylon-landing .prims {
+    margin-top: 48px;
+  }
+
+  .pylon-landing .prim,
+  .pylon-landing .lane {
+    padding: 22px;
+  }
+
+  .pylon-landing .lane {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .pylon-landing .lane:last-child {
+    border-bottom: none;
+  }
+
+  .pylon-landing .lane .top,
+  .pylon-landing .lane .footer-line {
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .pylon-landing .lane .cmd {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pylon-landing .compare {
+    overflow-x: auto;
+  }
+
+  .pylon-landing .compare table {
+    min-width: 660px;
+  }
+
+  .pylon-landing .compare th,
+  .pylon-landing .compare td {
+    padding: 14px 16px;
+  }
+
+  .pylon-landing .qs-term .body {
+    overflow-x: auto;
+    padding: 16px;
+  }
+
+  .pylon-landing .qs-term .body > div {
+    white-space: nowrap;
+  }
+
+  .pylon-landing .qs-step {
+    grid-template-columns: 24px minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .pylon-landing .cta-block {
+    padding: 76px 0 84px;
+  }
+
+  .pylon-landing .cta-block h2 {
+    font-size: 40px;
+    line-height: 1.04;
+  }
+
+  .pylon-landing .cta-block p {
+    font-size: 16px;
+  }
+
+  .pylon-landing .cta-block .ctas {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pylon-landing footer {
+    padding: 48px 0 32px;
+  }
+
+  .pylon-landing .foot-grid {
+    gap: 28px;
+  }
+
+  .pylon-landing .foot-grid .brand-col {
+    padding-right: 0;
+  }
+
+  .pylon-landing .foot-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 20px;
+  }
+}
+
+@media (max-width: 420px) {
+  .pylon-landing .shell,
+  .pylon-landing .shell-wide {
+    padding: 0 16px;
+  }
+
+  .pylon-landing .nav-cta .btn.dark {
+    padding: 8px 10px;
+  }
+
+  .pylon-landing h1.h1 {
+    font-size: 40px;
+  }
+
+  .pylon-landing .hero-meta-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pylon-landing h2.h2 {
+    font-size: 32px;
+  }
+
+  .pylon-landing .cta-block h2 {
+    font-size: 36px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pylon-landing *,
+  .pylon-landing *::before,
+  .pylon-landing *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}
 `;
 
 const TABLE_ROWS = [
@@ -637,7 +1081,7 @@ function CopyCommand({ command }: { command: string }) {
 			}}
 			aria-label={`Copy command: ${command}`}
 		>
-			<span className="prompt">$</span> {command}{" "}
+			<span className="prompt">$</span> <span className="cmd-text">{command}</span>{" "}
 			<span className="copy">{copied ? "✓" : "⧉"}</span>
 		</button>
 	);
@@ -1235,7 +1679,7 @@ export function LandingPage() {
 						<h2 className="h2">Real apps you can clone <span className="serif">and break.</span></h2>
 						<p className="section-lede">Every primitive shows up in a working example, MIT-licensed in the monorepo. Fork one, change the schema, and you have a head start.</p>
 
-						<div className="prims" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginTop: 56 }}>
+						<div className="prims" style={{ marginTop: 56 }}>
 							<a className="prim" href="https://github.com/pylonsync/pylon/tree/main/examples/chat" style={{ textDecoration: "none" }}>
 								<div className="top"><div className="icon">💬</div><div className="tag">app</div></div>
 								<h4>Chat</h4>
