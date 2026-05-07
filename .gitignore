@@ -76,3 +76,8 @@ REVIEW.*.md
 # Roadmap is tracked in private planning, not the public repo.
 ROADMAP.md
 .deepsec/
+
+# Local test scaffolds the user creates while iterating on create-pylon.
+yapless/
+test-app/
+smoke-app/
