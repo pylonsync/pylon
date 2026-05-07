@@ -46,11 +46,14 @@ const TEMPLATES = resolve(HERE, "..", "templates");
 
 // ---------------------------------------------------------------------------
 // Version pin — every generated dep references this version of @pylonsync/*.
-// Bumped via the workspace's release-please flow (same version as the rest
-// of the pylon stack).
+// Read from this package's own package.json so the value follows the rest
+// of the workspace automatically (release.sh bumps every package.json in
+// lockstep). Hard-coding it here was a drift bug we hit historically.
 // ---------------------------------------------------------------------------
 
-const PYLON_VERSION = "0.3.51";
+const PYLON_VERSION = JSON.parse(
+	readFileSync(resolve(HERE, "..", "package.json"), "utf8"),
+).version;
 
 // ---------------------------------------------------------------------------
 // Templates + platforms registry
