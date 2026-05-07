@@ -233,12 +233,35 @@ jobs:
   # ---------------------------------------------------------------
   # crates.io publish. katyo/publish-crates walks the workspace,
   # sorts topologically, skips unchanged crates, honors publish=false.
+  #
+  # CURRENTLY DISABLED. `cargo publish` runs a verification build
+  # against the published versions of every dependency — it ignores
+  # `[patch.crates-io]` in the workspace root. Our patch points
+  # `samael` at vendor/samael/ to fix the libxmlsec 1.2.x vs 1.3.x
+  # `xmlSecSize` type mismatch (u32 vs usize), but the publish
+  # verifier sees plain crates.io samael 0.0.20 and fails on
+  # `predigest_xml_from_raw_buffer(data_ptr, data_size)` —
+  # `expected usize, found u32`.
+  #
+  # Re-enable when ANY of these is true:
+  #   - samael upstream merges a fix that handles both libxmlsec1
+  #     versions (track the upstream PR / issue)
+  #   - we fork samael and publish under our own crate name, then
+  #     swap the dependency in pylon-auth to that fork
+  #   - we replace samael's xmlsec feature with an in-process
+  #     XMLDSig verifier that doesn't depend on system libxmlsec1
+  #
+  # Until then: the binary + npm + Docker publish paths still ship,
+  # which is what users actually consume. Crates.io publication is
+  # for downstream Rust consumers embedding pylon as a library —
+  # zero of those exist today.
   # ---------------------------------------------------------------
   publish-crates:
     name: Publish crates.io
     needs: verify
     runs-on: ubuntu-latest
     environment: Production
+    if: false # see block comment above; re-enable when samael upstream is fixed
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

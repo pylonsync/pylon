@@ -340,24 +340,22 @@ walkAndSubstitute(root);
 // picked (each PM exposes "run X in workspace Y" differently).
 // ---------------------------------------------------------------------------
 
-const wsScripts = pmScripts(flags.pm);
-const devScripts = {};
-// API runs always — every frontend connects to it.
-devScripts["dev:api"] = wsScripts.devApi;
-if (platforms.includes("web")) devScripts["dev:web"] = wsScripts.devWeb;
-if (platforms.includes("expo")) devScripts["dev:expo"] = wsScripts.devExpo;
+// Turborepo orchestrates the workspace. `turbo dev` runs the `dev`
+// task in every package that defines one (apps/api always; apps/web,
+// apps/expo when scaffolded). Native targets (ios, mac) aren't
+// `turbo dev`-shaped — Xcode / `swift run` block — so they get
+// dedicated escape-hatch scripts instead. turbo.json ships in
+// _root/, so it's already in the project.
+const helperScripts = {};
 if (platforms.includes("ios")) {
-	// `xcodegen generate` materializes the .xcodeproj from project.yml,
-	// then it's an Xcode-driven flow — no `bun run dev` semantics.
-	devScripts["dev:ios"] =
+	helperScripts["dev:ios"] =
 		"echo 'cd apps/ios && xcodegen generate && open *.xcodeproj  (or: swift run for a quick macOS preview)'";
 }
 if (platforms.includes("mac")) {
-	devScripts["dev:mac"] =
+	helperScripts["dev:mac"] =
 		"echo 'cd apps/mac && swift run  (or: xcodegen generate && open *.xcodeproj)'";
 }
 
-const parallelDevs = Object.keys(devScripts);
 const rootPkg = {
 	name: APP_NAME_KEBAB,
 	private: true,
@@ -369,14 +367,15 @@ const rootPkg = {
 		return true;
 	}),
 	scripts: {
-		dev:
-			parallelDevs.length > 1
-				? `npm-run-all --parallel ${parallelDevs.join(" ")}`
-				: wsScripts.devApi,
-		...devScripts,
-		build: wsScripts.build,
+		dev: "turbo dev",
+		build: "turbo build",
+		check: "turbo check",
+		lint: "turbo lint",
+		...helperScripts,
 	},
-	devDependencies: parallelDevs.length > 1 ? { "npm-run-all": "^4.1.5" } : {},
+	devDependencies: {
+		turbo: "^2.3.0",
+	},
 };
 writeFileSync(
 	join(root, "package.json"),
@@ -457,36 +456,3 @@ function detectPackageManager() {
 	return null;
 }
 
-function pmScripts(pm) {
-	switch (pm) {
-		case "bun":
-			return {
-				devApi: "bun run --filter './apps/api' dev",
-				devWeb: "bun run --filter './apps/web' dev",
-				devExpo: "bun run --filter './apps/expo' start",
-				build: "bun run --filter '*' build",
-			};
-		case "pnpm":
-			return {
-				devApi: "pnpm --filter './apps/api' run dev",
-				devWeb: "pnpm --filter './apps/web' run dev",
-				devExpo: "pnpm --filter './apps/expo' run start",
-				build: "pnpm --filter '*' run build",
-			};
-		case "yarn":
-			return {
-				devApi: `yarn workspace @${APP_NAME_KEBAB}/api run dev`,
-				devWeb: `yarn workspace @${APP_NAME_KEBAB}/web run dev`,
-				devExpo: `yarn workspace @${APP_NAME_KEBAB}/expo run start`,
-				build: "yarn workspaces foreach -A run build",
-			};
-		case "npm":
-		default:
-			return {
-				devApi: "npm --workspace apps/api run dev",
-				devWeb: "npm --workspace apps/web run dev",
-				devExpo: "npm --workspace apps/expo run start",
-				build: "npm --workspaces run build --if-present",
-			};
-	}
-}
