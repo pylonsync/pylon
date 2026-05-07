@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "__APP_NAME__",
+    "slug": "__APP_NAME_KEBAB__",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.__APP_NAME_SNAKE__",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.example.__APP_NAME_SNAKE__",
+      "usesCleartextTraffic": true
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

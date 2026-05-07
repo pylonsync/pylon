@@ -1,7 +1,7 @@
 {
   "name": "@pylonsync/create-pylon",
   "version": "0.3.51",
-  "description": "Scaffold a new Pylon app — realtime backend + Next.js frontend in one command. Run via `npm create @pylonsync/pylon@latest`.",
+  "description": "Scaffold a new Pylon app — realtime backend + web/mobile/expo frontends in one command. Run via `npm create @pylonsync/pylon@latest`.",
   "publishConfig": {
     "access": "public"
   },
@@ -10,7 +10,8 @@
     "create-pylon": "./bin/create-pylon.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "templates"
   ],
   "engines": {
     "node": ">=18"

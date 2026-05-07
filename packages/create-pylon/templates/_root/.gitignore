@@ -1,0 +1,27 @@
+node_modules/
+.next/
+.turbo/
+dist/
+out/
+.env
+.env.local
+*.db
+*.db-journal
+apps/api/pylon.manifest.json
+apps/api/pylon.client.ts
+
+# Swift / Xcode
+.build/
+DerivedData/
+*.xcworkspace
+*.xcodeproj
+Package.resolved
+
+# Expo / RN
+.expo/
+.expo-shared/
+ios/Pods/
+ios/build/
+android/.gradle/
+android/build/
+android/app/build/
