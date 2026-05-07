@@ -356,10 +356,21 @@ if (platforms.includes("mac")) {
 		"echo 'cd apps/mac && swift run  (or: xcodegen generate && open *.xcodeproj)'";
 }
 
+// Turbo 2.x refuses to run without packageManager set. Pick a recent-
+// stable for whichever PM the user picked. npm doesn't enforce this
+// field but turbo still expects it to be present.
+const PACKAGE_MANAGERS = {
+	bun: "bun@1.2.19",
+	pnpm: "pnpm@9.12.0",
+	yarn: "yarn@4.5.0",
+	npm: "npm@10.9.0",
+};
+
 const rootPkg = {
 	name: APP_NAME_KEBAB,
 	private: true,
 	type: "module",
+	packageManager: PACKAGE_MANAGERS[flags.pm],
 	workspaces: ["apps/*", "packages/*"].filter((p) => {
 		// Only declare packages/* as a workspace if we actually scaffolded
 		// packages/ui — otherwise the empty match warns on bun install.
