@@ -13,7 +13,7 @@ import {
 	SafeAreaView,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { init, callFn } from "@pylonsync/react-native";
+import { init, db, callFn } from "@pylonsync/react-native";
 
 const PYLON_BASE_URL =
 	process.env.EXPO_PUBLIC_PYLON_BASE_URL ??
@@ -48,23 +48,9 @@ function ensureInit() {
 
 export default function App() {
 	const [ready, setReady] = useState(false);
-	const [rooms, setRooms] = useState<Room[]>([]);
-	const [active, setActive] = useState<Room | null>(null);
-	const [authorName, setAuthorName] = useState("anonymous");
-
 	useEffect(() => {
-		ensureInit().then(async () => {
-			try {
-				const list = await callFn<Room[]>("listRooms", {});
-				setRooms(list);
-				setActive(list[0] ?? null);
-			} catch (e) {
-				Alert.alert("Load failed", String(e));
-			}
-			setReady(true);
-		});
+		ensureInit().then(() => setReady(true));
 	}, []);
-
 	if (!ready) {
 		return (
 			<View style={[styles.screen, styles.center]}>
@@ -72,32 +58,170 @@ export default function App() {
 			</View>
 		);
 	}
+	return <Chat />;
+}
+
+function Chat() {
+	// Live subscriptions — sync engine pushes diffs over WebSocket.
+	// New rooms / new messages from any other device or device update
+	// re-render this component without polling.
+	const { data: rooms = [] } = db.useQuery<Room>("Room", {
+		orderBy: { createdAt: "asc" },
+	});
+	const [activeId, setActiveId] = useState<string | null>(null);
+	useEffect(() => {
+		if (!activeId && rooms.length > 0) setActiveId(rooms[0].id);
+	}, [rooms, activeId]);
+
+	const active = rooms.find((r) => r.id === activeId) ?? null;
+
+	const { data: messages = [] } = db.useQuery<Message>("Message", {
+		where: activeId ? { roomId: activeId } : undefined,
+		orderBy: { createdAt: "asc" },
+		limit: 200,
+	});
+
+	const [draft, setDraft] = useState("");
+	const [sending, setSending] = useState(false);
+	const [authorName, setAuthorName] = useState("anonymous");
+	const listRef = useRef<FlatList<Message>>(null);
+
+	useEffect(() => {
+		if (messages.length > 0) {
+			listRef.current?.scrollToEnd({ animated: true });
+		}
+	}, [messages.length, activeId]);
 
 	if (!active) {
 		return (
 			<RoomCreate
 				authorName={authorName}
 				onAuthorNameChange={setAuthorName}
-				onCreated={(r) => {
-					setRooms((prev) => [...prev, r]);
-					setActive(r);
-				}}
+				onCreated={(r) => setActiveId(r.id)}
 			/>
 		);
 	}
 
+	async function send() {
+		const body = draft.trim();
+		if (!body) return;
+		setDraft("");
+		setSending(true);
+		try {
+			await callFn("sendMessage", {
+				roomId: active.id,
+				body,
+				authorName,
+			});
+		} catch (e) {
+			setDraft(body);
+			Alert.alert("Send failed", String(e));
+		} finally {
+			setSending(false);
+		}
+	}
+
+	async function createRoom() {
+		const name = window?.prompt?.("Room name?") ?? null;
+		if (!name) return;
+		const slug = name
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-|-$/g, "");
+		try {
+			const r = (await callFn("createRoom", { slug, name })) as Room;
+			setActiveId(r.id);
+		} catch (e) {
+			Alert.alert("Create failed", String(e));
+		}
+	}
+
 	return (
-		<RoomView
-			room={active}
-			rooms={rooms}
-			onSwitch={setActive}
-			authorName={authorName}
-			onAuthorNameChange={setAuthorName}
-			onCreate={(r) => {
-				setRooms((prev) => [...prev, r]);
-				setActive(r);
-			}}
-		/>
+		<SafeAreaView style={styles.screen}>
+			<StatusBar style="auto" />
+			<KeyboardAvoidingView
+				style={styles.flex}
+				behavior={Platform.OS === "ios" ? "padding" : undefined}
+				keyboardVerticalOffset={64}
+			>
+				<View style={styles.header}>
+					<View>
+						<Text style={styles.title}>{active.name}</Text>
+						<Text style={styles.handle}>#{active.slug}</Text>
+					</View>
+					{rooms.length > 1 && (
+						<Pressable
+							onPress={() => {
+								const idx = rooms.findIndex((r) => r.id === active.id);
+								setActiveId(rooms[(idx + 1) % rooms.length].id);
+							}}
+						>
+							<Text style={styles.switchBtn}>Next room →</Text>
+						</Pressable>
+					)}
+				</View>
+
+				<View style={styles.namebar}>
+					<Text style={styles.namelabel}>You:</Text>
+					<TextInput
+						style={styles.nameinput}
+						value={authorName}
+						onChangeText={setAuthorName}
+						autoCapitalize="none"
+					/>
+				</View>
+
+				<FlatList
+					ref={listRef}
+					data={messages}
+					keyExtractor={(m) => m.id}
+					contentContainerStyle={{ padding: 16 }}
+					ListEmptyComponent={() => (
+						<Text style={styles.empty}>No messages yet. Say hi.</Text>
+					)}
+					renderItem={({ item }) => (
+						<View style={styles.msg}>
+							<View style={styles.msgHead}>
+								<Text style={styles.msgName}>{item.authorName}</Text>
+								<Text style={styles.msgTime}>
+									{new Date(item.createdAt).toLocaleTimeString(undefined, {
+										hour: "numeric",
+										minute: "2-digit",
+									})}
+								</Text>
+							</View>
+							<Text style={styles.msgBody}>{item.body}</Text>
+						</View>
+					)}
+				/>
+
+				<View style={styles.composer}>
+					<TextInput
+						style={styles.composerInput}
+						value={draft}
+						onChangeText={setDraft}
+						placeholder={`Message ${active.name}…`}
+						multiline
+						editable={!sending}
+					/>
+					<Pressable
+						onPress={send}
+						disabled={sending || !draft.trim()}
+						style={({ pressed }) => [
+							styles.button,
+							(sending || !draft.trim()) && styles.buttonDisabled,
+							pressed && styles.buttonPressed,
+						]}
+					>
+						<Text style={styles.buttonLabel}>Send</Text>
+					</Pressable>
+				</View>
+
+				<Pressable onPress={createRoom} style={styles.newRoomBar}>
+					<Text style={styles.newRoomLabel}>+ New room</Text>
+				</Pressable>
+			</KeyboardAvoidingView>
+		</SafeAreaView>
 	);
 }
 
@@ -117,10 +241,10 @@ function RoomCreate({
 	async function create() {
 		setCreating(true);
 		try {
-			const r = await callFn<Room>("createRoom", {
+			const r = (await callFn("createRoom", {
 				slug: slug.toLowerCase(),
 				name,
-			});
+			})) as Room;
 			onCreated(r);
 		} catch (e) {
 			Alert.alert("Create failed", String(e));
@@ -169,167 +293,6 @@ function RoomCreate({
 					</Text>
 				</Pressable>
 			</View>
-		</SafeAreaView>
-	);
-}
-
-function RoomView({
-	room,
-	rooms,
-	onSwitch,
-	authorName,
-	onAuthorNameChange,
-	onCreate,
-}: {
-	room: Room;
-	rooms: Room[];
-	onSwitch: (r: Room) => void;
-	authorName: string;
-	onAuthorNameChange: (s: string) => void;
-	onCreate: (r: Room) => void;
-}) {
-	const [messages, setMessages] = useState<Message[]>([]);
-	const [draft, setDraft] = useState("");
-	const [sending, setSending] = useState(false);
-	const listRef = useRef<FlatList<Message>>(null);
-
-	useEffect(() => {
-		void load();
-		const t = setInterval(load, 1500);
-		return () => clearInterval(t);
-		async function load() {
-			try {
-				const m = await callFn<Message[]>("roomMessages", { roomId: room.id });
-				setMessages(m);
-			} catch {
-				// ignore — will retry on next tick
-			}
-		}
-	}, [room.id]);
-
-	useEffect(() => {
-		if (messages.length > 0) {
-			listRef.current?.scrollToEnd({ animated: true });
-		}
-	}, [messages.length]);
-
-	async function send() {
-		const body = draft.trim();
-		if (!body) return;
-		setSending(true);
-		setDraft("");
-		try {
-			const msg = await callFn<Message>("sendMessage", {
-				roomId: room.id,
-				body,
-				authorName,
-			});
-			setMessages((prev) => [...prev, msg]);
-		} catch (e) {
-			setDraft(body);
-			Alert.alert("Send failed", String(e));
-		} finally {
-			setSending(false);
-		}
-	}
-
-	async function createRoom() {
-		const name = window?.prompt?.("Room name?") ?? null;
-		if (!name) return;
-		const slug = name
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-|-$/g, "");
-		try {
-			const r = await callFn<Room>("createRoom", { slug, name });
-			onCreate(r);
-		} catch (e) {
-			Alert.alert("Create failed", String(e));
-		}
-	}
-
-	return (
-		<SafeAreaView style={styles.screen}>
-			<StatusBar style="auto" />
-			<KeyboardAvoidingView
-				style={styles.flex}
-				behavior={Platform.OS === "ios" ? "padding" : undefined}
-				keyboardVerticalOffset={64}
-			>
-				<View style={styles.header}>
-					<View>
-						<Text style={styles.title}>{room.name}</Text>
-						<Text style={styles.handle}>#{room.slug}</Text>
-					</View>
-					{rooms.length > 1 && (
-						<Pressable
-							onPress={() => {
-								// Cycle to next room — simplest "switch room" UX without a sidebar.
-								const idx = rooms.findIndex((r) => r.id === room.id);
-								onSwitch(rooms[(idx + 1) % rooms.length]);
-							}}
-						>
-							<Text style={styles.switchBtn}>Next room →</Text>
-						</Pressable>
-					)}
-				</View>
-
-				<View style={styles.namebar}>
-					<Text style={styles.namelabel}>You:</Text>
-					<TextInput
-						style={styles.nameinput}
-						value={authorName}
-						onChangeText={onAuthorNameChange}
-						autoCapitalize="none"
-					/>
-				</View>
-
-				<FlatList
-					ref={listRef}
-					data={messages}
-					keyExtractor={(m) => m.id}
-					contentContainerStyle={{ padding: 16 }}
-					ListEmptyComponent={() => (
-						<Text style={styles.empty}>No messages yet. Say hi.</Text>
-					)}
-					renderItem={({ item }) => (
-						<View style={styles.msg}>
-							<View style={styles.msgHead}>
-								<Text style={styles.msgName}>{item.authorName}</Text>
-								<Text style={styles.msgTime}>
-									{new Date(item.createdAt).toLocaleTimeString(undefined, {
-										hour: "numeric",
-										minute: "2-digit",
-									})}
-								</Text>
-							</View>
-							<Text style={styles.msgBody}>{item.body}</Text>
-						</View>
-					)}
-				/>
-
-				<View style={styles.composer}>
-					<TextInput
-						style={styles.composerInput}
-						value={draft}
-						onChangeText={setDraft}
-						placeholder={`Message ${room.name}…`}
-						multiline
-						editable={!sending}
-					/>
-					<Pressable
-						onPress={send}
-						disabled={sending || !draft.trim()}
-						style={({ pressed }) => [
-							styles.button,
-							(sending || !draft.trim()) && styles.buttonDisabled,
-							pressed && styles.buttonPressed,
-						]}
-					>
-						<Text style={styles.buttonLabel}>Send</Text>
-					</Pressable>
-				</View>
-			</KeyboardAvoidingView>
 		</SafeAreaView>
 	);
 }
@@ -411,4 +374,11 @@ const styles = StyleSheet.create({
 		paddingVertical: 8,
 		fontSize: 14,
 	},
+	newRoomBar: {
+		paddingVertical: 10,
+		alignItems: "center",
+		borderTopWidth: 1,
+		borderColor: "#e5e5e5",
+	},
+	newRoomLabel: { color: "#3b82f6", fontSize: 13 },
 });

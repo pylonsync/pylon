@@ -1,13 +1,34 @@
 import SwiftUI
 import PylonClient
+import PylonSync
+import PylonSwiftUI
 
+/// Live feed. Three subscriptions (Post / Like / Profile) joined
+/// in-memory. Every new post + every like from any client renders
+/// here without polling.
 struct FeedView: View {
 	@EnvironmentObject var session: AppSession
-	@State private var feed: [FeedItem] = []
-	@State private var loading = true
-	@State private var posting = false
+	let engine: SyncEngine
+	let me: Profile
+	let profiles: [Profile]
+
+	@StateObject private var posts: PylonQuery<Post>
+	@StateObject private var likes: PylonQuery<Like>
 	@State private var draft = ""
+	@State private var posting = false
 	@State private var errorMessage: String?
+
+	init(engine: SyncEngine, me: Profile, profiles: [Profile]) {
+		self.engine = engine
+		self.me = me
+		self.profiles = profiles
+		_posts = StateObject(
+			wrappedValue: PylonQuery<Post>(engine: engine, entity: "Post"),
+		)
+		_likes = StateObject(
+			wrappedValue: PylonQuery<Like>(engine: engine, entity: "Like"),
+		)
+	}
 
 	var body: some View {
 		NavigationStack {
@@ -31,13 +52,11 @@ struct FeedView: View {
 				}
 
 				Section("Feed") {
-					if loading {
-						ProgressView()
-					} else if feed.isEmpty {
+					if items.isEmpty {
 						Text("No posts yet.")
 							.foregroundStyle(.secondary)
 					} else {
-						ForEach(feed) { item in
+						ForEach(items, id: \.post.id) { item in
 							row(item)
 						}
 					}
@@ -52,13 +71,37 @@ struct FeedView: View {
 				}
 			}
 			.navigationTitle("__APP_NAME__")
-			.task { await load() }
-			.refreshable { await load() }
 		}
 	}
 
+	private struct FeedRow: Hashable {
+		let post: Post
+		let author: Profile?
+		let likeCount: Int
+		let likedByMe: Bool
+	}
+
+	private var profilesById: [String: Profile] {
+		Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+	}
+
+	private var items: [FeedRow] {
+		posts.rows
+			.sorted { $0.createdAt > $1.createdAt }
+			.prefix(100)
+			.map { post in
+				let postLikes = likes.rows.filter { $0.postId == post.id }
+				return FeedRow(
+					post: post,
+					author: profilesById[post.authorId],
+					likeCount: postLikes.count,
+					likedByMe: postLikes.contains { $0.profileId == me.id },
+				)
+			}
+	}
+
 	@ViewBuilder
-	private func row(_ item: FeedItem) -> some View {
+	private func row(_ item: FeedRow) -> some View {
 		VStack(alignment: .leading, spacing: 6) {
 			HStack(alignment: .firstTextBaseline) {
 				Text(item.author?.displayName ?? "Unknown")
@@ -67,16 +110,16 @@ struct FeedView: View {
 					.font(.system(.caption, design: .monospaced))
 					.foregroundStyle(.secondary)
 				Spacer()
-				Text(item.createdAt)
+				Text(item.post.createdAt)
 					.font(.caption2)
 					.foregroundStyle(.tertiary)
 			}
-			Text(item.body)
+			Text(item.post.body)
 				.font(.body)
 				.fixedSize(horizontal: false, vertical: true)
 			HStack {
 				Button {
-					Task { await toggleLike(item) }
+					Task { await toggleLike(item.post.id) }
 				} label: {
 					HStack(spacing: 4) {
 						Image(systemName: item.likedByMe ? "heart.fill" : "heart")
@@ -87,10 +130,10 @@ struct FeedView: View {
 				}
 				.buttonStyle(.plain)
 
-				if item.author?.id == session.me?.id {
+				if item.author?.id == me.id {
 					Spacer()
 					Button("Delete", role: .destructive) {
-						Task { await delete(item) }
+						Task { await delete(item.post.id) }
 					}
 					.font(.caption)
 				}
@@ -99,18 +142,9 @@ struct FeedView: View {
 		.padding(.vertical, 4)
 	}
 
-	// MARK: - Network
-
-	private func load() async {
-		loading = true
-		defer { loading = false }
-		do {
-			feed = try await session.pylon.callFn("feed", args: EmptyArgs())
-			errorMessage = nil
-		} catch {
-			errorMessage = "Load failed: \(error.localizedDescription)"
-		}
-	}
+	// MARK: - Mutations (writes flow through callFn; the engine receives
+	// the change_event and updates the local store, which re-renders the
+	// PylonQuery rows above).
 
 	private func post() async {
 		let body = draft.trimmingCharacters(in: .whitespaces)
@@ -118,53 +152,48 @@ struct FeedView: View {
 		posting = true
 		defer { posting = false }
 		do {
-			let item: FeedItem = try await session.pylon.callFn(
+			// `createPost` returns the joined shape (Post + author),
+			// but we don't use the return value — the engine will
+			// surface the new Post row via the live subscription.
+			let _: PostCreatedResponse = try await session.client.callFn(
 				"createPost",
 				args: CreatePostArgs(body: body),
 			)
-			feed.insert(item, at: 0)
 			draft = ""
+			errorMessage = nil
 		} catch {
 			errorMessage = "Post failed: \(error.localizedDescription)"
 		}
 	}
 
-	private func toggleLike(_ item: FeedItem) async {
-		// Optimistic
-		if let i = feed.firstIndex(where: { $0.id == item.id }) {
-			feed[i].likedByMe.toggle()
-			feed[i].likeCount += feed[i].likedByMe ? 1 : -1
-		}
+	private func toggleLike(_ postId: String) async {
 		do {
-			let result: ToggleLikeResult = try await session.pylon.callFn(
+			let _: ToggleLikeResponse = try await session.client.callFn(
 				"toggleLike",
-				args: ToggleLikeArgs(postId: item.id),
+				args: ToggleLikeArgs(postId: postId),
 			)
-			if let i = feed.firstIndex(where: { $0.id == item.id }) {
-				feed[i].likedByMe = result.liked
-				feed[i].likeCount = result.likeCount
-			}
 		} catch {
-			// Revert
-			if let i = feed.firstIndex(where: { $0.id == item.id }) {
-				feed[i].likedByMe = item.likedByMe
-				feed[i].likeCount = item.likeCount
-			}
 			errorMessage = "Like failed: \(error.localizedDescription)"
 		}
 	}
 
-	private func delete(_ item: FeedItem) async {
-		let snapshot = feed
-		feed.removeAll { $0.id == item.id }
+	private func delete(_ postId: String) async {
 		do {
-			let _: FeedItem = try await session.pylon.callFn(
+			let _: Post = try await session.client.callFn(
 				"deletePost",
-				args: DeletePostArgs(id: item.id),
+				args: DeletePostArgs(id: postId),
 			)
 		} catch {
-			feed = snapshot
 			errorMessage = "Delete failed: \(error.localizedDescription)"
 		}
 	}
+}
+
+private struct PostCreatedResponse: Decodable {
+	let id: String
+}
+
+private struct ToggleLikeResponse: Decodable {
+	let liked: Bool
+	let likeCount: Int
 }

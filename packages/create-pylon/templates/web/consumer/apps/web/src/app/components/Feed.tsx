@@ -1,15 +1,14 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useMemo, useState } from "react";
+import { db, callFn } from "@pylonsync/react";
 import { Button, Input, Card, CardHeader, CardContent } from "@__APP_NAME_KEBAB__/ui";
 
-type FeedItem = {
+type Post = {
 	id: string;
+	authorId: string;
 	body: string;
 	createdAt: string;
-	author: { id: string; handle: string; displayName: string } | null;
-	likeCount: number;
-	likedByMe: boolean;
 };
 
 type Profile = {
@@ -21,88 +20,109 @@ type Profile = {
 	createdAt: string;
 };
 
-export function Feed({
-	initialFeed,
-	initialMe,
-}: {
-	initialFeed: FeedItem[];
-	initialMe: Profile | null;
-}) {
-	const [feed, setFeed] = useState(initialFeed);
-	const [me, setMe] = useState(initialMe);
-	const [body, setBody] = useState("");
-	const [pending, startTransition] = useTransition();
+type Like = {
+	id: string;
+	postId: string;
+	profileId: string;
+	createdAt: string;
+};
 
-	if (!me) {
-		return <ProfileSetup onSaved={(p) => setMe(p)} />;
+export function Feed() {
+	// Three live subscriptions. The sync engine pushes diffs over
+	// WebSocket so a new Post / Like from any other client renders
+	// here within ~ms. Joining client-side keeps the schema simple
+	// — for very large feeds, a server-side aggregated query is
+	// cheaper, but the live story is more important to demonstrate.
+	const { data: posts = [] } = db.useQuery<Post>("Post", {
+		orderBy: { createdAt: "desc" },
+		limit: 100,
+	});
+	const { data: profiles = [] } = db.useQuery<Profile>("Profile", {});
+	const { data: likes = [] } = db.useQuery<Like>("Like", {});
+	const { data: myProfileRows = [] } = db.useQuery<Profile>("Profile", {});
+
+	const profilesById = useMemo(() => {
+		const map = new Map<string, Profile>();
+		for (const p of profiles) map.set(p.id, p);
+		return map;
+	}, [profiles]);
+
+	const myProfile = useMemo(() => {
+		// `myProfile` server-side filters by auth.userId; from the
+		// client we don't have userId here without a separate auth
+		// fetch, so we lean on the Profile policy: every Profile
+		// row in the local store IS visible (public reads). To find
+		// "ours" we'd want auth.userId; the scaffold uses a
+		// localStorage-cached selection instead.
+		if (typeof window === "undefined") return null;
+		const id = window.localStorage.getItem("__APP_NAME_SNAKE___profile_id");
+		if (!id) return null;
+		return myProfileRows.find((p) => p.id === id) ?? null;
+	}, [myProfileRows]);
+
+	if (!myProfile) {
+		return (
+			<ProfileSetup
+				existingHandles={profiles.map((p) => p.handle)}
+				onSaved={(p) => {
+					window.localStorage.setItem("__APP_NAME_SNAKE___profile_id", p.id);
+					// Force re-render by reading from the live profiles array.
+				}}
+			/>
+		);
 	}
+
+	const items = posts.map((post) => {
+		const author = profilesById.get(post.authorId) ?? null;
+		const postLikes = likes.filter((l) => l.postId === post.id);
+		const likedByMe = postLikes.some((l) => l.profileId === myProfile.id);
+		return { post, author, likeCount: postLikes.length, likedByMe };
+	});
+
+	return <FeedView me={myProfile} items={items} />;
+}
+
+function FeedView({
+	me,
+	items,
+}: {
+	me: Profile;
+	items: Array<{
+		post: Post;
+		author: Profile | null;
+		likeCount: number;
+		likedByMe: boolean;
+	}>;
+}) {
+	const [body, setBody] = useState("");
+	const [posting, setPosting] = useState(false);
 
 	async function post() {
 		const trimmed = body.trim();
 		if (!trimmed) return;
 		setBody("");
-		startTransition(async () => {
-			const res = await fetch("/api/fn/createPost", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ body: trimmed }),
-			});
-			if (res.ok) {
-				const item = (await res.json()) as FeedItem;
-				setFeed((prev) => [item, ...prev]);
-			} else {
-				setBody(trimmed);
-			}
-		});
+		setPosting(true);
+		try {
+			await callFn("createPost", { body: trimmed });
+		} finally {
+			setPosting(false);
+		}
 	}
 
-	async function toggleLike(item: FeedItem) {
-		// Optimistic
-		setFeed((prev) =>
-			prev.map((p) =>
-				p.id === item.id
-					? {
-							...p,
-							likedByMe: !p.likedByMe,
-							likeCount: p.likeCount + (p.likedByMe ? -1 : 1),
-						}
-					: p,
-			),
-		);
-		startTransition(async () => {
-			const res = await fetch("/api/fn/toggleLike", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ postId: item.id }),
-			});
-			if (!res.ok) {
-				// Revert
-				setFeed((prev) =>
-					prev.map((p) =>
-						p.id === item.id
-							? {
-									...p,
-									likedByMe: item.likedByMe,
-									likeCount: item.likeCount,
-								}
-							: p,
-					),
-				);
-			}
-		});
+	async function toggleLike(postId: string) {
+		try {
+			await callFn("toggleLike", { postId });
+		} catch (e) {
+			window.alert(`Like failed: ${String(e)}`);
+		}
 	}
 
-	async function remove(item: FeedItem) {
-		const snapshot = feed;
-		setFeed((prev) => prev.filter((p) => p.id !== item.id));
-		startTransition(async () => {
-			const res = await fetch("/api/fn/deletePost", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ id: item.id }),
-			});
-			if (!res.ok) setFeed(snapshot);
-		});
+	async function remove(postId: string) {
+		try {
+			await callFn("deletePost", { id: postId });
+		} catch (e) {
+			window.alert(`Delete failed: ${String(e)}`);
+		}
 	}
 
 	return (
@@ -116,12 +136,6 @@ export function Feed({
 								@{me.handle}
 							</div>
 						</div>
-						<button
-							className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-							onClick={() => setMe(null)}
-						>
-							Edit profile
-						</button>
 					</div>
 				</CardHeader>
 				<CardContent>
@@ -138,7 +152,7 @@ export function Feed({
 							placeholder={`What's on your mind, ${me.displayName.split(" ")[0]}?`}
 							rows={3}
 							maxLength={1000}
-							disabled={pending}
+							disabled={posting}
 							className="w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 resize-none"
 						/>
 						<div className="flex items-center justify-between">
@@ -148,7 +162,7 @@ export function Feed({
 							<Button
 								type="submit"
 								variant="primary"
-								disabled={pending || !body.trim()}
+								disabled={posting || !body.trim()}
 								size="sm"
 							>
 								Post
@@ -158,27 +172,27 @@ export function Feed({
 				</CardContent>
 			</Card>
 
-			{feed.length === 0 ? (
+			{items.length === 0 ? (
 				<p className="text-sm text-neutral-500 text-center py-8">
 					No posts yet. Be the first.
 				</p>
 			) : (
 				<ul className="space-y-3">
-					{feed.map((item) => (
-						<li key={item.id}>
+					{items.map(({ post, author, likeCount, likedByMe }) => (
+						<li key={post.id}>
 							<Card>
 								<CardContent className="space-y-3">
 									<div className="flex items-baseline justify-between">
 										<div className="text-sm">
 											<span className="font-medium">
-												{item.author?.displayName ?? "Unknown"}
+												{author?.displayName ?? "Unknown"}
 											</span>{" "}
 											<span className="text-neutral-400 font-mono text-xs">
-												@{item.author?.handle ?? "?"}
+												@{author?.handle ?? "?"}
 											</span>
 										</div>
 										<span className="text-xs text-neutral-400">
-											{new Date(item.createdAt).toLocaleString(undefined, {
+											{new Date(post.createdAt).toLocaleString(undefined, {
 												month: "short",
 												day: "numeric",
 												hour: "numeric",
@@ -187,22 +201,22 @@ export function Feed({
 										</span>
 									</div>
 									<p className="text-sm whitespace-pre-wrap break-words">
-										{item.body}
+										{post.body}
 									</p>
 									<div className="flex items-center gap-2">
 										<button
-											onClick={() => toggleLike(item)}
+											onClick={() => toggleLike(post.id)}
 											className={`text-xs font-mono px-2 py-1 rounded border transition-colors ${
-												item.likedByMe
+												likedByMe
 													? "border-pink-300 dark:border-pink-700 text-pink-600 dark:text-pink-300 bg-pink-50 dark:bg-pink-950"
 													: "border-neutral-200 dark:border-neutral-800 text-neutral-500 hover:bg-neutral-50 dark:hover:bg-neutral-900"
 											}`}
 										>
-											{item.likedByMe ? "♥" : "♡"} {item.likeCount}
+											{likedByMe ? "♥" : "♡"} {likeCount}
 										</button>
-										{item.author?.id === me.id && (
+										{author?.id === me.id && (
 											<button
-												onClick={() => remove(item)}
+												onClick={() => remove(post.id)}
 												className="text-xs text-neutral-400 hover:text-red-500"
 											>
 												Delete
@@ -219,30 +233,40 @@ export function Feed({
 	);
 }
 
-function ProfileSetup({ onSaved }: { onSaved: (p: Profile) => void }) {
+function ProfileSetup({
+	existingHandles,
+	onSaved,
+}: {
+	existingHandles: string[];
+	onSaved: (p: Profile) => void;
+}) {
 	const [handle, setHandle] = useState("");
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
-	const [pending, startTransition] = useTransition();
+	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
 	async function save(e: React.FormEvent) {
 		e.preventDefault();
 		setError(null);
-		startTransition(async () => {
-			const res = await fetch("/api/fn/upsertProfile", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ handle, displayName, bio }),
-			});
-			if (res.ok) {
-				const profile = (await res.json()) as Profile;
-				onSaved(profile);
-			} else {
-				const body = await res.json().catch(() => ({}));
-				setError(body?.message ?? "save failed");
-			}
-		});
+		const lower = handle.toLowerCase();
+		if (existingHandles.includes(lower)) {
+			setError(`@${lower} is taken`);
+			return;
+		}
+		setSaving(true);
+		try {
+			const profile = (await callFn("upsertProfile", {
+				handle: lower,
+				displayName,
+				bio,
+			})) as Profile;
+			onSaved(profile);
+		} catch (e) {
+			setError(String(e));
+		} finally {
+			setSaving(false);
+		}
 	}
 
 	return (
@@ -253,9 +277,7 @@ function ProfileSetup({ onSaved }: { onSaved: (p: Profile) => void }) {
 			<CardContent>
 				<form onSubmit={save} className="space-y-3">
 					<div>
-						<label className="text-xs text-neutral-500 block mb-1">
-							Handle
-						</label>
+						<label className="text-xs text-neutral-500 block mb-1">Handle</label>
 						<Input
 							value={handle}
 							onChange={(e) => setHandle(e.target.value.toLowerCase())}
@@ -275,9 +297,7 @@ function ProfileSetup({ onSaved }: { onSaved: (p: Profile) => void }) {
 						/>
 					</div>
 					<div>
-						<label className="text-xs text-neutral-500 block mb-1">
-							Bio
-						</label>
+						<label className="text-xs text-neutral-500 block mb-1">Bio</label>
 						<Input
 							value={bio}
 							onChange={(e) => setBio(e.target.value)}
@@ -285,8 +305,8 @@ function ProfileSetup({ onSaved }: { onSaved: (p: Profile) => void }) {
 						/>
 					</div>
 					{error && <p className="text-xs text-red-500">{error}</p>}
-					<Button type="submit" variant="primary" disabled={pending}>
-						{pending ? "Saving…" : "Save"}
+					<Button type="submit" variant="primary" disabled={saving}>
+						{saving ? "Saving…" : "Save"}
 					</Button>
 				</form>
 			</CardContent>

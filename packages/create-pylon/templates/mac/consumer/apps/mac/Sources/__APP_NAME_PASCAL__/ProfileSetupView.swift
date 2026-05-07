@@ -1,8 +1,12 @@
 import SwiftUI
 import PylonClient
+import PylonSync
 
 struct ProfileSetupView: View {
 	@EnvironmentObject var session: AppSession
+	let engine: SyncEngine
+	let existingHandles: [String]
+
 	@State private var handle = ""
 	@State private var displayName = ""
 	@State private var bio = ""
@@ -19,7 +23,6 @@ struct ProfileSetupView: View {
 					TextField("Display name", text: $displayName)
 					TextField("Bio (optional)", text: $bio)
 				}
-
 				if let errorMessage {
 					Section {
 						Text(errorMessage)
@@ -27,12 +30,12 @@ struct ProfileSetupView: View {
 							.font(.caption)
 					}
 				}
-
 				Section {
 					Button(saving ? "Saving…" : "Save") {
 						Task { await save() }
 					}
-					.disabled(saving || handle.trimmingCharacters(in: .whitespaces).isEmpty
+					.disabled(saving
+						|| handle.trimmingCharacters(in: .whitespaces).isEmpty
 						|| displayName.trimmingCharacters(in: .whitespaces).isEmpty)
 				}
 			}
@@ -43,16 +46,21 @@ struct ProfileSetupView: View {
 	private func save() async {
 		saving = true
 		defer { saving = false }
+		let lower = handle.trimmingCharacters(in: .whitespaces).lowercased()
+		if existingHandles.contains(lower) {
+			errorMessage = "@\(lower) is taken"
+			return
+		}
 		do {
-			let profile: Profile = try await session.pylon.callFn(
+			let profile: Profile = try await session.client.callFn(
 				"upsertProfile",
 				args: UpsertProfileArgs(
-					handle: handle.trimmingCharacters(in: .whitespaces).lowercased(),
+					handle: lower,
 					displayName: displayName.trimmingCharacters(in: .whitespaces),
 					bio: bio.trimmingCharacters(in: .whitespaces),
 				),
 			)
-			session.me = profile
+			session.setMyProfileId(profile.id)
 		} catch {
 			errorMessage = "Save failed: \(error.localizedDescription)"
 		}

@@ -1,14 +1,23 @@
 import SwiftUI
 import PylonClient
+import PylonSync
+import PylonSwiftUI
 
-/// Two-pane chat: rooms list → room view. Polls the active room
-/// every 1.5s. For realtime, swap `pollMessages()` out for a
-/// PylonQuery<Message> from PylonSwiftUI subscribed by roomId.
+/// Two-pane chat: rooms list → room view. Subscribes to Room
+/// inserts/deletes via PylonQuery — every new room created on any
+/// device shows up here within ~ms over the WebSocket sync channel.
 struct ChatRootView: View {
 	@EnvironmentObject var session: AppSession
-	@State private var rooms: [Room] = []
-	@State private var loadingRooms = true
+	let engine: SyncEngine
+	@StateObject private var rooms: PylonQuery<Room>
 	@State private var errorMessage: String?
+
+	init(engine: SyncEngine) {
+		self.engine = engine
+		_rooms = StateObject(
+			wrappedValue: PylonQuery<Room>(engine: engine, entity: "Room"),
+		)
+	}
 
 	var body: some View {
 		NavigationStack {
@@ -21,13 +30,11 @@ struct ChatRootView: View {
 					.autocorrectionDisabled()
 				}
 				Section("Rooms") {
-					if loadingRooms {
-						ProgressView()
-					} else if rooms.isEmpty {
-						Text("No rooms yet. Create one below.")
+					if rooms.rows.isEmpty {
+						Text("No rooms yet — create one below.")
 							.foregroundStyle(.secondary)
 					} else {
-						ForEach(rooms) { r in
+						ForEach(sortedRooms) { r in
 							NavigationLink(value: r) {
 								VStack(alignment: .leading) {
 									Text(r.name)
@@ -54,38 +61,31 @@ struct ChatRootView: View {
 			}
 			.navigationTitle("__APP_NAME__")
 			.navigationDestination(for: Room.self) { room in
-				RoomView(room: room)
+				RoomView(room: room, engine: engine)
 			}
-			.task { await loadRooms() }
-			.refreshable { await loadRooms() }
 		}
 	}
 
-	private func loadRooms() async {
-		loadingRooms = true
-		defer { loadingRooms = false }
-		do {
-			rooms = try await session.pylon.callFn("listRooms", args: EmptyArgs())
-			errorMessage = nil
-		} catch {
-			errorMessage = "Load failed: \(error.localizedDescription)"
-		}
+	private var sortedRooms: [Room] {
+		rooms.rows.sorted { $0.createdAt < $1.createdAt }
 	}
 
 	private func createRoom() async {
-		let alert = await prompt(title: "Create room", message: "Room name?")
-		guard let name = alert?.trimmingCharacters(in: .whitespaces),
+		let name = await prompt(title: "Create room", message: "Room name?")
+		guard let name = name?.trimmingCharacters(in: .whitespaces),
 			!name.isEmpty
 		else { return }
 		let slug = name.lowercased()
 			.replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
 			.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
 		do {
-			let room: Room = try await session.pylon.callFn(
+			// Server validates + writes via ctx.db.insert. The change_event
+			// flows back through the SyncEngine and PylonQuery picks up
+			// the new Room without us touching local state.
+			let _: Room = try await session.client.callFn(
 				"createRoom",
 				args: CreateRoomArgs(slug: slug, name: name),
 			)
-			rooms.append(room)
 		} catch {
 			errorMessage = "Create failed: \(error.localizedDescription)"
 		}
@@ -93,10 +93,6 @@ struct ChatRootView: View {
 
 	@MainActor
 	private func prompt(title: String, message: String) async -> String? {
-		// Minimal SwiftUI prompt — for production replace with an
-		// in-tree alert + TextField sheet. The scaffold uses a tiny
-		// UIKit detour on iOS so the demo works without a custom
-		// modal implementation.
 #if canImport(UIKit)
 		await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
 			let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)

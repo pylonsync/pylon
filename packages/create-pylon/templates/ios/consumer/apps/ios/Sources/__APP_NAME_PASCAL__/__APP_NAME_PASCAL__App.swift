@@ -1,5 +1,6 @@
 import SwiftUI
 import PylonClient
+import PylonSync
 
 @main
 struct __APP_NAME_PASCAL__App: App {
@@ -7,16 +8,25 @@ struct __APP_NAME_PASCAL__App: App {
 
 	var body: some Scene {
 		WindowGroup {
-			RootView()
-				.environmentObject(session)
+			Group {
+				if let engine = session.engine {
+					RootView(engine: engine)
+						.environmentObject(session)
+				} else {
+					ProgressView()
+						.frame(maxWidth: .infinity, maxHeight: .infinity)
+				}
+			}
+			.task { await session.bootIfNeeded() }
 		}
 	}
 }
 
 @MainActor
 final class AppSession: ObservableObject {
-	let pylon: PylonClient
-	@Published var me: Profile?
+	let client: PylonClient
+	@Published private(set) var engine: SyncEngine?
+	@Published var myProfileId: String?
 
 	init() {
 		let baseURLString = ProcessInfo.processInfo.environment["PYLON_BASE_URL"]
@@ -24,6 +34,24 @@ final class AppSession: ObservableObject {
 		guard let url = URL(string: baseURLString) else {
 			fatalError("Invalid PYLON_BASE_URL: \(baseURLString)")
 		}
-		self.pylon = PylonClient(baseURL: url, appName: "__APP_NAME_SNAKE__")
+		self.client = PylonClient(baseURL: url, appName: "__APP_NAME_SNAKE__")
+		self.myProfileId = UserDefaults.standard.string(forKey: "myProfileId")
+	}
+
+	func bootIfNeeded() async {
+		guard engine == nil else { return }
+		let baseURLString = ProcessInfo.processInfo.environment["PYLON_BASE_URL"]
+			?? "http://localhost:4321"
+		guard let url = URL(string: baseURLString) else { return }
+		let config = SyncEngineConfig(baseURL: url, appName: "__APP_NAME_SNAKE__")
+		let engine = await SyncEngine(config: config, client: client)
+		await engine.start()
+		self.engine = engine
+	}
+
+	func setMyProfileId(_ id: String?) {
+		myProfileId = id
+		if let id { UserDefaults.standard.set(id, forKey: "myProfileId") }
+		else { UserDefaults.standard.removeObject(forKey: "myProfileId") }
 	}
 }

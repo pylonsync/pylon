@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
+import { db, callFn } from "@pylonsync/react";
 import { Button, Input } from "@__APP_NAME_KEBAB__/ui";
 
 type Room = {
@@ -21,46 +22,28 @@ type Message = {
 
 const NAME_KEY = "__APP_NAME_SNAKE___author_name";
 
-export function ChatRoom({
-	initialRooms,
-	initialActiveRoom,
-	initialMessages,
-}: {
-	initialRooms: Room[];
-	initialActiveRoom: Room | null;
-	initialMessages: Message[];
-}) {
-	const [rooms, setRooms] = useState(initialRooms);
-	const [active, setActive] = useState(initialActiveRoom);
-	const [messages, setMessages] = useState(initialMessages);
+export function ChatRoom() {
+	// Live subscriptions. The sync engine pushes diffs over WebSocket
+	// — every Room insert + every Message append from any other client
+	// re-renders these components without a fetch / poll / refresh.
+	const { data: rooms = [] } = db.useQuery<Room>("Room", {
+		orderBy: { createdAt: "asc" },
+	});
+	const [activeId, setActiveId] = useState<string | null>(null);
+	useEffect(() => {
+		if (!activeId && rooms.length > 0) setActiveId(rooms[0].id);
+	}, [rooms, activeId]);
+
+	const { data: messages = [] } = db.useQuery<Message>("Message", {
+		where: activeId ? { roomId: activeId } : undefined,
+		orderBy: { createdAt: "asc" },
+		limit: 200,
+	});
+
 	const [body, setBody] = useState("");
 	const [authorName, setAuthorName] = useState("anonymous");
-	const [pending, startTransition] = useTransition();
-	const [pollIdx, setPollIdx] = useState(0);
+	const [sending, setSending] = useState(false);
 	const scrollerRef = useRef<HTMLDivElement>(null);
-
-	// Poll the active room every 1.5s. The framework supports a
-	// WebSocket subscription path (db.useQuery) — we use polling here
-	// so the scaffold has zero front-end SDK setup. Swap in
-	// db.useQuery("Message", { roomId }) when you wire up
-	// `@pylonsync/react`'s init() in your layout.
-	useEffect(() => {
-		if (!active) return;
-		const t = setInterval(() => setPollIdx((n) => n + 1), 1500);
-		return () => clearInterval(t);
-	}, [active]);
-
-	useEffect(() => {
-		if (!active) return;
-		void (async () => {
-			const res = await fetch("/api/fn/roomMessages", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ roomId: active.id }),
-			});
-			if (res.ok) setMessages(await res.json());
-		})();
-	}, [active, pollIdx]);
 
 	useEffect(() => {
 		const stored =
@@ -71,37 +54,38 @@ export function ChatRoom({
 	}, []);
 
 	useEffect(() => {
-		// Auto-scroll to bottom on new messages.
+		// Auto-scroll to bottom when message count changes.
 		scrollerRef.current?.scrollTo({
 			top: scrollerRef.current.scrollHeight,
 			behavior: "smooth",
 		});
-	}, [messages]);
+	}, [messages.length, activeId]);
 
 	function persistName(next: string) {
 		setAuthorName(next);
 		window.localStorage.setItem(NAME_KEY, next);
 	}
 
+	const active = rooms.find((r) => r.id === activeId) ?? null;
+
 	async function send() {
 		const trimmed = body.trim();
 		if (!trimmed || !active) return;
 		setBody("");
-		startTransition(async () => {
-			const res = await fetch("/api/fn/sendMessage", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					roomId: active.id,
-					body: trimmed,
-					authorName,
-				}),
+		setSending(true);
+		try {
+			// Server validates body length / auth, runs ctx.db.insert,
+			// the resulting change_event hits every subscriber's local
+			// store. We don't append to local state ourselves — the
+			// useQuery above re-renders when the new row lands.
+			await callFn("sendMessage", {
+				roomId: active.id,
+				body: trimmed,
+				authorName,
 			});
-			if (res.ok) {
-				const msg = (await res.json()) as Message;
-				setMessages((prev) => [...prev, msg]);
-			}
-		});
+		} finally {
+			setSending(false);
+		}
 	}
 
 	async function createRoom() {
@@ -111,18 +95,12 @@ export function ChatRoom({
 			.toLowerCase()
 			.replace(/[^a-z0-9]+/g, "-")
 			.replace(/^-|-$/g, "");
-		startTransition(async () => {
-			const res = await fetch("/api/fn/createRoom", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ slug, name }),
-			});
-			if (res.ok) {
-				const room = (await res.json()) as Room;
-				setRooms((prev) => [...prev, room]);
-				setActive(room);
-			}
-		});
+		try {
+			const room = (await callFn("createRoom", { slug, name })) as Room;
+			setActiveId(room.id);
+		} catch (e) {
+			window.alert(`Create failed: ${String(e)}`);
+		}
 	}
 
 	return (
@@ -149,9 +127,9 @@ export function ChatRoom({
 					{rooms.map((r) => (
 						<li key={r.id}>
 							<button
-								onClick={() => setActive(r)}
+								onClick={() => setActiveId(r.id)}
 								className={`w-full text-left px-4 py-2.5 text-sm hover:bg-neutral-50 dark:hover:bg-neutral-900 ${
-									r.id === active?.id
+									r.id === activeId
 										? "bg-neutral-100 dark:bg-neutral-800 font-medium"
 										: ""
 								}`}
@@ -181,7 +159,10 @@ export function ChatRoom({
 							</p>
 						</header>
 
-						<div ref={scrollerRef} className="flex-1 overflow-auto px-6 py-4 space-y-3">
+						<div
+							ref={scrollerRef}
+							className="flex-1 overflow-auto px-6 py-4 space-y-3"
+						>
 							{messages.length === 0 ? (
 								<p className="text-sm text-neutral-500 text-center py-12">
 									No messages yet. Say hi.
@@ -219,13 +200,13 @@ export function ChatRoom({
 								value={body}
 								onChange={(e) => setBody(e.target.value)}
 								placeholder={`Message ${active.name}…`}
-								disabled={pending}
+								disabled={sending}
 								className="flex-1"
 							/>
 							<Button
 								type="submit"
 								variant="primary"
-								disabled={pending || !body.trim()}
+								disabled={sending || !body.trim()}
 							>
 								Send
 							</Button>

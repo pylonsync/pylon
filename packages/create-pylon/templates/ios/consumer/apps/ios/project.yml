@@ -39,4 +39,6 @@ targets:
       - package: pylon
         product: PylonClient
       - package: pylon
+        product: PylonSync
+      - package: pylon
         product: PylonSwiftUI

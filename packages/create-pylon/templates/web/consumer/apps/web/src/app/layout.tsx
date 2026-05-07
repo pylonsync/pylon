@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Providers } from "./providers";
 
 export const metadata: Metadata = {
 	title: "__APP_NAME__",
-	description: "Multi-tenant SaaS scaffold powered by Pylon",
+	description: "Realtime social feed powered by Pylon",
 };
 
 export default function RootLayout({
@@ -14,7 +15,7 @@ export default function RootLayout({
 	return (
 		<html lang="en">
 			<body className="antialiased min-h-screen bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
-				{children}
+				<Providers>{children}</Providers>
 			</body>
 		</html>
 	);

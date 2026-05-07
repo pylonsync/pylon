@@ -1,24 +1,45 @@
 import SwiftUI
 import PylonClient
+import PylonSync
+import PylonSwiftUI
 
+/// Live room view. PylonQuery<Message> with a `where` predicate that
+/// matches `roomId` to the active room. The sync engine pushes diffs
+/// over WebSocket; new messages from any client land in `messages.rows`
+/// without us polling.
 struct RoomView: View {
 	@EnvironmentObject var session: AppSession
 	let room: Room
-	@State private var messages: [Message] = []
+	let engine: SyncEngine
+	@StateObject private var messages: PylonQuery<Message>
 	@State private var draft = ""
 	@State private var sending = false
 	@State private var errorMessage: String?
-	@State private var pollTimer: Task<Void, Never>?
+
+	init(room: Room, engine: SyncEngine) {
+		self.room = room
+		self.engine = engine
+		let roomId = room.id
+		_messages = StateObject(
+			wrappedValue: PylonQuery<Message>(
+				engine: engine,
+				entity: "Message",
+				where: { row in
+					row["roomId"]?.stringValue == roomId
+				},
+			),
+		)
+	}
 
 	var body: some View {
 		VStack(spacing: 0) {
 			ScrollViewReader { proxy in
 				ScrollView {
 					LazyVStack(alignment: .leading, spacing: 12) {
-						ForEach(messages) { msg in
+						ForEach(sortedMessages) { msg in
 							messageRow(msg).id(msg.id)
 						}
-						if messages.isEmpty {
+						if messages.rows.isEmpty {
 							Text("No messages yet. Say hi.")
 								.foregroundStyle(.secondary)
 								.padding(.top, 32)
@@ -27,8 +48,8 @@ struct RoomView: View {
 					}
 					.padding(16)
 				}
-				.onChange(of: messages.count) { _, _ in
-					if let last = messages.last {
+				.onChange(of: messages.rows.count) { _, _ in
+					if let last = sortedMessages.last {
 						withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
 					}
 				}
@@ -57,11 +78,10 @@ struct RoomView: View {
 		#if os(iOS)
 		.navigationBarTitleDisplayMode(.inline)
 		#endif
-		.task {
-			await loadMessages()
-			startPolling()
-		}
-		.onDisappear { pollTimer?.cancel() }
+	}
+
+	private var sortedMessages: [Message] {
+		messages.rows.sorted { $0.createdAt < $1.createdAt }
 	}
 
 	@ViewBuilder
@@ -90,36 +110,16 @@ struct RoomView: View {
 		return display.string(from: date)
 	}
 
-	private func loadMessages() async {
-		do {
-			messages = try await session.pylon.callFn(
-				"roomMessages",
-				args: RoomMessagesArgs(roomId: room.id),
-			)
-			errorMessage = nil
-		} catch {
-			errorMessage = "Load failed: \(error.localizedDescription)"
-		}
-	}
-
-	private func startPolling() {
-		pollTimer?.cancel()
-		pollTimer = Task {
-			while !Task.isCancelled {
-				try? await Task.sleep(nanoseconds: 1_500_000_000)
-				if Task.isCancelled { break }
-				await loadMessages()
-			}
-		}
-	}
-
 	private func send() async {
 		let body = draft.trimmingCharacters(in: .whitespaces)
 		guard !body.isEmpty else { return }
 		sending = true
 		defer { sending = false }
 		do {
-			let msg: Message = try await session.pylon.callFn(
+			// Server inserts via ctx.db.insert; the change_event flows
+			// back through the SyncEngine and our PylonQuery picks up
+			// the new row. We only clear the draft here.
+			let _: Message = try await session.client.callFn(
 				"sendMessage",
 				args: SendMessageArgs(
 					roomId: room.id,
@@ -127,7 +127,6 @@ struct RoomView: View {
 					authorName: session.authorName,
 				),
 			)
-			messages.append(msg)
 			draft = ""
 			errorMessage = nil
 		} catch {
