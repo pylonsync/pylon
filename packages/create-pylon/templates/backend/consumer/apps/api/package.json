@@ -1,0 +1,20 @@
+{
+  "name": "@__APP_NAME_KEBAB__/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev schema.ts --port 4321",
+    "build": "pylon codegen schema.ts --out pylon.manifest.json && pylon codegen client pylon.manifest.json --out pylon.client.ts",
+    "schema:push": "pylon schema push pylon.manifest.json --sqlite dev.db",
+    "schema:inspect": "pylon schema inspect --sqlite dev.db"
+  },
+  "dependencies": {
+    "@pylonsync/sdk": "^__PYLON_VERSION__",
+    "@pylonsync/functions": "^__PYLON_VERSION__"
+  },
+  "devDependencies": {
+    "@pylonsync/cli": "^__PYLON_VERSION__",
+    "typescript": "^5.5.0"
+  }
+}

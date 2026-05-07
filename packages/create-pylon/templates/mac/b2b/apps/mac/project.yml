@@ -1,0 +1,34 @@
+name: __APP_NAME_PASCAL__
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    macOS: "13.0"
+
+packages:
+  pylon:
+    url: https://github.com/pylonsync/pylon.git
+    from: "0.3.0"
+
+targets:
+  __APP_NAME_PASCAL__:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/__APP_NAME_PASCAL__
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: __APP_NAME__
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        SWIFT_VERSION: "5.9"
+        ENABLE_PREVIEWS: YES
+        # The mac app talks to the local Pylon control plane during dev.
+        # App Sandbox needs the network client entitlement to reach
+        # localhost; we declare it via codesign entitlements at build time.
+        CODE_SIGN_ENTITLEMENTS: __APP_NAME_PASCAL__.entitlements
+    dependencies:
+      - package: pylon
+        product: PylonClient
+      - package: pylon
+        product: PylonSwiftUI

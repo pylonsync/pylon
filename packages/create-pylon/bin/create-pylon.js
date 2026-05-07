@@ -57,10 +57,38 @@ const PYLON_VERSION = JSON.parse(
 
 // ---------------------------------------------------------------------------
 // Templates + platforms registry
+//
+// Each template declares which platforms it supports — `b2b` is web/mac
+// only because the demo flow (org switcher, member invite, RBAC admin
+// panel) is desktop-shaped and porting it to mobile would be busy work
+// without value. Pick a different template if you want mobile.
 // ---------------------------------------------------------------------------
 
-const TEMPLATES_AVAILABLE = ["barebones", "todo"];
-const PLATFORMS_AVAILABLE = ["web", "mobile", "expo"];
+const PLATFORMS_AVAILABLE = ["web", "ios", "mac", "expo"];
+
+const TEMPLATE_REGISTRY = {
+	barebones: {
+		blurb: "Single entity, list + create. The smallest working app.",
+		platforms: ["web", "ios", "mac", "expo"],
+	},
+	todo: {
+		blurb: "CRUD + drag-reorder + optimistic mutations.",
+		platforms: ["web", "ios", "mac", "expo"],
+	},
+	b2b: {
+		blurb: "Multi-tenant SaaS: orgs, members, roles, RBAC policies.",
+		platforms: ["web", "mac"],
+	},
+	consumer: {
+		blurb: "Social feed: profiles, posts, likes, follows.",
+		platforms: ["web", "ios", "mac", "expo"],
+	},
+	chat: {
+		blurb: "Realtime messaging: rooms, presence, live message feed.",
+		platforms: ["web", "ios", "mac", "expo"],
+	},
+};
+const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompts
@@ -95,18 +123,24 @@ function pickValue(arr, ...candidates) {
 }
 
 if (flags.help) {
+	const tmplLines = Object.entries(TEMPLATE_REGISTRY).map(
+		([k, v]) => `    ${k.padEnd(10)} ${v.blurb} (${v.platforms.join(", ")})`,
+	);
 	process.stdout.write(`
 Usage: npm create @pylonsync/pylon [name] [options]
 
-  --template <t>         barebones | todo
-  --platforms <list>     comma list: web,mobile,expo  (default: web)
+  --template <t>         ${TEMPLATES_AVAILABLE.join(" | ")}
+${tmplLines.join("\n")}
+
+  --platforms <list>     comma list: ${PLATFORMS_AVAILABLE.join(",")}  (default: web)
   --bun|--pnpm|--yarn|--npm
   --skip-install         scaffold only, don't run install
 
 Examples:
   npm create @pylonsync/pylon my-app
-  npm create @pylonsync/pylon my-app --template todo --platforms web,mobile
-  npm create @pylonsync/pylon my-app --template barebones --platforms expo --bun
+  npm create @pylonsync/pylon my-app --template todo --platforms web,ios
+  npm create @pylonsync/pylon my-app --template b2b --platforms web,mac
+  npm create @pylonsync/pylon my-app --template chat --platforms ios,mac,expo
 `);
 	exit(0);
 }
@@ -116,6 +150,10 @@ if (!projectName) {
 	projectName = (await rl.question("Project name: ")).trim() || "my-pylon-app";
 }
 if (!flags.template) {
+	const lines = Object.entries(TEMPLATE_REGISTRY)
+		.map(([k, v]) => `  ${k.padEnd(10)} ${v.blurb}`)
+		.join("\n");
+	process.stdout.write(`\n${lines}\n`);
 	const ans = (
 		await rl.question(
 			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [todo]: `,
@@ -126,9 +164,10 @@ if (!flags.template) {
 	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "todo";
 }
 if (!flags.platforms) {
+	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
 	const ans = (
 		await rl.question(
-			`Platforms (${PLATFORMS_AVAILABLE.join(", ")}, comma-separated) [web]: `,
+			`Platforms for ${flags.template} (${supported}, comma-separated) [web]: `,
 		)
 	).trim();
 	flags.platforms = ans || "web";
@@ -165,6 +204,21 @@ if (platforms.length === 0) {
 if (!TEMPLATES_AVAILABLE.includes(flags.template)) {
 	console.error(
 		`\nError: unknown template "${flags.template}". Valid: ${TEMPLATES_AVAILABLE.join(", ")}\n`,
+	);
+	exit(1);
+}
+
+// Reject combos a template doesn't yet support — better to fail loud
+// than to scaffold an incomplete tree (e.g. b2b + expo would skip
+// frontend entirely and leave the user with a half-empty workspace).
+const supportedPlatforms = TEMPLATE_REGISTRY[flags.template].platforms;
+const invalidForTemplate = platforms.filter(
+	(p) => !supportedPlatforms.includes(p),
+);
+if (invalidForTemplate.length > 0) {
+	console.error(
+		`\nError: template "${flags.template}" doesn't support platform(s): ${invalidForTemplate.join(", ")}.\n` +
+			`       supported: ${supportedPlatforms.join(", ")}\n`,
 	);
 	exit(1);
 }
@@ -260,13 +314,11 @@ function copyTemplate(srcSubpath, destSubpath = "") {
 
 // ---------------------------------------------------------------------------
 // Apply templates in order:
-//   1. _root/_shared       — gitignore, env.example, basic README
-//   2. backend/<template>  — apps/api/* always present
-//   3. ui                  — packages/ui (only if web is in platforms)
-//   4. web/<template>      — apps/web/* (only if web in platforms)
-//   5. mobile/<template>   — apps/mobile/* (only if mobile in platforms)
-//   6. expo/<template>     — apps/expo/* (only if expo in platforms)
-//   7. Root package.json   — generated, not templated; depends on platforms
+//   1. _root            — gitignore, env.example, README
+//   2. backend/<t>      — apps/api/* always present (one per template)
+//   3. ui               — packages/ui (only if web is in platforms)
+//   4. <platform>/<t>   — one per requested platform under apps/<platform>/
+//   5. Root package.json — generated, not templated
 // ---------------------------------------------------------------------------
 
 copyTemplate("_root");
@@ -276,11 +328,8 @@ if (platforms.includes("web")) {
 	copyTemplate("ui");
 	copyTemplate(`web/${flags.template}`);
 }
-if (platforms.includes("mobile")) {
-	copyTemplate(`mobile/${flags.template}`);
-}
-if (platforms.includes("expo")) {
-	copyTemplate(`expo/${flags.template}`);
+for (const p of ["ios", "mac", "expo"]) {
+	if (platforms.includes(p)) copyTemplate(`${p}/${flags.template}`);
 }
 
 walkAndSubstitute(root);
@@ -293,23 +342,19 @@ walkAndSubstitute(root);
 
 const wsScripts = pmScripts(flags.pm);
 const devScripts = {};
-const buildScripts = {};
-if (platforms.includes("web")) {
-	devScripts["dev:api"] = wsScripts.devApi;
-	devScripts["dev:web"] = wsScripts.devWeb;
+// API runs always — every frontend connects to it.
+devScripts["dev:api"] = wsScripts.devApi;
+if (platforms.includes("web")) devScripts["dev:web"] = wsScripts.devWeb;
+if (platforms.includes("expo")) devScripts["dev:expo"] = wsScripts.devExpo;
+if (platforms.includes("ios")) {
+	// `xcodegen generate` materializes the .xcodeproj from project.yml,
+	// then it's an Xcode-driven flow — no `bun run dev` semantics.
+	devScripts["dev:ios"] =
+		"echo 'cd apps/ios && xcodegen generate && open *.xcodeproj  (or: swift run for a quick macOS preview)'";
 }
-if (!platforms.includes("web")) {
-	// API still runs even without a web platform — mobile / expo connect
-	// to it directly.
-	devScripts["dev:api"] = wsScripts.devApi;
-}
-if (platforms.includes("expo")) {
-	devScripts["dev:expo"] = wsScripts.devExpo;
-}
-if (platforms.includes("mobile")) {
-	// Swift/iOS isn't a `bun run dev` thing — surfaced as a separate
-	// script invocation since `swift run` blocks and Xcode is out-of-band.
-	devScripts["dev:mobile"] = "echo 'Open apps/mobile in Xcode (or run: cd apps/mobile && swift run)'";
+if (platforms.includes("mac")) {
+	devScripts["dev:mac"] =
+		"echo 'cd apps/mac && swift run  (or: xcodegen generate && open *.xcodeproj)'";
 }
 
 const parallelDevs = Object.keys(devScripts);
@@ -363,13 +408,27 @@ if (!flags.skipInstall) {
 const runDev = flags.pm === "npm" ? "npm run dev" : `${flags.pm} run dev`;
 
 const platformLines = [];
+platformLines.push("  → api      http://localhost:4321  (Pylon control plane)");
 if (platforms.includes("web"))
 	platformLines.push("  → web      http://localhost:3000  (Next.js)");
-platformLines.push("  → api      http://localhost:4321  (Pylon control plane)");
 if (platforms.includes("expo"))
 	platformLines.push(`  → expo     ${flags.pm} run dev:expo  (Metro + simulator)`);
-if (platforms.includes("mobile"))
-	platformLines.push(`  → mobile   open apps/mobile in Xcode  (or: swift run)`);
+if (platforms.includes("ios"))
+	platformLines.push(`  → ios      cd apps/ios && xcodegen generate && open *.xcodeproj`);
+if (platforms.includes("mac"))
+	platformLines.push(`  → mac      cd apps/mac && swift run  (or xcodegen for .app)`);
+
+const layoutLines = ["  apps/api          schema + functions/ handlers"];
+if (platforms.includes("web")) {
+	layoutLines.push("  apps/web          Next.js 16 + React 19 + Tailwind v4");
+	layoutLines.push("  packages/ui       shared UI primitives");
+}
+if (platforms.includes("ios"))
+	layoutLines.push("  apps/ios          Swift / SwiftUI (iOS)");
+if (platforms.includes("mac"))
+	layoutLines.push("  apps/mac          Swift / SwiftUI (macOS)");
+if (platforms.includes("expo"))
+	layoutLines.push("  apps/expo         Expo + React Native");
 
 console.log(`
 ✓ Created ${projectName}
@@ -380,10 +439,7 @@ console.log(`
 ${platformLines.join("\n")}
 
 Layout:
-  apps/api          schema + functions/ handlers
-${platforms.includes("web") ? "  apps/web          Next.js 16 + React 19 + Tailwind v4\n  packages/ui       shared UI primitives" : ""}
-${platforms.includes("mobile") ? "  apps/mobile       Swift / SwiftUI" : ""}
-${platforms.includes("expo") ? "  apps/expo         Expo + React Native" : ""}
+${layoutLines.join("\n")}
 
 Docs: https://pylonsync.com/docs
 `);

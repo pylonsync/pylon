@@ -1,0 +1,29 @@
+{
+  "name": "@__APP_NAME_KEBAB__/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@__APP_NAME_KEBAB__/ui": "__WORKSPACE_DEP__",
+    "@pylonsync/sdk": "^__PYLON_VERSION__",
+    "@pylonsync/react": "^__PYLON_VERSION__",
+    "@pylonsync/next": "^__PYLON_VERSION__",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@tailwindcss/postcss": "^4.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

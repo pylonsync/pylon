@@ -1,0 +1,42 @@
+# xcodegen spec for the iOS build of __APP_NAME__.
+#
+# Materialize the Xcode project once with:
+#     brew install xcodegen
+#     xcodegen generate
+# Then open __APP_NAME_PASCAL__.xcodeproj.
+
+name: __APP_NAME_PASCAL__
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+
+packages:
+  pylon:
+    url: https://github.com/pylonsync/pylon.git
+    from: "0.3.0"
+
+targets:
+  __APP_NAME_PASCAL__:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/__APP_NAME_PASCAL__
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        ENABLE_PREVIEWS: YES
+        # __APP_NAME__ talks to a Pylon backend on localhost during dev.
+        # The simulator can reach localhost directly; on a physical device
+        # set PYLON_BASE_URL to your machine's LAN IP.
+        INFOPLIST_KEY_NSAppTransportSecurity: "{NSAllowsLocalNetworking = YES;}"
+    dependencies:
+      - package: pylon
+        product: PylonClient
+      - package: pylon
+        product: PylonSwiftUI

@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@source "../../../../packages/ui/src/**/*.{ts,tsx}";
+
+:root { color-scheme: light dark; }
+html, body { height: 100%; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }

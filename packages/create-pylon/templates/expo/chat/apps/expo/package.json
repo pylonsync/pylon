@@ -1,0 +1,30 @@
+{
+  "name": "@__APP_NAME_KEBAB__/expo",
+  "version": "0.0.1",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@pylonsync/sdk": "^__PYLON_VERSION__",
+    "@pylonsync/react": "^__PYLON_VERSION__",
+    "@pylonsync/react-native": "^__PYLON_VERSION__",
+    "@pylonsync/sync": "^__PYLON_VERSION__",
+    "@react-native-async-storage/async-storage": "1.23.1",
+    "@react-native-community/netinfo": "11.3.1",
+    "expo": "~51.0.0",
+    "expo-status-bar": "~1.12.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-native": "0.74.5"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.5.0"
+  }
+}
