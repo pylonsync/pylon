@@ -2332,6 +2332,28 @@ pre,
   color: inherit;
 }
 
+@media (max-width: 640px) {
+  .skill-page { padding: 48px 16px 80px; }
+  .skill-install { padding: 18px 16px; }
+  .skill-hint code {
+    display: inline-block;
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+  .skill-card-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+  .skill-card-meta { font-size: 11.5px; flex-wrap: wrap; }
+  .skill-card-actions { width: 100%; }
+  .skill-btn { flex: 1; text-align: center; }
+  .skill-pre { padding: 16px; font-size: 11.5px; max-height: 540px; }
+}
+
 /* ==========================================================
    Mobile pass — everything under 640px
    The site was designed desktop-first; this block corrects the
