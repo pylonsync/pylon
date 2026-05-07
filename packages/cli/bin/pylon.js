@@ -23,20 +23,39 @@ const require = createRequire(import.meta.url);
 
 // Map (process.platform, process.arch) → package name. The name is also
 // the platform-package's directory name on disk.
+//
+// `darwin-x64` (Intel Mac) and `linux-arm64` (ARM Linux: Raspberry Pi,
+// AWS Graviton, etc.) intentionally omitted — those binaries aren't
+// built in CI today. Intel Mac dropped because macos-13 GitHub-hosted
+// runners are no longer reliably available and cross-compiling from
+// arm64 macOS is blocked on libxmlsec1. ARM Linux dropped because
+// cross-compiling libxmlsec1 from ubuntu-latest is non-trivial.
+// Affected users hit the `UNSUPPORTED_HINTS` message below.
 const PLATFORM_PACKAGES = {
 	"darwin-arm64": "@pylonsync/cli-darwin-arm64",
-	"darwin-x64": "@pylonsync/cli-darwin-x64",
-	"linux-arm64": "@pylonsync/cli-linux-arm64",
 	"linux-x64": "@pylonsync/cli-linux-x64",
+};
+
+const UNSUPPORTED_HINTS = {
+	"darwin-x64":
+		"Intel Macs aren't currently supported by the npm-distributed CLI " +
+		"(macos-13 GitHub runners are gone and cross-compile from arm64 is " +
+		"blocked on libxmlsec1). Apple Silicon Macs are supported.",
+	"linux-arm64":
+		"ARM Linux isn't currently supported by the npm-distributed CLI " +
+		"(libxmlsec1 cross-compile from ubuntu-latest is unsolved).",
 };
 
 function resolveBinary() {
 	const key = `${process.platform}-${process.arch}`;
 	const pkg = PLATFORM_PACKAGES[key];
 	if (!pkg) {
+		const hint = UNSUPPORTED_HINTS[key]
+			? `\n${UNSUPPORTED_HINTS[key]}`
+			: "";
 		throw new Error(
-			`@pylonsync/cli: no prebuilt binary for ${key}.\n` +
-				`Supported: ${Object.keys(PLATFORM_PACKAGES).join(", ")}.\n` +
+			`@pylonsync/cli: no prebuilt binary for ${key}.${hint}\n` +
+				`Supported via npm: ${Object.keys(PLATFORM_PACKAGES).join(", ")}.\n` +
 				`Build from source: https://github.com/pylonsync/pylon`,
 		);
 	}

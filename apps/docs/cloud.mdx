@@ -3,7 +3,7 @@ title: Pylon Cloud
 description: "Hosted Pylon at cloud.pylonsync.com. Same binary, same APIs, no infrastructure to run."
 ---
 
-Pylon is fully self-hostable, but if you'd rather not run it yourself, **Pylon Cloud** at [cloud.pylonsync.com](https://cloud.pylonsync.com) hosts the same binary you'd run on a VPS — same routes, same wire formats, same client SDKs. Sign up, point `pylon deploy` at it, and your app is live.
+Pylon is fully self-hostable, but if you'd rather not run it yourself, **Pylon Cloud** at [cloud.pylonsync.com](https://cloud.pylonsync.com) hosts the same binary you'd run on a VPS — same routes, same wire formats, same client SDKs. Connect a GitHub repo, push to your default branch, and the project is live at `https://your-app.pyln.dev`.
 
 ## When to use it
 
@@ -11,7 +11,7 @@ Pylon is fully self-hostable, but if you'd rather not run it yourself, **Pylon C
 | --- | --- |
 | You want to ship today, not learn ops | You have strict data residency / on-prem requirements |
 | You don't want to manage Postgres backups, TLS, scaling | You already operate Kubernetes / Nomad / your own VPS fleet |
-| You'd rather pay per request than per server | Your workload spikes hard enough that reserved capacity is cheaper |
+| You'd rather pay a flat platform fee + per-machine compute than per-server | Your workload spikes hard enough that reserved capacity is cheaper |
 | You want managed magic-link email + OAuth credentials out of the box | You need to run an air-gapped deployment |
 
 Both targets run the same binary. You can start on Cloud and migrate to self-hosted (or back) without touching client code — only the `baseUrl` changes.
@@ -19,115 +19,158 @@ Both targets run the same binary. You can start on Cloud and migrate to self-hos
 ## Sign up
 
 1. Visit [cloud.pylonsync.com](https://cloud.pylonsync.com) and create an account.
-2. Create a workspace. Each workspace gets a stable URL like `https://your-app.pylon.app` and an API key.
-3. Add a payment method (free tier covers small projects; see pricing below).
+2. Create a project. The project gets a stable URL like `https://your-app.pyln.dev`.
+3. Add a payment method (free Hobby tier covers small projects; see pricing below).
 
-## Deploy from the CLI
+## Deploy
 
-```bash
-# One-time: log in
-pylon login
+There are two ways to deploy to Cloud:
 
-# From a Pylon project directory
-pylon deploy --target cloud
+### 1. Push to GitHub (recommended)
+
+Install the Pylon Cloud GitHub App on your repo from the project settings page. Every push to your project's default branch triggers a build + deploy. Pull-request pushes get a preview environment that tears down on merge.
+
+```sh
+git push origin main
+# → Cloud's webhook fires
+# → build runs on the platform
+# → schema migrates, traffic cuts over
+# → live at https://your-app.pyln.dev
 ```
 
-`pylon deploy --target cloud` does:
+You can also trigger a manual deploy of any branch from the project's dashboard (useful for redeploying without a fresh push, or shipping a feature branch to the project's machine for testing).
 
-1. Builds your TypeScript functions with Bun
-2. Validates `pylon.manifest.json`
-3. Uploads the bundle + manifest to your workspace
-4. Runs migrations
-5. Cuts over traffic atomically (zero-downtime — old version drains)
+### 2. Manual deploy from the dashboard
 
-You'll get back a URL like `https://your-app.pylon.app` that your clients connect to. Subsequent deploys are incremental.
+Project page → **Deploy** → pick a branch. The control plane resolves the branch head against your installed GitHub App and runs the same build pipeline as a webhook deploy.
 
 ### Custom domains
 
-```bash
-pylon domain add app.example.com
-```
-
-Cloud provisions a TLS certificate (Let's Encrypt) automatically. Add the displayed `CNAME` record to your DNS, wait a minute, and you're live on the custom domain. Both the apex Cloud URL and your custom domain stay valid.
+From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TLS certificate (Let's Encrypt) automatically. Add the displayed `CNAME` record to your DNS, wait for verification, and you're live on the custom domain. Both the apex `*.pyln.dev` URL and your custom domain stay valid.
 
 ### Environment variables
 
-Set per-workspace secrets without committing them to git:
-
-```bash
-pylon env set STRIPE_SECRET_KEY=sk_live_...
-pylon env set OPENAI_API_KEY=sk-...
-pylon env list
-pylon env unset STRIPE_SECRET_KEY
-```
-
-These show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`. They're encrypted at rest and never appear in logs.
+Project page → **Settings** → **Environment**. Set per-project secrets without committing them to git. They show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`, are encrypted at rest, and never appear in logs.
 
 ## What's included
 
-- **Postgres** — managed, with daily backups and point-in-time recovery up to 7 days
-- **TLS** — automatic Let's Encrypt certificates on `*.pylon.app` and your custom domains
-- **Magic-link email** — managed transactional sender; no SendGrid/Resend account required
-- **OAuth** — bring your own Google/GitHub OAuth credentials, or use Cloud's shared dev credentials in non-prod workspaces
-- **WebSocket + SSE + shard ports** — exposed automatically; clients connect to the public URL
-- **File storage** — S3-backed, included up to 10 GB on the free tier
-- **Studio** — every workspace has the inspector available at `https://your-app.pylon.app/studio`
-- **Logs + metrics** — request logs, function traces, and basic latency/error charts in the dashboard
-- **Versioned deploys** — `pylon deploy --rollback` reverts to the previous version
+- **Same binary as `pylon dev`** — no runtime hooks, no vendor proxies.
+- **Postgres or SQLite** — choose at project creation. SQLite ships on a Fly volume; Postgres is provisioned as a managed sibling service.
+- **TLS** — automatic Let's Encrypt certificates on `*.pyln.dev` and your custom domains.
+- **Magic-link email** — managed transactional sender; no SendGrid / Resend account required.
+- **OAuth** — bring your own Google / GitHub / etc. OAuth credentials.
+- **WebSocket + SSE + shard ports** — exposed automatically; clients connect to the public URL.
+- **File storage** — S3-backed, sized by plan.
+- **Studio** — every project has the inspector available at `https://your-app.pyln.dev/studio`.
+- **Logs + metrics** — request logs, function traces, latency / error charts in the dashboard.
+- **On-demand backups** — Fly volume snapshots from the project's **Backups** tab. Pro and Team plans get more frequent retention.
 
 ## Scaling
 
-Cloud autoscales the HTTP, WebSocket, and shard tiers separately based on load. The usage-based pricing model means you don't pre-provision — you pay for what you use.
+Pylon Cloud runs on Fly Machines under the hood. Every dashboard knob maps to a real infrastructure call:
 
-For multiplayer apps with sticky shard connections, set the **shard region** when creating the workspace so latency to your players is minimized:
+- **Machine size** — `shared-cpu-1x · 512 MB` baseline; resize up to 4 GB on Pro, 8 GB on Team.
+- **Replicas** — 1–3 on Pro, 1–10 on Team.
+- **Volume size** — up to 100 GB on Pro, 500 GB on Team.
+- **Autostop** — locked on for free tier (machine sleeps when idle, wakes on next request). Toggleable on Pro+ if you need always-warm WebSockets.
+- **Multi-region** — pick from any of 13 regions:
 
 | Region | Code |
 | --- | --- |
 | US East (Ashburn) | `iad` |
+| US Central (Chicago) | `ord` |
 | US West (San Jose) | `sjc` |
+| US West (Los Angeles) | `lax` |
+| US Northwest (Seattle) | `sea` |
+| EU (London) | `lhr` |
 | EU (Frankfurt) | `fra` |
+| EU (Amsterdam) | `ams` |
+| Australia (Sydney) | `syd` |
 | Asia (Singapore) | `sin` |
+| Asia (Tokyo) | `nrt` |
+| South America (São Paulo) | `gru` |
+| Canada (Toronto) | `yyz` |
 
-Multi-region replication is on the roadmap; for now each workspace lives in one region.
+Pricing is per-machine — multi-region equals one machine per region.
 
 ## Pricing
 
-Usage-based, no monthly minimums:
+Each tier has a flat platform fee plus per-machine compute. Hard quotas (requests, CPU-hours, egress) cap monthly usage; projects pause at the quota until the calendar month rolls over or you upgrade.
 
-| Resource | Free tier | Beyond free |
-| --- | --- | --- |
-| HTTP requests | 1M / month | $0.50 / 1M |
-| WebSocket connection-minutes | 100K / month | $0.10 / 100K |
-| Postgres storage | 1 GB | $0.20 / GB / month |
-| File storage | 10 GB | $0.02 / GB / month |
-| Bandwidth (egress) | 100 GB | $0.05 / GB |
-| Magic-link emails | 1K / month | $1.00 / 1K |
+### Hobby — $0
 
-Live pricing on the [pricing page](https://cloud.pylonsync.com/pricing).
+Locked free shape:
+
+- 1 project per organization
+- `shared-cpu-1x · 512 MB · 3 GB` volume, 1 replica, autostop forced on
+- 100k requests / month
+- 1 CPU-hour / month
+- 5 GB egress / month
+- Single region, SQLite only
+- Community support
+
+### Pro — $20 / org / month
+
+Includes one baseline 512 MB machine, 10 GB volume, 50 GB egress, all features (custom domains, OIDC SSO, audit log, autostop toggle).
+
+- Up to 10 projects per organization, 5 organizations per user
+- Quotas: 5M requests, 50 CPU-hours, 250 GB egress per month
+- Per-machine pricing:
+  - 1 GB always-warm: $14 / month
+  - 2 GB always-warm: $25 / month
+  - 4 GB always-warm: $50 / month (max)
+- Each replica bills at the machine rate × count
+- Volume above 10 GB: $0.25 / GB-month
+- Egress above 250 GB: $0.06 / GB
+
+### Team — $99 / org / month
+
+Includes one baseline 1 GB machine, 50 GB volume, 250 GB egress.
+
+- Up to 50 projects per organization, 20 organizations per user
+- Quotas: 50M requests, 500 CPU-hours, 2 TB egress per month
+- Per-machine pricing:
+  - 1 GB always-warm: $12 / month
+  - 2 GB always-warm: $22 / month
+  - 4 GB always-warm: $42 / month
+  - 8 GB always-warm: $110 / month (max)
+- Volume above 50 GB: $0.20 / GB-month
+- Egress above 2 TB: $0.04 / GB
+- Multi-region replication, SAML SSO, audit log, role-based access
+
+### Enterprise
+
+Bespoke quotas, single-tenant Fly org or BYOC (AWS, GCP), custom regions, SLA + on-call escalation, migration assistance. Email `cloud@pylonsync.com`.
+
+Live pricing on the [pricing page](https://cloud.pylonsync.com/#pricing).
 
 ## Migrating from self-hosted
 
-```bash
-# 1. Snapshot your data
+`pylon backup` and `pylon restore` (in the framework CLI) snapshot the SQLite database + uploads on a local Fly volume. To migrate into Cloud:
+
+```sh
+# 1. Snapshot your local data
 pylon backup ./snapshot/
 
-# 2. Create the workspace (or use an existing empty one)
-pylon login
-pylon workspace create my-app
+# 2. Create the project in the dashboard at cloud.pylonsync.com,
+#    with the SAME schema you've been running locally.
 
-# 3. Restore into Cloud
-pylon restore ./snapshot/ --target cloud
+# 3. Connect your GitHub repo and push — Cloud builds + deploys the
+#    same binary you'd run locally.
+
+# 4. Use the dashboard's "Restore from snapshot" flow on the
+#    project's Backups tab to upload ./snapshot/.
 ```
 
-Then point your clients at the new `baseUrl`. Sessions are preserved (the session store is part of the snapshot), so users stay signed in.
+Then point your clients at the new `baseUrl` (your project's `pyln.dev` URL or custom domain). Sessions are preserved — the session store is part of the snapshot — so users stay signed in.
 
 ## Migrating to self-hosted
 
-```bash
-# 1. Snapshot from Cloud
-pylon backup ./snapshot/ --source cloud
+```sh
+# 1. Snapshot from Cloud — Backups tab → "Download snapshot"
+#    or trigger a backup first with the "Snapshot now" button.
 
-# 2. Restore into your own deployment
+# 2. Restore into your own deployment locally or on a VPS.
 pylon restore ./snapshot/
 ```
 
@@ -135,13 +178,15 @@ No lock-in. The binary is the same; the data format is the same.
 
 ## Troubleshooting
 
-**`pylon deploy` says "not authenticated"** — run `pylon login` again. Tokens expire after 90 days.
+**Push didn't trigger a deploy** — Confirm the Pylon Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt; if nothing arrived, the webhook never fired.
 
-**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show your `*.pylon.app` target.
+**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show your `*.pyln.dev` target.
 
-**Magic-link emails not arriving** — check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in `Settings → Email` to authenticate with SPF/DKIM/DMARC under your domain.
+**Magic-link emails not arriving** — Check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in **Settings → Email** to authenticate with SPF / DKIM / DMARC under your domain.
 
-**WebSocket disconnects** — Cloud's load balancer holds connections for up to 4 hours; the sync engine handles reconnects automatically with full-jitter backoff. If you see frequent drops, check `connection state` in the dashboard.
+**WebSocket disconnects** — Cloud's load balancer holds connections for up to 4 hours; the sync engine handles reconnects automatically with full-jitter backoff. If you see frequent drops, check **Connections** in the project dashboard.
+
+**Hit a monthly quota** — The project pauses at the limit until the calendar month rolls over (UTC) or you upgrade the organization's plan. The dashboard shows current usage on the project's overview page.
 
 ## Status
 

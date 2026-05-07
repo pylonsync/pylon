@@ -284,18 +284,23 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-          # macos-13 is the last GitHub-hosted runner with native Intel
-          # hardware. Cross-compiling x86_64 from arm64 (`macos-latest`)
-          # broke openssl-sys + libxml: both look up dependencies via
-          # pkg-config, neither installs a cross toolchain via brew, and
-          # vendoring openssl alone wasn't enough (libxml is the next
-          # tripwire). Native Intel runner sidesteps both issues.
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+          # x86_64-apple-darwin (Intel Mac) intentionally not built —
+          # macos-13 (the last GitHub-hosted Intel runner) is no longer
+          # reliably available; jobs queued against it sit for 24h then
+          # cancel. Cross-compiling x86_64 from arm64 broke openssl-sys
+          # + libxmlsec1 (both look up deps via pkg-config, neither
+          # installs a cross toolchain via brew, vendoring openssl alone
+          # wasn't enough — libxmlsec1 is the next tripwire). Apple
+          # Silicon's Rosetta translation only runs Intel binaries on
+          # ARM Macs, NOT the reverse, so the dispatcher can't fall back.
+          # Intel Mac users on macOS 14+ are a small + shrinking minority
+          # (Apple stopped selling Intel Macs in 2023); they can build
+          # from source via https://github.com/pylonsync/pylon. Add this
+          # target back once we either get a self-hosted Intel runner or
+          # solve the libxmlsec1 cross-compile.
           # Dropped temporarily: x86_64-unknown-linux-musl (alpine has
           # no libxmlsec1 package fitting samael's needs) and
           # aarch64-unknown-linux-gnu (cross-compiling libxmlsec1 from
@@ -443,10 +448,11 @@ jobs:
           # on the cases pylon-cloud + standard Mac/Linux dev shops hit.
           # Anyone needing windows/musl can still grab the binary from
           # the GitHub release.
+          # x86_64-apple-darwin + aarch64-unknown-linux-gnu intentionally
+          # absent — see binary matrix comment for why. Add the line back
+          # here once the binary itself is being built again.
           declare -A TARGET_TO_PKG=(
             [aarch64-apple-darwin]=cli-darwin-arm64
-            [x86_64-apple-darwin]=cli-darwin-x64
-            [aarch64-unknown-linux-gnu]=cli-linux-arm64
             [x86_64-unknown-linux-gnu]=cli-linux-x64
           )
           for target in "${!TARGET_TO_PKG[@]}"; do
@@ -477,7 +483,12 @@ jobs:
           # to that version exactly. Drift here is the same class of bug
           # that broke @pylonsync/react@0.3.0 (workspace:* rewrite shipped
           # mismatched deps) — catch it before publish.
-          CLI_PKGS=(packages/cli packages/cli-darwin-arm64 packages/cli-darwin-x64 packages/cli-linux-arm64 packages/cli-linux-x64)
+          # cli-darwin-x64 + cli-linux-arm64 intentionally absent — those
+          # platform binaries aren't built (see binary matrix), so they
+          # aren't published. Their package.jsons stay in the workspace
+          # with stale versions; the version-match check skips anything
+          # not in this list.
+          CLI_PKGS=(packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64)
           REF=""
           for pkg in "${CLI_PKGS[@]}"; do
             v="$(node -p "require('./$pkg/package.json').version")"
@@ -511,7 +522,7 @@ jobs:
           # because its optionalDependencies must already exist on npm
           # for the install-time `bun install --frozen-lockfile`
           # postflight to resolve.
-          for pkg in cli-darwin-arm64 cli-darwin-x64 cli-linux-arm64 cli-linux-x64 cli; do
+          for pkg in cli-darwin-arm64 cli-linux-x64 cli; do
             NAME="$(node -p "require('./packages/$pkg/package.json').name")"
             VERSION="$(node -p "require('./packages/$pkg/package.json').version")"
             if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
