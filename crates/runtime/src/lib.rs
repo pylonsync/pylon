@@ -881,29 +881,26 @@ impl Runtime {
 
             let params: Vec<&dyn rusqlite::types::ToSql> =
                 values.iter().map(|v| v.as_ref()).collect();
-            conn.execute(&sql, params.as_slice())
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    // PK collision on a client-provided id (or, rare,
-                    // a generator collision) — surface as a typed code
-                    // so optimistic-mutation retry logic can tell this
-                    // apart from a generic write failure and either
-                    // re-issue with a fresh id or merge with the row
-                    // already present. Match `<entity>.id` specifically
-                    // so collisions on other UNIQUE columns (email,
-                    // slug, …) keep their generic INSERT_FAILED code.
-                    let code = if msg.contains(&format!(
-                        "UNIQUE constraint failed: {entity}.id"
-                    )) {
-                        "OPTIMISTIC_ID_CONFLICT"
-                    } else {
-                        "INSERT_FAILED"
-                    };
-                    RuntimeError {
-                        code: code.into(),
-                        message: format!("Insert into {entity} failed: {e}"),
-                    }
-                })?;
+            conn.execute(&sql, params.as_slice()).map_err(|e| {
+                let msg = e.to_string();
+                // PK collision on a client-provided id (or, rare,
+                // a generator collision) — surface as a typed code
+                // so optimistic-mutation retry logic can tell this
+                // apart from a generic write failure and either
+                // re-issue with a fresh id or merge with the row
+                // already present. Match `<entity>.id` specifically
+                // so collisions on other UNIQUE columns (email,
+                // slug, …) keep their generic INSERT_FAILED code.
+                let code = if msg.contains(&format!("UNIQUE constraint failed: {entity}.id")) {
+                    "OPTIMISTIC_ID_CONFLICT"
+                } else {
+                    "INSERT_FAILED"
+                };
+                RuntimeError {
+                    code: code.into(),
+                    message: format!("Insert into {entity} failed: {e}"),
+                }
+            })?;
 
             // Search-index maintenance lives inside the same tx so a
             // crash between the row insert and the FTS update can't leave
@@ -1672,19 +1669,18 @@ impl Runtime {
             placeholders.join(", ")
         );
         let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        conn.execute(&sql, params.as_slice())
-            .map_err(|e| {
-                let msg = e.to_string();
-                let code = if msg.contains("UNIQUE constraint failed") {
-                    "OPTIMISTIC_ID_CONFLICT"
-                } else {
-                    "INSERT_FAILED"
-                };
-                RuntimeError {
-                    code: code.into(),
-                    message: format!("Insert into {entity} failed: {e}"),
-                }
-            })?;
+        conn.execute(&sql, params.as_slice()).map_err(|e| {
+            let msg = e.to_string();
+            let code = if msg.contains("UNIQUE constraint failed") {
+                "OPTIMISTIC_ID_CONFLICT"
+            } else {
+                "INSERT_FAILED"
+            };
+            RuntimeError {
+                code: code.into(),
+                message: format!("Insert into {entity} failed: {e}"),
+            }
+        })?;
 
         // Faceted-search maintenance in the same transaction. Skipped
         // for entities that don't declare `search:` in their schema.
