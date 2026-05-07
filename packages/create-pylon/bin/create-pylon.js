@@ -254,12 +254,12 @@ writeJson("apps/api/tsconfig.json", {
 write(
 	"apps/api/schema.ts",
 	`import {
-\tentity,
-\tfield,
-\tquery,
-\taction,
-\tpolicy,
-\tbuildManifest,
+	entity,
+	field,
+	query,
+	action,
+	policy,
+	buildManifest,
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
@@ -267,14 +267,14 @@ write(
 // ---------------------------------------------------------------------------
 
 const Todo = entity("Todo", {
-\ttitle: field.string(),
-\tdone: field.bool(),
-\tcreatedAt: field.datetime(),
-\t// Float position so drag-reorder can insert between two existing
-\t// rows without renumbering the whole list. Frontend computes
-\t// (prev.position + next.position) / 2 on drop. Optional for
-\t// backwards compat with legacy rows.
-\tposition: field.float().optional(),
+	title: field.string(),
+	done: field.bool(),
+	createdAt: field.datetime(),
+	// Float position so drag-reorder can insert between two existing
+	// rows without renumbering the whole list. Frontend computes
+	// (prev.position + next.position) / 2 on drop. Optional for
+	// backwards compat with legacy rows.
+	position: field.float().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -285,29 +285,29 @@ const Todo = entity("Todo", {
 const listTodos = query("listTodos");
 
 const addTodo = action("addTodo", {
-\tinput: [{ name: "title", type: "string" }],
+	input: [{ name: "title", type: "string" }],
 });
 
 const toggleTodo = action("toggleTodo", {
-\tinput: [{ name: "id", type: "id(Todo)" }, { name: "done", type: "bool" }],
+	input: [{ name: "id", type: "id(Todo)" }, { name: "done", type: "bool" }],
 });
 
 const deleteTodo = action("deleteTodo", {
-\tinput: [{ name: "id", type: "id(Todo)" }],
+	input: [{ name: "id", type: "id(Todo)" }],
 });
 
 const editTodo = action("editTodo", {
-\tinput: [
-\t\t{ name: "id", type: "id(Todo)" },
-\t\t{ name: "title", type: "string" },
-\t],
+	input: [
+		{ name: "id", type: "id(Todo)" },
+		{ name: "title", type: "string" },
+	],
 });
 
 const reorderTodo = action("reorderTodo", {
-\tinput: [
-\t\t{ name: "id", type: "id(Todo)" },
-\t\t{ name: "position", type: "float" },
-\t],
+	input: [
+		{ name: "id", type: "id(Todo)" },
+		{ name: "position", type: "float" },
+	],
 });
 
 // ---------------------------------------------------------------------------
@@ -315,12 +315,12 @@ const reorderTodo = action("reorderTodo", {
 // ---------------------------------------------------------------------------
 
 const todoPolicy = policy({
-\tname: "todo_open",
-\tentity: "Todo",
-\tallowRead: "true",
-\tallowInsert: "true",
-\tallowUpdate: "true",
-\tallowDelete: "true",
+	name: "todo_open",
+	entity: "Todo",
+	allowRead: "true",
+	allowInsert: "true",
+	allowUpdate: "true",
+	allowDelete: "true",
 });
 
 // ---------------------------------------------------------------------------
@@ -331,13 +331,13 @@ const todoPolicy = policy({
 // manifest off stdout. The framework expects JSON, not the JS object —
 // every Pylon entry file ends with this console.log line.
 const manifest = buildManifest({
-\tname: "${projectName}",
-\tversion: "0.0.1",
-\tentities: [Todo],
-\tqueries: [listTodos],
-\tactions: [addTodo, toggleTodo, deleteTodo, editTodo, reorderTodo],
-\tpolicies: [todoPolicy],
-\troutes: [],
+	name: "${projectName}",
+	version: "0.0.1",
+	entities: [Todo],
+	queries: [listTodos],
+	actions: [addTodo, toggleTodo, deleteTodo, editTodo, reorderTodo],
+	policies: [todoPolicy],
+	routes: [],
 });
 
 console.log(JSON.stringify(manifest));
@@ -354,63 +354,63 @@ write(
  * a fallback so the list stays deterministic.
  */
 export default query({
-\targs: {},
-\tasync handler(ctx) {
-\t\tconst rows = await ctx.db.query("Todo", {});
-\t\treturn [...rows].sort((a: any, b: any) => {
-\t\t\tconst ap =
-\t\t\t\ttypeof a.position === "number"
-\t\t\t\t\t? a.position
-\t\t\t\t\t: Date.parse(a.createdAt) || 0;
-\t\t\tconst bp =
-\t\t\t\ttypeof b.position === "number"
-\t\t\t\t\t? b.position
-\t\t\t\t\t: Date.parse(b.createdAt) || 0;
-\t\t\treturn ap - bp;
-\t\t});
-\t},
+	args: {},
+	async handler(ctx) {
+		const rows = await ctx.db.query("Todo", {});
+		return [...rows].sort((a: any, b: any) => {
+			const ap =
+				typeof a.position === "number"
+					? a.position
+					: Date.parse(a.createdAt) || 0;
+			const bp =
+				typeof b.position === "number"
+					? b.position
+					: Date.parse(b.createdAt) || 0;
+			return ap - bp;
+		});
+	},
 });
 `,
 );
 
 write(
-\t"apps/api/functions/editTodo.ts",
-\t\`import { mutation, v } from "@pylonsync/functions";
+	"apps/api/functions/editTodo.ts",
+	`import { mutation, v } from "@pylonsync/functions";
 
 /**
  * Rename a Todo. Trims whitespace; rejects empty titles.
  */
 export default mutation({
-\\targs: { id: v.id("Todo"), title: v.string() },
-\\tasync handler(ctx, args: { id: string; title: string }) {
-\\t\\tconst trimmed = args.title.trim();
-\\t\\tif (!trimmed) {
-\\t\\t\\tthrow ctx.error("EMPTY_TITLE", "title cannot be empty");
-\\t\\t}
-\\t\\tawait ctx.db.update("Todo", args.id, { title: trimmed });
-\\t\\treturn await ctx.db.get("Todo", args.id);
-\\t},
+	args: { id: v.id("Todo"), title: v.string() },
+	async handler(ctx, args: { id: string; title: string }) {
+		const trimmed = args.title.trim();
+		if (!trimmed) {
+			throw ctx.error("EMPTY_TITLE", "title cannot be empty");
+		}
+		await ctx.db.update("Todo", args.id, { title: trimmed });
+		return await ctx.db.get("Todo", args.id);
+	},
 });
-\`,
+`,
 );
 
 write(
-\t"apps/api/functions/reorderTodo.ts",
-\t\`import { mutation, v } from "@pylonsync/functions";
+	"apps/api/functions/reorderTodo.ts",
+	`import { mutation, v } from "@pylonsync/functions";
 
 /**
- * Drag-reorder. Frontend computes \\\`position\\\` as the midpoint of the
+ * Drag-reorder. Frontend computes \`position\` as the midpoint of the
  * drop target's neighbors; we just write it. Floats give us ~52 inserts
  * between any two rows before precision matters.
  */
 export default mutation({
-\\targs: { id: v.id("Todo"), position: v.number() },
-\\tasync handler(ctx, args: { id: string; position: number }) {
-\\t\\tawait ctx.db.update("Todo", args.id, { position: args.position });
-\\t\\treturn await ctx.db.get("Todo", args.id);
-\\t},
+	args: { id: v.id("Todo"), position: v.number() },
+	async handler(ctx, args: { id: string; position: number }) {
+		await ctx.db.update("Todo", args.id, { position: args.position });
+		return await ctx.db.get("Todo", args.id);
+	},
 });
-\`,
+`,
 );
 
 write(
@@ -422,11 +422,11 @@ write(
  * \`ctx.db.update\` which is only on writable ctx variants.
  */
 export default mutation({
-\targs: { id: v.id("Todo"), done: v.bool() },
-\tasync handler(ctx, args: { id: string; done: boolean }) {
-\t\tawait ctx.db.update("Todo", args.id, { done: args.done });
-\t\treturn await ctx.db.get("Todo", args.id);
-\t},
+	args: { id: v.id("Todo"), done: v.bool() },
+	async handler(ctx, args: { id: string; done: boolean }) {
+		await ctx.db.update("Todo", args.id, { done: args.done });
+		return await ctx.db.get("Todo", args.id);
+	},
 });
 `,
 );
@@ -440,12 +440,12 @@ write(
  * the client can show a "todo removed" toast or animate it out.
  */
 export default mutation({
-\targs: { id: v.id("Todo") },
-\tasync handler(ctx, args: { id: string }) {
-\t\tconst snapshot = await ctx.db.get("Todo", args.id);
-\t\tawait ctx.db.delete("Todo", args.id);
-\t\treturn snapshot;
-\t},
+	args: { id: v.id("Todo") },
+	async handler(ctx, args: { id: string }) {
+		const snapshot = await ctx.db.get("Todo", args.id);
+		await ctx.db.delete("Todo", args.id);
+		return snapshot;
+	},
 });
 `,
 );
@@ -460,24 +460,24 @@ write(
  * room for inserts-between without needing global renumber.
  */
 export default mutation({
-\targs: { title: v.string() },
-\tasync handler(ctx, args: { title: string }) {
-\t\tconst existing = await ctx.db.query("Todo", {});
-\t\tconst maxPos = existing.reduce((acc: number, row: any) => {
-\t\t\tconst p =
-\t\t\t\ttypeof row.position === "number"
-\t\t\t\t\t? row.position
-\t\t\t\t\t: Date.parse(row.createdAt) || 0;
-\t\t\treturn p > acc ? p : acc;
-\t\t}, 0);
-\t\tconst id = await ctx.db.insert("Todo", {
-\t\t\ttitle: args.title,
-\t\t\tdone: false,
-\t\t\tcreatedAt: new Date().toISOString(),
-\t\t\tposition: maxPos + 1024,
-\t\t});
-\t\treturn await ctx.db.get("Todo", id);
-\t},
+	args: { title: v.string() },
+	async handler(ctx, args: { title: string }) {
+		const existing = await ctx.db.query("Todo", {});
+		const maxPos = existing.reduce((acc: number, row: any) => {
+			const p =
+				typeof row.position === "number"
+					? row.position
+					: Date.parse(row.createdAt) || 0;
+			return p > acc ? p : acc;
+		}, 0);
+		const id = await ctx.db.insert("Todo", {
+			title: args.title,
+			done: false,
+			createdAt: new Date().toISOString(),
+			position: maxPos + 1024,
+		});
+		return await ctx.db.get("Todo", id);
+	},
 });
 `,
 );
@@ -541,7 +541,7 @@ import { twMerge } from "tailwind-merge";
  * primitive's bg-neutral-900 base).
  */
 export function cn(...inputs: ClassValue[]): string {
-\treturn twMerge(clsx(inputs));
+	return twMerge(clsx(inputs));
 }
 `,
 );
@@ -555,42 +555,42 @@ type Variant = "default" | "primary" | "ghost";
 type Size = "sm" | "md";
 
 const variants: Record<Variant, string> = {
-\tdefault:
-\t\t"bg-neutral-100 hover:bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-100",
-\tprimary:
-\t\t"bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900",
-\tghost:
-\t\t"bg-transparent hover:bg-neutral-100 text-neutral-700 dark:hover:bg-neutral-800 dark:text-neutral-300",
+	default:
+		"bg-neutral-100 hover:bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-100",
+	primary:
+		"bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900",
+	ghost:
+		"bg-transparent hover:bg-neutral-100 text-neutral-700 dark:hover:bg-neutral-800 dark:text-neutral-300",
 };
 
 const sizes: Record<Size, string> = {
-\tsm: "h-8 px-3 text-[13px]",
-\tmd: "h-9 px-4 text-sm",
+	sm: "h-8 px-3 text-[13px]",
+	md: "h-9 px-4 text-sm",
 };
 
 export interface ButtonProps
-\textends React.ButtonHTMLAttributes<HTMLButtonElement> {
-\tvariant?: Variant;
-\tsize?: Size;
+	extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+	variant?: Variant;
+	size?: Size;
 }
 
 export function Button({
-\tclassName,
-\tvariant = "default",
-\tsize = "md",
-\t...props
+	className,
+	variant = "default",
+	size = "md",
+	...props
 }: ButtonProps) {
-\treturn (
-\t\t<button
-\t\t\tclassName={cn(
-\t\t\t\t"inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
-\t\t\t\tvariants[variant],
-\t\t\t\tsizes[size],
-\t\t\t\tclassName,
-\t\t\t)}
-\t\t\t{...props}
-\t\t/>
-\t);
+	return (
+		<button
+			className={cn(
+				"inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
+				variants[variant],
+				sizes[size],
+				className,
+			)}
+			{...props}
+		/>
+	);
 }
 `,
 );
@@ -603,18 +603,18 @@ import { cn } from "./cn";
 export type InputProps = React.InputHTMLAttributes<HTMLInputElement>;
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-\tfunction Input({ className, ...props }, ref) {
-\t\treturn (
-\t\t\t<input
-\t\t\t\tref={ref}
-\t\t\t\tclassName={cn(
-\t\t\t\t\t"flex h-9 w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50",
-\t\t\t\t\tclassName,
-\t\t\t\t)}
-\t\t\t\t{...props}
-\t\t\t/>
-\t\t);
-\t},
+	function Input({ className, ...props }, ref) {
+		return (
+			<input
+				ref={ref}
+				className={cn(
+					"flex h-9 w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm placeholder:text-neutral-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50",
+					className,
+				)}
+				{...props}
+			/>
+		);
+	},
 );
 `,
 );
@@ -625,34 +625,34 @@ write(
 import { cn } from "./cn";
 
 export function Card({
-\tclassName,
-\t...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLDivElement>) {
-\treturn (
-\t\t<div
-\t\t\tclassName={cn(
-\t\t\t\t"rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900",
-\t\t\t\tclassName,
-\t\t\t)}
-\t\t\t{...props}
-\t\t/>
-\t);
+	return (
+		<div
+			className={cn(
+				"rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900",
+				className,
+			)}
+			{...props}
+		/>
+	);
 }
 
 export function CardHeader({
-\tclassName,
-\t...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLDivElement>) {
-\treturn (
-\t\t<div className={cn("p-5 border-b border-neutral-200 dark:border-neutral-800", className)} {...props} />
-\t);
+	return (
+		<div className={cn("p-5 border-b border-neutral-200 dark:border-neutral-800", className)} {...props} />
+	);
 }
 
 export function CardContent({
-\tclassName,
-\t...props
+	className,
+	...props
 }: React.HTMLAttributes<HTMLDivElement>) {
-\treturn <div className={cn("p-5", className)} {...props} />;
+	return <div className={cn("p-5", className)} {...props} />;
 }
 `,
 );
@@ -749,22 +749,22 @@ write(
 const PYLON_API_URL = process.env.PYLON_API_URL ?? "http://localhost:4321";
 
 const config: NextConfig = {
-\ttranspilePackages: [
-\t\t"@${projectName}/ui",
-\t\t"@pylonsync/sdk",
-\t\t"@pylonsync/react",
-\t\t"@pylonsync/next",
-\t\t"@pylonsync/functions",
-\t\t"@pylonsync/sync",
-\t],
-\tasync rewrites() {
-\t\treturn [
-\t\t\t{ source: "/api/fn/:path*", destination: \`\${PYLON_API_URL}/api/fn/:path*\` },
-\t\t\t{ source: "/api/auth/:path*", destination: \`\${PYLON_API_URL}/api/auth/:path*\` },
-\t\t\t{ source: "/api/sync/:path*", destination: \`\${PYLON_API_URL}/api/sync/:path*\` },
-\t\t\t{ source: "/api/:path*", destination: \`\${PYLON_API_URL}/api/:path*\` },
-\t\t];
-\t},
+	transpilePackages: [
+		"@${projectName}/ui",
+		"@pylonsync/sdk",
+		"@pylonsync/react",
+		"@pylonsync/next",
+		"@pylonsync/functions",
+		"@pylonsync/sync",
+	],
+	async rewrites() {
+		return [
+			{ source: "/api/fn/:path*", destination: \`\${PYLON_API_URL}/api/fn/:path*\` },
+			{ source: "/api/auth/:path*", destination: \`\${PYLON_API_URL}/api/auth/:path*\` },
+			{ source: "/api/sync/:path*", destination: \`\${PYLON_API_URL}/api/sync/:path*\` },
+			{ source: "/api/:path*", destination: \`\${PYLON_API_URL}/api/:path*\` },
+		];
+	},
 };
 
 export default config;
@@ -775,7 +775,7 @@ write(
 	"apps/web/postcss.config.mjs",
 	`/** Tailwind v4 PostCSS pipeline. */
 export default {
-\tplugins: { "@tailwindcss/postcss": {} },
+	plugins: { "@tailwindcss/postcss": {} },
 };
 `,
 );
@@ -786,7 +786,7 @@ write(
 @source "../../../../packages/ui/src/**/*.{ts,tsx}";
 
 :root {
-\tcolor-scheme: light dark;
+	color-scheme: light dark;
 }
 
 html, body { height: 100%; }
@@ -800,22 +800,22 @@ write(
 import "./globals.css";
 
 export const metadata: Metadata = {
-\ttitle: "${projectName}",
-\tdescription: "Realtime app powered by Pylon",
+	title: "${projectName}",
+	description: "Realtime app powered by Pylon",
 };
 
 export default function RootLayout({
-\tchildren,
+	children,
 }: {
-\tchildren: React.ReactNode;
+	children: React.ReactNode;
 }) {
-\treturn (
-\t\t<html lang="en">
-\t\t\t<body className="antialiased min-h-screen bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
-\t\t\t\t{children}
-\t\t\t</body>
-\t\t</html>
-\t);
+	return (
+		<html lang="en">
+			<body className="antialiased min-h-screen bg-white dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100">
+				{children}
+			</body>
+		</html>
+	);
 }
 `,
 );
@@ -834,7 +834,7 @@ write(
  * deployment env can't silently break auth.
  */
 export const pylon = createPylonServer({
-\tcookieName: "${projectName}_session",
+	cookieName: "${projectName}_session",
 });
 `,
 );
@@ -850,41 +850,41 @@ import { TodoList } from "./components/TodoList";
 export const dynamic = "force-dynamic";
 
 type Todo = {
-\tid: string;
-\ttitle: string;
-\tdone: boolean;
-\tcreatedAt: string;
+	id: string;
+	title: string;
+	done: boolean;
+	createdAt: string;
 };
 
 export default async function HomePage() {
-\tconst todos = await pylon
-\t\t.json<Todo[]>("/api/fn/listTodos", {
-\t\t\tmethod: "POST",
-\t\t\tbody: "{}",
-\t\t\theaders: { "Content-Type": "application/json" },
-\t\t})
-\t\t.catch(() => [] as Todo[]);
+	const todos = await pylon
+		.json<Todo[]>("/api/fn/listTodos", {
+			method: "POST",
+			body: "{}",
+			headers: { "Content-Type": "application/json" },
+		})
+		.catch(() => [] as Todo[]);
 
-\treturn (
-\t\t<main className="mx-auto max-w-2xl px-6 py-12 space-y-8">
-\t\t\t<header className="space-y-2">
-\t\t\t\t<h1 className="text-3xl font-semibold tracking-tight">${projectName}</h1>
-\t\t\t\t<p className="text-sm text-neutral-500 dark:text-neutral-400">
-\t\t\t\t\tA Pylon-powered realtime app. Edit{" "}
-\t\t\t\t\t<code className="font-mono text-xs">apps/api/schema.ts</code> to change
-\t\t\t\t\tthe data model,{" "}
-\t\t\t\t\t<code className="font-mono text-xs">apps/api/functions/</code> to add
-\t\t\t\t\thandlers, or{" "}
-\t\t\t\t\t<code className="font-mono text-xs">
-\t\t\t\t\t\tapps/web/src/app/components/TodoList.tsx
-\t\t\t\t\t</code>{" "}
-\t\t\t\t\tfor the UI.
-\t\t\t\t</p>
-\t\t\t</header>
+	return (
+		<main className="mx-auto max-w-2xl px-6 py-12 space-y-8">
+			<header className="space-y-2">
+				<h1 className="text-3xl font-semibold tracking-tight">${projectName}</h1>
+				<p className="text-sm text-neutral-500 dark:text-neutral-400">
+					A Pylon-powered realtime app. Edit{" "}
+					<code className="font-mono text-xs">apps/api/schema.ts</code> to change
+					the data model,{" "}
+					<code className="font-mono text-xs">apps/api/functions/</code> to add
+					handlers, or{" "}
+					<code className="font-mono text-xs">
+						apps/web/src/app/components/TodoList.tsx
+					</code>{" "}
+					for the UI.
+				</p>
+			</header>
 
-\t\t\t<TodoList initialTodos={todos} />
-\t\t</main>
-\t);
+			<TodoList initialTodos={todos} />
+		</main>
+	);
 }
 `,
 );
@@ -897,29 +897,29 @@ import { useState, useTransition, useRef, useEffect } from "react";
 import { Button } from "@${projectName}/ui";
 import { Input } from "@${projectName}/ui";
 import {
-\tDndContext,
-\tclosestCenter,
-\tKeyboardSensor,
-\tPointerSensor,
-\tuseSensor,
-\tuseSensors,
-\ttype DragEndEvent,
+	DndContext,
+	closestCenter,
+	KeyboardSensor,
+	PointerSensor,
+	useSensor,
+	useSensors,
+	type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-\tarrayMove,
-\tSortableContext,
-\tsortableKeyboardCoordinates,
-\tuseSortable,
-\tverticalListSortingStrategy,
+	arrayMove,
+	SortableContext,
+	sortableKeyboardCoordinates,
+	useSortable,
+	verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 type Todo = {
-\tid: string;
-\ttitle: string;
-\tdone: boolean;
-\tcreatedAt: string;
-\tposition?: number;
+	id: string;
+	title: string;
+	done: boolean;
+	createdAt: string;
+	position?: number;
 };
 
 /**
@@ -929,265 +929,265 @@ type Todo = {
  * the midpoint between its new neighbors and POST it to reorderTodo.
  */
 export function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
-\tconst [todos, setTodos] = useState(initialTodos);
-\tconst [title, setTitle] = useState("");
-\tconst [pending, startTransition] = useTransition();
-\tconst sensors = useSensors(
-\t\tuseSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-\t\tuseSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-\t);
+	const [todos, setTodos] = useState(initialTodos);
+	const [title, setTitle] = useState("");
+	const [pending, startTransition] = useTransition();
+	const sensors = useSensors(
+		useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+		useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+	);
 
-\tasync function add() {
-\t\tif (!title.trim()) return;
-\t\tconst newTitle = title;
-\t\tsetTitle("");
-\t\tstartTransition(async () => {
-\t\t\tconst res = await fetch("/api/fn/addTodo", {
-\t\t\t\tmethod: "POST",
-\t\t\t\theaders: { "Content-Type": "application/json" },
-\t\t\t\tbody: JSON.stringify({ title: newTitle }),
-\t\t\t});
-\t\t\tif (res.ok) {
-\t\t\t\tconst todo = (await res.json()) as Todo;
-\t\t\t\tsetTodos((prev) => [...prev, todo]);
-\t\t\t}
-\t\t});
-\t}
+	async function add() {
+		if (!title.trim()) return;
+		const newTitle = title;
+		setTitle("");
+		startTransition(async () => {
+			const res = await fetch("/api/fn/addTodo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ title: newTitle }),
+			});
+			if (res.ok) {
+				const todo = (await res.json()) as Todo;
+				setTodos((prev) => [...prev, todo]);
+			}
+		});
+	}
 
-\tasync function toggle(t: Todo) {
-\t\tconst next = !t.done;
-\t\tsetTodos((prev) =>
-\t\t\tprev.map((row) => (row.id === t.id ? { ...row, done: next } : row)),
-\t\t);
-\t\tstartTransition(async () => {
-\t\t\tconst res = await fetch("/api/fn/toggleTodo", {
-\t\t\t\tmethod: "POST",
-\t\t\t\theaders: { "Content-Type": "application/json" },
-\t\t\t\tbody: JSON.stringify({ id: t.id, done: next }),
-\t\t\t});
-\t\t\tif (!res.ok) {
-\t\t\t\tsetTodos((prev) =>
-\t\t\t\t\tprev.map((row) => (row.id === t.id ? { ...row, done: t.done } : row)),
-\t\t\t\t);
-\t\t\t}
-\t\t});
-\t}
+	async function toggle(t: Todo) {
+		const next = !t.done;
+		setTodos((prev) =>
+			prev.map((row) => (row.id === t.id ? { ...row, done: next } : row)),
+		);
+		startTransition(async () => {
+			const res = await fetch("/api/fn/toggleTodo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: t.id, done: next }),
+			});
+			if (!res.ok) {
+				setTodos((prev) =>
+					prev.map((row) => (row.id === t.id ? { ...row, done: t.done } : row)),
+				);
+			}
+		});
+	}
 
-\tasync function remove(t: Todo) {
-\t\tconst snapshot = todos;
-\t\tsetTodos((prev) => prev.filter((row) => row.id !== t.id));
-\t\tstartTransition(async () => {
-\t\t\tconst res = await fetch("/api/fn/deleteTodo", {
-\t\t\t\tmethod: "POST",
-\t\t\t\theaders: { "Content-Type": "application/json" },
-\t\t\t\tbody: JSON.stringify({ id: t.id }),
-\t\t\t});
-\t\t\tif (!res.ok) setTodos(snapshot);
-\t\t});
-\t}
+	async function remove(t: Todo) {
+		const snapshot = todos;
+		setTodos((prev) => prev.filter((row) => row.id !== t.id));
+		startTransition(async () => {
+			const res = await fetch("/api/fn/deleteTodo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: t.id }),
+			});
+			if (!res.ok) setTodos(snapshot);
+		});
+	}
 
-\tasync function rename(t: Todo, newTitle: string) {
-\t\tconst trimmed = newTitle.trim();
-\t\tif (!trimmed || trimmed === t.title) return;
-\t\tsetTodos((prev) =>
-\t\t\tprev.map((row) => (row.id === t.id ? { ...row, title: trimmed } : row)),
-\t\t);
-\t\tstartTransition(async () => {
-\t\t\tconst res = await fetch("/api/fn/editTodo", {
-\t\t\t\tmethod: "POST",
-\t\t\t\theaders: { "Content-Type": "application/json" },
-\t\t\t\tbody: JSON.stringify({ id: t.id, title: trimmed }),
-\t\t\t});
-\t\t\tif (!res.ok) {
-\t\t\t\tsetTodos((prev) =>
-\t\t\t\t\tprev.map((row) => (row.id === t.id ? { ...row, title: t.title } : row)),
-\t\t\t\t);
-\t\t\t}
-\t\t});
-\t}
+	async function rename(t: Todo, newTitle: string) {
+		const trimmed = newTitle.trim();
+		if (!trimmed || trimmed === t.title) return;
+		setTodos((prev) =>
+			prev.map((row) => (row.id === t.id ? { ...row, title: trimmed } : row)),
+		);
+		startTransition(async () => {
+			const res = await fetch("/api/fn/editTodo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: t.id, title: trimmed }),
+			});
+			if (!res.ok) {
+				setTodos((prev) =>
+					prev.map((row) => (row.id === t.id ? { ...row, title: t.title } : row)),
+				);
+			}
+		});
+	}
 
-\tfunction onDragEnd(e: DragEndEvent) {
-\t\tconst { active, over } = e;
-\t\tif (!over || active.id === over.id) return;
-\t\tconst oldIndex = todos.findIndex((t) => t.id === active.id);
-\t\tconst newIndex = todos.findIndex((t) => t.id === over.id);
-\t\tif (oldIndex < 0 || newIndex < 0) return;
-\t\tconst reordered = arrayMove(todos, oldIndex, newIndex);
-\t\tsetTodos(reordered);
-\t\tconst prev = reordered[newIndex - 1];
-\t\tconst next = reordered[newIndex + 1];
-\t\tconst prevPos = prev?.position ?? Date.parse(prev?.createdAt ?? "") ?? 0;
-\t\tconst nextPos = next?.position ?? Date.parse(next?.createdAt ?? "") ?? 0;
-\t\tlet position: number;
-\t\tif (prev && next) position = (prevPos + nextPos) / 2;
-\t\telse if (prev) position = prevPos + 1024;
-\t\telse if (next) position = nextPos - 1024;
-\t\telse position = 1024;
-\t\tconst movedId = String(active.id);
-\t\tconst snapshot = todos;
-\t\tstartTransition(async () => {
-\t\t\tconst res = await fetch("/api/fn/reorderTodo", {
-\t\t\t\tmethod: "POST",
-\t\t\t\theaders: { "Content-Type": "application/json" },
-\t\t\t\tbody: JSON.stringify({ id: movedId, position }),
-\t\t\t});
-\t\t\tif (!res.ok) setTodos(snapshot);
-\t\t});
-\t}
+	function onDragEnd(e: DragEndEvent) {
+		const { active, over } = e;
+		if (!over || active.id === over.id) return;
+		const oldIndex = todos.findIndex((t) => t.id === active.id);
+		const newIndex = todos.findIndex((t) => t.id === over.id);
+		if (oldIndex < 0 || newIndex < 0) return;
+		const reordered = arrayMove(todos, oldIndex, newIndex);
+		setTodos(reordered);
+		const prev = reordered[newIndex - 1];
+		const next = reordered[newIndex + 1];
+		const prevPos = prev?.position ?? Date.parse(prev?.createdAt ?? "") ?? 0;
+		const nextPos = next?.position ?? Date.parse(next?.createdAt ?? "") ?? 0;
+		let position: number;
+		if (prev && next) position = (prevPos + nextPos) / 2;
+		else if (prev) position = prevPos + 1024;
+		else if (next) position = nextPos - 1024;
+		else position = 1024;
+		const movedId = String(active.id);
+		const snapshot = todos;
+		startTransition(async () => {
+			const res = await fetch("/api/fn/reorderTodo", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: movedId, position }),
+			});
+			if (!res.ok) setTodos(snapshot);
+		});
+	}
 
-\treturn (
-\t\t<div className="space-y-4">
-\t\t\t<form
-\t\t\t\tonSubmit={(e) => {
-\t\t\t\t\te.preventDefault();
-\t\t\t\t\tadd();
-\t\t\t\t}}
-\t\t\t\tclassName="flex gap-2"
-\t\t\t>
-\t\t\t\t<Input
-\t\t\t\t\tvalue={title}
-\t\t\t\t\tonChange={(e) => setTitle(e.target.value)}
-\t\t\t\t\tplaceholder="What needs doing?"
-\t\t\t\t\tdisabled={pending}
-\t\t\t\t\tclassName="flex-1"
-\t\t\t\t/>
-\t\t\t\t<Button
-\t\t\t\t\ttype="submit"
-\t\t\t\t\tvariant="primary"
-\t\t\t\t\tdisabled={pending || !title.trim()}
-\t\t\t\t>
-\t\t\t\t\tAdd
-\t\t\t\t</Button>
-\t\t\t</form>
+	return (
+		<div className="space-y-4">
+			<form
+				onSubmit={(e) => {
+					e.preventDefault();
+					add();
+				}}
+				className="flex gap-2"
+			>
+				<Input
+					value={title}
+					onChange={(e) => setTitle(e.target.value)}
+					placeholder="What needs doing?"
+					disabled={pending}
+					className="flex-1"
+				/>
+				<Button
+					type="submit"
+					variant="primary"
+					disabled={pending || !title.trim()}
+				>
+					Add
+				</Button>
+			</form>
 
-\t\t\t{todos.length === 0 ? (
-\t\t\t\t<p className="text-sm text-neutral-500 dark:text-neutral-400 text-center py-8">
-\t\t\t\t\tNo todos yet. Add one above.
-\t\t\t\t</p>
-\t\t\t) : (
-\t\t\t\t<DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-\t\t\t\t\t<SortableContext items={todos.map((t) => t.id)} strategy={verticalListSortingStrategy}>
-\t\t\t\t\t\t<ul className="divide-y divide-neutral-200 dark:divide-neutral-800 rounded-md border border-neutral-200 dark:border-neutral-800">
-\t\t\t\t\t\t\t{todos.map((t) => (
-\t\t\t\t\t\t\t\t<SortableRow
-\t\t\t\t\t\t\t\t\tkey={t.id}
-\t\t\t\t\t\t\t\t\ttodo={t}
-\t\t\t\t\t\t\t\t\tpending={pending}
-\t\t\t\t\t\t\t\t\tonToggle={() => toggle(t)}
-\t\t\t\t\t\t\t\t\tonRemove={() => remove(t)}
-\t\t\t\t\t\t\t\t\tonRename={(next) => rename(t, next)}
-\t\t\t\t\t\t\t\t/>
-\t\t\t\t\t\t\t))}
-\t\t\t\t\t\t</ul>
-\t\t\t\t\t</SortableContext>
-\t\t\t\t</DndContext>
-\t\t\t)}
-\t\t</div>
-\t);
+			{todos.length === 0 ? (
+				<p className="text-sm text-neutral-500 dark:text-neutral-400 text-center py-8">
+					No todos yet. Add one above.
+				</p>
+			) : (
+				<DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+					<SortableContext items={todos.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+						<ul className="divide-y divide-neutral-200 dark:divide-neutral-800 rounded-md border border-neutral-200 dark:border-neutral-800">
+							{todos.map((t) => (
+								<SortableRow
+									key={t.id}
+									todo={t}
+									pending={pending}
+									onToggle={() => toggle(t)}
+									onRemove={() => remove(t)}
+									onRename={(next) => rename(t, next)}
+								/>
+							))}
+						</ul>
+					</SortableContext>
+				</DndContext>
+			)}
+		</div>
+	);
 }
 
 function SortableRow({ todo, pending, onToggle, onRemove, onRename }: {
-\ttodo: Todo;
-\tpending: boolean;
-\tonToggle: () => void;
-\tonRemove: () => void;
-\tonRename: (next: string) => void;
+	todo: Todo;
+	pending: boolean;
+	onToggle: () => void;
+	onRemove: () => void;
+	onRename: (next: string) => void;
 }) {
-\tconst { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-\t\tuseSortable({ id: todo.id });
-\tconst style = {
-\t\ttransform: CSS.Transform.toString(transform),
-\t\ttransition,
-\t\topacity: isDragging ? 0.4 : 1,
-\t};
-\tconst [editing, setEditing] = useState(false);
-\tconst [draft, setDraft] = useState(todo.title);
-\tconst inputRef = useRef<HTMLInputElement>(null);
+	const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+		useSortable({ id: todo.id });
+	const style = {
+		transform: CSS.Transform.toString(transform),
+		transition,
+		opacity: isDragging ? 0.4 : 1,
+	};
+	const [editing, setEditing] = useState(false);
+	const [draft, setDraft] = useState(todo.title);
+	const inputRef = useRef<HTMLInputElement>(null);
 
-\tuseEffect(() => {
-\t\tif (editing) {
-\t\t\tsetDraft(todo.title);
-\t\t\trequestAnimationFrame(() => {
-\t\t\t\tinputRef.current?.focus();
-\t\t\t\tinputRef.current?.select();
-\t\t\t});
-\t\t}
-\t}, [editing, todo.title]);
+	useEffect(() => {
+		if (editing) {
+			setDraft(todo.title);
+			requestAnimationFrame(() => {
+				inputRef.current?.focus();
+				inputRef.current?.select();
+			});
+		}
+	}, [editing, todo.title]);
 
-\tfunction commit() {
-\t\tsetEditing(false);
-\t\tonRename(draft);
-\t}
+	function commit() {
+		setEditing(false);
+		onRename(draft);
+	}
 
-\treturn (
-\t\t<li
-\t\t\tref={setNodeRef}
-\t\t\tstyle={style}
-\t\t\tclassName="flex items-center gap-3 px-4 py-3 text-sm group bg-white dark:bg-neutral-950"
-\t\t>
-\t\t\t<button
-\t\t\t\ttype="button"
-\t\t\t\t{...attributes}
-\t\t\t\t{...listeners}
-\t\t\t\tclassName="cursor-grab active:cursor-grabbing text-neutral-300 hover:text-neutral-500 select-none touch-none"
-\t\t\t\taria-label="Drag to reorder"
-\t\t\t\ttabIndex={-1}
-\t\t\t>
-\t\t\t\t⋮⋮
-\t\t\t</button>
-\t\t\t<input
-\t\t\t\ttype="checkbox"
-\t\t\t\tchecked={todo.done}
-\t\t\t\tonChange={onToggle}
-\t\t\t\tdisabled={pending}
-\t\t\t\tclassName="size-4 cursor-pointer"
-\t\t\t\taria-label={\\\`Mark "\${todo.title}" as \${todo.done ? "not done" : "done"}\\\`}
-\t\t\t/>
-\t\t\t{editing ? (
-\t\t\t\t<input
-\t\t\t\t\tref={inputRef}
-\t\t\t\t\tvalue={draft}
-\t\t\t\t\tonChange={(e) => setDraft(e.target.value)}
-\t\t\t\t\tonBlur={commit}
-\t\t\t\t\tonKeyDown={(e) => {
-\t\t\t\t\t\tif (e.key === "Enter") commit();
-\t\t\t\t\t\telse if (e.key === "Escape") {
-\t\t\t\t\t\t\tsetEditing(false);
-\t\t\t\t\t\t\tsetDraft(todo.title);
-\t\t\t\t\t\t}
-\t\t\t\t\t}}
-\t\t\t\t\tclassName="flex-1 bg-transparent border-b border-neutral-300 dark:border-neutral-700 outline-none text-sm"
-\t\t\t\t\taria-label="Edit title"
-\t\t\t\t/>
-\t\t\t) : (
-\t\t\t\t<button
-\t\t\t\t\ttype="button"
-\t\t\t\t\tonDoubleClick={() => setEditing(true)}
-\t\t\t\t\tclassName={\\\`flex-1 text-left \${todo.done ? "line-through text-neutral-400" : ""}\\\`}
-\t\t\t\t\ttitle="Double-click to edit"
-\t\t\t\t>
-\t\t\t\t\t{todo.title}
-\t\t\t\t</button>
-\t\t\t)}
-\t\t\t<button
-\t\t\t\ttype="button"
-\t\t\t\tonClick={() => setEditing(true)}
-\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-\t\t\t\taria-label={\\\`Edit "\${todo.title}"\\\`}
-\t\t\t>
-\t\t\t\tEdit
-\t\t\t</button>
-\t\t\t<button
-\t\t\t\ttype="button"
-\t\t\t\tonClick={onRemove}
-\t\t\t\tdisabled={pending}
-\t\t\t\tclassName="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-red-500"
-\t\t\t\taria-label={\\\`Delete "\${todo.title}"\\\`}
-\t\t\t>
-\t\t\t\tDelete
-\t\t\t</button>
-\t\t</li>
-\t);
+	return (
+		<li
+			ref={setNodeRef}
+			style={style}
+			className="flex items-center gap-3 px-4 py-3 text-sm group bg-white dark:bg-neutral-950"
+		>
+			<button
+				type="button"
+				{...attributes}
+				{...listeners}
+				className="cursor-grab active:cursor-grabbing text-neutral-300 hover:text-neutral-500 select-none touch-none"
+				aria-label="Drag to reorder"
+				tabIndex={-1}
+			>
+				⋮⋮
+			</button>
+			<input
+				type="checkbox"
+				checked={todo.done}
+				onChange={onToggle}
+				disabled={pending}
+				className="size-4 cursor-pointer"
+				aria-label={\\\`Mark "\${todo.title}" as \${todo.done ? "not done" : "done"}\\\`}
+			/>
+			{editing ? (
+				<input
+					ref={inputRef}
+					value={draft}
+					onChange={(e) => setDraft(e.target.value)}
+					onBlur={commit}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") commit();
+						else if (e.key === "Escape") {
+							setEditing(false);
+							setDraft(todo.title);
+						}
+					}}
+					className="flex-1 bg-transparent border-b border-neutral-300 dark:border-neutral-700 outline-none text-sm"
+					aria-label="Edit title"
+				/>
+			) : (
+				<button
+					type="button"
+					onDoubleClick={() => setEditing(true)}
+					className={\\\`flex-1 text-left \${todo.done ? "line-through text-neutral-400" : ""}\\\`}
+					title="Double-click to edit"
+				>
+					{todo.title}
+				</button>
+			)}
+			<button
+				type="button"
+				onClick={() => setEditing(true)}
+				className="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+				aria-label={\\\`Edit "\${todo.title}"\\\`}
+			>
+				Edit
+			</button>
+			<button
+				type="button"
+				onClick={onRemove}
+				disabled={pending}
+				className="opacity-0 group-hover:opacity-100 transition-opacity text-xs text-neutral-500 hover:text-red-500"
+				aria-label={\\\`Delete "\${todo.title}"\\\`}
+			>
+				Delete
+			</button>
+		</li>
+	);
 }
 `,
 );
