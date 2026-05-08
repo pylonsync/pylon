@@ -282,10 +282,7 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 // pylon-cloud's `uniq_hobby_owner` partial unique
                 // index in place after the per-user-org cap was
                 // lifted, breaking org creation in prod.
-                statements.push(format!(
-                    "DROP INDEX IF EXISTS {}",
-                    quote_ident(name)
-                ));
+                statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(name)));
             }
             SchemaOperation::CreateSearchIndex { entity, config } => {
                 #[cfg(feature = "postgres-live")]
