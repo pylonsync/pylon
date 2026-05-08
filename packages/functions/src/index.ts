@@ -21,6 +21,7 @@
 export { query, mutation, action } from "./define";
 export { v } from "./validators";
 export { resetDb, installTestIsolation } from "./testing";
+export { slugifyName, availableSlug } from "./slugify";
 export type {
   QueryCtx,
   MutationCtx,
