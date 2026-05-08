@@ -81,3 +81,6 @@ ROADMAP.md
 yapless/
 test-app/
 smoke-app/
+
+# Claude Code scheduled-task lockfile (created by ScheduleWakeup tooling)
+.claude/
