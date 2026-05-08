@@ -1301,22 +1301,40 @@ pub(crate) fn handle(
         };
         match ctx.magic_codes.try_verify(&email, code) {
             Ok(()) => {
-                let now = format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
-                // Best-effort: ignore the result. Schemas without an
-                // emailVerified field will reject the unknown column;
-                // schemas with it will accept the update. Either way
-                // the verification *intent* succeeded.
-                let _ = ctx.store.update(
+                // RFC 3339 / ISO 8601 — what the storage layer's
+                // datetime columns expect. Earlier versions formatted
+                // this as "<unix_seconds>Z" (e.g. "1715200712Z"),
+                // which the storage adapter silently rejected. The
+                // `let _ =` below then swallowed the rejection, so
+                // verify returned success while emailVerified stayed
+                // null forever. Bug: users could "verify" any number
+                // of times and still be flagged unverified.
+                let now = pylon_kernel::util::now_iso();
+                // Schemas without an emailVerified field will reject
+                // the unknown column. Schemas with it (recommended)
+                // accept the update. Log + return failures so a
+                // misconfigured schema doesn't ship as a silent
+                // forever-unverified state — the prior `let _ =`
+                // pattern was the original bug.
+                if let Err(e) = ctx.store.update(
                     &ctx.store.manifest().auth.user.entity,
                     user_id,
                     &serde_json::json!({ "emailVerified": now }),
-                );
+                ) {
+                    tracing::warn!(
+                        "[auth] email/verify: failed to persist emailVerified for user {}: {}",
+                        user_id,
+                        e
+                    );
+                    return Some((
+                        500,
+                        json_error_safe(
+                            "PERSIST_FAILED",
+                            "Email code accepted but the verified flag couldn't be saved. Check the User entity has an `emailVerified` datetime field.",
+                            &format!("{e}"),
+                        ),
+                    ));
+                }
                 return Some((
                     200,
                     serde_json::json!({"verified": true, "emailVerified": now}).to_string(),
