@@ -195,10 +195,31 @@ export function ResourceListPage({
 		}
 	};
 
-	const onBulk = async (action: BulkAction) => {
+	// Bulk-confirm dialog state. Destructive actions (anything that
+	// would call DELETE) flow through this rather than firing on the
+	// click; the prior `window.confirm()` fallback wasn't even invoked
+	// for the default delete path because no `confirm` string was set.
+	// Result: clicking Actions deleted everything you'd selected with
+	// zero ack. Now Actions always opens this dialog for destructive
+	// kinds; non-destructive (export, custom) run inline.
+	const [pendingBulk, setPendingBulk] = useState<BulkAction | null>(null);
+
+	const isDestructive = (action: BulkAction): boolean =>
+		action.kind === "delete" || action.id === "delete";
+
+	const onBulk = (action: BulkAction): void => {
 		const ids = Array.from(selected);
 		if (ids.length === 0) return;
-		if (action.confirm && !window.confirm(action.confirm)) return;
+		if (isDestructive(action)) {
+			setPendingBulk(action);
+			return;
+		}
+		void runBulk(action);
+	};
+
+	const runBulk = async (action: BulkAction): Promise<void> => {
+		const ids = Array.from(selected);
+		if (ids.length === 0) return;
 
 		if (action.kind === "delete" || action.id === "delete") {
 			let ok = 0;
@@ -271,42 +292,54 @@ export function ResourceListPage({
 			</div>
 
 			<div className="flex flex-wrap items-center gap-2">
-				{listCfg?.bulkActions && listCfg.bulkActions.length > 0 ? (
-					<DropdownMenu>
-						<DropdownMenuTrigger asChild>
-							<Button
-								size="sm"
+				<DropdownMenu>
+					<DropdownMenuTrigger asChild>
+						<Button
+							size="sm"
+							disabled={selected.size === 0}
+							variant="default"
+						>
+							Actions ({selected.size})
+							<ChevronsUpDown className="size-3.5 opacity-70" />
+						</Button>
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="start">
+						{(listCfg?.bulkActions ?? []).map((a) => (
+							<DropdownMenuItem
+								key={a.id}
+								onClick={() => onBulk(a)}
 								disabled={selected.size === 0}
-								variant="default"
+								className={
+									a.kind === "delete" || a.id === "delete"
+										? "text-destructive focus:text-destructive"
+										: undefined
+								}
 							>
-								Actions ({selected.size})
-								<ChevronsUpDown className="size-3.5 opacity-70" />
-							</Button>
-						</DropdownMenuTrigger>
-						<DropdownMenuContent align="start">
-							{listCfg.bulkActions.map((a) => (
-								<DropdownMenuItem
-									key={a.id}
-									onClick={() => onBulk(a)}
-									disabled={selected.size === 0}
-								>
-									{a.label}
-								</DropdownMenuItem>
-							))}
-						</DropdownMenuContent>
-					</DropdownMenu>
-				) : (
-					<Button
-						size="sm"
-						variant="default"
-						disabled={selected.size === 0}
-						onClick={() =>
-							onBulk({ id: "delete", label: "Delete", kind: "delete" })
-						}
-					>
-						Actions ({selected.size})
-					</Button>
-				)}
+								{a.label}
+							</DropdownMenuItem>
+						))}
+						{(listCfg?.bulkActions ?? []).length > 0 && (
+							<DropdownMenuSeparator />
+						)}
+						<DropdownMenuItem
+							onClick={() =>
+								onBulk({ id: "export", label: "Export JSON", kind: "export" })
+							}
+							disabled={selected.size === 0}
+						>
+							Export JSON
+						</DropdownMenuItem>
+						<DropdownMenuItem
+							onClick={() =>
+								onBulk({ id: "delete", label: "Delete", kind: "delete" })
+							}
+							disabled={selected.size === 0}
+							className="text-destructive focus:text-destructive"
+						>
+							Delete…
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
 
 				{showSearch && (
 					<div className="relative">
@@ -654,6 +687,38 @@ export function ResourceListPage({
 					<DialogFooter>
 						<Button variant="ghost" onClick={() => setInspectRow(null)}>
 							Close
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			<Dialog
+				open={pendingBulk !== null}
+				onOpenChange={(o) => !o && setPendingBulk(null)}
+			>
+				<DialogContent className="sm:max-w-[480px]">
+					<DialogHeader>
+						<DialogTitle>
+							Delete {selected.size} {selected.size === 1 ? "row" : "rows"}?
+						</DialogTitle>
+						<DialogDescription>
+							{pendingBulk?.confirm ??
+								`This will permanently delete ${selected.size} ${entity} ${selected.size === 1 ? "row" : "rows"}. This action can't be undone.`}
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button variant="ghost" onClick={() => setPendingBulk(null)}>
+							Cancel
+						</Button>
+						<Button
+							variant="destructive"
+							onClick={() => {
+								const action = pendingBulk;
+								setPendingBulk(null);
+								if (action) void runBulk(action);
+							}}
+						>
+							Delete {selected.size}
 						</Button>
 					</DialogFooter>
 				</DialogContent>
