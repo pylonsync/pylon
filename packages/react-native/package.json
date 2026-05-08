@@ -1,7 +1,7 @@
 {
   "name": "@pylonsync/react-native",
   "publishConfig": { "access": "public" },
-  "version": "0.3.61",
+  "version": "0.3.62",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
