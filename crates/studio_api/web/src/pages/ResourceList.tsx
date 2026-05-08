@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { RowEditor } from "@/components/RowEditor";
 import { CellRenderer } from "@/components/renderers";
 import { ApiError, MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
 import type {
@@ -670,27 +671,16 @@ export function ResourceListPage({
 				</DialogContent>
 			</Dialog>
 
-			<Dialog
-				open={!!inspectRow}
-				onOpenChange={(o) => !o && setInspectRow(null)}
-			>
-				<DialogContent className="sm:max-w-[600px]">
-					<DialogHeader>
-						<DialogTitle>Row inspector</DialogTitle>
-						<DialogDescription className="font-mono text-xs">
-							{(inspectRow?.id as string) ?? "—"}
-						</DialogDescription>
-					</DialogHeader>
-					<pre className="max-h-[60vh] overflow-auto rounded-md border bg-muted/30 p-3 text-xs">
-						{JSON.stringify(inspectRow, null, 2)}
-					</pre>
-					<DialogFooter>
-						<Button variant="ghost" onClick={() => setInspectRow(null)}>
-							Close
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
+			<RowEditor
+				row={inspectRow}
+				entity={manifestEntity}
+				entityName={entity}
+				onClose={() => setInspectRow(null)}
+				onSaved={() => {
+					setInspectRow(null);
+					void load();
+				}}
+			/>
 
 			<Dialog
 				open={pendingBulk !== null}
