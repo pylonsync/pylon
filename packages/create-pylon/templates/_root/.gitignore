@@ -7,6 +7,9 @@ out/
 .env.local
 *.db
 *.db-journal
+# Local pylon dev state: sqlite db, jobs queue, sessions, uploads dir.
+# Created by `pylon dev` on first run; safe to delete to reset.
+.pylon/
 apps/api/pylon.manifest.json
 apps/api/pylon.client.ts
 
