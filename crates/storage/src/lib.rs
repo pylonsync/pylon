@@ -372,11 +372,18 @@ pub fn analyze_plan(plan: &SchemaPlan) -> PlanAnalysis {
                 });
             }
             SchemaOperation::RemoveIndex { entity, name } => {
-                has_unsupported = true;
+                // RemoveIndex is non-destructive on Postgres
+                // (DROP INDEX IF EXISTS) and the apply path on the
+                // SQLite adapter handles it via PRAGMA. Neither is
+                // unsupported — historical version of this code
+                // blanket-flagged it, which left orphan partial
+                // unique indexes in production after the schema
+                // dropped them. Surface a soft warning so operators
+                // see the change in dry-run output, but don't block.
                 warnings.push(PlanWarning {
-                    code: "UNSUPPORTED_REMOVE_INDEX".into(),
+                    code: "REMOVE_INDEX".into(),
                     message: format!(
-                        "Removing index \"{}.{}\" is not supported by the SQLite adapter",
+                        "Removing index \"{}.{}\" — auto-migrate will issue DROP INDEX IF EXISTS",
                         entity, name
                     ),
                 });

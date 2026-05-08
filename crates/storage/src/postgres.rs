@@ -273,6 +273,20 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                     where_clause.as_deref(),
                 ));
             }
+            SchemaOperation::RemoveIndex { entity: _, name } => {
+                // Dropping an index is non-destructive (queries that
+                // used it just fall back to seq scan) and idempotent
+                // when guarded with IF EXISTS — safe to run from the
+                // auto-migrate boot path. Used to be flagged as
+                // "unsupported" by analyze_plan, which left
+                // pylon-cloud's `uniq_hobby_owner` partial unique
+                // index in place after the per-user-org cap was
+                // lifted, breaking org creation in prod.
+                statements.push(format!(
+                    "DROP INDEX IF EXISTS {}",
+                    quote_ident(name)
+                ));
+            }
             SchemaOperation::CreateSearchIndex { entity, config } => {
                 #[cfg(feature = "postgres-live")]
                 {
