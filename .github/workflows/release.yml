@@ -210,6 +210,12 @@ jobs:
           # @pylonsync/react in a temp dir. If bun can't satisfy the deps,
           # we just produced another broken release — fail loudly so the
           # tag can be yanked before users hit it.
+          #
+          # Retry loop because npm's CDN takes 5-30s to propagate freshly-
+          # published versions to all edge nodes, and bun's resolver can
+          # fail with a hard "package not found" on the first try while
+          # subsequent tries succeed. Six attempts × 10s = a 60s window,
+          # which empirically covers every propagation case we've hit.
           POSTFLIGHT_DIR="$(mktemp -d)"
           (
             cd "$POSTFLIGHT_DIR"
@@ -220,11 +226,17 @@ jobs:
             "dependencies": { "@pylonsync/react": "$REFERENCE_VERSION" }
           }
           EOF
-            if ! bun install --no-save 2>&1 | tee install.log; then
-              echo "::error::Postflight: bun install of @pylonsync/react@$REFERENCE_VERSION FAILED. The graph published this run is unsatisfiable for end users. Investigate before announcing the release; consider yanking these versions." >&2
-              cat install.log >&2
-              exit 5
-            fi
+            attempt=0
+            until bun install --no-save 2>&1 | tee install.log; do
+              attempt=$((attempt + 1))
+              if [[ "$attempt" -ge 6 ]]; then
+                echo "::error::Postflight: bun install of @pylonsync/react@$REFERENCE_VERSION FAILED after 6 attempts. The graph published this run is unsatisfiable for end users. Investigate before announcing the release; consider yanking these versions." >&2
+                cat install.log >&2
+                exit 5
+              fi
+              echo "→ postflight attempt $attempt failed, retrying in 10s for npm CDN propagation..."
+              sleep 10
+            done
           )
           rm -rf "$POSTFLIGHT_DIR"
 
@@ -420,32 +432,35 @@ jobs:
           echo "→ original dylib references:"
           otool -L "$BIN" | grep -E 'libxmlsec1' || true
 
-          # Match any libxmlsec1*.NNNNN.dylib reference (point-versioned)
-          # and rewrite to the unversioned symlink (libxmlsec1*.dylib).
-          mapfile -t refs < <(otool -L "$BIN" \
-            | awk '{print $1}' \
-            | grep -E '/libxmlsec1[a-z0-9-]*\.[0-9.]+\.dylib$' || true)
+          # macOS runners ship bash 3.2 which doesn't have `mapfile`;
+          # use a while-read loop instead. `read -r` for raw bytes,
+          # IFS= so leading whitespace stays attached to $line.
+          REWRITES=0
+          while IFS= read -r full; do
+            [[ -z "$full" ]] && continue
+            # libxmlsec1-openssl.10311.dylib → libxmlsec1-openssl.dylib
+            base="$(basename "$full")"
+            libname="${base%%.*}"
+            dir="$(dirname "$full")"
+            new="${dir}/${libname}.dylib"
+            echo "→ rewriting: $full → $new"
+            install_name_tool -change "$full" "$new" "$BIN"
+            REWRITES=$((REWRITES + 1))
+          done < <(
+            otool -L "$BIN" \
+              | awk '{print $1}' \
+              | grep -E '/libxmlsec1[a-z0-9-]*\.[0-9.]+\.dylib$' \
+              || true
+          )
 
-          if [[ ${#refs[@]} -eq 0 ]]; then
+          if [[ "$REWRITES" -eq 0 ]]; then
             echo "→ no point-versioned libxmlsec1 references found; nothing to rewrite"
           else
-            for full in "${refs[@]}"; do
-              # libxmlsec1-openssl.10311.dylib → libxmlsec1-openssl.dylib
-              base="$(basename "$full")"
-              libname="${base%%.*}"
-              dir="$(dirname "$full")"
-              new="${dir}/${libname}.dylib"
-              echo "→ rewriting: $full → $new"
-              install_name_tool -change "$full" "$new" "$BIN"
-            done
             echo "→ post-rewrite dylib references:"
             otool -L "$BIN" | grep -E 'libxmlsec1' || true
             # Re-sign ad-hoc; install_name_tool invalidates LC_CODE_SIGNATURE.
             codesign --force --sign - "$BIN"
             # Sanity: confirm the binary still loads its dylibs.
-            # `pylon --version` is the cheapest invocation that
-            # exercises the dylib resolution path without touching the
-            # network or filesystem. Hard-fails the job if dyld aborts.
             "$BIN" --version
           fi
       # Artifact names must match what install.sh and Formula/pylon.rb
