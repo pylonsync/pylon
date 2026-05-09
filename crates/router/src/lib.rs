@@ -2265,6 +2265,59 @@ mod auth_gate_tests {
         });
     }
 
+    /// /api/auth/native-session refuses anonymous callers — there's
+    /// no cookie session to mint a token for. Don't accidentally
+    /// regress to the pre-fix /api/auth/session shape that minted
+    /// for any user_id.
+    #[test]
+    fn auth_native_session_refuses_anonymous() {
+        let anon = AuthContext::anonymous();
+        with_ctx(false, &anon, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/native-session",
+                "",
+                None,
+            );
+            assert_eq!(status, 401);
+            assert!(body.contains("AUTH_REQUIRED"));
+        });
+    }
+
+    /// /api/auth/native-session mints a real SessionStore entry for
+    /// the cookie-authed user — no admin gate, no privilege escalation
+    /// (it can ONLY mint for the SAME user the cookie already
+    /// represents). The minted token is the one native apps use for
+    /// both HTTP `Authorization: Bearer <token>` and the WebSocket
+    /// `bearer.<token>` subprotocol.
+    #[test]
+    fn auth_native_session_mints_for_cookie_user_in_prod() {
+        let user = AuthContext::authenticated("alice".to_string());
+        with_ctx(false, &user, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/native-session",
+                "",
+                None,
+            );
+            assert_eq!(status, 201);
+            // Body shape: { token, user_id, expires_at }
+            assert!(body.contains("\"token\""));
+            assert!(body.contains("\"alice\""));
+            assert!(body.contains("\"expires_at\""));
+            // Confirm the minted token resolves through SessionStore
+            // (the WS path's auth check uses the same lookup) — this
+            // is what closes the JWT-on-WS gap.
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let token = parsed["token"].as_str().unwrap();
+            let resolved = ctx.session_store.get(token);
+            assert!(resolved.is_some(), "minted token must resolve via SessionStore");
+            assert_eq!(resolved.unwrap().user_id, "alice");
+        });
+    }
+
     /// Prior vuln: OAuth callback accepted `{email, state}` without a real
     /// authorization code, letting anyone mint a session for any email.
     /// Now: prod requires an authorization code.

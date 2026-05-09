@@ -2000,6 +2000,50 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"revoked": true}).to_string()));
     }
 
+    // POST /api/auth/native-session — mint a fresh server-stored
+    // session token for the currently-authenticated user.
+    //
+    // Use case: desktop / CLI / native-mobile handoff. The browser
+    // user is already signed in (cookie), opens an `/auth/desktop`
+    // page that POSTs here, and gets back a token the native app can
+    // store + send as `Authorization: Bearer <token>` on HTTP and as
+    // the `bearer.<token>` Sec-WebSocket-Protocol on WS. Both auth
+    // paths funnel through `SessionStore.resolve`, so one token works
+    // everywhere — JWTs from /api/auth/jwt only work for HTTP.
+    //
+    // Authz: cookie session must already be valid. No admin token
+    // required (unlike POST /api/auth/session which can mint a session
+    // for ANY user_id and is therefore admin-gated). Here we mint a
+    // session for the SAME user the cookie already represents — no
+    // privilege escalation.
+    //
+    // The minted session has its own SessionStore row, revokable
+    // independently of the browser cookie that minted it.
+    if url == "/api/auth/native-session" && method == HttpMethod::Post {
+        if !ctx.auth_ctx.is_authenticated() {
+            return Some((401, json_error("AUTH_REQUIRED", "Login required")));
+        }
+        let user_id = match ctx.auth_ctx.user_id.clone() {
+            Some(id) if !id.is_empty() => id,
+            _ => {
+                return Some((
+                    401,
+                    json_error("AUTH_REQUIRED", "No user_id in current session"),
+                ));
+            }
+        };
+        let session = ctx.session_store.create(user_id);
+        return Some((
+            201,
+            serde_json::json!({
+                "token": session.token,
+                "user_id": session.user_id,
+                "expires_at": session.expires_at,
+            })
+            .to_string(),
+        ));
+    }
+
     // POST /api/auth/jwt — exchange the current session for a JWT-shaped
     // token (HS256 signed with PYLON_JWT_SECRET). Useful for edge runtimes
     // that can't tolerate a session-store round-trip on every request.

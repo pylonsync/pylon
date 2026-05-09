@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.66](https://github.com/pylonsync/pylon/compare/v0.3.65...v0.3.66) (2026-05-09)
+
+
+### Features
+
+* **auth:** `POST /api/auth/native-session` for desktop / native-app handoff. Cookie-session-gated; mints a real SessionStore token that works on both HTTP `Authorization: Bearer <token>` AND the WebSocket `bearer.<token>` subprotocol. Closes the gap where JWTs from `/api/auth/jwt` passed HTTP but the SyncEngine's WS reconnect-looped with `unauthorized: bearer token required`. No admin token needed — the cookie itself proves identity, and we mint a session for the same user only (no privilege escalation). New canonical endpoint for the `/auth/desktop` redirect pattern.
+* **docs:** add `docs/auth/sessions.md` covering when to use `/api/auth/native-session` vs `/api/auth/jwt`, the desktop-handoff flow, and SDK guidance.
+
 ## [0.3.65](https://github.com/pylonsync/pylon/compare/v0.3.64...v0.3.65) (2026-05-09)
 
 
