@@ -199,7 +199,8 @@ PYLON_PORT=4321
 PYLON_DB_PATH=/var/lib/pylon/pylon.db
 PYLON_FILES_DIR=/var/lib/pylon/uploads
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db
-PYLON_ADMIN_TOKEN=<long random>
+PYLON_ADMIN_TOKEN=<long random>             # operator-role bearer
+PYLON_ADMIN_EMAILS=ops@your-domain.com      # human admins (verified email allowlist)
 PYLON_CORS_ORIGIN=https://your-app.com
 PYLON_DEV_MODE=false
 ```

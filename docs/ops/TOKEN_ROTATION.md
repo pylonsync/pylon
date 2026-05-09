@@ -12,6 +12,31 @@
 Treat it like an SSH key: minimum 32 bytes of randomness, never in git,
 rotate on any suspicion of compromise.
 
+## Admin token vs. admin user
+
+`PYLON_ADMIN_TOKEN` is an **operator-role** secret — automation, cron,
+migrations, break-glass scripts. It's not a user identity; routes
+authenticated by the bearer don't have a `user_id`.
+
+For **designating a human as a platform admin**, use one of:
+
+1. `auth: { user: { adminField: "isAdmin" } }` in the manifest +
+   flip the field on the User row in Studio/SQL. The dispatcher
+   reads it on every request.
+2. `PYLON_ADMIN_EMAILS=eric@yapless.com,ops@acme.com` env var.
+   Comma-separated allowlist of verified email addresses; matched
+   users get `auth.is_admin` lifted on every successful auth
+   resolution. Case-insensitive, requires `emailVerified=true`. When
+   `adminField` is configured, the flag is persisted on first match
+   so removing the email from the env doesn't demote — revoke
+   explicitly via Studio/dashboard/SQL.
+
+Both paths apply on top of cookie/JWT/API-key auth, so admins sign in
+with their normal account and Studio respects the role.
+
+Don't use `PYLON_ADMIN_TOKEN` to "log in as admin" — see the
+"Don't use the admin token as a session token" guidance below.
+
 ## Without downtime (two-token rotation)
 
 The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires

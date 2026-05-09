@@ -18,6 +18,16 @@ PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 PYLON_ADMIN_TOKEN=<64+ random bytes, hex>
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db
 
+# Optional: declarative admin allowlist. Comma-separated list of
+# verified email addresses. Matched users get auth.is_admin lifted on
+# every request (case-insensitive, requires emailVerified=true). When
+# the manifest also declares `auth: { user: { adminField: "..." } }`,
+# the User row's flag is persisted on first match — removing the
+# email from the env later does not demote (revoke explicitly via
+# Studio / dashboard / SQL). PYLON_ADMIN_TOKEN remains for operator
+# automation; this is for designating human admins.
+PYLON_ADMIN_EMAILS=ops@your-domain.com,sre@your-domain.com
+
 # Client-facing
 PYLON_CORS_ORIGIN=https://your-app.com
 PYLON_CSRF_ORIGINS=https://your-app.com
