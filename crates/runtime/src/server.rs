@@ -1004,20 +1004,24 @@ fn start_server(
                         .as_deref()
                         .and_then(|t| session_store.get(t))
                         .map(|s| s.user_id);
-                    if let (Some(uid), Some(field)) = (
-                        session_user_id.as_deref(),
-                        runtime
+                    // Try admin_field first (cheap field read), then fall
+                    // back to PYLON_ADMIN_EMAILS so cookie-authed admins
+                    // listed there also get past /metrics. Both paths
+                    // resolve to the same boolean — this gate just needs
+                    // "is the cookie-authed user an admin?".
+                    if let Some(uid) = session_user_id.as_deref() {
+                        let user_entity = runtime.manifest().auth.user.entity.as_str();
+                        use pylon_http::DataStore as _;
+                        let row = runtime.get_by_id(user_entity, uid).ok().flatten();
+                        let admin_field = runtime
                             .manifest()
                             .auth
                             .user
                             .admin_field
                             .as_deref()
-                            .filter(|f| !f.is_empty()),
-                    ) {
-                        let user_entity = runtime.manifest().auth.user.entity.as_str();
-                        use pylon_http::DataStore as _;
-                        match runtime.get_by_id(user_entity, uid) {
-                            Ok(Some(row)) => match row.get(field) {
+                            .filter(|f| !f.is_empty());
+                        let field_ok = match (admin_field, row.as_ref()) {
+                            (Some(field), Some(row)) => match row.get(field) {
                                 Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
                                 Some(v) if v.is_string() => {
                                     let s = v.as_str().unwrap_or("").to_ascii_lowercase();
@@ -1026,6 +1030,44 @@ fn start_server(
                                 _ => false,
                             },
                             _ => false,
+                        };
+                        if field_ok {
+                            true
+                        } else {
+                            // PYLON_ADMIN_EMAILS allowlist on verified
+                            // email. Same rules as the main dispatcher
+                            // path below: case-insensitive, requires
+                            // emailVerified, no demote on env-removal
+                            // (the dispatcher persists admin_field=true).
+                            let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
+                                .unwrap_or_default()
+                                .split(',')
+                                .map(|s| s.trim().to_ascii_lowercase())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if allow.is_empty() {
+                                false
+                            } else if let Some(row) = row {
+                                let email = row
+                                    .get("email")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().to_ascii_lowercase())
+                                    .filter(|s| !s.is_empty());
+                                let verified = row
+                                    .get("emailVerified")
+                                    .or_else(|| row.get("email_verified"))
+                                    .map(|v| match v {
+                                        serde_json::Value::Bool(b) => *b,
+                                        serde_json::Value::String(s) => !s.is_empty()
+                                            && !s.eq_ignore_ascii_case("false"),
+                                        _ => false,
+                                    })
+                                    .unwrap_or(false);
+                                verified
+                                    && email.map(|e| allow.contains(&e)).unwrap_or(false)
+                            } else {
+                                false
+                            }
                         }
                     } else {
                         false
@@ -1405,41 +1447,132 @@ fn start_server(
                 }
             }
         }
-        // Per-user admin: if manifest sets auth.user.admin_field, look
-        // up the user record and lift is_admin when that field is
-        // truthy. Apps with a User.isAdmin column (or "admin" role)
-        // configure this so platform admins sign in with their regular
-        // account and Studio respects the role — no shared admin token
-        // to share + rotate. PYLON_ADMIN_TOKEN still works as the
-        // bootstrap path for fresh deploys with no User rows yet.
+        // Per-user admin resolution. Two independent paths feed into
+        // is_admin; either one is enough to lift it.
+        //
+        // 1. `auth.user.admin_field` (manifest config) — load the
+        //    User row, check the configured boolean/string/role-array
+        //    field, lift is_admin when truthy. Apps with a
+        //    User.isAdmin column (or "admin" role) configure this so
+        //    platform admins sign in with their regular account and
+        //    Studio respects the role.
+        //
+        // 2. `PYLON_ADMIN_EMAILS` env var — comma-separated allowlist
+        //    of verified emails. On every successful auth resolution,
+        //    a matched user gets is_admin lifted AND (when
+        //    admin_field is configured) the User row's flag is
+        //    flipped to true so the promotion survives env-var
+        //    removal. Operator-friendly: every Pylon app gets
+        //    "designate admins by email" without writing app code.
+        //
+        // PYLON_ADMIN_TOKEN remains as the operator-token escape
+        // hatch for cron/migration scripts.
         if !auth_ctx.is_admin {
-            if let Some(uid) = auth_ctx.user_id.as_deref() {
-                if let Some(field) = runtime
+            if let Some(uid) = auth_ctx.user_id.clone() {
+                let user_entity = runtime.manifest().auth.user.entity.clone();
+                let admin_field = runtime
                     .manifest()
                     .auth
                     .user
                     .admin_field
-                    .as_deref()
-                    .filter(|f| !f.is_empty())
-                {
-                    let user_entity = runtime.manifest().auth.user.entity.as_str();
-                    use pylon_http::DataStore as _;
-                    if let Ok(Some(row)) = runtime.get_by_id(user_entity, uid) {
-                        let truthy = match row.get(field) {
-                            Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
-                            Some(v) if v.is_string() => {
-                                let s = v.as_str().unwrap_or("").to_ascii_lowercase();
-                                s == "true" || s == "1" || s == "admin"
+                    .clone()
+                    .filter(|f| !f.is_empty());
+                use pylon_http::DataStore as _;
+                let row = runtime.get_by_id(&user_entity, &uid).ok().flatten();
+
+                // Path 1: admin_field on the User row.
+                if let (Some(ref field), Some(ref row)) = (&admin_field, &row) {
+                    let truthy = match row.get(field.as_str()) {
+                        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+                        Some(v) if v.is_string() => {
+                            let s = v.as_str().unwrap_or("").to_ascii_lowercase();
+                            s == "true" || s == "1" || s == "admin"
+                        }
+                        Some(v) if v.is_number() => {
+                            v.as_i64().map(|n| n != 0).unwrap_or(false)
+                        }
+                        Some(v) if v.is_array() => v
+                            .as_array()
+                            .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if truthy {
+                        auth_ctx.is_admin = true;
+                    }
+                }
+
+                // Path 2: PYLON_ADMIN_EMAILS allowlist. Only fires when
+                // the User row carries a verified email — we never
+                // promote on an unverified claim. Match is case-
+                // insensitive and tolerates whitespace around entries.
+                if !auth_ctx.is_admin {
+                    let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(|s| s.trim().to_ascii_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !allow.is_empty() {
+                        if let Some(ref row) = row {
+                            let email = row
+                                .get("email")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_ascii_lowercase())
+                                .filter(|s| !s.is_empty());
+                            let verified = row
+                                .get("emailVerified")
+                                .or_else(|| row.get("email_verified"))
+                                .map(|v| match v {
+                                    serde_json::Value::Bool(b) => *b,
+                                    // Treat any non-empty timestamp / "true" /
+                                    // "1" string as verified (consistent with
+                                    // how the rest of the framework reads
+                                    // "verified" timestamps).
+                                    serde_json::Value::String(s) => !s.is_empty()
+                                        && !s.eq_ignore_ascii_case("false"),
+                                    serde_json::Value::Number(n) => {
+                                        n.as_i64().map(|n| n != 0).unwrap_or(false)
+                                    }
+                                    serde_json::Value::Null => false,
+                                    _ => false,
+                                })
+                                .unwrap_or(false);
+                            if verified {
+                                if let Some(email) = email {
+                                    if allow.iter().any(|a| a == &email) {
+                                        auth_ctx.is_admin = true;
+                                        // Persist when an admin_field is
+                                        // configured. Best-effort — a write
+                                        // failure shouldn't fail the request,
+                                        // we already lifted in-memory. The
+                                        // spec says "removing an email from
+                                        // the env doesn't demote", and the
+                                        // persisted flag is what makes that
+                                        // true.
+                                        if let Some(field) = &admin_field {
+                                            let already_truthy = row
+                                                .get(field.as_str())
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(false);
+                                            if !already_truthy {
+                                                let payload = serde_json::json!({
+                                                    field: true,
+                                                });
+                                                let _ = runtime.update(
+                                                    &user_entity,
+                                                    &uid,
+                                                    &payload,
+                                                );
+                                                tracing::info!(
+                                                    target: "pylon::auth",
+                                                    "[admin-emails] promoted {email} via PYLON_ADMIN_EMAILS"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            Some(v) if v.is_number() => v.as_i64().map(|n| n != 0).unwrap_or(false),
-                            Some(v) if v.is_array() => v
-                                .as_array()
-                                .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
-                                .unwrap_or(false),
-                            _ => false,
-                        };
-                        if truthy {
-                            auth_ctx.is_admin = true;
                         }
                     }
                 }
