@@ -38,9 +38,31 @@ pub mod workflows;
 pub mod ws;
 
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
+
+/// Bind a TCP listener that accepts BOTH IPv4 and IPv6 connections.
+///
+/// macOS resolves `localhost` to `::1` first (IPv6). A v4-only listener
+/// at `0.0.0.0:port` would silently refuse those connects — the client
+/// retries the next address (`127.0.0.1`) but applications that don't
+/// retry (e.g. the Yapless Mac app's WebSocket connect) just see
+/// "connection refused" with no useful diagnostic.
+///
+/// Pattern: try `[::]:port` first (dual-stack, the kernel maps v4
+/// connections via IPv4-mapped IPv6 addresses on Linux + macOS), fall
+/// back to `0.0.0.0:port` if v6 is unavailable. The fallback exists
+/// because some sandboxed test environments and old Linux kernels
+/// disable IPv6 entirely; we don't want to refuse to start there.
+pub fn bind_dual_stack_tcp(port: u16) -> Result<TcpListener, std::io::Error> {
+    let v6 = format!("[::]:{port}");
+    match TcpListener::bind(&v6) {
+        Ok(l) => Ok(l),
+        Err(_) => TcpListener::bind(format!("0.0.0.0:{port}")),
+    }
+}
 
 use pylon_kernel::{AppManifest, ManifestEntity, StudioConfig};
 use rusqlite::Connection;

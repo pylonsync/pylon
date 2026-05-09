@@ -117,6 +117,42 @@ pub fn create_index_sql(
     )
 }
 
+/// Best-effort recovery of a partial-index predicate from the original
+/// CREATE INDEX SQL stored in sqlite_master. Looks for a top-level
+/// ` WHERE ` token (case-insensitive, parenthesis-aware) and returns
+/// the trimmed tail. SQLite's parser canonicalises the predicate when
+/// it stores the SQL — but it doesn't normalise quoting or whitespace
+/// — so the planner runs it back through `normalise_predicate` before
+/// comparing against the manifest's form. Returns None when the SQL
+/// has no WHERE (regular index) or when parsing gives up (e.g., the
+/// predicate uses tokens we don't recognise).
+fn extract_partial_predicate(create_index_sql: &str) -> Option<String> {
+    let upper = create_index_sql.to_uppercase();
+    // Find " WHERE " outside any parentheses. CREATE INDEX SQL doesn't
+    // typically have parens around the column list closing before
+    // WHERE, so a simple depth tracker is enough.
+    let bytes = upper.as_bytes();
+    let mut depth: i32 = 0;
+    let needle = b" WHERE ";
+    for i in 0..bytes.len().saturating_sub(needle.len()) {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && &bytes[i..i + needle.len()] == needle {
+            // Slice in the ORIGINAL string (case preserved) past the
+            // " WHERE " token.
+            let predicate = create_index_sql[i + needle.len()..].trim().to_string();
+            if predicate.is_empty() {
+                return None;
+            }
+            return Some(predicate);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // SqliteAdapter
 // ---------------------------------------------------------------------------
@@ -543,6 +579,19 @@ impl SqliteAdapter {
                         message: format!("Failed to create index {entity}.{name}: {e}"),
                     })?;
                 }
+                SchemaOperation::RemoveIndex { entity, name } => {
+                    // `name` is the logical name from the manifest.
+                    // Live indexes are stored prefixed (`<entity>_<name>`)
+                    // to match AddIndex's namespace, so we DROP under
+                    // the same naming convention. IF EXISTS makes this
+                    // idempotent — running twice is harmless.
+                    let full = format!("{}_{}", entity, name);
+                    let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&full));
+                    self.conn.execute(&sql, []).map_err(|e| StorageError {
+                        code: "SQLITE_EXEC_FAILED".into(),
+                        message: format!("Failed to drop index {full}: {e}"),
+                    })?;
+                }
                 SchemaOperation::CreateSearchIndex { entity, config } => {
                     // Ensure the shared facet table exists. Single
                     // `_facet_bitmap` table holds all entities' bitmaps
@@ -745,10 +794,29 @@ impl SqliteAdapter {
                 .collect::<Result<Vec<String>, _>>()
                 .map_err(sqlite_err)?;
 
+            // Recover the WHERE predicate (if this is a partial index)
+            // by parsing the original CREATE INDEX SQL out of
+            // sqlite_master. PRAGMA introspection doesn't expose the
+            // predicate directly. Best-effort string match — anything
+            // we can't parse comes back as None, which the planner
+            // treats as "no partial predicate" (a manifest with a
+            // WHERE clause then drift-rebuilds, which is the safe
+            // behaviour).
+            let mut sql_stmt = self
+                .conn
+                .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?1")
+                .map_err(sqlite_err)?;
+            let where_clause: Option<String> = sql_stmt
+                .query_row([name], |row| row.get::<_, Option<String>>(0))
+                .ok()
+                .flatten()
+                .and_then(|sql| extract_partial_predicate(&sql));
+
             indexes.push(IndexSnapshot {
                 name: name.clone(),
                 columns,
                 unique: *unique,
+                where_clause,
             });
         }
 

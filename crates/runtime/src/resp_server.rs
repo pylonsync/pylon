@@ -15,7 +15,7 @@
 //! Conn:    PING, ECHO, QUIT, COMMAND, INFO
 
 use std::io::{BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
 
@@ -28,11 +28,11 @@ use crate::resp::{parse_resp, RespValue};
 /// This blocks the calling thread. Each client connection is handled in its
 /// own thread with a synchronous read loop.
 pub fn start_resp_server(cache: Arc<CachePlugin>, port: u16) {
-    let addr = format!("0.0.0.0:{port}");
-    let listener = match TcpListener::bind(&addr) {
+    // Dual-stack v6+v4 (see crate::bind_dual_stack_tcp).
+    let listener = match crate::bind_dual_stack_tcp(port) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!("[resp] Failed to bind RESP server on {addr}: {e}");
+            tracing::warn!("[resp] Failed to bind RESP server on port {port}: {e}");
             return;
         }
     };

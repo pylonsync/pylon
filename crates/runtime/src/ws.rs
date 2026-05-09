@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -579,11 +579,15 @@ pub fn start_ws_server(
     port: u16,
     snapshot_fetcher: Option<SnapshotFetcher>,
 ) {
-    let addr = format!("0.0.0.0:{port}");
-    let listener = match TcpListener::bind(&addr) {
+    // Dual-stack v6+v4. The Yapless Mac app + any client that
+    // resolves `localhost` to `::1` first (the macOS default) would
+    // otherwise see "connection refused" on the WS port even though
+    // the HTTP server on the next port up is reachable. See
+    // crate::bind_dual_stack_tcp for the rationale.
+    let listener = match crate::bind_dual_stack_tcp(port) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!("[ws] Failed to bind on {addr}: {e}");
+            tracing::warn!("[ws] Failed to bind on port {port}: {e}");
             return;
         }
     };

@@ -13,7 +13,7 @@
 //! swap in an async runtime; for pylon's current scale, thread-per-conn
 //! is simpler and fine.
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -36,14 +36,17 @@ pub fn start_shard_ws_server(
     sessions: Arc<SessionStore>,
     port: u16,
 ) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
+    // Dual-stack v6+v4 bind — without this, macOS clients that
+    // resolve `localhost` to `::1` (IPv6) hit ECONNREFUSED on what
+    // looks like a working server. See crate::bind_dual_stack_tcp.
+    let listener = match crate::bind_dual_stack_tcp(port) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("[shard-ws] failed to bind port {port}: {e}");
             return;
         }
     };
-    tracing::warn!("[shard-ws] listening on ws://0.0.0.0:{port}");
+    tracing::warn!("[shard-ws] listening on ws://[::]:{port} (dual-stack)");
 
     // Per-IP cap so a single client can't open a swarm of shard WS
     // connections to exhaust the per-thread resource budget. Games with

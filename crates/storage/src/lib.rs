@@ -177,11 +177,56 @@ pub struct IndexSnapshot {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Partial-index predicate as introspected from the live DB. None
+    /// means "regular index covering every row". Compared against the
+    /// manifest's `where_clause` to detect shape drift — if the live
+    /// index lacks a WHERE clause that the manifest declares (or
+    /// vice-versa), `plan_from_snapshot` emits RemoveIndex + AddIndex
+    /// to recreate it correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
 }
 
-/// Plan additive schema changes from a snapshot to a target manifest.
-/// Shared by both SQLite and Postgres adapters.
-/// Only produces CreateEntity, AddField, AddIndex, and Noop.
+/// Best-effort canonicalization of a partial-index WHERE predicate so
+/// shape-drift comparison doesn't fire on cosmetic differences. The
+/// only normalisation we attempt is whitespace collapsing — Postgres'
+/// pg_get_expr usually adds parentheses (`(plan = 'hobby'::text)`)
+/// while a manifest typically writes the bare form (`plan = 'hobby'`),
+/// so we strip a single leading/trailing pair plus type-cast suffixes
+/// like `::text`. This is intentionally narrow: anything fancier (sub-
+/// expressions, multiple type casts, function calls) falls through and
+/// produces a "drift" signal that triggers a rebuild — better to over-
+/// rebuild than to silently skip a legit drift.
+fn normalise_predicate(p: Option<&str>) -> Option<String> {
+    p.map(|s| {
+        let mut t = s.trim().to_string();
+        // Strip one balanced pair of outer parens.
+        if t.starts_with('(') && t.ends_with(')') {
+            t = t[1..t.len() - 1].trim().to_string();
+        }
+        // Drop common Postgres type-cast suffixes from string
+        // literals so `'hobby'::text` ≡ `'hobby'`.
+        for cast in ["::text", "::varchar", "::character varying", "::bpchar"] {
+            t = t.replace(cast, "");
+        }
+        // Collapse runs of whitespace.
+        let collapsed: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        collapsed
+    })
+}
+
+/// Plan schema changes from a snapshot to a target manifest. Shared by
+/// the SQLite and Postgres adapters.
+///
+/// Produces a mix of CreateEntity / AddField / AlterField / AddIndex /
+/// RemoveIndex / Noop. RemoveIndex fires in two cases: an index in the
+/// live DB has no counterpart in the manifest (someone deleted it from
+/// schema and we honour the deletion), or an index exists under the
+/// same name but with a drifted shape (different columns, uniqueness,
+/// or partial-WHERE predicate). The drift case auto-heals indexes
+/// created by an older Pylon binary that silently dropped a WHERE
+/// clause — see the regression test
+/// `plan_recreates_index_when_partial_predicate_drifts`.
 pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> SchemaPlan {
     use std::collections::{HashMap, HashSet};
 
@@ -277,19 +322,96 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                     }
                 }
                 // Index names in DB are prefixed: {entity}_{index_name}.
-                let existing_indexes: HashSet<&str> =
-                    table.indexes.iter().map(|i| i.name.as_str()).collect();
+                // Build a lookup keyed by the prefixed name so we can
+                // detect: missing → AddIndex, drifted shape → drop +
+                // recreate, removed-from-manifest → RemoveIndex.
+                let existing_index_by_full: HashMap<&str, &IndexSnapshot> = table
+                    .indexes
+                    .iter()
+                    .map(|i| (i.name.as_str(), i))
+                    .collect();
+
                 for index in &entity.indexes {
                     let full_name = format!("{}_{}", entity.name, index.name);
-                    if !existing_indexes.contains(full_name.as_str()) {
-                        operations.push(SchemaOperation::AddIndex {
-                            entity: entity.name.clone(),
-                            name: index.name.clone(),
-                            fields: index.fields.clone(),
-                            unique: index.unique,
-                            where_clause: index.where_clause.clone(),
-                        });
+                    match existing_index_by_full.get(full_name.as_str()) {
+                        None => {
+                            operations.push(SchemaOperation::AddIndex {
+                                entity: entity.name.clone(),
+                                name: index.name.clone(),
+                                fields: index.fields.clone(),
+                                unique: index.unique,
+                                where_clause: index.where_clause.clone(),
+                            });
+                        }
+                        Some(existing) => {
+                            // Shape drift: columns / unique / WHERE
+                            // predicate differs between the live index
+                            // and the manifest. Auto-heals indexes
+                            // created by an older Pylon version that
+                            // didn't honour the WHERE clause (shipped
+                            // a regular unique index where a partial
+                            // unique was requested). Drop + recreate
+                            // with the manifest's intent.
+                            //
+                            // SQL equality on the WHERE predicate is
+                            // string-comparison, which catches the
+                            // common case but not semantic equivalence
+                            // (`plan = 'hobby'` vs `(plan = 'hobby')`).
+                            // Postgres re-renders predicates through
+                            // pg_get_expr, so what we read back is the
+                            // canonical form — matching it requires
+                            // the manifest to use the same form. Drift
+                            // in either direction triggers a rebuild.
+                            let columns_match = existing.columns == index.fields;
+                            let unique_match = existing.unique == index.unique;
+                            let where_match =
+                                normalise_predicate(existing.where_clause.as_deref())
+                                    == normalise_predicate(index.where_clause.as_deref());
+                            if !columns_match || !unique_match || !where_match {
+                                operations.push(SchemaOperation::RemoveIndex {
+                                    entity: entity.name.clone(),
+                                    name: index.name.clone(),
+                                });
+                                operations.push(SchemaOperation::AddIndex {
+                                    entity: entity.name.clone(),
+                                    name: index.name.clone(),
+                                    fields: index.fields.clone(),
+                                    unique: index.unique,
+                                    where_clause: index.where_clause.clone(),
+                                });
+                            }
+                        }
                     }
+                }
+
+                // Indexes that exist in the DB but not in the manifest
+                // — drop them. Skips the table's primary key (Postgres
+                // names it `<table>_pkey`, SQLite's autoindex_*) and
+                // anything whose name doesn't match the
+                // `<entity>_<logical>` Pylon convention, so externally
+                // managed indexes (DBA-created, search shadow tables,
+                // etc.) don't get clobbered.
+                let prefix = format!("{}_", entity.name);
+                let manifest_index_names: HashSet<String> = entity
+                    .indexes
+                    .iter()
+                    .map(|i| format!("{}_{}", entity.name, i.name))
+                    .collect();
+                for live in &table.indexes {
+                    if !live.name.starts_with(&prefix) {
+                        continue;
+                    }
+                    if live.name.ends_with("_pkey") {
+                        continue;
+                    }
+                    if manifest_index_names.contains(&live.name) {
+                        continue;
+                    }
+                    let logical = live.name[prefix.len()..].to_string();
+                    operations.push(SchemaOperation::RemoveIndex {
+                        entity: entity.name.clone(),
+                        name: logical,
+                    });
                 }
                 // Search-index creation on an already-existing table:
                 // emit CreateSearchIndex when the manifest adds a
@@ -848,7 +970,11 @@ mod tests {
     }
 
     #[test]
-    fn remove_index_is_unsupported_not_destructive() {
+    fn remove_index_is_safe_and_supported() {
+        // Reverses the previous classification. DROP INDEX IF EXISTS
+        // is non-destructive on data + supported by both adapters, so
+        // it should NOT block auto-migrate. analyze_plan emits a soft
+        // REMOVE_INDEX warning for visibility.
         let plan = SchemaPlan {
             operations: vec![SchemaOperation::RemoveIndex {
                 entity: "User".into(),
@@ -857,12 +983,19 @@ mod tests {
         };
         let analysis = analyze_plan(&plan);
         assert!(!analysis.destructive);
-        assert!(analysis.has_unsupported);
-        assert_eq!(analysis.warnings[0].code, "UNSUPPORTED_REMOVE_INDEX");
+        assert!(!analysis.has_unsupported);
+        assert!(analysis.warnings.iter().any(|w| w.code == "REMOVE_INDEX"));
     }
 
     #[test]
     fn mixed_plan_flags_both() {
+        // RemoveEntity is destructive + unsupported (we never auto-
+        // drop tables). RemoveIndex is now safe + supported, so the
+        // mix should be destructive (RemoveEntity) but neither op
+        // alone is responsible for the unsupported flag from
+        // RemoveIndex any more — only RemoveEntity contributes here.
+        // Three warnings total: RemoveEntity (destructive +
+        // unsupported = two warnings) + RemoveIndex (one).
         let plan = SchemaPlan {
             operations: vec![
                 SchemaOperation::CreateEntity {
@@ -881,7 +1014,8 @@ mod tests {
         let analysis = analyze_plan(&plan);
         assert!(analysis.destructive);
         assert!(analysis.has_unsupported);
-        assert_eq!(analysis.warnings.len(), 2);
+        assert!(analysis.warnings.iter().any(|w| w.code == "DESTRUCTIVE_REMOVE_ENTITY"));
+        assert!(analysis.warnings.iter().any(|w| w.code == "REMOVE_INDEX"));
     }
 
     #[test]
@@ -1041,6 +1175,226 @@ mod tests {
             .operations
             .iter()
             .any(|op| matches!(op, SchemaOperation::AddIndex { name, .. } if name == "by_email")));
+    }
+
+    /// Regression for the framework bug behind pylon-cloud's
+    /// `Organization_uniq_hobby_owner` constraint: an older Pylon
+    /// silently created a regular unique index where the manifest
+    /// declared a partial one (`WHERE plan = 'hobby'`). When a newer
+    /// schema removed the index, auto-migrate kept the bad index alive
+    /// because plan_from_snapshot only checked existence-by-name and
+    /// never compared shape. Org creation stayed broken in prod even
+    /// after the schema change shipped.
+    ///
+    /// Fix: detect partial-WHERE drift and emit RemoveIndex + AddIndex
+    /// to recreate the index in the manifest's intended shape.
+    #[test]
+    fn plan_recreates_index_when_partial_predicate_drifts() {
+        let snapshot = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "Organization".into(),
+                columns: vec![
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: true,
+                    },
+                    ColumnSnapshot {
+                        name: "createdBy".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
+                    ColumnSnapshot {
+                        name: "plan".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
+                ],
+                // Live DB has a regular unique index — no WHERE clause.
+                // Mirrors the bad state pylon-cloud's prod was stuck in.
+                indexes: vec![IndexSnapshot {
+                    name: "Organization_uniq_hobby_owner".into(),
+                    columns: vec!["createdBy".into()],
+                    unique: true,
+                    where_clause: None,
+                }],
+            }],
+        };
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "Organization".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "createdBy".into(),
+                        field_type: "id".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                    ManifestField {
+                        name: "plan".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                ],
+                indexes: vec![ManifestIndex {
+                    name: "uniq_hobby_owner".into(),
+                    fields: vec!["createdBy".into()],
+                    unique: true,
+                    where_clause: Some("plan = 'hobby'".into()),
+                }],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+
+        // Expect a RemoveIndex (drop the wrong-shape index) followed
+        // by an AddIndex (recreate with the WHERE predicate).
+        let remove_idx = plan.operations.iter().position(|op| {
+            matches!(op, SchemaOperation::RemoveIndex { name, .. } if name == "uniq_hobby_owner")
+        });
+        let add_idx = plan.operations.iter().position(|op| {
+            matches!(
+                op,
+                SchemaOperation::AddIndex { name, where_clause: Some(_), .. }
+                    if name == "uniq_hobby_owner"
+            )
+        });
+        assert!(remove_idx.is_some(), "expected RemoveIndex for drifted index");
+        assert!(add_idx.is_some(), "expected AddIndex with WHERE clause");
+        assert!(remove_idx.unwrap() < add_idx.unwrap(), "remove must come before recreate");
+    }
+
+    /// Regression for the second framework bug: removing an index
+    /// from the schema didn't drop it from the live DB, because
+    /// plan_from_snapshot only iterated over manifest indexes. The
+    /// orphan index continued to enforce its constraint forever.
+    #[test]
+    fn plan_drops_index_removed_from_manifest() {
+        let snapshot = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "User".into(),
+                columns: vec![
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: true,
+                    },
+                    ColumnSnapshot {
+                        name: "email".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
+                ],
+                indexes: vec![IndexSnapshot {
+                    // DB index that the manifest no longer declares.
+                    name: "User_old_idx".into(),
+                    columns: vec!["email".into()],
+                    unique: false,
+                    where_clause: None,
+                }],
+            }],
+        };
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "User".into(),
+                fields: vec![ManifestField {
+                    name: "email".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                }],
+                // Manifest dropped the old_idx entry.
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+        assert!(
+            plan.operations.iter().any(|op| matches!(
+                op,
+                SchemaOperation::RemoveIndex { entity, name }
+                    if entity == "User" && name == "old_idx"
+            )),
+            "expected RemoveIndex for orphan DB index, got plan: {:?}",
+            plan.operations,
+        );
+    }
+
+    /// The primary-key index is always present in Postgres (named
+    /// `<table>_pkey`) and never declared in the manifest. The planner
+    /// must NOT try to drop it.
+    #[test]
+    fn plan_leaves_primary_key_alone() {
+        let snapshot = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "User".into(),
+                columns: vec![ColumnSnapshot {
+                    name: "id".into(),
+                    column_type: "TEXT".into(),
+                    notnull: true,
+                    primary_key: true,
+                }],
+                indexes: vec![IndexSnapshot {
+                    name: "User_pkey".into(),
+                    columns: vec!["id".into()],
+                    unique: true,
+                    where_clause: None,
+                }],
+            }],
+        };
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "User".into(),
+                fields: vec![],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+        let drops_pkey = plan.operations.iter().any(|op| matches!(
+            op,
+            SchemaOperation::RemoveIndex { name, .. } if name == "pkey"
+        ));
+        assert!(!drops_pkey, "primary key must not be dropped");
     }
 
     // -- SchemaPlan::is_empty --

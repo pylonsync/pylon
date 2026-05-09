@@ -84,9 +84,18 @@ pub fn start_cache_server_with_options(
         return Ok(());
     }
 
-    // Start the HTTP server.
-    let addr = format!("0.0.0.0:{port}");
-    let server = Server::http(&addr).map_err(|e| format!("Failed to start cache server: {e}"))?;
+    // Start the HTTP server. Dual-stack v6+v4 (`[::]:port`) so macOS
+    // clients resolving `localhost` to ::1 reach us — same fallback
+    // pattern as the main API server in server.rs.
+    let v6_addr = format!("[::]:{port}");
+    let server = match Server::http(&v6_addr) {
+        Ok(s) => s,
+        Err(_) => {
+            let v4_addr = format!("0.0.0.0:{port}");
+            Server::http(&v4_addr)
+                .map_err(|e| format!("Failed to start cache server: {e}"))?
+        }
+    };
 
     tracing::warn!("pylon cache server listening on http://localhost:{port}");
     tracing::warn!("  Cache:  POST http://localhost:{port}/cache");

@@ -273,16 +273,23 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                     where_clause.as_deref(),
                 ));
             }
-            SchemaOperation::RemoveIndex { entity: _, name } => {
+            SchemaOperation::RemoveIndex { entity, name } => {
                 // Dropping an index is non-destructive (queries that
                 // used it just fall back to seq scan) and idempotent
                 // when guarded with IF EXISTS — safe to run from the
-                // auto-migrate boot path. Used to be flagged as
-                // "unsupported" by analyze_plan, which left
-                // pylon-cloud's `uniq_hobby_owner` partial unique
-                // index in place after the per-user-org cap was
-                // lifted, breaking org creation in prod.
-                statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(name)));
+                // auto-migrate boot path.
+                //
+                // `name` is the logical (manifest-side) name; the DB
+                // stores it prefixed with `<entity>_` to match the
+                // namespace AddIndex creates. We previously emitted
+                // `DROP INDEX <logical>` here, which silently became
+                // a no-op against the prefixed DB name — auto-migrate
+                // looked like it had run but the index stayed alive,
+                // visible as the pylon-cloud `uniq_hobby_owner` regression
+                // (the index outlived its schema entry and broke org
+                // creation in prod even after the schema change shipped).
+                let full = format!("{}_{}", entity, name);
+                statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(&full)));
             }
             SchemaOperation::CreateSearchIndex { entity, config } => {
                 #[cfg(feature = "postgres-live")]
@@ -363,12 +370,17 @@ pub const INTROSPECT_COLUMNS_SQL: &str = "\
     WHERE table_schema = 'public' AND table_name = $1 \
     ORDER BY ordinal_position";
 
-/// SQL to list indexes for a given table.
-/// Use with parameter: table_name.
+/// SQL to list indexes for a given table. Returns one row per index
+/// with: index_name, is_unique, columns array, and the partial-index
+/// WHERE predicate (NULL for full-table indexes). The predicate is
+/// rendered through pg_get_expr so it comes back in canonical form
+/// (`(plan = 'hobby'::text)`) — the planner normalises that against
+/// the manifest's raw form before deciding the index has drifted.
 pub const INTROSPECT_INDEXES_SQL: &str = "\
     SELECT i.relname as index_name, \
            ix.indisunique as is_unique, \
-           array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns \
+           array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns, \
+           pg_get_expr(ix.indpred, ix.indrelid) as where_clause \
     FROM pg_index ix \
     JOIN pg_class t ON t.oid = ix.indrelid \
     JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -377,7 +389,7 @@ pub const INTROSPECT_INDEXES_SQL: &str = "\
     WHERE n.nspname = 'public' \
       AND t.relname = $1 \
       AND NOT ix.indisprimary \
-    GROUP BY i.relname, ix.indisunique \
+    GROUP BY i.relname, ix.indisunique, ix.indpred, ix.indrelid \
     ORDER BY i.relname";
 
 /// Plan from a snapshot (reuses the shared plan_from_snapshot).
@@ -1000,10 +1012,12 @@ pub mod live {
                 let name: String = row.get(0);
                 let unique: bool = row.get(1);
                 let columns: Vec<String> = row.get(2);
+                let where_clause: Option<String> = row.get(3);
                 indexes.push(IndexSnapshot {
                     name,
                     columns,
                     unique,
+                    where_clause,
                 });
             }
             Ok(indexes)
@@ -2283,6 +2297,7 @@ mod tests {
                         name: "Todo_by_user".into(),
                         columns: vec!["userId".into()],
                         unique: false,
+                        where_clause: None,
                     }],
                 },
             ],
@@ -2353,6 +2368,7 @@ mod tests {
                         name: "Todo_by_user".into(),
                         columns: vec!["userId".into()],
                         unique: false,
+                        where_clause: None,
                     }],
                 },
             ],

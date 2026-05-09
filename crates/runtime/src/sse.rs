@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -207,11 +207,13 @@ impl SseHub {
 /// and registers the stream with the hub. The accept thread exits immediately
 /// after registration — no per-client thread is kept alive.
 pub fn start_sse_server(hub: Arc<SseHub>, port: u16) {
-    let addr = format!("0.0.0.0:{port}");
-    let listener = match TcpListener::bind(&addr) {
+    // Dual-stack v6+v4 — without it, macOS clients connecting to
+    // `localhost:port` over IPv6 (::1) hit connection refused.
+    // See crate::bind_dual_stack_tcp.
+    let listener = match crate::bind_dual_stack_tcp(port) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!("[sse] Failed to bind on {addr}: {e}");
+            tracing::warn!("[sse] Failed to bind on port {port}: {e}");
             return;
         }
     };
