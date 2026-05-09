@@ -23,8 +23,8 @@ use std::sync::RwLock;
 
 /// One org's SSO configuration. The client_secret is stored encrypted
 /// at rest using the same envelope the rest of the auth crate uses for
-/// secrets at rest (sealed with PYLON_SSO_ENCRYPTION_KEY when set; in
-/// dev mode, plain).
+/// secrets at rest (sealed with PYLON_SECRET when set; in dev mode,
+/// plain). PYLON_SSO_ENCRYPTION_KEY remains a legacy alias.
 ///
 /// Discovery endpoints (`authorization_endpoint`, `token_endpoint`,
 /// `userinfo_endpoint`, `jwks_uri`) are populated from the IdP's
@@ -37,7 +37,7 @@ pub struct OrgSsoConfig {
     /// resolve `<issuer_url>/.well-known/openid-configuration`.
     pub issuer_url: String,
     pub client_id: String,
-    /// Sealed (PYLON_SSO_ENCRYPTION_KEY) when set; raw otherwise. The
+    /// Sealed (PYLON_SECRET) when set; raw otherwise. The
     /// public-facing config endpoint NEVER returns this field.
     pub client_secret_sealed: String,
     /// Org role granted to a freshly-auto-joined user. Defaults to
@@ -838,8 +838,9 @@ pub fn random_state() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Encrypt-at-rest envelope for client secrets. Uses
-/// PYLON_SSO_ENCRYPTION_KEY (32-byte hex/base64). When unset, returns
+/// Encrypt-at-rest envelope for client secrets. Uses PYLON_SECRET
+/// (32-byte hex/base64; PYLON_SSO_ENCRYPTION_KEY accepted as a legacy
+/// alias). When unset, returns
 /// the secret verbatim with a `plain:` prefix so the round-trip works
 /// in dev — operators are warned at server-boot time (see `server.rs`)
 /// when a secret would be persisted plain.
@@ -873,7 +874,7 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
     }
     if let Some(rest) = blob.strip_prefix("enc:") {
         let key = sso_encryption_key().ok_or_else(|| {
-            "PYLON_SSO_ENCRYPTION_KEY required to read sealed SSO secret".to_string()
+            "PYLON_SECRET required to read sealed SSO secret".to_string()
         })?;
         return decrypt_chacha(rest, &key);
     }
@@ -883,7 +884,17 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
 }
 
 fn sso_encryption_key() -> Option<[u8; 32]> {
-    let raw = std::env::var("PYLON_SSO_ENCRYPTION_KEY").ok()?;
+    // PYLON_SECRET is the canonical framework env var (matches the
+    // `<framework>_SECRET` pattern used by better-auth, NextAuth,
+    // Auth.js, et al.). PYLON_SSO_ENCRYPTION_KEY is the legacy name —
+    // accepted for backward compatibility with existing deployments
+    // so a framework upgrade doesn't snap apps that already set it.
+    // Prefer the new name when both are set.
+    let raw = std::env::var("PYLON_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("PYLON_SSO_ENCRYPTION_KEY").ok())
+        .filter(|s| !s.is_empty())?;
     parse_key32(&raw)
 }
 

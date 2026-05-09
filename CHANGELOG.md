@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.65](https://github.com/pylonsync/pylon/compare/v0.3.64...v0.3.65) (2026-05-09)
+
+
+### Features
+
+* **auth:** rename `PYLON_SSO_ENCRYPTION_KEY` → `PYLON_SECRET`. Matches the `<framework>_SECRET` convention used by better-auth, NextAuth, Auth.js. The old name remains a legacy alias — existing deployments don't need to update env vars to upgrade. Boot-time warning + doc references now use the new name.
+
 ## [0.3.64](https://github.com/pylonsync/pylon/compare/v0.3.63...v0.3.64) (2026-05-09)
 
 

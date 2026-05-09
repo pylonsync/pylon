@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "loro-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/loro-dev/loro-swift.git",
+      "state" : {
+        "revision" : "742c70948521f0f793a1f9af4a85185dfe9df5d1",
+        "version" : "1.10.3"
+      }
+    }
+  ],
+  "version" : 2
+}

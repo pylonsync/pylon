@@ -18,6 +18,14 @@ PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 PYLON_ADMIN_TOKEN=<64+ random bytes, hex>
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db
 
+# At-rest encryption key — used for SSO/SAML client secrets and any
+# other sensitive values pylon persists. 32 bytes hex (or base64). When
+# unset, pylon falls back to plaintext storage with a startup warning;
+# fine in dev, refused effectively in production. Generate with
+# `openssl rand -hex 32`. PYLON_SSO_ENCRYPTION_KEY is honoured as a
+# legacy alias for backward compatibility.
+PYLON_SECRET=<openssl rand -hex 32>
+
 # Optional: declarative admin allowlist. Comma-separated list of
 # verified email addresses. Matched users get auth.is_admin lifted on
 # every request (case-insensitive, requires emailVerified=true). When
