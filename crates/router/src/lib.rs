@@ -314,12 +314,7 @@ pub trait FileOps: Send + Sync {
     ///   data and access is allowed but logged — new uploads always carry
     ///   an owner record so this fallback only covers files predating the
     ///   ownership machinery.
-    fn get_file(
-        &self,
-        id: &str,
-        requester_user_id: Option<&str>,
-        is_admin: bool,
-    ) -> (u16, String);
+    fn get_file(&self, id: &str, requester_user_id: Option<&str>, is_admin: bool) -> (u16, String);
 }
 
 /// Sends emails (magic codes, invitations, etc.).
@@ -2296,13 +2291,8 @@ mod auth_gate_tests {
     fn auth_native_session_refuses_anonymous() {
         let anon = AuthContext::anonymous();
         with_ctx(false, &anon, |ctx| {
-            let (status, body, _ct) = route(
-                ctx,
-                HttpMethod::Post,
-                "/api/auth/native-session",
-                "",
-                None,
-            );
+            let (status, body, _ct) =
+                route(ctx, HttpMethod::Post, "/api/auth/native-session", "", None);
             assert_eq!(status, 401);
             assert!(body.contains("AUTH_REQUIRED"));
         });
@@ -2315,19 +2305,11 @@ mod auth_gate_tests {
     /// 2026-05-09 codex security audit.
     #[test]
     fn auth_native_session_refuses_api_key_auth() {
-        let api_key_ctx = AuthContext::from_api_key(
-            "alice".to_string(),
-            "key_abc".to_string(),
-            None,
-        );
+        let api_key_ctx =
+            AuthContext::from_api_key("alice".to_string(), "key_abc".to_string(), None);
         with_ctx(false, &api_key_ctx, |ctx| {
-            let (status, body, _ct) = route(
-                ctx,
-                HttpMethod::Post,
-                "/api/auth/native-session",
-                "",
-                None,
-            );
+            let (status, body, _ct) =
+                route(ctx, HttpMethod::Post, "/api/auth/native-session", "", None);
             assert_eq!(status, 403);
             assert!(body.contains("API_KEY_AUTH_FORBIDDEN"));
         });
@@ -2343,13 +2325,8 @@ mod auth_gate_tests {
     fn auth_native_session_mints_for_cookie_user_in_prod() {
         let user = AuthContext::authenticated("alice".to_string());
         with_ctx(false, &user, |ctx| {
-            let (status, body, _ct) = route(
-                ctx,
-                HttpMethod::Post,
-                "/api/auth/native-session",
-                "",
-                None,
-            );
+            let (status, body, _ct) =
+                route(ctx, HttpMethod::Post, "/api/auth/native-session", "", None);
             assert_eq!(status, 201);
             // Body shape: { token, user_id, expires_at }
             assert!(body.contains("\"token\""));
@@ -2361,7 +2338,10 @@ mod auth_gate_tests {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
             let token = parsed["token"].as_str().unwrap();
             let resolved = ctx.session_store.get(token);
-            assert!(resolved.is_some(), "minted token must resolve via SessionStore");
+            assert!(
+                resolved.is_some(),
+                "minted token must resolve via SessionStore"
+            );
             assert_eq!(resolved.unwrap().user_id, "alice");
         });
     }

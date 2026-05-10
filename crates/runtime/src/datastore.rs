@@ -1243,12 +1243,7 @@ impl pylon_router::FileOps for FileOpsAdapter {
         )
     }
 
-    fn get_file(
-        &self,
-        id: &str,
-        requester_user_id: Option<&str>,
-        is_admin: bool,
-    ) -> (u16, String) {
+    fn get_file(&self, id: &str, requester_user_id: Option<&str>, is_admin: bool) -> (u16, String) {
         // Owner enforcement: backends that support it (LocalFileStorage)
         // record an owner alongside each upload. We treat a 403 the same
         // as 404 to avoid leaking which IDs exist in another user's space.
@@ -1259,10 +1254,7 @@ impl pylon_router::FileOps for FileOpsAdapter {
                     _ => {
                         return (
                             404,
-                            pylon_router::json_error(
-                                "FILE_NOT_FOUND",
-                                "File not found",
-                            ),
+                            pylon_router::json_error("FILE_NOT_FOUND", "File not found"),
                         );
                     }
                 },
@@ -1424,11 +1416,8 @@ mod file_ownership_tests {
     use pylon_storage::files::{FileOwner, FileStorage, LocalFileStorage};
 
     fn temp_storage(suffix: &str) -> (Arc<dyn FileStorage>, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "pylon_owner_{}_{}",
-            std::process::id(),
-            suffix
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pylon_owner_{}_{}", std::process::id(), suffix));
         let _ = std::fs::remove_dir_all(&dir);
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
         (Arc::new(storage), dir)

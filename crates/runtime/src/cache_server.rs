@@ -92,8 +92,7 @@ pub fn start_cache_server_with_options(
         Ok(s) => s,
         Err(_) => {
             let v4_addr = format!("0.0.0.0:{port}");
-            Server::http(&v4_addr)
-                .map_err(|e| format!("Failed to start cache server: {e}"))?
+            Server::http(&v4_addr).map_err(|e| format!("Failed to start cache server: {e}"))?
         }
     };
 

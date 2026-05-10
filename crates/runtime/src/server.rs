@@ -1082,13 +1082,13 @@ fn start_server(
                                     .or_else(|| row.get("email_verified"))
                                     .map(|v| match v {
                                         serde_json::Value::Bool(b) => *b,
-                                        serde_json::Value::String(s) => !s.is_empty()
-                                            && !s.eq_ignore_ascii_case("false"),
+                                        serde_json::Value::String(s) => {
+                                            !s.is_empty() && !s.eq_ignore_ascii_case("false")
+                                        }
                                         _ => false,
                                     })
                                     .unwrap_or(false);
-                                verified
-                                    && email.map(|e| allow.contains(&e)).unwrap_or(false)
+                                verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
                             } else {
                                 false
                             }
@@ -1521,9 +1521,7 @@ fn start_server(
                             let s = v.as_str().unwrap_or("").to_ascii_lowercase();
                             s == "true" || s == "1" || s == "admin"
                         }
-                        Some(v) if v.is_number() => {
-                            v.as_i64().map(|n| n != 0).unwrap_or(false)
-                        }
+                        Some(v) if v.is_number() => v.as_i64().map(|n| n != 0).unwrap_or(false),
                         Some(v) if v.is_array() => v
                             .as_array()
                             .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
@@ -1562,8 +1560,9 @@ fn start_server(
                                     // "1" string as verified (consistent with
                                     // how the rest of the framework reads
                                     // "verified" timestamps).
-                                    serde_json::Value::String(s) => !s.is_empty()
-                                        && !s.eq_ignore_ascii_case("false"),
+                                    serde_json::Value::String(s) => {
+                                        !s.is_empty() && !s.eq_ignore_ascii_case("false")
+                                    }
                                     serde_json::Value::Number(n) => {
                                         n.as_i64().map(|n| n != 0).unwrap_or(false)
                                     }
@@ -1592,11 +1591,8 @@ fn start_server(
                                                 let payload = serde_json::json!({
                                                     field: true,
                                                 });
-                                                let _ = runtime.update(
-                                                    &user_entity,
-                                                    &uid,
-                                                    &payload,
-                                                );
+                                                let _ =
+                                                    runtime.update(&user_entity, &uid, &payload);
                                                 tracing::info!(
                                                     target: "pylon::auth",
                                                     "[admin-emails] promoted {email} via PYLON_ADMIN_EMAILS"
@@ -1828,9 +1824,7 @@ fn start_server(
                                 tenant_id: auth_ctx.tenant_id.clone(),
                             };
                             if let Err(e) = pylon_storage::files::FileStorage::record_owner(
-                                &storage,
-                                &stored.id,
-                                &owner,
+                                &storage, &stored.id, &owner,
                             ) {
                                 // Owner record is critical — without it the file
                                 // becomes readable by any other authenticated
@@ -1840,20 +1834,15 @@ fn start_server(
                                     error = %e.message,
                                     "Failed to record file owner; rolling back upload"
                                 );
-                                let _ = pylon_storage::files::FileStorage::delete(
-                                    &storage,
-                                    &stored.id,
-                                );
+                                let _ =
+                                    pylon_storage::files::FileStorage::delete(&storage, &stored.id);
                                 let err = json_error("OWNERSHIP_RECORD_FAILED", &e.message);
                                 let response = with_security_headers(
                                     Response::from_string(&err)
                                         .with_status_code(500u16)
                                         .with_header(
-                                            Header::from_bytes(
-                                                "Content-Type",
-                                                "application/json",
-                                            )
-                                            .unwrap(),
+                                            Header::from_bytes("Content-Type", "application/json")
+                                                .unwrap(),
                                         )
                                         .with_header(
                                             Header::from_bytes(

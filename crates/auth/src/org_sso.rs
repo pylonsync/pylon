@@ -874,9 +874,8 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
         return Ok(rest.to_string());
     }
     if let Some(rest) = blob.strip_prefix("enc:") {
-        let key = resolve_sso_encryption_key()?.ok_or_else(|| {
-            "PYLON_SECRET required to read sealed SSO secret".to_string()
-        })?;
+        let key = resolve_sso_encryption_key()?
+            .ok_or_else(|| "PYLON_SECRET required to read sealed SSO secret".to_string())?;
         return decrypt_chacha(rest, &key);
     }
     // Legacy unprefixed value: assume plain. Operators won't see this
@@ -1182,6 +1181,9 @@ mod tests {
 
     #[test]
     fn seal_unseal_round_trip_plain_mode() {
+        // Take the env lock so a parallel test can't toggle PYLON_SECRET
+        // out from under us between seal and unseal.
+        let _guard = super::secret_resolution_tests::ENV_LOCK.lock().unwrap();
         // No PYLON_SSO_ENCRYPTION_KEY set in tests by default.
         let sealed = seal_secret("topsecret").expect("plain-mode seal cannot fail");
         assert!(sealed.starts_with("plain:") || sealed.starts_with("enc:"));

@@ -54,11 +54,7 @@ pub trait FileStorage: Send + Sync {
     /// immediately after `store()` so ownership is persisted next to the bytes.
     /// Default impl is a noop for backends that delegate auth elsewhere
     /// (e.g., Stack0, where access is mediated by a CDN-level API key).
-    fn record_owner(
-        &self,
-        _id: &str,
-        _owner: &FileOwner,
-    ) -> Result<(), FileStorageError> {
+    fn record_owner(&self, _id: &str, _owner: &FileOwner) -> Result<(), FileStorageError> {
         Ok(())
     }
 
@@ -192,11 +188,7 @@ impl FileStorage for LocalFileStorage {
         Ok(existed)
     }
 
-    fn record_owner(
-        &self,
-        id: &str,
-        owner: &FileOwner,
-    ) -> Result<(), FileStorageError> {
+    fn record_owner(&self, id: &str, owner: &FileOwner) -> Result<(), FileStorageError> {
         validate_local_id(id)?;
         let dir = self.dir.join(".ownership");
         std::fs::create_dir_all(&dir).map_err(|e| FileStorageError {
@@ -504,8 +496,7 @@ mod tests {
 
     #[test]
     fn local_owner_round_trip() {
-        let dir = std::env::temp_dir()
-            .join(format!("pylon_files_owner_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pylon_files_owner_{}", std::process::id()));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
         let stored = storage.store("a.txt", b"hi", "text/plain").unwrap();
@@ -535,8 +526,10 @@ mod tests {
 
     #[test]
     fn local_owner_rejects_traversal() {
-        let dir = std::env::temp_dir()
-            .join(format!("pylon_files_owner_traversal_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "pylon_files_owner_traversal_{}",
+            std::process::id()
+        ));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
         let bad_owner = FileOwner {

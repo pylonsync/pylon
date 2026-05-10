@@ -325,11 +325,8 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                 // Build a lookup keyed by the prefixed name so we can
                 // detect: missing → AddIndex, drifted shape → drop +
                 // recreate, removed-from-manifest → RemoveIndex.
-                let existing_index_by_full: HashMap<&str, &IndexSnapshot> = table
-                    .indexes
-                    .iter()
-                    .map(|i| (i.name.as_str(), i))
-                    .collect();
+                let existing_index_by_full: HashMap<&str, &IndexSnapshot> =
+                    table.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
 
                 for index in &entity.indexes {
                     let full_name = format!("{}_{}", entity.name, index.name);
@@ -364,9 +361,8 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                             // in either direction triggers a rebuild.
                             let columns_match = existing.columns == index.fields;
                             let unique_match = existing.unique == index.unique;
-                            let where_match =
-                                normalise_predicate(existing.where_clause.as_deref())
-                                    == normalise_predicate(index.where_clause.as_deref());
+                            let where_match = normalise_predicate(existing.where_clause.as_deref())
+                                == normalise_predicate(index.where_clause.as_deref());
                             if !columns_match || !unique_match || !where_match {
                                 operations.push(SchemaOperation::RemoveIndex {
                                     entity: entity.name.clone(),
@@ -1014,7 +1010,10 @@ mod tests {
         let analysis = analyze_plan(&plan);
         assert!(analysis.destructive);
         assert!(analysis.has_unsupported);
-        assert!(analysis.warnings.iter().any(|w| w.code == "DESTRUCTIVE_REMOVE_ENTITY"));
+        assert!(analysis
+            .warnings
+            .iter()
+            .any(|w| w.code == "DESTRUCTIVE_REMOVE_ENTITY"));
         assert!(analysis.warnings.iter().any(|w| w.code == "REMOVE_INDEX"));
     }
 
@@ -1275,9 +1274,15 @@ mod tests {
                     if name == "uniq_hobby_owner"
             )
         });
-        assert!(remove_idx.is_some(), "expected RemoveIndex for drifted index");
+        assert!(
+            remove_idx.is_some(),
+            "expected RemoveIndex for drifted index"
+        );
         assert!(add_idx.is_some(), "expected AddIndex with WHERE clause");
-        assert!(remove_idx.unwrap() < add_idx.unwrap(), "remove must come before recreate");
+        assert!(
+            remove_idx.unwrap() < add_idx.unwrap(),
+            "remove must come before recreate"
+        );
     }
 
     /// Regression for the second framework bug: removing an index
@@ -1390,10 +1395,12 @@ mod tests {
             auth: Default::default(),
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
-        let drops_pkey = plan.operations.iter().any(|op| matches!(
-            op,
-            SchemaOperation::RemoveIndex { name, .. } if name == "pkey"
-        ));
+        let drops_pkey = plan.operations.iter().any(|op| {
+            matches!(
+                op,
+                SchemaOperation::RemoveIndex { name, .. } if name == "pkey"
+            )
+        });
         assert!(!drops_pkey, "primary key must not be dropped");
     }
 
