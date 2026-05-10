@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::Plugin;
+use crate::{Plugin, PluginError};
 use pylon_auth::AuthContext;
 
 /// Per-entity tenant scoping configuration.
@@ -111,6 +111,16 @@ impl TenantScopePlugin {
 
     /// Stamp `tenantId` onto a row that's about to be inserted.
     /// Returns `Err` if the entity is scoped but the caller has no tenant.
+    ///
+    /// Non-admin callers cannot override the tenant id — any explicit
+    /// value they pass must match `auth.tenantId`. Admin contexts (and
+    /// callers who didn't provide a value) get the auth.tenantId
+    /// auto-stamped. This closes the cross-tenant insert path the
+    /// 2026-05-09 codex security audit flagged: a member of tenant A
+    /// could otherwise plant rows into tenant B by sending
+    /// `{tenantId: "B", ...}` and counting on policy expressions to
+    /// only check membership of `auth.tenantId`, not equality with
+    /// `data.tenantId`.
     pub fn stamp_insert(
         &self,
         entity: &str,
@@ -125,14 +135,25 @@ impl TenantScopePlugin {
             None => return Err(TenantError::MissingTenant),
         };
         if let Some(obj) = data.as_object_mut() {
-            // Only inject when caller didn't provide one — let admin tooling
-            // override by being explicit.
-            let needs_set = obj
-                .get(field)
-                .map(|v| v.is_null() || v.as_str().map_or(false, str::is_empty))
-                .unwrap_or(true);
-            if needs_set {
-                obj.insert(field.into(), Value::String(tenant_id.into()));
+            let provided = obj.get(field).cloned();
+            let provided_str = provided
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            match provided_str {
+                None => {
+                    obj.insert(field.into(), Value::String(tenant_id.into()));
+                }
+                Some(supplied) if supplied == tenant_id => {
+                    // Caller supplied their own tenant — fine, no-op.
+                }
+                Some(_other) => {
+                    if !auth.is_admin {
+                        return Err(TenantError::WrongTenant);
+                    }
+                    // Admin context: keep the explicit value (cross-
+                    // tenant tooling, migration scripts, etc.).
+                }
             }
         }
         Ok(())
@@ -176,6 +197,48 @@ impl Default for TenantScopePlugin {
 impl Plugin for TenantScopePlugin {
     fn name(&self) -> &str {
         "tenant_scope"
+    }
+
+    /// Stamp + validate `tenantId` on every insert. Earlier the
+    /// plugin exposed `stamp_insert` but never overrode this trait
+    /// hook, so the runtime's plugin chain never invoked the stamp.
+    /// Apps that relied on "add tenantId field, get automatic
+    /// scoping" got nothing — caught in the 2026-05-09 codex
+    /// security audit.
+    ///
+    /// Update + delete enforcement intentionally lives in the
+    /// `tenantScoped` policy expression (per-entity allowUpdate /
+    /// allowDelete in the manifest) rather than here: the plugin
+    /// hook signature doesn't include the existing row, so we'd
+    /// have to re-load it inside the hook to compare tenant ids.
+    /// The policy engine already does that load with the right
+    /// semantics, so the right move is to trust it for read/write
+    /// gating and use this hook only for the insert-time stamp.
+    fn before_insert(
+        &self,
+        entity: &str,
+        data: &mut Value,
+        auth: &AuthContext,
+    ) -> Result<(), PluginError> {
+        match self.stamp_insert(entity, data, auth) {
+            Ok(()) => Ok(()),
+            Err(TenantError::MissingTenant) => Err(PluginError {
+                code: "TENANT_REQUIRED".into(),
+                message: format!(
+                    "Entity \"{entity}\" is tenant-scoped; the caller has no active tenant. \
+                     Select an organization before writing."
+                ),
+                status: 403,
+            }),
+            Err(TenantError::WrongTenant) => Err(PluginError {
+                code: "CROSS_TENANT_INSERT".into(),
+                message: format!(
+                    "Cross-tenant insert refused for entity \"{entity}\": the row's tenant id \
+                     doesn't match the caller's active tenant."
+                ),
+                status: 403,
+            }),
+        }
     }
 }
 
@@ -225,13 +288,43 @@ mod tests {
     }
 
     #[test]
-    fn does_not_overwrite_provided_tenant() {
+    fn matching_tenant_passes_through() {
         let mut p = TenantScopePlugin::new();
         p.scope("Doc");
-        let mut data = json!({"tenantId": "explicit"});
+        // Caller-supplied tenantId equal to auth.tenantId is fine.
+        let mut data = json!({"tenantId": "tA"});
         p.stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA"))
             .unwrap();
-        assert_eq!(data["tenantId"], "explicit");
+        assert_eq!(data["tenantId"], "tA");
+    }
+
+    /// Non-admin callers cannot stamp a different tenant's id onto
+    /// their inserts. Regression for the 2026-05-09 codex security
+    /// audit: previously the plugin's stamp_insert silently
+    /// preserved any caller-supplied non-empty tenantId, letting a
+    /// member of tenant A plant rows into tenant B.
+    #[test]
+    fn non_admin_cannot_override_tenant_to_another_id() {
+        let mut p = TenantScopePlugin::new();
+        p.scope("Doc");
+        let mut data = json!({"tenantId": "tB"});
+        let err = p
+            .stamp_insert("Doc", &mut data, &auth_with_tenant("u1", "tA"))
+            .unwrap_err();
+        assert_eq!(err, TenantError::WrongTenant);
+    }
+
+    /// Admin contexts (cross-tenant tooling, migration scripts) keep
+    /// the explicit value. Same code path as non-admin, but the
+    /// is_admin flag flips the decision.
+    #[test]
+    fn admin_can_override_tenant_to_another_id() {
+        let mut p = TenantScopePlugin::new();
+        p.scope("Doc");
+        let mut data = json!({"tenantId": "tB"});
+        let admin = AuthContext::admin().with_tenant("tA".into());
+        p.stamp_insert("Doc", &mut data, &admin).unwrap();
+        assert_eq!(data["tenantId"], "tB");
     }
 
     #[test]

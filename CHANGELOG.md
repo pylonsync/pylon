@@ -1,6 +1,14 @@
 # Changelog
 
-## [0.3.66](https://github.com/pylonsync/pylon/compare/v0.3.65...v0.3.66) (2026-05-09)
+## [0.3.67](https://github.com/pylonsync/pylon/compare/v0.3.66...v0.3.67) (2026-05-09)
+
+
+### Bug Fixes
+
+* **auth:** P0 — `auth.user.adminField` and `PYLON_ADMIN_EMAILS` no longer promote API-key contexts to `is_admin`. A leaked or scoped `pk.*` token for an admin-allowlisted user previously escalated to full admin on every privileged route. Caught in the 2026-05-09 codex security audit.
+* **auth:** P0 — `POST /api/auth/native-session` rejects API-key-authed callers (403 `API_KEY_AUTH_FORBIDDEN`). The endpoint mints a real SessionStore entry that bypasses session-only routes; allowing API-key auth to mint sessions was a privilege-escalation path. Regression test added.
+* **runtime:** P1 — streaming `/api/fn/:name` (SSE fast path) now enforces `def.internal && !is_admin` like the non-streaming router path. The fast path previously bypassed the gate, letting any caller invoke an internal function by setting `Accept: text/event-stream`.
+* **plugin:** P1 — `TenantScopePlugin` now overrides `before_insert` (was a no-op default) so registering the plugin actually stamps + validates `tenantId` on every insert. Non-admin callers can no longer override the tenant id to plant rows in another tenant's space; admin contexts retain explicit-override capability for migration tooling. Two regression tests added.
 
 
 ### Features

@@ -2023,6 +2023,24 @@ pub(crate) fn handle(
         if !ctx.auth_ctx.is_authenticated() {
             return Some((401, json_error("AUTH_REQUIRED", "Login required")));
         }
+        // Reject API-key-authed callers. The endpoint mints a real
+        // SessionStore entry that works on every cookie-or-session
+        // surface — including session-only routes like
+        // /api/auth/upgrade and org management. Without this gate a
+        // leaked / scoped `pk.*` API key for some user could escalate
+        // into a full session, bypassing routes that explicitly
+        // refuse API-key auth. Caught in the 2026-05-09 codex
+        // security audit.
+        if ctx.auth_ctx.is_api_key_auth() {
+            return Some((
+                403,
+                json_error(
+                    "API_KEY_AUTH_FORBIDDEN",
+                    "Cannot mint a session token from an API-key context. \
+                     Use a cookie-authenticated session.",
+                ),
+            ));
+        }
         let user_id = match ctx.auth_ctx.user_id.clone() {
             Some(id) if !id.is_empty() => id,
             _ => {

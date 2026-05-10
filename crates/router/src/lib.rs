@@ -2285,6 +2285,31 @@ mod auth_gate_tests {
         });
     }
 
+    /// /api/auth/native-session refuses API-key contexts. A leaked
+    /// `pk.*` API key for some user must NOT be able to mint a real
+    /// session — sessions work on every auth surface including
+    /// routes that explicitly refuse API keys. Regression for the
+    /// 2026-05-09 codex security audit.
+    #[test]
+    fn auth_native_session_refuses_api_key_auth() {
+        let api_key_ctx = AuthContext::from_api_key(
+            "alice".to_string(),
+            "key_abc".to_string(),
+            None,
+        );
+        with_ctx(false, &api_key_ctx, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/native-session",
+                "",
+                None,
+            );
+            assert_eq!(status, 403);
+            assert!(body.contains("API_KEY_AUTH_FORBIDDEN"));
+        });
+    }
+
     /// /api/auth/native-session mints a real SessionStore entry for
     /// the cookie-authed user — no admin gate, no privilege escalation
     /// (it can ONLY mint for the SAME user the cookie already

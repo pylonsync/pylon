@@ -1477,7 +1477,16 @@ fn start_server(
         //
         // PYLON_ADMIN_TOKEN remains as the operator-token escape
         // hatch for cron/migration scripts.
-        if !auth_ctx.is_admin {
+        //
+        // SECURITY: API-key contexts are excluded from admin
+        // promotion. A leaked / scoped `pk.*` token for an admin-
+        // allowlisted user must NOT escalate to is_admin — the
+        // API-key issuer minted that token with a specific scope,
+        // not "act as this user across every privileged route".
+        // Caught in the 2026-05-09 codex security audit. Apps that
+        // genuinely want API keys with admin power should explicitly
+        // mint them via the admin-token path.
+        if !auth_ctx.is_admin && !auth_ctx.is_api_key_auth() {
             if let Some(uid) = auth_ctx.user_id.clone() {
                 let user_entity = runtime.manifest().auth.user.entity.clone();
                 let admin_field = runtime
@@ -2104,7 +2113,8 @@ fn start_server(
                 // Mirror the router's gates so the streaming fast path doesn't
                 // become a way to bypass function auth / rate limits.
                 // 1. Function must exist (otherwise 404, not a hung SSE).
-                if pylon_router::FnOps::get_fn(fn_ops.as_ref(), &fn_name).is_none() {
+                let fn_def = pylon_router::FnOps::get_fn(fn_ops.as_ref(), &fn_name);
+                if fn_def.is_none() {
                     let err = json_error(
                         "FN_NOT_FOUND",
                         &format!("Function \"{fn_name}\" is not registered"),
@@ -2126,6 +2136,40 @@ fn start_server(
                     let _ = request.respond(response);
                     mt.record_request("POST", 404);
                     continue;
+                }
+                // 1b. `internal: true` functions reachable only from
+                // admin contexts. The non-streaming router path (in
+                // routes/functions.rs) already enforces this; the
+                // SSE fast path missed the same gate, which let any
+                // caller invoke an internal function by setting
+                // `Accept: text/event-stream`. Caught in the
+                // 2026-05-09 codex security audit.
+                if let Some(def) = fn_def.as_ref() {
+                    if def.internal && !auth_ctx.is_admin {
+                        let err = json_error(
+                            "FN_INTERNAL",
+                            &format!(
+                                "Function \"{fn_name}\" is internal and cannot be called over HTTP"
+                            ),
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(403u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 403);
+                        continue;
+                    }
                 }
                 // 2. Per-function rate limit (identity = user_id or "anon").
                 let identity = auth_ctx.user_id.as_deref().unwrap_or("anon");
