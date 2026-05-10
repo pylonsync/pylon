@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.68](https://github.com/pylonsync/pylon/compare/v0.3.67...v0.3.68) (2026-05-09)
+
+
+### Bug Fixes
+
+* **router,storage:** P1 — `GET /api/files/:id` now requires the requester to be the file's owner (or `is_admin`). Previously any authenticated identity could fetch any file by id; file IDs are timestamp-based so they're enumerable. New uploads stamp a `FileOwner { user_id, tenant_id }` sidecar at upload time; the router's GET handler returns 404 for non-owner / non-admin reads (404 not 403, to avoid leaking which IDs exist in another user's space). Files predating this change have no sidecar and remain readable as a one-release transition (logged as legacy on every read). Stack0 backend opts out via `requires_owner_check() = false` since CDN-level auth handles access there. New regression tests: `rejects_other_users_file_id`, `allows_owner_and_admin`, `legacy_file_with_no_owner_is_readable` in `pylon-runtime`, plus `local_owner_round_trip` and `local_owner_rejects_traversal` in `pylon-storage`.
+* **auth:** P2 — `seal_secret` no longer silently downgrades to `plain:` envelopes when `PYLON_SECRET` (or the legacy `PYLON_SSO_ENCRYPTION_KEY` alias) is set but unparseable. The previous `sso_encryption_key()` returned `None` for both "unset" and "set-but-malformed" — operators believed encryption was on while their values were persisted in cleartext. The new public `resolve_sso_encryption_key() -> Result<Option<[u8; 32]>, String>` distinguishes the two cases; `seal_secret` / `unseal_secret` propagate the parse error; the runtime panics at boot if PYLON_SECRET is set but invalid (refuses to start with a misconfigured key). Six regression tests added covering unset, empty, malformed, valid hex round-trip, legacy-alias errors, and PYLON_SECRET-takes-precedence ordering.
+
 ## [0.3.67](https://github.com/pylonsync/pylon/compare/v0.3.66...v0.3.67) (2026-05-09)
 
 

@@ -3,8 +3,21 @@
 //! Provides a trait for file storage operations that can be implemented
 //! for local disk, S3, R2, GCS, or any other storage backend.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
+
+// ---------------------------------------------------------------------------
+// File ownership
+// ---------------------------------------------------------------------------
+
+/// Owner of a stored file. Recorded at upload time; checked on retrieval so
+/// a logged-in caller cannot enumerate file IDs uploaded by other users.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOwner {
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // File storage trait
@@ -35,6 +48,32 @@ pub trait FileStorage: Send + Sync {
         _expires_secs: u64,
     ) -> Result<Option<String>, FileStorageError> {
         Ok(None)
+    }
+
+    /// Record the owner of a stored file. Called by the upload path
+    /// immediately after `store()` so ownership is persisted next to the bytes.
+    /// Default impl is a noop for backends that delegate auth elsewhere
+    /// (e.g., Stack0, where access is mediated by a CDN-level API key).
+    fn record_owner(
+        &self,
+        _id: &str,
+        _owner: &FileOwner,
+    ) -> Result<(), FileStorageError> {
+        Ok(())
+    }
+
+    /// Look up the owner of a stored file. Returns `Ok(None)` for backends
+    /// that don't track ownership, or for files predating the ownership
+    /// machinery (legacy uploads). Callers that require owner enforcement
+    /// must combine this with `requires_owner_check()`.
+    fn owner_of(&self, _id: &str) -> Result<Option<FileOwner>, FileStorageError> {
+        Ok(None)
+    }
+
+    /// Whether the router should enforce per-file owner checks against this
+    /// backend. Local disk: yes. Stack0: no (its CDN auth handles access).
+    fn requires_owner_check(&self) -> bool {
+        false
     }
 }
 
@@ -73,11 +112,29 @@ impl LocalFileStorage {
     pub fn new(dir: &str, url_prefix: &str) -> Self {
         let path = std::path::PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&path);
+        let _ = std::fs::create_dir_all(path.join(".ownership"));
         Self {
             dir: path,
             url_prefix: url_prefix.to_string(),
         }
     }
+
+    fn owner_sidecar_path(&self, id: &str) -> std::path::PathBuf {
+        // id is validated by `validate_local_id` at every entry point that
+        // accepts external input, so no traversal segments can leak in.
+        self.dir.join(".ownership").join(format!("{id}.json"))
+    }
+}
+
+/// Reject IDs that try to escape the storage dir or the ownership sidecar dir.
+fn validate_local_id(id: &str) -> Result<(), FileStorageError> {
+    if id.is_empty() || id.contains("..") || id.contains('/') || id.contains('\\') {
+        return Err(FileStorageError {
+            code: "INVALID_ID".into(),
+            message: "Invalid file ID".into(),
+        });
+    }
+    Ok(())
 }
 
 impl FileStorage for LocalFileStorage {
@@ -109,12 +166,7 @@ impl FileStorage for LocalFileStorage {
     }
 
     fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError> {
-        if id.contains("..") || id.contains('/') || id.contains('\\') {
-            return Err(FileStorageError {
-                code: "INVALID_ID".into(),
-                message: "Invalid file ID".into(),
-            });
-        }
+        validate_local_id(id)?;
         let path = self.dir.join(id);
         std::fs::read(&path).map_err(|_| FileStorageError {
             code: "NOT_FOUND".into(),
@@ -123,21 +175,68 @@ impl FileStorage for LocalFileStorage {
     }
 
     fn delete(&self, id: &str) -> Result<bool, FileStorageError> {
-        if id.contains("..") || id.contains('/') || id.contains('\\') {
-            return Err(FileStorageError {
-                code: "INVALID_ID".into(),
-                message: "Invalid file ID".into(),
-            });
-        }
+        validate_local_id(id)?;
         let path = self.dir.join(id);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        let existed = match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                return Err(FileStorageError {
+                    code: "DELETE_FAILED".into(),
+                    message: format!("Failed to delete file: {e}"),
+                });
+            }
+        };
+        // Best-effort sidecar cleanup so an owner record can't outlive its file.
+        let _ = std::fs::remove_file(self.owner_sidecar_path(id));
+        Ok(existed)
+    }
+
+    fn record_owner(
+        &self,
+        id: &str,
+        owner: &FileOwner,
+    ) -> Result<(), FileStorageError> {
+        validate_local_id(id)?;
+        let dir = self.dir.join(".ownership");
+        std::fs::create_dir_all(&dir).map_err(|e| FileStorageError {
+            code: "OWNERSHIP_DIR_FAILED".into(),
+            message: format!("Failed to create ownership dir: {e}"),
+        })?;
+        let path = self.owner_sidecar_path(id);
+        let body = serde_json::to_vec(owner).map_err(|e| FileStorageError {
+            code: "OWNERSHIP_ENCODE_FAILED".into(),
+            message: format!("Failed to serialize owner: {e}"),
+        })?;
+        std::fs::write(&path, body).map_err(|e| FileStorageError {
+            code: "OWNERSHIP_WRITE_FAILED".into(),
+            message: format!("Failed to write owner sidecar: {e}"),
+        })?;
+        Ok(())
+    }
+
+    fn owner_of(&self, id: &str) -> Result<Option<FileOwner>, FileStorageError> {
+        validate_local_id(id)?;
+        let path = self.owner_sidecar_path(id);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let owner: FileOwner =
+                    serde_json::from_slice(&bytes).map_err(|e| FileStorageError {
+                        code: "OWNERSHIP_DECODE_FAILED".into(),
+                        message: format!("Corrupt owner sidecar for {id}: {e}"),
+                    })?;
+                Ok(Some(owner))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(FileStorageError {
-                code: "DELETE_FAILED".into(),
-                message: format!("Failed to delete file: {e}"),
+                code: "OWNERSHIP_READ_FAILED".into(),
+                message: format!("Failed to read owner sidecar: {e}"),
             }),
         }
+    }
+
+    fn requires_owner_check(&self) -> bool {
+        true
     }
 }
 
@@ -399,6 +498,54 @@ mod tests {
 
         assert!(storage.get("../etc/passwd").is_err());
         assert!(storage.delete("../etc/passwd").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_owner_round_trip() {
+        let dir = std::env::temp_dir()
+            .join(format!("pylon_files_owner_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        let stored = storage.store("a.txt", b"hi", "text/plain").unwrap();
+        assert!(storage.requires_owner_check());
+        assert!(storage.owner_of(&stored.id).unwrap().is_none());
+
+        storage
+            .record_owner(
+                &stored.id,
+                &FileOwner {
+                    user_id: "u-alice".into(),
+                    tenant_id: Some("t-1".into()),
+                },
+            )
+            .unwrap();
+
+        let owner = storage.owner_of(&stored.id).unwrap().unwrap();
+        assert_eq!(owner.user_id, "u-alice");
+        assert_eq!(owner.tenant_id.as_deref(), Some("t-1"));
+
+        // Deleting the file also clears the sidecar.
+        storage.delete(&stored.id).unwrap();
+        assert!(storage.owner_of(&stored.id).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_owner_rejects_traversal() {
+        let dir = std::env::temp_dir()
+            .join(format!("pylon_files_owner_traversal_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        let bad_owner = FileOwner {
+            user_id: "u".into(),
+            tenant_id: None,
+        };
+        assert!(storage.record_owner("../escape", &bad_owner).is_err());
+        assert!(storage.owner_of("../escape").is_err());
+        assert!(storage.owner_of("foo/bar").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

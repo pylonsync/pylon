@@ -845,25 +845,26 @@ pub fn random_state() -> String {
 /// in dev — operators are warned at server-boot time (see `server.rs`)
 /// when a secret would be persisted plain.
 ///
-/// Returns Err when the operator HAS configured a key but encryption
-/// fails (CSPRNG nonce-gen error, ring init error). The previous
-/// silent fallback to `plain:` was a P2 from the post-Wave-8 review:
-/// operators believed their secrets were encrypted but the encryption
-/// path silently downgraded on transient ring errors. The PUT
-/// handler now surfaces the failure as 500 SSO_SECRET_SEAL_FAILED so
-/// the misconfiguration is loud.
+/// Returns Err when:
+/// - PYLON_SECRET is set but unparseable (wrong length, bad hex/base64).
+///   The previous behaviour returned `None` from the resolver and silently
+///   downgraded to `plain:`, leaving operators believing their secrets were
+///   encrypted while the encryption path was off. The seal path now surfaces
+///   the parse error as `PYLON_SECRET_INVALID` instead of pretending the
+///   key was unset.
+/// - PYLON_SECRET is set but encryption itself fails (CSPRNG nonce-gen,
+///   ring init).
 ///
 /// Format: `enc:<nonce_hex>:<ciphertext_b64>` for sealed values,
 /// `plain:<value>` for dev-mode pass-through.
 pub fn seal_secret(secret: &str) -> Result<String, String> {
-    if let Some(key) = sso_encryption_key() {
-        // ChaCha20-Poly1305 sealed envelope. Re-uses the totp module's
-        // approach to keep one crypto primitive in the auth crate.
-        let b = encrypt_chacha(secret.as_bytes(), &key)
-            .map_err(|e| format!("ChaCha20-Poly1305 seal failed: {e}"))?;
-        Ok(format!("enc:{b}"))
-    } else {
-        Ok(format!("plain:{secret}"))
+    match resolve_sso_encryption_key()? {
+        Some(key) => {
+            let b = encrypt_chacha(secret.as_bytes(), &key)
+                .map_err(|e| format!("ChaCha20-Poly1305 seal failed: {e}"))?;
+            Ok(format!("enc:{b}"))
+        }
+        None => Ok(format!("plain:{secret}")),
     }
 }
 
@@ -873,7 +874,7 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
         return Ok(rest.to_string());
     }
     if let Some(rest) = blob.strip_prefix("enc:") {
-        let key = sso_encryption_key().ok_or_else(|| {
+        let key = resolve_sso_encryption_key()?.ok_or_else(|| {
             "PYLON_SECRET required to read sealed SSO secret".to_string()
         })?;
         return decrypt_chacha(rest, &key);
@@ -883,19 +884,44 @@ pub fn unseal_secret(blob: &str) -> Result<String, String> {
     Ok(blob.to_string())
 }
 
-fn sso_encryption_key() -> Option<[u8; 32]> {
+/// Resolve the at-rest encryption key.
+///
+/// Returns:
+/// - `Ok(Some(key))` when PYLON_SECRET (or the PYLON_SSO_ENCRYPTION_KEY
+///   alias) is set to a valid 32-byte hex / base64 value.
+/// - `Ok(None)` when neither env var is set — dev mode falls back to
+///   `plain:` envelopes.
+/// - `Err(_)` when an env var IS set but cannot be parsed. Callers must
+///   not silently downgrade in this case; the value is misconfigured and
+///   the operator needs to know.
+pub fn resolve_sso_encryption_key() -> Result<Option<[u8; 32]>, String> {
     // PYLON_SECRET is the canonical framework env var (matches the
     // `<framework>_SECRET` pattern used by better-auth, NextAuth,
     // Auth.js, et al.). PYLON_SSO_ENCRYPTION_KEY is the legacy name —
     // accepted for backward compatibility with existing deployments
     // so a framework upgrade doesn't snap apps that already set it.
     // Prefer the new name when both are set.
-    let raw = std::env::var("PYLON_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("PYLON_SSO_ENCRYPTION_KEY").ok())
-        .filter(|s| !s.is_empty())?;
-    parse_key32(&raw)
+    let (var_name, raw) = if let Ok(v) = std::env::var("PYLON_SECRET") {
+        if !v.is_empty() {
+            ("PYLON_SECRET", v)
+        } else {
+            return Ok(None);
+        }
+    } else if let Ok(v) = std::env::var("PYLON_SSO_ENCRYPTION_KEY") {
+        if !v.is_empty() {
+            ("PYLON_SSO_ENCRYPTION_KEY", v)
+        } else {
+            return Ok(None);
+        }
+    } else {
+        return Ok(None);
+    };
+
+    parse_key32(&raw).ok_or_else(|| {
+        format!(
+            "{var_name} is set but is not a valid 32-byte key. Expected 64 hex chars or 32 raw bytes encoded as base64 (standard or url-safe). Generate one with `openssl rand -hex 32`."
+        )
+    }).map(Some)
 }
 
 fn parse_key32(raw: &str) -> Option<[u8; 32]> {
@@ -1165,6 +1191,10 @@ mod tests {
 
     #[test]
     fn seal_returns_ok_for_normal_input() {
+        // Take the same env lock the resolution tests use so a parallel
+        // test can't toggle PYLON_SECRET out from under us between
+        // seal and unseal.
+        let _guard = super::secret_resolution_tests::ENV_LOCK.lock().unwrap();
         // Round-trip a few different shapes — proves seal_secret's
         // Result-return doesn't reject benign input.
         for input in ["", "x", "secret with spaces", "üñíçødé"] {
@@ -1177,5 +1207,127 @@ mod tests {
     fn unseal_handles_legacy_unprefixed() {
         // Rows written before the prefix scheme existed.
         assert_eq!(unseal_secret("legacy_value").unwrap(), "legacy_value");
+    }
+
+    /// `parse_key32` is the building block for env-var resolution. Verify
+    /// it accepts both encodings and rejects values that aren't 32 bytes —
+    /// these are exactly the inputs that used to silently disable
+    /// encryption when stuffed into PYLON_SECRET.
+    #[test]
+    fn parse_key32_accepts_hex_and_base64() {
+        let hex_key = "00".repeat(32);
+        assert!(parse_key32(&hex_key).is_some());
+
+        use base64::Engine;
+        let raw = [0u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        assert!(parse_key32(&b64).is_some());
+
+        // Wrong length / encoding → None. Without the fail-loud wrapper
+        // this is what made the previous silent-fallback bug possible.
+        assert!(parse_key32("not-a-key").is_none());
+        assert!(parse_key32(&"00".repeat(16)).is_none());
+        assert!(parse_key32("zzzz").is_none());
+    }
+}
+
+/// PYLON_SECRET resolution tests. These mutate process-global env vars,
+/// so they live in a `#[cfg(test)]` module that runs them serially via a
+/// shared mutex — otherwise concurrent tests stomp each other's env state.
+#[cfg(test)]
+mod secret_resolution_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(secret: Option<&str>, alias: Option<&str>, f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_secret = std::env::var("PYLON_SECRET").ok();
+        let prev_alias = std::env::var("PYLON_SSO_ENCRYPTION_KEY").ok();
+        match secret {
+            Some(v) => std::env::set_var("PYLON_SECRET", v),
+            None => std::env::remove_var("PYLON_SECRET"),
+        }
+        match alias {
+            Some(v) => std::env::set_var("PYLON_SSO_ENCRYPTION_KEY", v),
+            None => std::env::remove_var("PYLON_SSO_ENCRYPTION_KEY"),
+        }
+        f();
+        // Restore prior state so cross-test ordering doesn't matter.
+        match prev_secret {
+            Some(v) => std::env::set_var("PYLON_SECRET", v),
+            None => std::env::remove_var("PYLON_SECRET"),
+        }
+        match prev_alias {
+            Some(v) => std::env::set_var("PYLON_SSO_ENCRYPTION_KEY", v),
+            None => std::env::remove_var("PYLON_SSO_ENCRYPTION_KEY"),
+        }
+    }
+
+    #[test]
+    fn unset_returns_ok_none() {
+        with_env(None, None, || {
+            let resolved = resolve_sso_encryption_key().unwrap();
+            assert!(resolved.is_none());
+            // Seal works: dev-mode plain-envelope passthrough.
+            let sealed = seal_secret("hello").unwrap();
+            assert_eq!(sealed, "plain:hello");
+        });
+    }
+
+    #[test]
+    fn empty_string_returns_ok_none() {
+        with_env(Some(""), None, || {
+            let resolved = resolve_sso_encryption_key().unwrap();
+            assert!(resolved.is_none());
+        });
+    }
+
+    #[test]
+    fn malformed_secret_returns_err_not_ok_none() {
+        // This is the audit finding: a present-but-unparseable PYLON_SECRET
+        // used to fall back to `plain:` silently. Now it errors loudly.
+        with_env(Some("not-a-real-key"), None, || {
+            let err = resolve_sso_encryption_key()
+                .expect_err("malformed PYLON_SECRET must error, not return None");
+            assert!(
+                err.contains("PYLON_SECRET"),
+                "error must name the env var: {err}"
+            );
+            // seal_secret must propagate, not silently downgrade.
+            let seal_err = seal_secret("hello").expect_err("seal must fail");
+            assert!(seal_err.contains("PYLON_SECRET"));
+        });
+    }
+
+    #[test]
+    fn malformed_legacy_alias_returns_err() {
+        with_env(None, Some("garbage"), || {
+            let err = resolve_sso_encryption_key().unwrap_err();
+            assert!(err.contains("PYLON_SSO_ENCRYPTION_KEY"));
+        });
+    }
+
+    #[test]
+    fn valid_hex_secret_round_trips() {
+        let hex = "0".repeat(64);
+        with_env(Some(&hex), None, || {
+            let resolved = resolve_sso_encryption_key().unwrap();
+            assert!(resolved.is_some());
+            let sealed = seal_secret("payload").unwrap();
+            assert!(sealed.starts_with("enc:"));
+            assert_eq!(unseal_secret(&sealed).unwrap(), "payload");
+        });
+    }
+
+    #[test]
+    fn pylon_secret_takes_precedence_over_legacy_alias() {
+        let valid_hex = "0".repeat(64);
+        // PYLON_SECRET valid, alias invalid — must prefer the valid one.
+        with_env(Some(&valid_hex), Some("garbage"), || {
+            let resolved = resolve_sso_encryption_key().unwrap();
+            assert!(resolved.is_some());
+        });
     }
 }

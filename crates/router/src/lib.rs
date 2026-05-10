@@ -301,7 +301,25 @@ pub trait WorkflowOps: Send + Sync {
 /// File storage operations used by the router.
 pub trait FileOps: Send + Sync {
     fn upload(&self, body: &str) -> (u16, String);
-    fn get_file(&self, id: &str) -> (u16, String);
+    /// Retrieve a file by ID, gated on owner identity.
+    ///
+    /// Implementations must:
+    /// - Allow access when `is_admin` is true.
+    /// - Allow access when an owner record exists and `requester_user_id`
+    ///   matches the recorded `user_id`.
+    /// - Reject (403) when an owner record exists and does not match.
+    /// - Allow access when no owner record exists AND the storage backend
+    ///   does not require owner checks (e.g., Stack0). For backends that
+    ///   do require owner checks, a missing record is treated as legacy
+    ///   data and access is allowed but logged — new uploads always carry
+    ///   an owner record so this fallback only covers files predating the
+    ///   ownership machinery.
+    fn get_file(
+        &self,
+        id: &str,
+        requester_user_id: Option<&str>,
+        is_admin: bool,
+    ) -> (u16, String);
 }
 
 /// Sends emails (magic codes, invitations, etc.).
@@ -2113,7 +2131,12 @@ mod auth_gate_tests {
         fn upload(&self, _body: &str) -> (u16, String) {
             (501, "{}".into())
         }
-        fn get_file(&self, _id: &str) -> (u16, String) {
+        fn get_file(
+            &self,
+            _id: &str,
+            _requester_user_id: Option<&str>,
+            _is_admin: bool,
+        ) -> (u16, String) {
             (404, "{}".into())
         }
     }

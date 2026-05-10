@@ -1243,7 +1243,50 @@ impl pylon_router::FileOps for FileOpsAdapter {
         )
     }
 
-    fn get_file(&self, id: &str) -> (u16, String) {
+    fn get_file(
+        &self,
+        id: &str,
+        requester_user_id: Option<&str>,
+        is_admin: bool,
+    ) -> (u16, String) {
+        // Owner enforcement: backends that support it (LocalFileStorage)
+        // record an owner alongside each upload. We treat a 403 the same
+        // as 404 to avoid leaking which IDs exist in another user's space.
+        if !is_admin {
+            match self.storage.owner_of(id) {
+                Ok(Some(owner)) => match requester_user_id {
+                    Some(uid) if uid == owner.user_id => {}
+                    _ => {
+                        return (
+                            404,
+                            pylon_router::json_error(
+                                "FILE_NOT_FOUND",
+                                "File not found",
+                            ),
+                        );
+                    }
+                },
+                Ok(None) => {
+                    // No owner record. Two cases:
+                    //   * Backend doesn't track ownership (Stack0 etc.) —
+                    //     access is mediated by the backend's own auth.
+                    //   * Backend does track ownership but this file
+                    //     predates the machinery. Log + allow so legacy
+                    //     uploads remain readable; new uploads always
+                    //     carry an owner record.
+                    if self.storage.requires_owner_check() {
+                        tracing::warn!(
+                            file_id = %id,
+                            "Serving file with no owner record (legacy upload before owner tracking)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    return (500, pylon_router::json_error(&e.code, &e.message));
+                }
+            }
+        }
+
         match self.storage.get(id) {
             Ok(content) => (200, String::from_utf8_lossy(&content).into_owned()),
             Err(e) if e.code == "NOT_FOUND" => {
@@ -1371,6 +1414,100 @@ mod find_runtime_tests {
             found.as_deref(),
             Some("/tmp/definitely-does-not-exist-42.ts")
         );
+    }
+}
+
+#[cfg(test)]
+mod file_ownership_tests {
+    use super::*;
+    use pylon_router::FileOps;
+    use pylon_storage::files::{FileOwner, FileStorage, LocalFileStorage};
+
+    fn temp_storage(suffix: &str) -> (Arc<dyn FileStorage>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "pylon_owner_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+        (Arc::new(storage), dir)
+    }
+
+    #[test]
+    fn rejects_other_users_file_id() {
+        let (storage, dir) = temp_storage("rejects_other");
+        let stored = storage.store("a.txt", b"secret", "text/plain").unwrap();
+        storage
+            .record_owner(
+                &stored.id,
+                &FileOwner {
+                    user_id: "u-alice".into(),
+                    tenant_id: None,
+                },
+            )
+            .unwrap();
+
+        let adapter = FileOpsAdapter {
+            storage: storage.clone(),
+        };
+
+        // Bob (different user, not admin) cannot read Alice's file.
+        let (status, body) = adapter.get_file(&stored.id, Some("u-bob"), false);
+        assert_eq!(status, 404, "should not leak existence: {body}");
+        assert!(body.contains("FILE_NOT_FOUND"));
+
+        // Anonymous (no requester id) likewise.
+        let (status, _) = adapter.get_file(&stored.id, None, false);
+        assert_eq!(status, 404);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_owner_and_admin() {
+        let (storage, dir) = temp_storage("allows_owner_admin");
+        let stored = storage.store("a.txt", b"hello", "text/plain").unwrap();
+        storage
+            .record_owner(
+                &stored.id,
+                &FileOwner {
+                    user_id: "u-alice".into(),
+                    tenant_id: None,
+                },
+            )
+            .unwrap();
+
+        let adapter = FileOpsAdapter {
+            storage: storage.clone(),
+        };
+
+        // Owner reads OK.
+        let (status, body) = adapter.get_file(&stored.id, Some("u-alice"), false);
+        assert_eq!(status, 200, "owner should read: {body}");
+
+        // Admin reads OK regardless of identity.
+        let (status, _) = adapter.get_file(&stored.id, Some("u-someone-else"), true);
+        assert_eq!(status, 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_file_with_no_owner_is_readable() {
+        // Files predating the ownership machinery have no sidecar. Until the
+        // operator runs a backfill, those reads must continue to work.
+        let (storage, dir) = temp_storage("legacy_unowned");
+        let stored = storage.store("a.txt", b"legacy", "text/plain").unwrap();
+
+        let adapter = FileOpsAdapter {
+            storage: storage.clone(),
+        };
+
+        let (status, _) = adapter.get_file(&stored.id, Some("u-anyone"), false);
+        assert_eq!(status, 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

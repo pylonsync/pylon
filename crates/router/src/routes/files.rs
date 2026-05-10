@@ -21,11 +21,16 @@ pub(crate) fn handle(
         if method == HttpMethod::Get {
             // File IDs are timestamp + sanitised filename — predictable
             // enough that an unauthenticated caller could enumerate
-            // recent uploads. Require any authenticated identity here.
+            // recent uploads. Require an authenticated identity AND a
+            // matching owner record (enforced inside `get_file`).
             if let Some(err) = require_auth(ctx) {
                 return Some(err);
             }
-            let (s, b) = ctx.files.get_file(file_id);
+            let (s, b) = ctx.files.get_file(
+                file_id,
+                ctx.auth_ctx.user_id.as_deref(),
+                ctx.auth_ctx.is_admin,
+            );
             return Some((s, b));
         }
     }

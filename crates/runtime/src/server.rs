@@ -271,24 +271,38 @@ fn start_server(
     // PYLON_SSO_ENCRYPTION_KEY is the legacy name — still honoured by
     // sso_encryption_key() in org_sso.rs but no longer the
     // recommended env to set.
-    let secret_set = std::env::var("PYLON_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || std::env::var("PYLON_SSO_ENCRYPTION_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .is_some();
     let in_prod = std::env::var("PYLON_DEV_MODE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
-    if !secret_set && in_prod {
-        tracing::warn!(
-            "[pylon] PYLON_SECRET is unset — at-rest encryption (per-org \
-             SSO + SAML secrets, etc.) is disabled and values are persisted \
-             in plaintext (`plain:` envelope). Set PYLON_SECRET to a \
-             32-byte hex/base64 value (e.g. `openssl rand -hex 32`)."
-        );
+    // Validate PYLON_SECRET (or its legacy PYLON_SSO_ENCRYPTION_KEY alias)
+    // up front. Three outcomes:
+    //   * Unset → at-rest encryption is disabled. Loud warning in prod so
+    //     deployments running with SSO enabled don't silently persist
+    //     OAuth client secrets in plaintext.
+    //   * Set but unparseable → fail loud. Previously the resolver returned
+    //     `None` for malformed values, silently downgrading to `plain:`
+    //     while the operator believed encryption was on. Refuse to start.
+    //   * Set and valid → no-op.
+    match pylon_auth::org_sso::resolve_sso_encryption_key() {
+        Ok(None) => {
+            if in_prod {
+                tracing::warn!(
+                    "[pylon] PYLON_SECRET is unset — at-rest encryption (per-org \
+                     SSO + SAML secrets, etc.) is disabled and values are persisted \
+                     in plaintext (`plain:` envelope). Set PYLON_SECRET to a \
+                     32-byte hex/base64 value (e.g. `openssl rand -hex 32`)."
+                );
+            }
+        }
+        Ok(Some(_)) => {}
+        Err(msg) => {
+            tracing::error!(
+                "[pylon] PYLON_SECRET parse failed at startup: {msg}. Refusing to \
+                 boot — a misconfigured secret would cause `seal_secret` to silently \
+                 emit `plain:` envelopes."
+            );
+            panic!("PYLON_SECRET is set but invalid: {msg}");
+        }
     }
     let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime);
     let session_store = auth_stores.session_store;
@@ -1803,10 +1817,62 @@ fn start_server(
 
             let (status, body) =
                 match pylon_storage::files::FileStorage::store(&storage, &name, &payload, &ct) {
-                    Ok(stored) => (
-                        201u16,
-                        serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
-                    ),
+                    Ok(stored) => {
+                        // Stamp ownership BEFORE returning success so a logged-in
+                        // caller cannot enumerate other users' uploads later via
+                        // /api/files/<id>. We unwrapped auth_ctx.user_id above
+                        // (the upload endpoint requires an authenticated identity).
+                        if let Some(uid) = auth_ctx.user_id.as_ref() {
+                            let owner = pylon_storage::files::FileOwner {
+                                user_id: uid.clone(),
+                                tenant_id: auth_ctx.tenant_id.clone(),
+                            };
+                            if let Err(e) = pylon_storage::files::FileStorage::record_owner(
+                                &storage,
+                                &stored.id,
+                                &owner,
+                            ) {
+                                // Owner record is critical — without it the file
+                                // becomes readable by any other authenticated
+                                // caller. Bail out hard rather than half-shipping.
+                                tracing::error!(
+                                    file_id = %stored.id,
+                                    error = %e.message,
+                                    "Failed to record file owner; rolling back upload"
+                                );
+                                let _ = pylon_storage::files::FileStorage::delete(
+                                    &storage,
+                                    &stored.id,
+                                );
+                                let err = json_error("OWNERSHIP_RECORD_FAILED", &e.message);
+                                let response = with_security_headers(
+                                    Response::from_string(&err)
+                                        .with_status_code(500u16)
+                                        .with_header(
+                                            Header::from_bytes(
+                                                "Content-Type",
+                                                "application/json",
+                                            )
+                                            .unwrap(),
+                                        )
+                                        .with_header(
+                                            Header::from_bytes(
+                                                "Access-Control-Allow-Origin",
+                                                cors_origin.as_bytes().to_vec(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                );
+                                let _ = request.respond(response);
+                                mt.record_request("POST", 500);
+                                continue;
+                            }
+                        }
+                        (
+                            201u16,
+                            serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
+                        )
+                    }
                     Err(e) => (500u16, json_error(&e.code, &e.message)),
                 };
 

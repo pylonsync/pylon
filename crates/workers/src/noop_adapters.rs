@@ -201,7 +201,12 @@ impl FileOps for NoopAll {
         )
     }
 
-    fn get_file(&self, _id: &str) -> (u16, String) {
+    fn get_file(
+        &self,
+        _id: &str,
+        _requester_user_id: Option<&str>,
+        _is_admin: bool,
+    ) -> (u16, String) {
         (
             503,
             pylon_router::json_error(
