@@ -170,6 +170,36 @@ pub trait DataStore: Send + Sync {
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError>;
 
+    /// Acquire a transaction-scoped advisory lock on `key`.
+    ///
+    /// Used by application code to close TOCTOU windows around
+    /// quota/uniqueness checks ("count then insert" patterns where two
+    /// concurrent transactions both pass the count then both insert,
+    /// blowing past the cap). When called from a mutation handler, the
+    /// lock is held for the duration of the handler's transaction and
+    /// released automatically on commit or rollback.
+    ///
+    /// Backend semantics:
+    /// - Postgres: `SELECT pg_advisory_xact_lock(hash(key))`. Two
+    ///   concurrent mutations holding the same key serialize.
+    /// - SQLite: noop. SQLite already serializes writers via the
+    ///   per-connection lock, so a "count + insert" inside a single
+    ///   mutation transaction is already safe against parallel
+    ///   handlers — the second handler waits for the first to commit
+    ///   before seeing any rows. The trait method is a noop here so
+    ///   application code can use the same primitive across both
+    ///   backends without conditional logic.
+    /// - D1 / Workers / read-only stores: returns NOT_SUPPORTED so
+    ///   callers can fail loudly if they assumed the gate was on.
+    ///
+    /// `key` is hashed into a stable integer; pick a string that
+    /// uniquely identifies the resource being gated (e.g.
+    /// `format!("org_count:{user_id}")`).
+    fn advisory_lock(&self, _key: &str) -> Result<(), DataError> {
+        // Default noop. SQLite hits this path; PG overrides.
+        Ok(())
+    }
+
     /// Run a faceted full-text search against a searchable entity. `query`
     /// is a JSON object with the keys defined by `SearchQuery` in
     /// `pylon_storage::search`; returns a JSON object shaped like

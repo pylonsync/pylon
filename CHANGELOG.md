@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.69](https://github.com/pylonsync/pylon/compare/v0.3.68...v0.3.69) (2026-05-10)
+
+
+### Features
+
+* **functions:** new `ctx.db.advisoryLock(key: string): Promise<void>` primitive for closing TOCTOU windows on quota / uniqueness checks. Backed by `pg_advisory_xact_lock` on Postgres (held until the mutation tx commits or rolls back); noop on SQLite where writers are already serialized at the connection level. Application code can write `await ctx.db.advisoryLock(\`org_count:\${userId}\`); /* count + insert */` and trust that two concurrent mutations on the same key serialize without manual transaction-isolation tuning. Wired through DataStore trait → PgTxStore → PgBufferedTxStore → DbOp protocol → TS DbWriter interface. Three regression tests on the key-pair hash (deterministic, distinct keys hash differently, empty key doesn't panic). Caught in the 2026-05-09 codex security audit.
+
 ## [0.3.68](https://github.com/pylonsync/pylon/compare/v0.3.67...v0.3.68) (2026-05-09)
 
 

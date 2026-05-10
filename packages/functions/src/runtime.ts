@@ -398,6 +398,16 @@ function buildDbWriter(callId: string): DbWriter {
       })) as { unlinked: boolean };
       return r.unlinked;
     },
+    async advisoryLock(key) {
+      // The lock key rides on `entity` to avoid carving a new field
+      // for a single op. The Rust dispatcher matches on `op:
+      // "advisory_lock"` and treats `entity` as the key string.
+      await rpcDb(callId, {
+        type: "db",
+        op: "advisory_lock",
+        entity: key,
+      });
+    },
   };
 }
 

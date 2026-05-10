@@ -1877,6 +1877,13 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         self.inner.aggregate(entity, spec)
     }
 
+    fn advisory_lock(&self, key: &str) -> Result<(), DataError> {
+        // Forward to the inner PgTxStore so the lock is taken against
+        // the held transaction. Without this delegation the trait's
+        // default noop would run, defeating the point of the gate.
+        self.inner.advisory_lock(key)
+    }
+
     fn transact(
         &self,
         ops: &[serde_json::Value],

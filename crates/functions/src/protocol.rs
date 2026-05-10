@@ -253,6 +253,13 @@ pub enum DbOp {
     /// facets, sort, page, pageSize. Carried on `data`.
     /// Response shape: `{ hits, facetCounts, total, tookMs }`.
     Search,
+    /// Acquire a transaction-scoped advisory lock. Used to close
+    /// TOCTOU races on quota / uniqueness checks. The lock key travels
+    /// on `entity` (we reuse the field rather than carving a new
+    /// protocol slot — the message shape is `{ op: "advisory_lock",
+    /// entity: "<key>" }`). Held until the mutation tx commits or
+    /// rolls back.
+    AdvisoryLock,
 }
 
 /// A stream chunk to forward to the HTTP client as SSE.

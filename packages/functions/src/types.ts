@@ -134,6 +134,27 @@ export interface DbWriter extends DbReader {
 
   /** Unlink a relation (set FK to null). */
   unlink(entity: string, id: string, relation: string): Promise<boolean>;
+
+  /**
+   * Acquire a transaction-scoped advisory lock on `key`. Held until
+   * the mutation tx commits or rolls back. Two concurrent mutations
+   * holding the same key serialize on Postgres; on SQLite this is a
+   * noop because writers are already serialized at the connection
+   * level.
+   *
+   * Use this to close TOCTOU windows on quota / uniqueness checks:
+   * call `advisoryLock` BEFORE the count query so the second tx
+   * blocks on the first's commit before observing state.
+   *
+   * Example:
+   * ```ts
+   * await ctx.db.advisoryLock(`org_count:${ctx.auth.userId}`);
+   * const orgs = await ctx.db.query("Organization", { createdBy: userId });
+   * if (orgs.length >= cap) throw ctx.error("QUOTA_EXCEEDED", "...");
+   * await ctx.db.insert("Organization", { ... });
+   * ```
+   */
+  advisoryLock(key: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -809,6 +809,15 @@ fn execute_db_op(
                 Err(e) => (Err(e), None),
             }
         }
+        DbOp::AdvisoryLock => {
+            // The lock key rides on `entity`. SQLite path is a noop
+            // (writers serialized); PG path issues
+            // `pg_advisory_xact_lock` against the mutation tx.
+            match store.advisory_lock(&msg.entity) {
+                Ok(()) => (Ok(serde_json::json!({"locked": true})), None),
+                Err(e) => (Err(e), None),
+            }
+        }
     }
 }
 

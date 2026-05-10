@@ -745,4 +745,78 @@ impl<'a> DataStore for PgTxStore<'a> {
                 .into(),
         })
     }
+
+    fn advisory_lock(&self, key: &str) -> Result<(), DataError> {
+        // pg_advisory_xact_lock holds the lock for the duration of the
+        // current transaction and releases on commit/rollback. The two-
+        // i32 form gives us a 64-bit key space without truncation;
+        // hashing the same string twice with different seeds keeps the
+        // odds of accidental collision between distinct application
+        // keys vanishingly small.
+        let (a, b) = pg_advisory_key_pair(key);
+        self.with_tx(|tx| {
+            tx.execute(
+                "SELECT pg_advisory_xact_lock($1::int4, $2::int4)",
+                &[&a, &b],
+            )
+            .map_err(pg_err_to_data)?;
+            Ok(())
+        })
+    }
+}
+
+/// Hash an arbitrary string into a stable `(i32, i32)` pair for
+/// `pg_advisory_xact_lock(key1, key2)`. Two distinct seeds reduce the
+/// chance of a same-value collision between different application
+/// keys to ~1 in 2^64.
+fn pg_advisory_key_pair(s: &str) -> (i32, i32) {
+    fn hash_with_seed(s: &str, seed: u64) -> i32 {
+        // Standard FNV-1a 64-bit, then truncate to i32. FNV is fine
+        // here — we don't need cryptographic strength, just stable
+        // distribution across distinct inputs.
+        let mut h: u64 = seed;
+        for b in s.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        (h as u32) as i32
+    }
+    let a = hash_with_seed(s, 0xcbf29ce484222325);
+    let b = hash_with_seed(s, 0x84222325cbf29ce4);
+    (a, b)
+}
+
+#[cfg(test)]
+mod advisory_lock_tests {
+    use super::*;
+
+    #[test]
+    fn key_pair_is_deterministic() {
+        // Same input → same i32 pair, every call. Required so two
+        // concurrent mutations holding the SAME logical key actually
+        // collide on `pg_advisory_xact_lock`.
+        let a = pg_advisory_key_pair("org_count:user_alice");
+        let b = pg_advisory_key_pair("org_count:user_alice");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn different_keys_hash_differently() {
+        // Different logical keys must produce different `(i32, i32)`
+        // pairs almost always — otherwise distinct application gates
+        // would deadlock against each other through false sharing.
+        let a = pg_advisory_key_pair("org_count:user_alice");
+        let b = pg_advisory_key_pair("org_count:user_bob");
+        let c = pg_advisory_key_pair("project_count:org_acme");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn empty_key_does_not_panic() {
+        // Defensive: callers shouldn't pass empty strings, but we
+        // shouldn't crash on it either — produce a stable hash.
+        let _ = pg_advisory_key_pair("");
+    }
 }
