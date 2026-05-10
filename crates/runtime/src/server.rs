@@ -511,6 +511,22 @@ fn start_server(
         .unwrap_or(60);
     let fn_rate_limiter = Arc::new(RateLimiter::new(fn_rl_max, fn_rl_window));
 
+    // /api/ai/stream rate limiter: per-user (or per-IP for unauth — but
+    // we now require auth, so effectively per-user). AI endpoints spend
+    // real money per call; default 30/hour caps cost at ~$5/user/day on
+    // typical pricing. Operators tune via PYLON_AI_RATE_LIMIT_MAX +
+    // PYLON_AI_RATE_LIMIT_WINDOW. Caught in the 2026-05-10 codex pass-3
+    // audit (P2 NEW: any logged-in user could burn shared spend).
+    let ai_rl_max: u32 = std::env::var("PYLON_AI_RATE_LIMIT_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let ai_rl_window: u64 = std::env::var("PYLON_AI_RATE_LIMIT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    let ai_rate_limiter = Arc::new(RateLimiter::new(ai_rl_max, ai_rl_window));
+
     // TypeScript function runtime: optional Bun process that loads functions/*.ts
     // If no `functions/` directory exists or Bun isn't installed, this is None
     // and /api/fn/* routes return 503.
@@ -773,12 +789,50 @@ fn start_server(
         });
     }
 
-    // Start SSE server on port+2.
-    {
+    // Start SSE server on port+2 unless explicitly disabled.
+    //
+    // SECURITY NOTE: the dedicated SSE port currently has NO
+    // authentication and NO per-client tenant filtering — every
+    // connected client receives every change event from every
+    // tenant, including row data. The 2026-05-10 codex pass-3
+    // audit flagged this as P0 for any operator who exposes the
+    // port to untrusted networks. Pylon Cloud does NOT expose it
+    // (only port+1 for WS is bound externally), so the cloud
+    // surface is unaffected. Per-client filter + auth gate is
+    // landing in v0.3.72.
+    //
+    // Stop-gap mitigations shipped today:
+    // - PYLON_SSE_PORT_DISABLE=1 — disables the listener entirely.
+    //   Use this if you don't need the SSE fallback transport
+    //   (Pylon Cloud, deployments behind a private network, etc.).
+    // - Loud boot-time warning when the port is bound in
+    //   non-dev mode without an explicit "I-accept-the-leak" opt-in.
+    let sse_disabled = std::env::var("PYLON_SSE_PORT_DISABLE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !sse_disabled {
+        let in_prod_for_sse = std::env::var("PYLON_DEV_MODE")
+            .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let acknowledged = std::env::var("PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if in_prod_for_sse && !acknowledged {
+            tracing::warn!(
+                "[sse] Dedicated SSE port :{sse_port} is binding WITHOUT authentication or \
+                 per-client tenant filtering — every connected client receives every change \
+                 event from every tenant. If you do not need this port (most deploys do not), \
+                 set PYLON_SSE_PORT_DISABLE=1. If you need it and accept the leak risk, set \
+                 PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1 to silence this warning. Per-client \
+                 filter + auth gate ships in v0.3.72."
+            );
+        }
         let hub = Arc::clone(&sse_hub);
         std::thread::spawn(move || {
             crate::sse::start_sse_server(hub, sse_port);
         });
+    } else {
+        tracing::info!("[sse] Dedicated SSE port :{sse_port} disabled by PYLON_SSE_PORT_DISABLE=1");
     }
 
     // Start shard WebSocket server on port+3 when a registry is provided.
@@ -1682,7 +1736,16 @@ fn start_server(
         // (and into the plugin audit log for soft-delete etc.), so
         // unauthenticated callers cannot use this route.
         if url == "/api/files/upload" && method == Method::Post {
-            const UPLOAD_MAX: usize = 10 * 1024 * 1024;
+            // Default 200 MiB. Override with PYLON_MAX_UPLOAD_BYTES (raw
+            // bytes) for video-heavy apps. The 10 MiB original was right
+            // for thumbnail / avatar use cases but 1080p screen recordings
+            // routinely exceed it.
+            let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(200 * 1024 * 1024);
+            #[allow(non_snake_case)]
+            let UPLOAD_MAX = upload_max;
             // Enforce size BEFORE reading the body so a 10 GiB stream can't
             // buffer into memory. Content-Length pre-check, then bounded read.
             if let Some(declared) = request.body_length() {
@@ -1742,9 +1805,11 @@ fn start_server(
             let mut limited = request.as_reader().take((UPLOAD_MAX as u64) + 1);
             let _ = limited.read_to_end(&mut bytes);
 
-            const MAX: usize = UPLOAD_MAX;
-            if bytes.len() > MAX {
-                let err = json_error("PAYLOAD_TOO_LARGE", "File exceeds 10 MB limit");
+            if bytes.len() > UPLOAD_MAX {
+                let err = json_error(
+                    "PAYLOAD_TOO_LARGE",
+                    &format!("File exceeds upload max of {UPLOAD_MAX} bytes"),
+                );
                 let response = with_security_headers(
                     Response::from_string(&err)
                         .with_status_code(413u16)
@@ -2368,6 +2433,34 @@ fn start_server(
                 mt.record_request("POST", 401);
                 continue;
             }
+            // Per-user rate limit. Default 30/hour caps a runaway client
+            // (or compromised session) at ~$5/day on typical pricing.
+            // Admins skip the limit so internal tooling isn't blocked.
+            let ai_identity = auth_ctx.user_id.as_deref().unwrap_or(&peer_ip);
+            if !auth_ctx.is_admin {
+                if let Err(retry_after) = ai_rate_limiter.check(ai_identity) {
+                    let body = format!(
+                        r#"{{"error":{{"code":"RATE_LIMITED","message":"AI requests rate limit exceeded","retry_after_secs":{retry_after}}}}}"#
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&body)
+                            .with_status_code(429u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 429);
+                    continue;
+                }
+            }
             let ai_provider = std::env::var("PYLON_AI_PROVIDER").unwrap_or_default();
             let ai_key = std::env::var("PYLON_AI_API_KEY").unwrap_or_default();
             let ai_model = std::env::var("PYLON_AI_MODEL").unwrap_or_default();
@@ -2452,12 +2545,77 @@ fn start_server(
                 }
             };
 
-            // Override model from request body if provided.
-            let model = parsed
+            // Model selection. Operators set PYLON_AI_MODEL as the
+            // default; PYLON_AI_MODELS_ALLOWED (comma-separated) opts
+            // into client-supplied overrides. Without the allowlist,
+            // a logged-in user could request the most expensive model
+            // available to the API key — caught in the 2026-05-10
+            // codex pass-3 audit (P2 NEW). Admins skip the gate so
+            // internal tooling can target any model.
+            let requested_model = parsed
                 .get("model")
                 .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or(ai_model);
+                .map(|s| s.to_string());
+            let model = match requested_model {
+                Some(req) if !auth_ctx.is_admin => {
+                    let allowed = std::env::var("PYLON_AI_MODELS_ALLOWED").unwrap_or_default();
+                    if allowed.is_empty() {
+                        // No allowlist — refuse the override.
+                        let err = json_error(
+                            "MODEL_OVERRIDE_FORBIDDEN",
+                            "Client model override requires PYLON_AI_MODELS_ALLOWED to be set; using server default",
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(403u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 403);
+                        continue;
+                    }
+                    let allowed_set: std::collections::HashSet<&str> = allowed
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !allowed_set.contains(req.as_str()) {
+                        let err = json_error(
+                            "MODEL_NOT_ALLOWED",
+                            &format!("Model \"{req}\" is not in PYLON_AI_MODELS_ALLOWED"),
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(403u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 403);
+                        continue;
+                    }
+                    req
+                }
+                Some(req) => req, // admin override
+                None => ai_model,
+            };
 
             let proxy = match ai_provider.as_str() {
                 "anthropic" => AiProxyPlugin::anthropic(&ai_key, &model),

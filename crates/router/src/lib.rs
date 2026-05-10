@@ -1017,7 +1017,20 @@ fn route_inner(
     }
 
     // GET /api/openapi.json
+    //
+    // Gated to admin / dev mode. The full spec includes batch/transact
+    // and the entity-API surface, which is useful reconnaissance for
+    // an attacker probing app shape. Public clients don't need it (they
+    // use the typed SDK), so admins-only is the right default. Dev
+    // mode keeps it open so hand-curl explorations still work.
+    // Caught in the 2026-05-10 codex pass-3 audit (P3 NEW).
     if url == "/api/openapi.json" && method == HttpMethod::Get {
+        if !ctx.is_dev && !ctx.auth_ctx.is_admin {
+            return (
+                404,
+                json_error("NOT_FOUND", "OpenAPI spec is admin-only outside dev mode"),
+            );
+        }
         return (200, ctx.openapi.generate(""));
     }
 

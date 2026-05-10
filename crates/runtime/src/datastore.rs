@@ -1667,15 +1667,32 @@ impl<'a> DataStore for TxStore<'a> {
         relation: &str,
         target_id: &str,
     ) -> Result<bool, DataError> {
-        self.runtime
+        let linked = self
+            .runtime
             .link_with_conn(self.conn, entity, id, relation, target_id)
-            .map_err(into_data_error)
+            .map_err(into_data_error)?;
+        if linked {
+            // Mirror PgBufferedTxStore: a successful link is conceptually
+            // an update (FK column set), so subscribers expect a change
+            // event. Without this, SQLite TS-mutation link() calls were
+            // invisible to sync — caught in the 2026-05-10 codex pass-3
+            // audit (P2 REGRESSION).
+            let data = serde_json::json!({ relation: target_id });
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&data));
+        }
+        Ok(linked)
     }
 
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
-        self.runtime
+        let unlinked = self
+            .runtime
             .unlink_with_conn(self.conn, entity, id, relation)
-            .map_err(into_data_error)
+            .map_err(into_data_error)?;
+        if unlinked {
+            let data = serde_json::json!({ relation: serde_json::Value::Null });
+            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&data));
+        }
+        Ok(unlinked)
     }
 
     fn query_filtered(
@@ -1882,11 +1899,38 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         relation: &str,
         target_id: &str,
     ) -> Result<bool, DataError> {
-        self.inner.link(entity, id, relation, target_id)
+        // Treat link as an update on the row whose FK column is the
+        // relation. Without this the entity-level plugin chain
+        // (TenantScopePlugin's check_write, validation, audit_log) was
+        // silently bypassed for relation mutations — caught in the
+        // 2026-05-10 codex pass-3 audit (P2 REGRESSION).
+        let mut data = serde_json::json!({ relation: target_id });
+        self.plugins
+            .run_before_update(entity, id, &mut data, &self.auth)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        let linked = self.inner.link(entity, id, relation, target_id)?;
+        if linked {
+            self.plugins.run_after_update(entity, id, &data, &self.auth);
+        }
+        Ok(linked)
     }
 
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
-        self.inner.unlink(entity, id, relation)
+        let mut data = serde_json::json!({ relation: serde_json::Value::Null });
+        self.plugins
+            .run_before_update(entity, id, &mut data, &self.auth)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        let unlinked = self.inner.unlink(entity, id, relation)?;
+        if unlinked {
+            self.plugins.run_after_update(entity, id, &data, &self.auth);
+        }
+        Ok(unlinked)
     }
 
     fn query_filtered(

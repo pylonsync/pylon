@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.71](https://github.com/pylonsync/pylon/compare/v0.3.70...v0.3.71) (2026-05-10)
+
+
+### Bug Fixes
+
+* **runtime,plugin:** P2 — `HookEnforcingDataStore.link/unlink` now runs the plugin chain (TenantScopePlugin, audit_log, validation) instead of forwarding straight to the inner store. Previously a TS-mutation `ctx.db.link("Doc", id, "tenantOwner", "other-tenant")` skipped the chain entirely, undoing v0.3.70's "every TS mutation path" claim for relation mutations. SQLite `TxStore.link/unlink` also now records sync change events so subscribers see relation flips, matching the Postgres path. Caught in the 2026-05-10 codex pass-3 audit.
+* **router:** P2 — `/api/ai/stream` now per-user rate limited (default 30/hour, configurable via `PYLON_AI_RATE_LIMIT_MAX` / `PYLON_AI_RATE_LIMIT_WINDOW`) and refuses client model overrides unless the operator opts in via `PYLON_AI_MODELS_ALLOWED` (comma-separated allowlist). Without these gates a logged-in user could request the most expensive model the provider key supports and burn shared spend. Admins skip both gates so internal tooling isn't blocked. Caught in the 2026-05-10 codex pass-3 audit.
+* **router:** P3 — `GET /api/openapi.json` now requires admin/dev-mode. The full spec includes batch/transact + entity surface, useful reconnaissance for attackers probing app shape. Public clients use the typed SDK and don't need it. Returns 404 outside dev for non-admin callers (rather than 403, to avoid confirming the route exists). Caught in the 2026-05-10 codex pass-3 audit.
+* **runtime:** P0 partial mitigation — the dedicated SSE port (port+2) currently broadcasts every change event to every connected client with no auth and no per-client tenant filter. Pylon Cloud does NOT expose this port, so the cloud surface is unaffected, but self-hosted deploys that bind it on a public interface leak cross-tenant row data. Stop-gap added: loud boot-time warning, plus `PYLON_SSE_PORT_DISABLE=1` kill switch for deploys that don't need the SSE fallback transport. Full per-client tenant filter + cookie/bearer auth gate ships in v0.3.72. Caught in the 2026-05-10 codex pass-3 audit.
+
 ## [0.3.70](https://github.com/pylonsync/pylon/compare/v0.3.69...v0.3.70) (2026-05-10)
 
 
