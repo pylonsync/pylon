@@ -30,12 +30,36 @@ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The server layer converts these into SSE events on the HTTP response.
 pub type StreamCallback = Box<dyn FnMut(&str) + Send>;
 
+/// Information about the function CALLING `ctx.scheduler.runAfter/runAt`,
+/// passed to the schedule hook so it can enforce "public functions can't
+/// smuggle work to internal:true targets via the scheduler" — caught in
+/// the 2026-05-10 codex pass-3 audit (P1). Without this gate any public
+/// action accepting a fn_name argument becomes an internal-fn proxy, and
+/// the dispatched job runs with anonymous auth.
+#[derive(Debug, Clone)]
+pub struct ScheduleCallerInfo {
+    /// Whether the calling function declares `internal: true`. Internal
+    /// callers are allowed to schedule any target (including other
+    /// internal:true cron self-perpetuation patterns).
+    pub caller_internal: bool,
+    /// Whether the calling function ran with an admin AuthContext.
+    /// Admins skip the gate entirely.
+    pub caller_is_admin: bool,
+}
+
 /// Callback invoked when a function calls `ctx.scheduler.runAfter/runAt`.
 /// Returns `Ok(job_id)` on success or `Err(msg)` on persistence/queue
-/// failure. The runner reports the error back to the calling handler so
-/// users don't get a silent `{scheduled: true, id: ""}`.
+/// failure (or on the internal-target gate refusing the enqueue). The
+/// runner reports the error back to the calling handler so users don't
+/// get a silent `{scheduled: true, id: ""}`.
 pub type ScheduleHook = Box<
-    dyn Fn(&str, serde_json::Value, Option<u64>, Option<u64>) -> Result<String, String>
+    dyn Fn(
+            &str,
+            serde_json::Value,
+            Option<u64>,
+            Option<u64>,
+            ScheduleCallerInfo,
+        ) -> Result<String, String>
         + Send
         + Sync,
 >;
@@ -308,6 +332,35 @@ impl FnRunner {
         self.call_inner(store, fn_name, fn_type, args, auth, on_stream, request)
     }
 
+    /// Lock-acquiring variant that propagates the caller's `internal`
+    /// flag so the schedule hook can refuse public-to-internal smuggle
+    /// attempts. Used by `FnOpsImpl::call` which knows `def.internal`
+    /// from the registry; everything else goes through `call`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_with_caller_internal(
+        &self,
+        store: &dyn DataStore,
+        fn_name: &str,
+        fn_type: FnType,
+        args: serde_json::Value,
+        auth: AuthInfo,
+        on_stream: Option<StreamCallback>,
+        request: Option<crate::protocol::RequestInfo>,
+        caller_internal: bool,
+    ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
+        let _io = self.io_lock.lock().unwrap();
+        self.call_inner_with_caller_internal(
+            store,
+            fn_name,
+            fn_type,
+            args,
+            auth,
+            on_stream,
+            request,
+            caller_internal,
+        )
+    }
+
     /// Protocol-only call — assumes the caller already holds `io_lock`.
     /// This is the body of a `call()` minus the lock. It is `pub` so the
     /// nested-call hook in `FnOpsImpl` can re-enter the protocol for a
@@ -325,9 +378,37 @@ impl FnRunner {
         fn_type: FnType,
         args: serde_json::Value,
         auth: AuthInfo,
-        mut on_stream: Option<StreamCallback>,
+        on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
+        // Most callers go through the lock-wrapped `call`, which goes
+        // through here. Callers that need to gate scheduler enqueues
+        // (public actions can't schedule internal:true targets) use
+        // `call_inner_with_caller_internal` directly. Default here:
+        // treat caller as public (most restrictive — public callers
+        // can't enqueue internal:true targets, but public-to-public
+        // works as before).
+        self.call_inner_with_caller_internal(
+            store, fn_name, fn_type, args, auth, on_stream, request, false,
+        )
+    }
+
+    /// Variant of `call_inner` that takes the calling function's
+    /// `internal` flag so the schedule hook can refuse public-to-
+    /// internal smuggle attempts. Most callers should use `call_inner`
+    /// directly; FnOpsImpl wires the per-call internal flag here.
+    pub fn call_inner_with_caller_internal(
+        &self,
+        store: &dyn DataStore,
+        fn_name: &str,
+        fn_type: FnType,
+        args: serde_json::Value,
+        auth: AuthInfo,
+        mut on_stream: Option<StreamCallback>,
+        request: Option<crate::protocol::RequestInfo>,
+        caller_internal: bool,
+    ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
+        let caller_is_admin = auth.is_admin;
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
 
@@ -418,6 +499,10 @@ impl FnRunner {
 
                 TsMessage::Schedule(sched) if sched.call_id == call_id => {
                     trace.record_schedule(&sched.fn_name, sched.delay_ms, sched.run_at);
+                    let caller = ScheduleCallerInfo {
+                        caller_internal,
+                        caller_is_admin,
+                    };
                     let hook_result: Result<String, String> = {
                         let hook = self.schedule_hook.lock().unwrap();
                         match *hook {
@@ -426,6 +511,7 @@ impl FnRunner {
                                 sched.args.clone(),
                                 sched.delay_ms,
                                 sched.run_at,
+                                caller,
                             ),
                             None => Err("no schedule hook installed".into()),
                         }

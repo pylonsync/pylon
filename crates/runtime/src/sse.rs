@@ -1,23 +1,35 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use pylon_auth::{AuthContext, SessionStore};
+use pylon_policy::{PolicyEngine, PolicyResult};
 use pylon_sync::ChangeEvent;
 
 use crate::ip_limit::{IpConnCounter, IpConnGuard};
 
 const NUM_SHARDS: usize = 16;
 
-/// Per-client state in the shard map. The `_guard` is held for the lifetime
-/// of the connection — dropping it (when the client is removed) releases
-/// the client's slot in the per-IP connection counter. Without this, a
-/// crash-loopy browser could open unlimited SSE streams.
+/// Per-client state in the shard map.
+///
+/// `auth` is captured at connection time (parsed from the initial HTTP
+/// request's session cookie / bearer token / `?token=` query param)
+/// and feeds the per-client tenant filter on every change-event
+/// broadcast. Without it, every connected SSE client received every
+/// change event from every tenant. Caught in the 2026-05-10 codex
+/// pass-3 audit (P0).
+///
+/// `_guard` is held for the lifetime of the connection — dropping it
+/// (when the client is removed) releases the client's slot in the
+/// per-IP connection counter. Without this, a crash-loopy browser
+/// could open unlimited SSE streams.
 struct SseClient {
     stream: TcpStream,
+    auth: AuthContext,
     _guard: Option<IpConnGuard>,
 }
 
@@ -41,11 +53,12 @@ impl SseShard {
         }
     }
 
-    fn add(&self, id: u64, stream: TcpStream, guard: Option<IpConnGuard>) {
+    fn add(&self, id: u64, stream: TcpStream, auth: AuthContext, guard: Option<IpConnGuard>) {
         self.clients.lock().unwrap().insert(
             id,
             SseClient {
                 stream,
+                auth,
                 _guard: guard,
             },
         );
@@ -58,11 +71,42 @@ impl SseShard {
 
     /// Send SSE-formatted data to every client in this shard.
     /// Dead clients (write failures) are removed inline and their IDs returned.
+    /// Used for non-tenant-scoped messages (e.g. presence relays).
     fn broadcast(&self, data: &str) -> Vec<u64> {
         let sse_data = format!("data: {data}\n\n");
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
+            if client.stream.write_all(sse_data.as_bytes()).is_err()
+                || client.stream.flush().is_err()
+            {
+                dead.push(*id);
+            }
+        }
+        for id in &dead {
+            clients.remove(id);
+        }
+        dead
+    }
+
+    /// Send a change event to clients in this shard whose stored
+    /// `AuthContext` passes the entity's read policy. Closes the
+    /// cross-tenant data leak the codex pass-3 audit flagged: every
+    /// connected SSE client used to receive every change event from
+    /// every tenant. Now each client only sees rows it's allowed to
+    /// read. Admins bypass the gate so internal tooling stays unblocked.
+    fn broadcast_change(&self, event: &ChangeEvent, json: &str, policy: &PolicyEngine) -> Vec<u64> {
+        let sse_data = format!("data: {json}\n\n");
+        let mut clients = self.clients.lock().unwrap();
+        let mut dead = Vec::new();
+        for (id, client) in clients.iter_mut() {
+            if !client.auth.is_admin {
+                let row = event.data.as_ref();
+                match policy.check_entity_read(&event.entity, &client.auth, row) {
+                    PolicyResult::Allowed => {}
+                    PolicyResult::Denied { .. } => continue,
+                }
+            }
             if client.stream.write_all(sse_data.as_bytes()).is_err()
                 || client.stream.flush().is_err()
             {
@@ -96,6 +140,18 @@ impl SseShard {
     }
 }
 
+/// What each broadcast shard worker consumes off its mpsc channel.
+/// Mirror of `pylon_runtime::ws::BroadcastJob`. `Change` carries the
+/// deserialized event so the worker can run the per-client policy
+/// check; `Plain` is unfiltered and goes to every client.
+pub enum SseJob {
+    Change {
+        event: Arc<ChangeEvent>,
+        json: Arc<str>,
+    },
+    Plain(Arc<str>),
+}
+
 /// Sharded SSE broadcast hub.
 ///
 /// 16 shards partition clients by ID. Each shard has a dedicated broadcast
@@ -107,26 +163,37 @@ impl SseShard {
 pub struct SseHub {
     shards: Vec<Arc<SseShard>>,
     next_id: Mutex<u64>,
-    broadcast_txs: Vec<mpsc::SyncSender<String>>,
+    broadcast_txs: Vec<mpsc::SyncSender<SseJob>>,
+    /// Policy engine for per-client read checks on every change-event
+    /// broadcast.
+    policy: Arc<PolicyEngine>,
 }
 
 impl SseHub {
-    pub fn new() -> Arc<Self> {
+    pub fn new(policy: Arc<PolicyEngine>) -> Arc<Self> {
         let mut shards = Vec::with_capacity(NUM_SHARDS);
         let mut broadcast_txs = Vec::with_capacity(NUM_SHARDS);
 
         for i in 0..NUM_SHARDS {
             let shard = Arc::new(SseShard::new());
-            let (tx, rx) = mpsc::sync_channel::<String>(BROADCAST_QUEUE_DEPTH);
+            let (tx, rx) = mpsc::sync_channel::<SseJob>(BROADCAST_QUEUE_DEPTH);
 
             // Broadcast worker: drains the channel and writes to every client
             // in this shard. Runs until the channel is dropped (hub teardown).
             let shard_clone = Arc::clone(&shard);
+            let policy_clone = Arc::clone(&policy);
             thread::Builder::new()
                 .name(format!("sse-broadcast-{i}"))
                 .spawn(move || {
-                    while let Ok(msg) = rx.recv() {
-                        shard_clone.broadcast(&msg);
+                    while let Ok(job) = rx.recv() {
+                        match job {
+                            SseJob::Change { event, json } => {
+                                shard_clone.broadcast_change(&event, &json, &policy_clone);
+                            }
+                            SseJob::Plain(msg) => {
+                                shard_clone.broadcast(&msg);
+                            }
+                        }
                     }
                 })
                 .expect("Failed to spawn SSE broadcast worker");
@@ -150,27 +217,43 @@ impl SseHub {
             shards,
             next_id: Mutex::new(0),
             broadcast_txs,
+            policy,
         })
     }
 
-    /// Broadcast a `ChangeEvent` to all connected SSE clients.
+    /// Broadcast a `ChangeEvent` to clients whose stored auth passes
+    /// the entity's read policy. Per-client filtering happens in the
+    /// shard worker.
     pub fn broadcast(&self, event: &ChangeEvent) {
         let json = match serde_json::to_string(event) {
             Ok(j) => j,
             Err(_) => return,
         };
-        self.send_to_all(&json);
-    }
-
-    /// Broadcast an arbitrary string message (e.g. presence/topic updates).
-    pub fn broadcast_message(&self, msg: &str) {
-        self.send_to_all(msg);
-    }
-
-    /// Internal: bounded-queue send to all shard workers.
-    fn send_to_all(&self, msg: &str) {
+        let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
+        let event_arc: Arc<ChangeEvent> = Arc::new(event.clone());
         for tx in &self.broadcast_txs {
-            match tx.try_send(msg.to_string()) {
+            let _ = tx.try_send(SseJob::Change {
+                event: Arc::clone(&event_arc),
+                json: Arc::clone(&json_arc),
+            });
+        }
+    }
+
+    /// Broadcast an arbitrary string message to ALL clients, no
+    /// filtering. Used for presence/topic relays where the payload
+    /// doesn't carry tenant-scoped row data.
+    pub fn broadcast_message(&self, msg: &str) {
+        let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
+        for tx in &self.broadcast_txs {
+            let _ = tx.try_send(SseJob::Plain(Arc::clone(&shared)));
+        }
+    }
+
+    #[allow(dead_code)]
+    fn send_to_all(&self, msg: &str) {
+        let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
+        for tx in &self.broadcast_txs {
+            match tx.try_send(SseJob::Plain(Arc::clone(&shared))) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
                     tracing::warn!("[sse] broadcast queue full — dropping event for one shard");
@@ -182,16 +265,16 @@ impl SseHub {
 
     /// Register a new SSE client. Returns the assigned client ID.
     /// The stream is moved into the appropriate shard — the caller should not
-    /// use it after this call. The optional `guard` binds the client's slot
-    /// in the per-IP connection counter to this client's presence in the
-    /// shard map; when the client is removed, the guard drops and the slot
-    /// is returned.
-    fn add_client(&self, stream: TcpStream, guard: Option<IpConnGuard>) -> u64 {
+    /// use it after this call. `auth` is captured at registration so the
+    /// per-client filter can evaluate against the same identity that
+    /// authenticated this connection. The optional `guard` binds the
+    /// client's slot in the per-IP connection counter.
+    fn add_client(&self, stream: TcpStream, auth: AuthContext, guard: Option<IpConnGuard>) -> u64 {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        self.shards[shard_idx].add(id, stream, guard);
+        self.shards[shard_idx].add(id, stream, auth, guard);
         id
     }
 
@@ -203,10 +286,13 @@ impl SseHub {
 
 /// Start the SSE server on the given port.
 ///
-/// Accepts TCP connections, performs minimal HTTP parsing, sends SSE headers,
-/// and registers the stream with the hub. The accept thread exits immediately
-/// after registration — no per-client thread is kept alive.
-pub fn start_sse_server(hub: Arc<SseHub>, port: u16) {
+/// Accepts TCP connections, parses the initial HTTP request to extract
+/// auth (Authorization header / session cookie / `?token=` query param),
+/// rejects unauthenticated callers (in non-dev mode unless
+/// `PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1` is set), then registers the
+/// stream with the hub. The accept thread exits immediately after
+/// registration — no per-client thread is kept alive.
+pub fn start_sse_server(hub: Arc<SseHub>, sessions: Arc<SessionStore>, port: u16) {
     // Dual-stack v6+v4 — without it, macOS clients connecting to
     // `localhost:port` over IPv6 (::1) hit connection refused.
     // See crate::bind_dual_stack_tcp.
@@ -243,29 +329,121 @@ pub fn start_sse_server(hub: Arc<SseHub>, port: u16) {
         };
 
         let hub = Arc::clone(&hub);
-        // Lightweight accept thread with a small stack. It reads the HTTP
-        // request, writes SSE headers, registers the stream (transferring
-        // the IP-conn guard into the shard map), then exits.
+        let sessions = Arc::clone(&sessions);
         thread::Builder::new()
             .name("sse-accept".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                handle_sse_connection(hub, stream, guard);
+                handle_sse_connection(hub, sessions, stream, guard);
             })
             .ok();
     }
 }
 
-fn handle_sse_connection(hub: Arc<SseHub>, mut stream: TcpStream, guard: IpConnGuard) {
-    // Consume the HTTP request headers. We don't route — any connection
-    // to this port is treated as an SSE subscription.
-    let mut buf = [0u8; 2048];
-    let _ = std::io::Read::read(&mut stream, &mut buf);
+/// Parse the initial HTTP request bytes to extract an auth token, in
+/// order: `Authorization: Bearer <t>`, session cookie (configurable
+/// name, defaulting to `pylon_session`), `?token=<t>` query param.
+/// Returns the first match. Browsers using EventSource can't set
+/// custom headers, so cookies + query params are the practical paths.
+fn extract_sse_token(buf: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(buf).ok()?;
+    // Request line: "GET /events?token=... HTTP/1.1\r\n"
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next()?;
+    // Pull token from query string.
+    let query_token = request_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|path| path.split('?').nth(1))
+        .and_then(|q| {
+            q.split('&').find_map(|kv| {
+                let mut parts = kv.splitn(2, '=');
+                let key = parts.next()?;
+                let value = parts.next()?;
+                if key == "token" {
+                    Some(value.to_string())
+                } else {
+                    None
+                }
+            })
+        });
 
-    // Disable Nagle for lower-latency event delivery.
+    let cookie_name =
+        std::env::var("PYLON_COOKIE_NAME").unwrap_or_else(|_| "pylon_session".to_string());
+
+    let mut bearer: Option<String> = None;
+    let mut cookie_value: Option<String> = None;
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("authorization:") {
+            // Re-read original-cased value for the token portion.
+            let original = &line[line.find(':')? + 1..];
+            let trimmed = original.trim();
+            if let Some(t) = trimmed.strip_prefix("Bearer ") {
+                bearer = Some(t.trim().to_string());
+            } else if let Some(t) = trimmed.strip_prefix("bearer ") {
+                bearer = Some(t.trim().to_string());
+            }
+            let _ = rest;
+        } else if lower.starts_with("cookie:") {
+            let original = &line[line.find(':')? + 1..];
+            for kv in original.split(';') {
+                let kv = kv.trim();
+                let mut parts = kv.splitn(2, '=');
+                let key = parts.next()?.trim();
+                let value = parts.next()?.trim();
+                if key == cookie_name {
+                    cookie_value = Some(value.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    bearer.or(cookie_value).or(query_token)
+}
+
+fn handle_sse_connection(
+    hub: Arc<SseHub>,
+    sessions: Arc<SessionStore>,
+    mut stream: TcpStream,
+    guard: IpConnGuard,
+) {
+    // Consume the HTTP request headers. We use these to extract an
+    // auth token before sending the SSE response.
+    let mut buf = [0u8; 2048];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let token = extract_sse_token(&buf[..n]);
+
+    // Resolve auth. SessionStore::resolve handles None (anonymous),
+    // valid bearer/session tokens, and the admin token.
+    let auth_ctx = sessions.resolve(token.as_deref());
+
+    // Reject unauthenticated callers in non-dev mode unless the
+    // operator explicitly opted in to anonymous SSE via
+    // PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1. This closes the unauth
+    // half of the codex pass-3 P0 finding: previously any TCP client
+    // got every change event from every tenant.
+    let in_dev = std::env::var("PYLON_DEV_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let acknowledged_unauth = std::env::var("PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let is_authed = auth_ctx.user_id.is_some() || auth_ctx.is_admin;
+    if !is_authed && !in_dev && !acknowledged_unauth {
+        let body = b"{\"error\":{\"code\":\"AUTH_REQUIRED\",\"message\":\"SSE requires authentication; pass session cookie, Authorization: Bearer, or ?token=\"}}";
+        let resp = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+        return;
+    }
+
     stream.set_nodelay(true).ok();
 
-    // Send SSE response headers.
     let headers = "HTTP/1.1 200 OK\r\n\
                    Content-Type: text/event-stream\r\n\
                    Cache-Control: no-cache\r\n\
@@ -282,35 +460,38 @@ fn handle_sse_connection(hub: Arc<SseHub>, mut stream: TcpStream, guard: IpConnG
     }
     let _ = stream.flush();
 
-    // Hand the stream AND the IP-conn guard to the hub. The shard's
-    // broadcast and keepalive workers now own writes; the guard is
-    // released when the client is dropped from the shard map. This
-    // thread exits.
-    hub.add_client(stream, Some(guard));
+    // Hand the stream + auth + IP-conn guard to the hub. The shard's
+    // workers own writes; per-client filtering uses the auth captured
+    // here on every change-event broadcast.
+    hub.add_client(stream, auth_ctx, Some(guard));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pylon_kernel::AppManifest;
+
+    fn empty_policy() -> Arc<PolicyEngine> {
+        Arc::new(PolicyEngine::from_manifest(&AppManifest::default()))
+    }
 
     #[test]
     fn hub_starts_with_correct_shard_count() {
-        let hub = SseHub::new();
+        let hub = SseHub::new(empty_policy());
         assert_eq!(hub.shards.len(), NUM_SHARDS);
         assert_eq!(hub.broadcast_txs.len(), NUM_SHARDS);
     }
 
     #[test]
     fn hub_starts_empty() {
-        let hub = SseHub::new();
+        let hub = SseHub::new(empty_policy());
         assert_eq!(hub.client_count(), 0);
     }
 
     #[test]
     fn broadcast_on_empty_hub_does_not_panic() {
-        let hub = SseHub::new();
+        let hub = SseHub::new(empty_policy());
         hub.broadcast_message("hello");
-        // Give broadcast workers time to process.
         thread::sleep(Duration::from_millis(50));
         assert_eq!(hub.client_count(), 0);
     }
@@ -331,7 +512,7 @@ mod tests {
 
     #[test]
     fn client_ids_are_sequential() {
-        let hub = SseHub::new();
+        let hub = SseHub::new(empty_policy());
         // Verify the ID counter increments correctly.
         let mut next_id = hub.next_id.lock().unwrap();
         assert_eq!(*next_id, 0);

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.72](https://github.com/pylonsync/pylon/compare/v0.3.71...v0.3.72) (2026-05-10)
+
+
+### Bug Fixes
+
+* **runtime,policy:** P0 — WS + SSE change-event broadcasts now run a per-client tenant filter. Each connected client's `AuthContext` is captured at registration time and stored on the shard's client entry; before the shard worker forwards a change event, it calls `policy.check_entity_read(entity, &client.auth, &row)` and skips clients that fail. Without this filter every connected client received every change event from every tenant — a cross-tenant data leak via subscription. New types `ws::WsClient` (carries auth) + `ws::BroadcastJob::Change` / `BroadcastJob::Plain` enum + `sse::SseClient` (carries auth) + `sse::SseJob`. Both hubs now require an `Arc<PolicyEngine>` at construction. `WsHub::new(policy)` and `SseHub::new(policy)` are breaking-API in their signatures (no in-tree callers outside the runtime + benches; bench/test sites updated). Caught in the 2026-05-10 codex pass-3 audit.
+* **runtime:** P0 (cont.) — dedicated SSE port now authenticates incoming connections by parsing the initial HTTP request for `Authorization: Bearer`, the framework session cookie (`PYLON_COOKIE_NAME` / default `pylon_session`), or `?token=` query param. Resolves through the existing `SessionStore`. Rejects unauthenticated callers with `401 AUTH_REQUIRED` outside dev mode unless the operator opts in via `PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1`. Browsers using `EventSource` carry the session cookie automatically on same-origin; native clients use bearer or `?token=`.
+* **functions:** P1 — `ctx.scheduler.runAfter / runAt` now refuses to enqueue an `internal:true` target when the calling function is itself public (non-internal) AND the caller's auth is non-admin. Without this gate any public action that exposed scheduler parameters became an internal-fn smuggling proxy: a non-admin caller could `runAfter(0, "rollupUsage", {...})` to run an internal cron with arbitrary args, and the dispatched job would execute under anonymous auth context. New `ScheduleCallerInfo { caller_internal, caller_is_admin }` flows through the schedule hook. `FnRunner::call_with_caller_internal` exposes the propagation; `FnOpsImpl::call` wires `def.internal` at every top-level + nested mutation path. Internal cron self-perpetuation (`internal -> internal scheduling`) and admin contexts continue to work. Caught in the 2026-05-10 codex pass-3 audit.
+
+### Deferred to 0.3.73
+
+* **router (P1):** `/api/crdt/<entity>/<row>` binary CRDT update path bypasses plugin hooks and doesn't verify row tenant before merging the LoroDoc patch. Real gap but requires a logged-in caller crafting binary CRDT update messages with another tenant's row id.
+* **runtime (P3):** WS bearer-subprotocol auth resolves only session tokens, while HTTP bearer additionally accepts admin tokens / API keys / JWT. Revocation + admin-promotion semantics diverge. Needs a shared resolver across the WS upgrade + HTTP routes.
+
 ## [0.3.71](https://github.com/pylonsync/pylon/compare/v0.3.70...v0.3.71) (2026-05-10)
 
 

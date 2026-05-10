@@ -2279,6 +2279,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     // again outside the closure.
                     let runner = self.runner.clone();
                     let fn_type = def.fn_type;
+                    let caller_internal = def.internal;
                     let fn_name_owned = fn_name.to_string();
 
                     // Push the schedule buffer onto the thread-local for
@@ -2315,7 +2316,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                         let hook_auth = auth_info_to_context(&auth);
                         let hooked =
                             HookEnforcingDataStore::new(&buffered, Arc::clone(&plugins), hook_auth);
-                        let (value, trace) = runner.call(
+                        let (value, trace) = runner.call_with_caller_internal(
                             &hooked,
                             &fn_name_owned,
                             fn_type,
@@ -2323,6 +2324,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                             auth,
                             on_stream,
                             request,
+                            caller_internal,
                         )?;
                         Ok((value, trace, buffered.take_pending()))
                     });
@@ -2389,7 +2391,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                 let hook_auth = auth_info_to_context(&auth);
                 let hooked =
                     HookEnforcingDataStore::new(&tx_store, Arc::clone(&self.plugins), hook_auth);
-                let result = self.runner.call(
+                let result = self.runner.call_with_caller_internal(
                     &hooked,
                     fn_name,
                     def.fn_type,
@@ -2397,6 +2399,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     auth,
                     on_stream,
                     request,
+                    def.internal,
                 );
 
                 // Surface commit/rollback errors. A swallowed COMMIT failure
@@ -2463,7 +2466,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                 // conn_guard drops here, releasing the lock.
                 result
             }
-            _ => self.runner.call(
+            _ => self.runner.call_with_caller_internal(
                 &*self.runtime,
                 fn_name,
                 def.fn_type,
@@ -2471,6 +2474,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                 auth,
                 on_stream,
                 request,
+                def.internal,
             ),
         }
     }
@@ -2602,55 +2606,77 @@ pub fn try_spawn_functions(
     // Outside a mutation (queries, actions, top-level non-mutation
     // jobs), the buffer is `None` and we enqueue immediately — matching
     // the historical contract for those code paths.
-    runner.set_schedule_hook(Box::new(move |fn_name, args, delay_ms, run_at| {
-        // Check the thread-local first. If we're inside a mutation, the
-        // buffer is `Some` and we defer.
-        let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
-            let slot = cell.borrow();
-            slot.as_ref()
-                .map(|b| {
-                    b.borrow_mut().push(PendingSchedule {
-                        fn_name: fn_name.to_string(),
-                        args: args.clone(),
-                        delay_ms,
-                        run_at,
-                    });
-                })
-                .is_some()
-        });
-        if buffered {
-            // No real job-id yet — the actual enqueue happens after
-            // COMMIT. Returning a synthetic id keeps the TS contract
-            // (`{scheduled:true,id:string}`) intact; a mutation that
-            // rolls back will discard the buffer and the id was never
-            // observable to anyone outside the handler anyway.
-            return Ok(format!("pending:{fn_name}"));
-        }
-
-        let delay_secs = match (delay_ms, run_at) {
-            (Some(ms), _) => ms / 1000,
-            (None, Some(ts)) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                if ts > now {
-                    (ts - now) / 1000
-                } else {
-                    0
+    // Construct the registry BEFORE the schedule hook so the hook can
+    // close over it for the internal:true gate check.
+    let registry = Arc::new(FnRegistry::new());
+    let count = defs.len();
+    registry.replace_all(defs);
+    tracing::warn!("[functions] Loaded {count} function(s) from {fn_dir}");
+    let registry_for_schedule = Arc::clone(&registry);
+    runner.set_schedule_hook(Box::new(
+        move |fn_name, args, delay_ms, run_at, caller| {
+            // Pass-3 audit P1: refuse a non-admin public action's
+            // attempt to enqueue an internal:true target. Otherwise
+            // any public action that takes user-controlled fn_name
+            // becomes an internal-fn smuggling proxy, and the
+            // dispatched job runs with anonymous auth context.
+            // Internal callers (cron self-perpetuation, internal
+            // -> internal scheduling) are allowed; admin contexts
+            // skip the gate entirely.
+            if !caller.caller_is_admin && !caller.caller_internal {
+                if let Some(target) = registry_for_schedule.get(fn_name) {
+                    if target.internal {
+                        return Err(format!(
+                            "Public function may not enqueue internal:true target \"{fn_name}\" via scheduler. Mark the calling function internal:true if this is legitimate cron self-perpetuation, or call the work synchronously."
+                        ));
+                    }
                 }
             }
-            _ => 0,
-        };
-        job_queue.try_enqueue_with_options(
-            fn_name,
-            args,
-            crate::jobs::Priority::Normal,
-            delay_secs,
-            3,
-            "functions",
-        )
-    }));
+
+            // Check the thread-local first. If we're inside a mutation, the
+            // buffer is `Some` and we defer.
+            let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
+                let slot = cell.borrow();
+                slot.as_ref()
+                    .map(|b| {
+                        b.borrow_mut().push(PendingSchedule {
+                            fn_name: fn_name.to_string(),
+                            args: args.clone(),
+                            delay_ms,
+                            run_at,
+                        });
+                    })
+                    .is_some()
+            });
+            if buffered {
+                return Ok(format!("pending:{fn_name}"));
+            }
+
+            let delay_secs = match (delay_ms, run_at) {
+                (Some(ms), _) => ms / 1000,
+                (None, Some(ts)) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if ts > now {
+                        (ts - now) / 1000
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+            job_queue.try_enqueue_with_options(
+                fn_name,
+                args,
+                crate::jobs::Priority::Normal,
+                delay_secs,
+                3,
+                "functions",
+            )
+        },
+    ));
 
     // Wire ctx.email.send → runtime's EmailAdapter. Without this hook,
     // any function that calls ctx.email.send() gets EMAIL_SEND_FAILED
@@ -2666,11 +2692,6 @@ pub fn try_spawn_functions(
             },
         ));
     }
-
-    let registry = Arc::new(FnRegistry::new());
-    let count = defs.len();
-    registry.replace_all(defs);
-    tracing::warn!("[functions] Loaded {count} function(s) from {fn_dir}");
 
     let ops = Arc::new(FnOpsImpl {
         runner,

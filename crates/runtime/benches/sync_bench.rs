@@ -1,9 +1,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use pylon_kernel::AppManifest;
+use pylon_policy::PolicyEngine;
 use pylon_runtime::sse::SseHub;
 use pylon_runtime::ws::WsHub;
 use pylon_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
+
+fn empty_policy() -> Arc<PolicyEngine> {
+    Arc::new(PolicyEngine::from_manifest(&AppManifest::default()))
+}
 
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
     let start = Instant::now();
@@ -61,7 +67,7 @@ fn main() {
     });
 
     // -- WsHub broadcast (no clients) --
-    let hub = WsHub::new();
+    let hub = WsHub::new(empty_policy());
     let event = ChangeEvent {
         seq: 1,
         entity: "User".into(),
@@ -76,7 +82,7 @@ fn main() {
     });
 
     // -- SseHub broadcast (no clients) --
-    let sse = SseHub::new();
+    let sse = SseHub::new(empty_policy());
     bench("sse broadcast (0 clients)", 100_000, || {
         sse.broadcast(&event);
     });
@@ -104,7 +110,7 @@ fn main() {
     );
 
     // Measure lock contention under simulated load.
-    let hub = WsHub::new();
+    let hub = WsHub::new(empty_policy());
     let hub = Arc::new(hub);
     let start = Instant::now();
     let mut handles = vec![];

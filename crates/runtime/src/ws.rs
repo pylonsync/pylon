@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use pylon_auth::SessionStore;
+use pylon_auth::{AuthContext, SessionStore};
+use pylon_policy::{PolicyEngine, PolicyResult};
 use pylon_sync::ChangeEvent;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::protocol::Role;
@@ -180,7 +181,20 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// brief — O(count of clients in shard)), then grabs each client's
 /// individual mutex to do the `socket.send`. Contention is now per-
 /// client instead of per-shard.
-type ClientSocket = Arc<Mutex<WebSocket<Box<dyn WsStream>>>>;
+///
+/// Auth context is captured at registration time (post-handshake auth
+/// resolution) and lives for the connection's lifetime. It feeds the
+/// per-client tenant filter on every change-event broadcast — the
+/// hub evaluates `policy.check_entity_read(entity, &client.auth, &row)`
+/// before pushing each event. Without this, every connected client
+/// received every change event from every tenant. Caught in the
+/// 2026-05-10 codex pass-3 audit (P0).
+pub struct WsClient {
+    pub socket: Mutex<WebSocket<Box<dyn WsStream>>>,
+    pub auth: AuthContext,
+}
+
+type ClientSocket = Arc<WsClient>;
 
 /// A single shard holding a subset of WebSocket clients.
 ///
@@ -197,8 +211,11 @@ impl Shard {
         }
     }
 
-    fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>) -> ClientSocket {
-        let handle = Arc::new(Mutex::new(ws));
+    fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>, auth: AuthContext) -> ClientSocket {
+        let handle = Arc::new(WsClient {
+            socket: Mutex::new(ws),
+            auth,
+        });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
     }
@@ -207,18 +224,16 @@ impl Shard {
         self.clients.lock().unwrap().remove(&id);
     }
 
-    /// Send a message to all clients in this shard.
+    /// Send a string message to ALL clients in this shard, no filtering.
+    /// Used for presence/topic relays where every client in the room
+    /// genuinely should see the message — those messages don't carry
+    /// row data. Change events go through `broadcast_change` instead so
+    /// the per-client tenant filter runs.
     ///
     /// Snapshot the client handles under the shard lock, drop the shard
     /// lock, then contend only with per-client mutexes to do the writes.
     /// This is what lets a reader thread hold its client's mutex for a
     /// socket.read() without stalling broadcasts for the whole shard.
-    ///
-    /// `msg` is `Arc<str>` rather than `&str` so the caller can serialize
-    /// the JSON exactly once and share the same allocation across all
-    /// 16 shards. Per-client `Message::Text` still allocates an owned
-    /// String (tungstenite 0.24 requires it), but the broadcast no
-    /// longer pays N copies of the JSON across shard channels.
     fn broadcast(&self, msg: &Arc<str>) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
@@ -226,19 +241,51 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            // `try_lock` would skip clients whose reader is currently
-            // blocked in read(); we prefer `lock()` here so the occasional
-            // broadcaster wait (bounded by the 200ms read timeout) doesn't
-            // drop the message for that client.
-            let mut guard = match handle.lock() {
+            let mut guard = match handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            // Owned String per send is the tungstenite 0.24 contract.
-            // The clone here copies the string contents; sharing the
-            // raw bytes via Utf8Bytes would be the next-level
-            // optimization but requires a tungstenite version bump.
             if guard.send(Message::Text((**msg).to_string())).is_err() {
+                dead.push(id);
+            }
+        }
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for id in &dead {
+                clients.remove(id);
+            }
+        }
+    }
+
+    /// Send a change event to clients in this shard whose stored
+    /// `AuthContext` passes the entity's read policy. Skips clients
+    /// without permission so client A never sees client B's tenant
+    /// data. The pre-serialized `json` is reused across allowed
+    /// clients; serialization happened once at the hub level.
+    fn broadcast_change(&self, event: &ChangeEvent, json: &Arc<str>, policy: &PolicyEngine) {
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            // Per-client policy check. The event's `data` field carries
+            // the row payload (or None for deletes — policy still
+            // evaluates against entity-level rules). `is_admin`
+            // bypasses everything (admins legitimately see all
+            // tenants). All other clients run through the engine.
+            if !handle.auth.is_admin {
+                let row = event.data.as_ref();
+                match policy.check_entity_read(&event.entity, &handle.auth, row) {
+                    PolicyResult::Allowed => {}
+                    PolicyResult::Denied { .. } => continue,
+                }
+            }
+            let mut guard = match handle.socket.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.send(Message::Text((**json).to_string())).is_err() {
                 dead.push(id);
             }
         }
@@ -272,7 +319,7 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.lock() {
+            let mut guard = match handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -301,7 +348,7 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.lock() {
+            let mut guard = match handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -335,25 +382,37 @@ impl Shard {
 /// - Read-side threads use 64KB stacks (vs 2-8MB default) to keep memory bounded.
 /// - Total thread count: NUM_SHARDS broadcast workers + 1 per connected client (with
 ///   minimal stack), plus the accept thread.
+/// What each broadcast shard worker consumes off its mpsc channel.
+///
+/// `Change` carries a deserialized event PLUS the pre-serialized JSON.
+/// Workers iterate clients in their shard, run the policy engine
+/// against each client's stored auth + the event's row data, and only
+/// forward the JSON to clients that pass. `Plain` skips the filter and
+/// goes to every client — used for presence/topic relay where the
+/// payload doesn't carry row data.
+pub enum BroadcastJob {
+    Change {
+        event: Arc<ChangeEvent>,
+        json: Arc<str>,
+    },
+    Plain(Arc<str>),
+}
+
 pub struct WsHub {
     shards: Vec<Arc<Shard>>,
     next_id: Mutex<u64>,
-    /// Bounded-capacity senders for each shard's broadcast worker. When
-    /// a send would block because the queue is full, `broadcast_raw` drains
-    /// the oldest queued messages so new ones aren't lost to a stuck worker.
-    ///
-    /// Carries `Arc<str>` so a single broadcast event allocates the JSON
-    /// once and the 16 shard sends are cheap refcount bumps. Was a 16×
-    /// String clone hotspot under high write rates with thousands of
-    /// subscribers per shard.
-    broadcast_txs: Vec<mpsc::SyncSender<Arc<str>>>,
-    /// Matching receivers are held by each worker thread and also exposed
-    /// here so the "drop oldest" fallback can drain them on full. Keeping
-    /// the receiver handle alongside the sender is only safe because mpsc
-    /// lets multiple clones share a queue — here we only consume via the
-    /// worker, and the sender-side uses `try_send` + drain retry.
+    /// Bounded-capacity senders for each shard's broadcast worker. The
+    /// `Change` variant carries the event so the worker can run the
+    /// per-client tenant filter; the `Plain` variant is unfiltered.
+    broadcast_txs: Vec<mpsc::SyncSender<BroadcastJob>>,
     #[allow(dead_code)]
     queue_depth: usize,
+    /// Policy engine for per-client read checks on every change-event
+    /// broadcast. Wrapped in Arc so worker threads can clone cheaply.
+    /// `None` is a hard error path now — change events without policy
+    /// would re-open the cross-tenant leak. Construction sites in
+    /// `server.rs` always pass one.
+    policy: Arc<PolicyEngine>,
     /// Per-client CRDT subscriptions. Reader threads register `(entity,
     /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
     /// the binary CRDT broadcast path uses `subscribers()` to filter the
@@ -363,22 +422,28 @@ pub struct WsHub {
 }
 
 impl WsHub {
-    pub fn new() -> Arc<Self> {
+    pub fn new(policy: Arc<PolicyEngine>) -> Arc<Self> {
         let mut shards = Vec::with_capacity(NUM_SHARDS);
         let mut broadcast_txs = Vec::with_capacity(NUM_SHARDS);
 
         for i in 0..NUM_SHARDS {
             let shard = Arc::new(Shard::new());
-            // Bounded queue — if a broadcast worker stalls, `try_send` fails
-            // with Full and `broadcast_raw` drops the oldest to make room.
-            let (tx, rx) = mpsc::sync_channel::<Arc<str>>(BROADCAST_QUEUE_DEPTH);
+            let (tx, rx) = mpsc::sync_channel::<BroadcastJob>(BROADCAST_QUEUE_DEPTH);
 
             let shard_clone = Arc::clone(&shard);
+            let policy_clone = Arc::clone(&policy);
             thread::Builder::new()
                 .name(format!("ws-broadcast-{i}"))
                 .spawn(move || {
-                    while let Ok(msg) = rx.recv() {
-                        shard_clone.broadcast(&msg);
+                    while let Ok(job) = rx.recv() {
+                        match job {
+                            BroadcastJob::Change { event, json } => {
+                                shard_clone.broadcast_change(&event, &json, &policy_clone);
+                            }
+                            BroadcastJob::Plain(msg) => {
+                                shard_clone.broadcast(&msg);
+                            }
+                        }
                     }
                 })
                 .expect("Failed to spawn broadcast worker");
@@ -392,6 +457,7 @@ impl WsHub {
             next_id: Mutex::new(0),
             broadcast_txs,
             queue_depth: BROADCAST_QUEUE_DEPTH,
+            policy,
             subscriptions: CrdtSubscriptions::new(),
         })
     }
@@ -403,25 +469,46 @@ impl WsHub {
         &self.subscriptions
     }
 
-    /// Broadcast a change event to ALL connected clients across all shards.
-    /// Non-blocking: pushes to each shard's channel and returns immediately.
+    /// Broadcast a change event to clients whose stored auth passes the
+    /// entity's read policy. Non-blocking: pushes to each shard's channel
+    /// and returns immediately.
     ///
-    /// Serializes the event JSON exactly once into an `Arc<str>` and
-    /// shares it across the 16 shard senders. Each shard's worker
-    /// thread receives the same Arc and pays only a refcount bump.
+    /// Serializes the event JSON once and ships it via `BroadcastJob::Change`
+    /// alongside the deserialized event. Workers run the policy engine
+    /// per-client before sending, so a client without read access never
+    /// sees the row data. This is the v0.3.72 fix for the cross-tenant
+    /// data leak the codex pass-3 audit flagged.
     pub fn broadcast(&self, event: &ChangeEvent) {
         let json = match serde_json::to_string(event) {
             Ok(j) => j,
             Err(_) => return,
         };
-        let shared: Arc<str> = Arc::from(json.into_boxed_str());
-        self.broadcast_shared(shared);
+        let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
+        let event_arc: Arc<ChangeEvent> = Arc::new(event.clone());
+        for tx in &self.broadcast_txs {
+            let job = BroadcastJob::Change {
+                event: Arc::clone(&event_arc),
+                json: Arc::clone(&json_arc),
+            };
+            match tx.try_send(job) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!("[ws] broadcast queue full — dropping event for one shard");
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {}
+            }
+        }
     }
 
-    /// Broadcast a raw string message to all clients (used for presence updates).
+    /// Broadcast a raw string message to ALL clients, no per-client
+    /// filter. Used for presence/topic relays where the message
+    /// doesn't carry tenant-scoped row data and every connected client
+    /// is a legitimate recipient.
     pub fn broadcast_presence(&self, msg: &str) {
         let shared: Arc<str> = Arc::from(msg.to_string().into_boxed_str());
-        self.broadcast_shared(shared);
+        for tx in &self.broadcast_txs {
+            let _ = tx.try_send(BroadcastJob::Plain(Arc::clone(&shared)));
+        }
     }
 
     /// Broadcast a binary frame to every connected client across all
@@ -491,37 +578,22 @@ impl WsHub {
         }
     }
 
-    /// Internal: fan out a single shared message to every shard worker.
-    ///
-    /// Uses `try_send`; on full we log once (per call) and drop the message
-    /// for that shard. Previously the channel was unbounded, so a stuck
-    /// worker thread would grow memory until OOM. The new bounded queue
-    /// means a slow/stuck subscriber at worst loses broadcast events —
-    /// correctness for critical data still comes through the change-log
-    /// cursor on a reconnect.
-    fn broadcast_shared(&self, msg: Arc<str>) {
-        for tx in &self.broadcast_txs {
-            match tx.try_send(Arc::clone(&msg)) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => {
-                    tracing::warn!("[ws] broadcast queue full — dropping event for one shard");
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    // Worker exited (shutdown). Silent.
-                }
-            }
-        }
-    }
-
     /// Assign a client to a shard via round-robin and register it.
     /// Returns `(id, socket_handle)` — the caller keeps the handle and uses
     /// it for reads; the shard also keeps an Arc clone for broadcasts.
-    fn add_client(&self, ws: WebSocket<Box<dyn WsStream>>) -> (u64, ClientSocket) {
+    /// `auth` is captured at registration time and lives for the
+    /// connection's lifetime so per-client filtering can evaluate
+    /// against the same identity that authenticated the handshake.
+    fn add_client(
+        &self,
+        ws: WebSocket<Box<dyn WsStream>>,
+        auth: AuthContext,
+    ) -> (u64, ClientSocket) {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
         let shard_idx = (id as usize) % NUM_SHARDS;
-        let handle = self.shards[shard_idx].add(id, ws);
+        let handle = self.shards[shard_idx].add(id, ws, auth);
         (id, handle)
     }
 
@@ -777,7 +849,7 @@ fn run_authenticated_session(
         return;
     }
 
-    let (client_id, socket_handle) = hub.add_client(ws);
+    let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone());
 
     loop {
         // Lock this client's socket mutex only for the duration of the
@@ -785,7 +857,7 @@ fn run_authenticated_session(
         // THIS client wait at most 5s. Other clients are never blocked
         // by this lock — they have their own.
         let msg = {
-            let mut guard = match socket_handle.lock() {
+            let mut guard = match socket_handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -835,7 +907,7 @@ fn run_authenticated_session(
             }
             Ok(Message::Ping(data)) => {
                 // Respond with pong to keep the connection alive.
-                if let Ok(mut guard) = socket_handle.lock() {
+                if let Ok(mut guard) = socket_handle.socket.lock() {
                     let _ = guard.send(Message::Pong(data));
                 }
             }
@@ -1178,13 +1250,17 @@ mod tests {
 
     #[test]
     fn hub_starts_with_zero_clients() {
-        let hub = WsHub::new();
+        let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
+            &pylon_kernel::AppManifest::default(),
+        )));
         assert_eq!(hub.client_count(), 0);
     }
 
     #[test]
     fn broadcast_to_empty_hub_doesnt_panic() {
-        let hub = WsHub::new();
+        let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
+            &pylon_kernel::AppManifest::default(),
+        )));
         let event = ChangeEvent {
             seq: 1,
             entity: "Test".into(),
@@ -1195,6 +1271,68 @@ mod tests {
         };
         hub.broadcast(&event);
         hub.broadcast_presence("test");
+    }
+
+    /// Per-client tenant filter regression. Without it, the WS shard's
+    /// `broadcast_change` would fan a tenant-A row to a tenant-B
+    /// subscriber. The `Shard::broadcast_change` path runs the policy
+    /// engine against each client's stored auth — this test verifies
+    /// the gate by constructing a manifest with a tenant-scoped read
+    /// rule, two clients with different tenants, and asserting only
+    /// the matching one would be allowed.
+    #[test]
+    fn change_event_filters_per_client_tenant() {
+        use pylon_kernel::{ManifestEntity, ManifestField, ManifestPolicy};
+
+        let manifest = pylon_kernel::AppManifest {
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "id".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                    ManifestField {
+                        name: "tenantId".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                ],
+                ..Default::default()
+            }],
+            policies: vec![ManifestPolicy {
+                name: "doc_tenant_read".into(),
+                entity: Some("Doc".into()),
+                allow_read: Some("auth.tenantId == data.tenantId".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
+
+        // Tenant-A client should see the row; tenant-B client should not.
+        let auth_a = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let auth_b = AuthContext::user("bob".into()).with_tenant("tB".into());
+        let row = serde_json::json!({"id": "r1", "tenantId": "tA"});
+
+        match policy.check_entity_read("Doc", &auth_a, Some(&row)) {
+            PolicyResult::Allowed => {}
+            PolicyResult::Denied { reason, .. } => {
+                panic!("tenant-A should be allowed: {reason}")
+            }
+        }
+        match policy.check_entity_read("Doc", &auth_b, Some(&row)) {
+            PolicyResult::Allowed => panic!("tenant-B must be denied"),
+            PolicyResult::Denied { .. } => {}
+        }
     }
 
     #[test]

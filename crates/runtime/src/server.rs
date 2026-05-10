@@ -343,8 +343,8 @@ fn start_server(
             }
         }
     }
-    let ws_hub = WsHub::new();
-    let sse_hub = SseHub::new();
+    let ws_hub = WsHub::new(Arc::clone(&policy_engine));
+    let sse_hub = SseHub::new(Arc::clone(&policy_engine));
     // Default-register the rate-limit plugin when no custom registry was
     // supplied. Without this, self-hosted deployments would launch with
     // auth endpoints (/api/auth/magic/send, /api/auth/magic/verify,
@@ -828,8 +828,9 @@ fn start_server(
             );
         }
         let hub = Arc::clone(&sse_hub);
+        let sessions = Arc::clone(&session_store);
         std::thread::spawn(move || {
-            crate::sse::start_sse_server(hub, sse_port);
+            crate::sse::start_sse_server(hub, sessions, sse_port);
         });
     } else {
         tracing::info!("[sse] Dedicated SSE port :{sse_port} disabled by PYLON_SSE_PORT_DISABLE=1");

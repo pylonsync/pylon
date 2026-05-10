@@ -17,6 +17,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use pylon_kernel::AppManifest;
+use pylon_policy::PolicyEngine;
 use pylon_runtime::ws::WsHub;
 use pylon_sync::{ChangeEvent, ChangeKind, ChangeLog, SyncCursor};
 
@@ -87,7 +89,9 @@ fn main() {
     // with zero clients attached they no-op, so the rate you see here is
     // the enqueue-side ceiling. Real throughput depends on client count
     // and message size.
-    let hub = WsHub::new();
+    let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
+        &AppManifest::default(),
+    )));
     let _hub_clone: Arc<WsHub> = Arc::clone(&hub);
     let mut i = 0u64;
     bench("ws_hub.broadcast (enqueue, 0 clients)", 100_000, || {
