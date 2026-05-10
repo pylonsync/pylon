@@ -6,8 +6,25 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use pylon_auth::{AuthContext, SessionStore};
+use pylon_auth::{api_key::ApiKeyStore, resolve_bearer_token, AuthContext, SessionStore};
 use pylon_policy::{PolicyEngine, PolicyResult};
+
+/// Auth resolution context for WS handshake.
+///
+/// Bundles the four pieces the shared `resolve_bearer_token` needs:
+/// session store, API-key store, optional admin token, optional JWT
+/// secret + issuer. Without this, the WS upgrade path used to only
+/// validate session tokens — admin/API-key/JWT bearers that worked
+/// over HTTP silently failed over WS, plus admin promotion / API-key
+/// revocation semantics diverged from the HTTP path. Caught in the
+/// 2026-05-10 codex pass-3 audit (P3 REGRESSION).
+pub struct WsAuth {
+    pub sessions: Arc<SessionStore>,
+    pub api_keys: Arc<ApiKeyStore>,
+    pub admin_token: Option<String>,
+    pub jwt_secret: Option<String>,
+    pub jwt_issuer: Option<String>,
+}
 use pylon_sync::ChangeEvent;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::protocol::Role;
@@ -647,7 +664,7 @@ pub type SnapshotFetcher =
 /// recorded but the catch-up frame is skipped.
 pub fn start_ws_server(
     hub: Arc<WsHub>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<WsAuth>,
     port: u16,
     snapshot_fetcher: Option<SnapshotFetcher>,
 ) {
@@ -695,19 +712,14 @@ pub fn start_ws_server(
         };
 
         let hub = Arc::clone(&hub);
-        let sessions = Arc::clone(&sessions);
+        let auth = Arc::clone(&auth);
         let fetcher = snapshot_fetcher.clone();
-        // Spawn a reader thread per client with a small stack.
-        // 64KB stack * 10k connections = ~640MB, vs 2-8MB default * 10k = 20-80GB.
         let spawn_result = thread::Builder::new()
             .name("ws-client".into())
             .stack_size(64 * 1024)
             .spawn(move || {
-                // Holding `guard` for the life of the connection thread is
-                // what makes the decrement-on-disconnect contract work. Not
-                // `let _ = guard;` — that drops immediately.
                 let _conn_slot = guard;
-                handle_ws_connection(hub, sessions, stream, fetcher);
+                handle_ws_connection(hub, auth, stream, fetcher);
             });
         if spawn_result.is_err() {
             // Thread creation failed — guard is already dropped here, slot
@@ -725,7 +737,7 @@ pub fn start_ws_server(
 /// and clean disconnect with presence broadcast.
 fn handle_ws_connection(
     hub: Arc<WsHub>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<WsAuth>,
     stream: TcpStream,
     snapshot_fetcher: Option<SnapshotFetcher>,
 ) {
@@ -820,7 +832,7 @@ fn handle_ws_connection(
     // a custom error response, and we already have the socket open for
     // a clean close frame.
     let token = token_slot.lock().unwrap().clone();
-    run_authenticated_session(ws, hub, sessions, token, snapshot_fetcher);
+    run_authenticated_session(ws, hub, auth, token, snapshot_fetcher);
 }
 
 /// Take an already-handshaken WebSocket, resolve its bearer token,
@@ -835,11 +847,32 @@ fn handle_ws_connection(
 fn run_authenticated_session(
     ws: WebSocket<Box<dyn WsStream>>,
     hub: Arc<WsHub>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<WsAuth>,
     token: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
 ) {
-    let auth_ctx = sessions.resolve(token.as_deref());
+    // Use the shared bearer resolver so WS sees the same identities
+    // HTTP does — admin token / API key / JWT / session — not only
+    // session tokens like the pre-v0.3.72 path. Caught in the
+    // 2026-05-10 codex pass-3 audit (P3 REGRESSION).
+    let auth_ctx = match resolve_bearer_token(
+        token.as_deref(),
+        &auth.sessions,
+        &auth.api_keys,
+        auth.admin_token.as_deref(),
+        auth.jwt_secret.as_deref(),
+        auth.jwt_issuer.as_deref(),
+    ) {
+        Ok(ctx) => ctx,
+        Err(reason) => {
+            let mut ws = ws;
+            let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::Policy,
+                reason: format!("unauthorized: {reason}").into(),
+            }));
+            return;
+        }
+    };
     if auth_ctx.user_id.is_none() && !auth_ctx.is_admin {
         let mut ws = ws;
         let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
@@ -1182,7 +1215,7 @@ pub fn handle_http_upgrade(
     request: tiny_http::Request,
     upgrade: WsUpgradeRequest,
     hub: Arc<WsHub>,
-    sessions: Arc<SessionStore>,
+    auth: Arc<WsAuth>,
     snapshot_fetcher: Option<SnapshotFetcher>,
 ) {
     let accept = ws_accept_value(&upgrade.sec_key);
@@ -1214,7 +1247,7 @@ pub fn handle_http_upgrade(
         ..Default::default()
     };
     let ws = WebSocket::from_raw_socket(stream, Role::Server, Some(ws_config));
-    run_authenticated_session(ws, hub, sessions, upgrade.bearer_token, snapshot_fetcher);
+    run_authenticated_session(ws, hub, auth, upgrade.bearer_token, snapshot_fetcher);
 }
 
 /// Adapter so a `Box<dyn tiny_http::ReadWrite + Send>` satisfies our

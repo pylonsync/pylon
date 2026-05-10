@@ -73,13 +73,30 @@ pub(crate) fn handle(
             ));
         }
     };
-    let existing_row = ctx.store.get_by_id(entity, row_id).ok().flatten();
+    // Row MUST exist before we merge a CRDT update. Otherwise an
+    // authed caller could push bytes for a row id they invented; the
+    // materialized SQLite row stays absent but the CRDT sidecar
+    // accumulates state — divergent + invisible-to-policy. Return
+    // 404 so the caller doesn't think their write landed. Caught in
+    // the 2026-05-10 codex pass-3 audit (P1 NEW).
+    let existing_row = match ctx.store.get_by_id(entity, row_id).ok().flatten() {
+        Some(row) => row,
+        None => {
+            return Some((
+                404,
+                json_error(
+                    "ROW_NOT_FOUND",
+                    "CRDT update targets a row that doesn't exist",
+                ),
+            ));
+        }
+    };
     if let pylon_policy::PolicyResult::Denied {
         policy_name,
         reason,
     } = ctx
         .policy_engine
-        .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref())
+        .check_entity_update(entity, ctx.auth_ctx, Some(&existing_row))
     {
         tracing::warn!(
             "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
@@ -93,9 +110,29 @@ pub(crate) fn handle(
             ),
         ));
     }
+    // Plugin chain: run `before_update` so TenantScopePlugin and any
+    // audit_log / validation plugins observe the write. The CRDT
+    // wire shape is opaque bytes, so we pass a synthetic data payload
+    // marking it as a CRDT delta — plugins that need the actual
+    // post-merge row read it from the store after the merge. This
+    // closes the gap where TS-mutation `ctx.db.update` got plugin
+    // hooks (v0.3.70 fix) but `/api/crdt/<e>/<row>` did not.
+    // Caught in the 2026-05-10 codex pass-3 audit (P1 NEW).
+    let mut hook_data = serde_json::json!({
+        "_pylon_crdt_update": true,
+        "_pylon_update_size_bytes": update_bytes.len(),
+    });
+    if let Err((status, code, msg)) =
+        ctx.plugin_hooks
+            .before_update(entity, row_id, &mut hook_data, ctx.auth_ctx)
+    {
+        return Some((status, json_error(&code, &msg)));
+    }
     Some(
         match ctx.store.crdt_apply_update(entity, row_id, &update_bytes) {
             Ok(snapshot) => {
+                ctx.plugin_hooks
+                    .after_update(entity, row_id, &hook_data, ctx.auth_ctx);
                 ctx.notifier.notify_crdt(entity, row_id, &snapshot);
                 (200, serde_json::json!({"ok": true}).to_string())
             }

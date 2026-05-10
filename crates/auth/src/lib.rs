@@ -230,6 +230,78 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Bearer-token resolver — single source of truth for HTTP + WS auth
+// ---------------------------------------------------------------------------
+
+/// Resolve a bearer token to an `AuthContext` using the same priority
+/// chain the HTTP path uses:
+///
+///   1. Admin token (constant-time compare against `admin_token`).
+///   2. `pk.…` API key — looked up in the supplied `ApiKeyStore`.
+///   3. JWT (when the token looks like a JWT AND `jwt_secret` is set).
+///   4. Session token — looked up in the supplied `SessionStore`.
+///   5. None or unknown → anonymous (`AuthContext::anonymous()`).
+///
+/// `Err` is returned for tokens that match a shape (API key prefix /
+/// JWT structure) but fail verification, so callers can return 401
+/// instead of silently degrading to anonymous.
+///
+/// Used by both the HTTP request loop and the WS bearer-subprotocol
+/// upgrade so the two paths produce identical `AuthContext` values
+/// for the same token. Without this shared resolver the WS path only
+/// accepted session tokens — admin / API-key / JWT bearers worked
+/// over HTTP but silently failed over WS. Caught in the 2026-05-10
+/// codex pass-3 audit (P3 REGRESSION).
+pub fn resolve_bearer_token(
+    token: Option<&str>,
+    sessions: &SessionStore,
+    api_keys: &api_key::ApiKeyStore,
+    admin_token: Option<&str>,
+    jwt_secret: Option<&str>,
+    jwt_issuer: Option<&str>,
+) -> Result<AuthContext, &'static str> {
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => return Ok(sessions.resolve(None)),
+    };
+
+    if let Some(admin) = admin_token {
+        if !admin.is_empty() && constant_time_eq(token.as_bytes(), admin.as_bytes()) {
+            return Ok(AuthContext::admin());
+        }
+    }
+
+    if let Some(_pk) = token.strip_prefix("pk.") {
+        return match api_keys.verify(token) {
+            Ok(key) => Ok(AuthContext::from_api_key(key.user_id, key.id, key.scopes)),
+            Err(_) => Err("INVALID_API_KEY"),
+        };
+    }
+
+    if jwt::looks_like_jwt(token) {
+        match (jwt_secret, jwt_issuer) {
+            (Some(secret), Some(issuer)) if !secret.is_empty() => {
+                return match jwt::verify(token, secret.as_bytes(), Some(issuer)) {
+                    Ok(claims) => {
+                        let mut ctx = AuthContext::authenticated(claims.sub);
+                        ctx.roles = claims.roles;
+                        if let Some(t) = claims.tenant_id {
+                            ctx = ctx.with_tenant(t);
+                        }
+                        Ok(ctx)
+                    }
+                    Err(_) => Err("INVALID_JWT"),
+                };
+            }
+            (Some(_), None) => return Err("JWT_MISCONFIGURED"),
+            _ => {} // No JWT secret configured — fall through to session lookup.
+        }
+    }
+
+    Ok(sessions.resolve(Some(token)))
+}
+
+// ---------------------------------------------------------------------------
 // Auth mode — matches the route "auth" field values
 // ---------------------------------------------------------------------------
 
@@ -3626,5 +3698,89 @@ mod tests {
         let r2 = handle2.join().expect("thread 2 panicked");
         assert!(r1.is_ok(), "first refresh should succeed");
         assert!(r2.is_ok(), "second refresh should succeed");
+    }
+
+    // ---- resolve_bearer_token (HTTP + WS shared resolver) ----
+
+    #[test]
+    fn resolve_bearer_admin_token_returns_admin() {
+        let sessions = SessionStore::new();
+        let api_keys = api_key::ApiKeyStore::new();
+        let ctx = resolve_bearer_token(
+            Some("sekret"),
+            &sessions,
+            &api_keys,
+            Some("sekret"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(ctx.is_admin);
+    }
+
+    #[test]
+    fn resolve_bearer_wrong_admin_token_falls_through_to_session() {
+        let sessions = SessionStore::new();
+        let api_keys = api_key::ApiKeyStore::new();
+        let ctx = resolve_bearer_token(
+            Some("not-the-admin-token"),
+            &sessions,
+            &api_keys,
+            Some("real-admin"),
+            None,
+            None,
+        )
+        .unwrap();
+        // Falls through to session lookup; unknown session → anonymous.
+        assert!(!ctx.is_admin);
+        assert!(ctx.user_id.is_none());
+    }
+
+    #[test]
+    fn resolve_bearer_bad_api_key_returns_err() {
+        let sessions = SessionStore::new();
+        let api_keys = api_key::ApiKeyStore::new();
+        let err = resolve_bearer_token(
+            Some("pk.notrealkey"),
+            &sessions,
+            &api_keys,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        // pk.* prefix routes to API-key verify; unknown key must error
+        // (not silently degrade to anonymous) so the caller sees 401.
+        assert_eq!(err, "INVALID_API_KEY");
+    }
+
+    #[test]
+    fn resolve_bearer_none_returns_anonymous() {
+        let sessions = SessionStore::new();
+        let api_keys = api_key::ApiKeyStore::new();
+        let ctx =
+            resolve_bearer_token(None, &sessions, &api_keys, Some("admin"), None, None).unwrap();
+        assert!(!ctx.is_admin);
+        assert!(ctx.user_id.is_none());
+    }
+
+    #[test]
+    fn resolve_bearer_jwt_misconfigured_when_secret_without_issuer() {
+        let sessions = SessionStore::new();
+        let api_keys = api_key::ApiKeyStore::new();
+        // A 3-segment dot-separated token that looks like a JWT but
+        // isn't an API key prefix. With secret set and issuer unset
+        // we must refuse rather than silently downgrade.
+        let token = "header.payload.signature";
+        let err = resolve_bearer_token(
+            Some(token),
+            &sessions,
+            &api_keys,
+            None,
+            Some("a-very-long-jwt-secret-of-many-bytes-not-too-short"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "JWT_MISCONFIGURED");
     }
 }

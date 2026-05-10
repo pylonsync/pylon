@@ -780,12 +780,24 @@ fn start_server(
             .ok()
         })
     };
+    // Build a shared WS auth bundle so the WS handshake resolves
+    // bearer tokens the same way HTTP does — admin token, API key,
+    // JWT, session. Pre-v0.3.72 the WS path only validated session
+    // tokens, leaving admin/API-key/JWT bearers silently broken on
+    // WS. Caught in the 2026-05-10 codex pass-3 audit (P3).
+    let ws_auth = Arc::new(crate::ws::WsAuth {
+        sessions: Arc::clone(&session_store),
+        api_keys: Arc::clone(&api_keys),
+        admin_token: admin_token.clone(),
+        jwt_secret: jwt_secret().cloned(),
+        jwt_issuer: jwt_issuer().cloned(),
+    });
     {
         let hub = Arc::clone(&ws_hub);
-        let sessions = Arc::clone(&session_store);
+        let auth = Arc::clone(&ws_auth);
         let fetcher = snapshot_fetcher.clone();
         std::thread::spawn(move || {
-            crate::ws::start_ws_server(hub, sessions, ws_port, Some(fetcher));
+            crate::ws::start_ws_server(hub, auth, ws_port, Some(fetcher));
         });
     }
 
@@ -969,7 +981,7 @@ fn start_server(
                 crate::ws::inspect_ws_upgrade(request.headers(), &cookie_config.name)
             {
                 let hub = Arc::clone(&ws_hub);
-                let sessions = Arc::clone(&session_store);
+                let auth = Arc::clone(&ws_auth);
                 let fetcher = snapshot_fetcher.clone();
                 std::thread::Builder::new()
                     .name("ws-upgrade".into())
@@ -979,7 +991,7 @@ fn start_server(
                             request,
                             upgrade_req,
                             hub,
-                            sessions,
+                            auth,
                             Some(fetcher),
                         );
                     })

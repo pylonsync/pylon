@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.73](https://github.com/pylonsync/pylon/compare/v0.3.72...v0.3.73) (2026-05-10)
+
+
+### Bug Fixes
+
+* **router,plugin:** P1 — `POST /api/crdt/<entity>/<row>` now (a) requires the materialized row to exist before merging the LoroDoc patch (returns 404 `ROW_NOT_FOUND` instead of accumulating CRDT sidecar state for phantom rows) and (b) runs the plugin chain's `before_update` / `after_update` hooks so TenantScopePlugin / audit_log / validation observe the write. The v0.3.70 `HookEnforcingDataStore` fix wrapped `ctx.db.update` but not this binary CRDT path, leaving relation mutations and audit trails to silently skip the chain. Caught in the 2026-05-10 codex pass-3 audit.
+* **auth,runtime:** P3 — WS handshake now uses the same bearer-resolution chain HTTP does (admin token / API key / JWT / session). New shared helper `pylon_auth::resolve_bearer_token`. New `pylon_runtime::ws::WsAuth` bundle carries the four pieces (sessions, API-key store, admin token, JWT secret + issuer) through the WS upgrade. Before this fix the WS subprotocol auth resolved ONLY session tokens — admin tokens / API keys / JWT bearers that worked over HTTP silently failed over WS, and revocation / admin-promotion semantics diverged. Five regression tests on the shared resolver cover admin / wrong-admin / bad-API-key / none / JWT-misconfigured paths. Caught in the 2026-05-10 codex pass-3 audit.
+
 ## [0.3.72](https://github.com/pylonsync/pylon/compare/v0.3.71...v0.3.72) (2026-05-10)
 
 
