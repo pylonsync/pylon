@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.70](https://github.com/pylonsync/pylon/compare/v0.3.69...v0.3.70) (2026-05-10)
+
+
+### Bug Fixes
+
+* **runtime,plugin:** P1 — `ctx.db.insert/update/delete` from a TS function handler now fires the same plugin chain (TenantScopePlugin, validation, audit_log, webhooks, ...) as the entity-API path. Previously TS-mutation writes bypassed the chain entirely, so a non-admin caller could pass `{tenantId: "other"}` directly through `ctx.db.insert("Doc", {...})` and plant rows in another tenant's space, even though TenantScopePlugin's `before_insert` was correctly rejecting the same payload on `POST /api/entities/Doc`. New `HookEnforcingDataStore` wrapper installed across both SQLite (`TxStore`) and Postgres (`PgBufferedTxStore`) mutation paths, plus the two nested-mutation paths (`action -> ctx.runMutation`). Three regression tests prove the gate fires: cross-tenant insert rejected, same-tenant insert stamped, admin override allowed. Caught in the 2026-05-10 codex pass-2 audit.
+* **runtime:** P2 — SSE fast path `/api/fn/:name` for `Accept: text/event-stream` callers now returns `404 FN_NOT_FOUND` for internal-and-non-admin requests (matching the router's non-streaming path) instead of `403 FN_INTERNAL`, which leaked which functions exist by name. Also switched anonymous rate-limit identity from a global `"anon"` bucket to the per-peer-IP key the router uses, so one bad actor can't lock everyone else out of the SSE endpoint. Caught in the 2026-05-10 codex pass-2 audit.
+* **release:** regenerate `bun.lock` so workspace versions track the published package.json versions. Stale lockfile entries from 0.3.63 caused `bun publish` to rewrite `workspace:*` deps to `0.3.63` instead of the current version — `@pylonsync/react@0.3.64` through `@pylonsync/react@0.3.69` all shipped with frozen `@pylonsync/sdk: 0.3.63` + `@pylonsync/sync: 0.3.63` nested deps. Apps that pulled `@pylonsync/react` at any of those versions got the SDK at 0.3.63 nested under react, missing every SDK fix from 0.3.64 forward (Files API owner gate, PYLON_SECRET fail-loud, advisoryLock primitive). The 0.3.70 publish ships react/next/react-native with correctly-rewritten 0.3.70 internal deps. Caught in the 2026-05-10 codex pass-2 audit.
+
 ## [0.3.69](https://github.com/pylonsync/pylon/compare/v0.3.68...v0.3.69) (2026-05-10)
 
 

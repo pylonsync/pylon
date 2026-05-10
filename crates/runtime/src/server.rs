@@ -537,6 +537,7 @@ fn start_server(
         Arc::clone(&change_log),
         fn_notifier,
         Arc::clone(&fn_email_adapter),
+        Arc::clone(&plugin_reg),
     );
 
     // Dev mode flag. Gates a *lot* of permissive behavior: magic codes
@@ -2199,17 +2200,22 @@ fn start_server(
                 // caller invoke an internal function by setting
                 // `Accept: text/event-stream`. Caught in the
                 // 2026-05-09 codex security audit.
+                //
+                // Match the router's response shape exactly: 404
+                // FN_NOT_FOUND, NOT 403 FN_INTERNAL. A 403 confirms
+                // the function exists, letting an attacker enumerate
+                // the internal-function namespace by scanning for
+                // 403-vs-404. Caught in the 2026-05-10 codex pass-2
+                // audit (P2 regression).
                 if let Some(def) = fn_def.as_ref() {
                     if def.internal && !auth_ctx.is_admin {
                         let err = json_error(
-                            "FN_INTERNAL",
-                            &format!(
-                                "Function \"{fn_name}\" is internal and cannot be called over HTTP"
-                            ),
+                            "FN_NOT_FOUND",
+                            &format!("Function \"{fn_name}\" is not registered"),
                         );
                         let response = with_security_headers(
                             Response::from_string(&err)
-                                .with_status_code(403u16)
+                                .with_status_code(404u16)
                                 .with_header(
                                     Header::from_bytes("Content-Type", "application/json").unwrap(),
                                 )
@@ -2222,12 +2228,25 @@ fn start_server(
                                 ),
                         );
                         let _ = request.respond(response);
-                        mt.record_request("POST", 403);
+                        mt.record_request("POST", 404);
                         continue;
                     }
                 }
-                // 2. Per-function rate limit (identity = user_id or "anon").
-                let identity = auth_ctx.user_id.as_deref().unwrap_or("anon");
+                // 2. Per-function rate limit. Match router identity:
+                // user_id when authed, peer_ip when anonymous, "anon"
+                // only as a last-resort fallback. Previously the SSE
+                // path used a global "anon" bucket — one bad actor
+                // would rate-limit every other anonymous caller off
+                // the SSE endpoint. Caught in the 2026-05-10 codex
+                // pass-2 audit (P2 regression). `peer_ip` is bound
+                // earlier in the request loop from `resolve_client_ip`.
+                let identity = auth_ctx.user_id.as_deref().unwrap_or_else(|| {
+                    if peer_ip.is_empty() {
+                        "anon"
+                    } else {
+                        peer_ip.as_str()
+                    }
+                });
                 if let Err(retry_after) =
                     pylon_router::FnOps::check_rate_limit(fn_ops.as_ref(), &fn_name, identity)
                 {

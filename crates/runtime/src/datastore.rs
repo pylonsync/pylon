@@ -1735,6 +1735,204 @@ impl<'a> DataStore for TxStore<'a> {
 // ---------------------------------------------------------------------------
 
 /// `DataStore` wrapper used by the Postgres mutation path. The Postgres
+// ---------------------------------------------------------------------------
+// HookEnforcingDataStore — fires plugin before_*/after_* on every write
+// from a TS function `ctx.db.X` call.
+// ---------------------------------------------------------------------------
+
+/// Reconstitute a `pylon_auth::AuthContext` from a function-runner
+/// `AuthInfo`. The runner travels with `AuthInfo` (a thin Send wire
+/// shape) but the plugin chain wants the richer `AuthContext`. We
+/// rebuild here at the mutation-tx boundary so plugins see the
+/// caller's identity / admin / tenant accurately. Loses fields the
+/// runner never had (api_key_id, roles, is_guest, is_trusted_device)
+/// — none of which TenantScopePlugin reads, but if a future plugin
+/// needs them we'd need to extend the runner protocol.
+fn auth_info_to_context(auth: &pylon_functions::protocol::AuthInfo) -> pylon_auth::AuthContext {
+    let mut ctx = if auth.is_admin {
+        pylon_auth::AuthContext::admin()
+    } else if let Some(uid) = &auth.user_id {
+        pylon_auth::AuthContext::authenticated(uid.clone())
+    } else {
+        pylon_auth::AuthContext::anonymous()
+    };
+    if let Some(tenant) = &auth.tenant_id {
+        ctx = ctx.with_tenant(tenant.clone());
+    }
+    ctx
+}
+
+/// Wrapper that runs the plugin chain (TenantScopePlugin, validation,
+/// audit_log, webhooks, etc.) on every write from a TS function's
+/// `ctx.db.insert/update/delete` call.
+///
+/// Why this exists: the entity-API path (`POST /api/entities/:e`) goes
+/// through the router, which calls `ctx.plugin_hooks.before_insert(...)`
+/// before the DataStore write. But TS function handlers call
+/// `ctx.db.insert(...)` directly, which historically went straight to
+/// the runtime's DataStore impl, skipping the plugin chain entirely.
+///
+/// That gap let a non-admin caller smuggle `tenantId: "B"` into a
+/// `ctx.db.insert("Doc", {...})` payload and plant rows into another
+/// tenant's space, even though TenantScopePlugin's stamp_insert was
+/// configured to reject the cross-tenant id on the entity-API path.
+/// Caught in the 2026-05-10 codex pass-2 audit (P1 BYPASSABLE).
+///
+/// Wraps both SQLite (`TxStore`) and Postgres (`PgBufferedTxStore`)
+/// transactional stores. The hook fires INSIDE the mutation tx so a
+/// rejection rolls back atomically with everything else.
+pub struct HookEnforcingDataStore<'a> {
+    inner: &'a dyn DataStore,
+    plugins: Arc<pylon_plugin::PluginRegistry>,
+    auth: pylon_auth::AuthContext,
+}
+
+impl<'a> HookEnforcingDataStore<'a> {
+    pub fn new(
+        inner: &'a dyn DataStore,
+        plugins: Arc<pylon_plugin::PluginRegistry>,
+        auth: pylon_auth::AuthContext,
+    ) -> Self {
+        Self {
+            inner,
+            plugins,
+            auth,
+        }
+    }
+}
+
+impl<'a> DataStore for HookEnforcingDataStore<'a> {
+    fn manifest(&self) -> &pylon_kernel::AppManifest {
+        self.inner.manifest()
+    }
+
+    fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+        let mut data = data.clone();
+        self.plugins
+            .run_before_insert(entity, &mut data, &self.auth)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        let id = self.inner.insert(entity, &data)?;
+        self.plugins
+            .run_after_insert(entity, &id, &data, &self.auth);
+        Ok(id)
+    }
+
+    fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
+        self.inner.get_by_id(entity, id)
+    }
+
+    fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.list(entity)
+    }
+
+    fn list_after(
+        &self,
+        entity: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.list_after(entity, after, limit)
+    }
+
+    fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        let mut data = data.clone();
+        self.plugins
+            .run_before_update(entity, id, &mut data, &self.auth)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        let updated = self.inner.update(entity, id, &data)?;
+        if updated {
+            self.plugins.run_after_update(entity, id, &data, &self.auth);
+        }
+        Ok(updated)
+    }
+
+    fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+        self.plugins
+            .run_before_delete(entity, id, &self.auth)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        let deleted = self.inner.delete(entity, id)?;
+        if deleted {
+            self.plugins.run_after_delete(entity, id, &self.auth);
+        }
+        Ok(deleted)
+    }
+
+    fn lookup(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Option<serde_json::Value>, DataError> {
+        self.inner.lookup(entity, field, value)
+    }
+
+    fn link(
+        &self,
+        entity: &str,
+        id: &str,
+        relation: &str,
+        target_id: &str,
+    ) -> Result<bool, DataError> {
+        self.inner.link(entity, id, relation, target_id)
+    }
+
+    fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
+        self.inner.unlink(entity, id, relation)
+    }
+
+    fn query_filtered(
+        &self,
+        entity: &str,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DataError> {
+        self.inner.query_filtered(entity, filter)
+    }
+
+    fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+        self.inner.query_graph(query)
+    }
+
+    fn aggregate(
+        &self,
+        entity: &str,
+        spec: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        self.inner.aggregate(entity, spec)
+    }
+
+    fn transact(
+        &self,
+        ops: &[serde_json::Value],
+    ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        self.inner.transact(ops)
+    }
+
+    fn search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        self.inner.search(entity, query)
+    }
+
+    fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
+        self.inner.crdt_snapshot(entity, row_id)
+    }
+
+    fn advisory_lock(&self, key: &str) -> Result<(), DataError> {
+        self.inner.advisory_lock(key)
+    }
+}
+
 /// `PgTxStore` owns the transaction; this wrapper layers the same
 /// "buffer change events, flush after COMMIT" guarantee that SQLite's
 /// `TxStore` provides directly. The underlying `inner` ref lives only
@@ -1943,6 +2141,13 @@ pub struct FnOpsImpl {
     /// non-mutation enqueue path; this clone is what the
     /// post-COMMIT flush uses.
     pub job_queue: Arc<crate::jobs::JobQueue>,
+    /// Plugin chain. Wrapped around mutation transactional stores so
+    /// `ctx.db.insert/update/delete` from a TS handler fires the same
+    /// `before_*`/`after_*` hooks the entity-API path runs. Without
+    /// this, TenantScopePlugin (and any other write-time plugin)
+    /// would silently skip TS-mutation writes — caught in the
+    /// 2026-05-10 codex pass-2 audit (P1 BYPASSABLE).
+    pub plugins: Arc<pylon_plugin::PluginRegistry>,
 }
 
 impl FnOpsImpl {
@@ -2053,13 +2258,21 @@ impl pylon_router::FnOps for FnOpsImpl {
                         });
 
                     let pg = &pg_backend.store;
+                    let plugins = Arc::clone(&self.plugins);
                     let tx_result: Result<
                         (serde_json::Value, FnTrace, Vec<pylon_sync::ChangeEvent>),
                         FnCallError,
                     > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
                         let buffered = PgBufferedTxStore::new(inner_store);
+                        // Wrap in HookEnforcingDataStore so TS-mutation
+                        // ctx.db.X writes fire the same plugin chain as
+                        // the entity-API path. Outside the buffer so
+                        // a hook rejection rolls back atomically.
+                        let hook_auth = auth_info_to_context(&auth);
+                        let hooked =
+                            HookEnforcingDataStore::new(&buffered, Arc::clone(&plugins), hook_auth);
                         let (value, trace) = runner.call(
-                            &buffered,
+                            &hooked,
                             &fn_name_owned,
                             fn_type,
                             args,
@@ -2125,8 +2338,15 @@ impl pylon_router::FnOps for FnOpsImpl {
                 let _depth_guard = MutationDepthGuard::enter();
 
                 let tx_store = TxStore::new(&self.runtime, &conn_guard);
+                // Wrap in HookEnforcingDataStore so TS-mutation
+                // ctx.db.X writes fire the same plugin chain
+                // (TenantScopePlugin, validation, audit_log, ...) as
+                // the entity-API path.
+                let hook_auth = auth_info_to_context(&auth);
+                let hooked =
+                    HookEnforcingDataStore::new(&tx_store, Arc::clone(&self.plugins), hook_auth);
                 let result = self.runner.call(
-                    &tx_store,
+                    &hooked,
                     fn_name,
                     def.fn_type,
                     args,
@@ -2286,6 +2506,7 @@ pub fn try_spawn_functions(
     change_log: Arc<pylon_sync::ChangeLog>,
     notifier: Arc<dyn pylon_router::ChangeNotifier>,
     email_adapter: Arc<EmailAdapter>,
+    plugins: Arc<pylon_plugin::PluginRegistry>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     if !std::path::Path::new(&fn_dir).exists() {
@@ -2415,6 +2636,7 @@ pub fn try_spawn_functions(
         change_log,
         notifier,
         job_queue: Arc::clone(&job_queue_for_handlers),
+        plugins,
     });
 
     install_nested_call_hook(&ops);
@@ -2543,13 +2765,23 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                             crdt: std::sync::Arc::clone(&pg_backend.crdt),
                             manifest: std::sync::Arc::new(ops.runtime.manifest().clone()),
                         });
+                        let plugins = Arc::clone(&ops.plugins);
                         let tx_result: Result<
                             (serde_json::Value, Vec<pylon_sync::ChangeEvent>),
                             FnCallError,
                         > = pg.with_transaction_crdt(crdt_hook, move |inner_store: &dyn DataStore| {
                             let buffered = PgBufferedTxStore::new(inner_store);
-                            let (value, _trace) = runner.call_inner(
+                            // Same wrap-with-hooks dance as the top-level
+                            // mutation path so nested ctx.runMutation
+                            // calls still fire TenantScopePlugin.
+                            let hook_auth = auth_info_to_context(&auth);
+                            let hooked = HookEnforcingDataStore::new(
                                 &buffered,
+                                Arc::clone(&plugins),
+                                hook_auth,
+                            );
+                            let (value, _trace) = runner.call_inner(
+                                &hooked,
                                 &fn_name_owned,
                                 fn_type,
                                 args,
@@ -2594,13 +2826,23 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                     let sched_guard = ScheduleBufferGuard::enter();
                     let _depth_guard = MutationDepthGuard::enter();
                     let tx_store = TxStore::new(&ops.runtime, &conn_guard);
+                    // Same wrap-with-hooks dance as the top-level
+                    // mutation path so nested ctx.runMutation calls
+                    // (action -> internal mutation) still fire
+                    // TenantScopePlugin et al.
+                    let hook_auth = auth_info_to_context(&auth);
+                    let hooked = HookEnforcingDataStore::new(
+                        &tx_store,
+                        Arc::clone(&ops.plugins),
+                        hook_auth,
+                    );
                     // Re-enter protocol without acquiring io_lock — we're
                     // already inside the outer call_inner which holds it.
                     // Nested calls never get HTTP request metadata — that's
                     // only meaningful for the top-level webhook invocation.
                     let result = ops
                         .runner
-                        .call_inner(&tx_store, fn_name, fn_type, args, auth, None, None);
+                        .call_inner(&hooked, fn_name, fn_type, args, auth, None, None);
                     match result {
                         Ok((value, _trace)) => {
                             if let Err(e) = conn_guard.execute("COMMIT", []) {
@@ -2714,4 +2956,217 @@ fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
             }
         })
         .expect("failed to spawn function runtime supervisor");
+}
+
+#[cfg(test)]
+mod hook_enforcing_tests {
+    //! Regression tests for the 2026-05-10 codex pass-2 audit P1
+    //! BYPASSABLE finding: TenantScopePlugin only ran on the
+    //! `/api/entities/*` router path, not on `ctx.db.insert` from a
+    //! TS function handler. A non-admin caller could pass
+    //! `{tenantId: "other-tenant"}` directly through ctx.db.insert
+    //! and plant a row in a tenant they're not a member of.
+    //!
+    //! These tests construct a HookEnforcingDataStore around a stub
+    //! inner store + the real TenantScopePlugin (registered into a
+    //! real PluginRegistry) and verify the cross-tenant insert path
+    //! is rejected, while same-tenant + admin paths still succeed.
+
+    use super::*;
+    use pylon_auth::AuthContext;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+    use pylon_plugin::builtin::tenant_scope::TenantScopePlugin;
+    use pylon_plugin::PluginRegistry;
+    use std::sync::Mutex;
+
+    /// Minimal DataStore impl that records inserts. Lets tests
+    /// inspect what made it past the hook chain.
+    struct RecordingStore {
+        inserts: Mutex<Vec<(String, serde_json::Value)>>,
+        manifest: AppManifest,
+    }
+
+    impl RecordingStore {
+        fn new(manifest: AppManifest) -> Self {
+            Self {
+                inserts: Mutex::new(Vec::new()),
+                manifest,
+            }
+        }
+        fn inserts(&self) -> Vec<(String, serde_json::Value)> {
+            self.inserts.lock().unwrap().clone()
+        }
+    }
+
+    impl DataStore for RecordingStore {
+        fn manifest(&self) -> &AppManifest {
+            &self.manifest
+        }
+        fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+            self.inserts
+                .lock()
+                .unwrap()
+                .push((entity.to_string(), data.clone()));
+            Ok(format!("{entity}_id"))
+        }
+        fn get_by_id(
+            &self,
+            _entity: &str,
+            _id: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn list(&self, _entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn list_after(
+            &self,
+            _entity: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn update(
+            &self,
+            _entity: &str,
+            _id: &str,
+            _data: &serde_json::Value,
+        ) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn delete(&self, _entity: &str, _id: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn lookup(
+            &self,
+            _entity: &str,
+            _field: &str,
+            _value: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn link(
+            &self,
+            _entity: &str,
+            _id: &str,
+            _relation: &str,
+            _target_id: &str,
+        ) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn unlink(&self, _entity: &str, _id: &str, _relation: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn query_filtered(
+            &self,
+            _entity: &str,
+            _filter: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn query_graph(&self, _query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn transact(
+            &self,
+            _ops: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+            Ok((true, vec![]))
+        }
+    }
+
+    fn manifest_with_tenant_field() -> AppManifest {
+        AppManifest {
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0".into(),
+            entities: vec![ManifestEntity {
+                name: "Doc".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "id".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                    ManifestField {
+                        name: "tenantId".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn registry_with_tenant_plugin(manifest: &AppManifest) -> Arc<PluginRegistry> {
+        let mut reg = PluginRegistry::new(manifest.clone());
+        reg.register(Arc::new(TenantScopePlugin::from_manifest(manifest)));
+        Arc::new(reg)
+    }
+
+    /// The whole point of the fix: a non-admin TS handler calling
+    /// ctx.db.insert("Doc", {tenantId: "other"}) must be rejected
+    /// by TenantScopePlugin.before_insert before the row hits the
+    /// inner store.
+    #[test]
+    fn rejects_non_admin_cross_tenant_insert_via_ctx_db() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        let row = serde_json::json!({"tenantId": "tB", "title": "stolen"});
+        let err = hooked.insert("Doc", &row).expect_err("must reject");
+        assert!(
+            err.code.contains("CROSS_TENANT") || err.code.contains("TENANT"),
+            "expected tenant error, got {}: {}",
+            err.code,
+            err.message
+        );
+        assert_eq!(
+            inner.inserts().len(),
+            0,
+            "rejected insert must not reach the inner store"
+        );
+    }
+
+    #[test]
+    fn stamps_tenant_id_on_same_tenant_insert() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        // No tenantId supplied — plugin stamps it from auth.
+        hooked
+            .insert("Doc", &serde_json::json!({"title": "x"}))
+            .expect("same-tenant insert allowed");
+        let landed = inner.inserts();
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].1["tenantId"], "tA");
+    }
+
+    #[test]
+    fn admin_can_override_tenant_id() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::admin().with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        hooked
+            .insert("Doc", &serde_json::json!({"tenantId": "tB"}))
+            .expect("admin can override tenant id");
+        let landed = inner.inserts();
+        assert_eq!(landed[0].1["tenantId"], "tB");
+    }
 }
