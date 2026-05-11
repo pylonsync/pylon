@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.75](https://github.com/pylonsync/pylon/compare/v0.3.74...v0.3.75) (2026-05-11)
+
+
+### Features
+
+* **sdk:** `auth({ org: { entity, memberEntity, inviteEntity, disabled } })` config now flows through the TS SDK to the manifest. Rust side accepted it in v0.3.74 but the SDK helper hadn't been updated — apps had to hand-write the snake_case JSON. Now `auth({ org: { disabled: true } })` reads cleanly in TS for apps that want to keep their own org flow without the framework's routes adding parallel write paths. Same camelCase → snake_case translation pattern as the rest of `auth({...})`.
+
 ## [0.3.74](https://github.com/pylonsync/pylon/compare/v0.3.73...v0.3.74) (2026-05-11)
 
 

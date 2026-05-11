@@ -562,6 +562,34 @@ export type AuthConfig = {
       claims?: string[];
     };
   };
+  /**
+   * Org / OrgMember / OrgInvite entity configuration. Apps that use
+   * the framework's `/api/auth/orgs/*` surface declare these entities
+   * in their schema with the framework's required fields. Add custom
+   * fields freely (logo, industry, billingEmail, etc.) — the framework
+   * reads / writes only the fields it manages.
+   *
+   * Defaults to entities named `Org`, `OrgMember`, `OrgInvite`. Rename
+   * via the three string fields if your codebase uses different names
+   * (e.g. `Organization` / `Membership`). Set `disabled: true` to opt
+   * out of the framework's routes entirely — useful when the app has
+   * its own org flow in TS and doesn't want the framework's parallel
+   * write paths.
+   */
+  org?: {
+    /** Entity name for the org table. Default `"Org"`. */
+    entity?: string;
+    /** Entity name for membership rows. Default `"OrgMember"`. */
+    memberEntity?: string;
+    /** Entity name for invite rows. Default `"OrgInvite"`. */
+    inviteEntity?: string;
+    /**
+     * Disable the framework's `/api/auth/orgs/*` routes. Endpoints
+     * return `501 ORG_NOT_CONFIGURED`. Use when you implement org
+     * management entirely in your own TypeScript functions.
+     */
+    disabled?: boolean;
+  };
   /** Per-app trusted origins for OAuth `?callback=` validation. Merged with `PYLON_TRUSTED_ORIGINS` env. */
   trustedOrigins?: string[];
 };
@@ -580,6 +608,12 @@ export type ManifestAuthConfig = {
       max_age: number;
       claims: string[];
     };
+  };
+  org: {
+    entity: string;
+    member_entity: string;
+    invite_entity: string;
+    disabled: boolean;
   };
   trusted_origins: string[];
 };
@@ -606,6 +640,12 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
         max_age: cfg.session?.cookieCache?.maxAge ?? 5 * 60,
         claims: cfg.session?.cookieCache?.claims ?? ["is_admin", "tenant_id"],
       },
+    },
+    org: {
+      entity: cfg.org?.entity ?? "Org",
+      member_entity: cfg.org?.memberEntity ?? "OrgMember",
+      invite_entity: cfg.org?.inviteEntity ?? "OrgInvite",
+      disabled: cfg.org?.disabled ?? false,
     },
     trusted_origins: cfg.trustedOrigins ?? [],
   };
