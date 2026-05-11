@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+
+use crate::tinybird_logger::TinybirdLogger;
 
 /// Rolling per-minute buckets for the request count + error count.
 /// Sized for the Studio Overview's "last 60 minutes" sparkline. Cheap
@@ -138,6 +140,23 @@ pub fn set_current_request(url: &str, started: std::time::Instant) {
     });
 }
 
+// Process-global Tinybird shipper. Initialized once at server startup
+// if PYLON_TINYBIRD_TOKEN is set; otherwise stays None and the shipper
+// hot path is a single `is_none()` check. OnceLock avoids the lazy-init
+// allocation on every request.
+static TINYBIRD_LOGGER: OnceLock<Option<Arc<TinybirdLogger>>> = OnceLock::new();
+
+/// Initialize the Tinybird request-log shipper from env. Idempotent:
+/// subsequent calls are no-ops (the first call wins). Call once during
+/// server boot, before requests start arriving.
+pub fn init_tinybird_logger() {
+    TINYBIRD_LOGGER.get_or_init(TinybirdLogger::from_env);
+}
+
+fn tinybird_logger() -> Option<&'static Arc<TinybirdLogger>> {
+    TINYBIRD_LOGGER.get().and_then(|opt| opt.as_ref())
+}
+
 impl Metrics {
     /// Create a new metrics instance. The uptime clock starts immediately.
     pub fn new() -> Self {
@@ -187,6 +206,15 @@ impl Metrics {
             Some(c) => {
                 let dur_ms = c.started.elapsed().as_millis();
                 tracing::info!("← {} {} {} in {}ms", method, c.url, status, dur_ms);
+                // Tinybird shipper: best-effort fire-and-forget into
+                // the background channel. `record()` returns immediately
+                // even on backpressure (drops the event), so the cost
+                // on the request hot path is one channel try_send.
+                if let Some(logger) = tinybird_logger() {
+                    let path = c.url.split('?').next().unwrap_or(&c.url);
+                    let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
+                    logger.record(method, path, status, cpu_ms, 0, 0, "");
+                }
             }
             None => {
                 tracing::debug!("← {} {} (no per-request ctx)", method, status);

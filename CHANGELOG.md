@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.78](https://github.com/pylonsync/pylon/compare/v0.3.77...v0.3.78) (2026-05-11)
+
+
+### Features
+
+* **runtime/logger:** Optional Tinybird request-log shipper. When `PYLON_TINYBIRD_TOKEN` + `PYLON_PROJECT_ID` are set in env, every completed HTTP request emits one NDJSON row to a configured Tinybird datasource (defaults to `request_log`). Disabled at runtime if either env is unset — zero cost for standalone deployments. Designed for Pylon Cloud's per-project Logs page: cloud sets the envs on each customer Fly machine at provision time, the shipper batches up to 100 events / 2s and POSTs to `{host}/v0/events?name=request_log`. Bounded `mpsc::sync_channel` (capacity 2048) drops on backpressure rather than blocking the request hot path. Optional envs: `PYLON_TINYBIRD_HOST` (defaults to `https://api.tinybird.co`), `PYLON_DEPLOYMENT_ID`, `PYLON_REGION` (falls back to `FLY_REGION`), `PYLON_TINYBIRD_DATASOURCE` (defaults to `request_log`).
+
 ## [0.3.77](https://github.com/pylonsync/pylon/compare/v0.3.76...v0.3.77) (2026-05-11)
 
 

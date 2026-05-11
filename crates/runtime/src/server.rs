@@ -241,6 +241,12 @@ fn start_server(
     // if nothing was registered.
     pylon_observability::run_tracing_hook();
 
+    // Optional Tinybird request-log shipper. No-op unless the env is
+    // set (PYLON_TINYBIRD_TOKEN + PYLON_PROJECT_ID); on Pylon Cloud
+    // these are set per-machine at provision time so every customer
+    // app ships request rows to the central workspace.
+    crate::metrics::init_tinybird_logger();
+
     // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by
     // default) IPv4-mapped connections to the same socket. Without
     // this, a v4-only `0.0.0.0:port` bind silently breaks Fly.io —

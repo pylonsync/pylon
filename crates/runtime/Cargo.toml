@@ -35,6 +35,11 @@ serde_json = { workspace = true }
 tiny_http = { workspace = true }
 tungstenite = { workspace = true }
 tracing = { workspace = true }
+# HTTP client for the optional Tinybird request-log shipper. Lives
+# under feature `tinybird` so the dep is opt-in but enabled by default
+# on Pylon Cloud builds (always-on at the binary level — gated at
+# runtime by the absence of PYLON_TINYBIRD_TOKEN env, not at compile).
+ureq = { workspace = true }
 # WebSocket handshake on the multiplexed HTTP port: sha1 + base64
 # compute Sec-WebSocket-Accept ourselves so tiny_http can hijack the
 # socket without going back through tungstenite's accept path.
