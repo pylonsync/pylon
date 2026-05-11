@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.77](https://github.com/pylonsync/pylon/compare/v0.3.76...v0.3.77) (2026-05-11)
+
+
+### Bug Fixes
+
+* **runtime/jobs:** `JobQueue::restore_from` now also re-populates the in-memory dead-letter queue from disk on startup, not just pending/running/retrying. Dead-letter rows were always persisted by `try_enqueue_job` → `JobStore::save` (the SQLite table has them with `status='dead'`), but `restore_from` skipped them, so `/api/jobs/dead` returned `[]` after every restart even though the rows were still on disk. Operators lost visibility into failed jobs at the exact moment they most needed it (right after a deploy that may have caused the failures). Fix re-pushes dead rows into the in-memory VecDeque in chronological order and threads them into the next-id calculation so a restored `job_999` doesn't get clobbered by a fresh enqueue. Regression test covers the round-trip.
+
 ## [0.3.76](https://github.com/pylonsync/pylon/compare/v0.3.75...v0.3.76) (2026-05-11)
 
 

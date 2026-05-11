@@ -581,21 +581,32 @@ impl JobQueue {
     // Persistence
     // -----------------------------------------------------------------------
 
-    /// Restore pending/running/retrying jobs from a persistent store.
+    /// Restore pending/running/retrying jobs AND dead-letter jobs from a
+    /// persistent store.
     ///
     /// Jobs that were `Running` at the time of the crash are reset to
-    /// `Pending` so they will be re-processed. Returns the number of jobs
-    /// restored.
+    /// `Pending` so they will be re-processed. Dead-letter rows are
+    /// re-populated into the in-memory `dead_letters` queue so
+    /// `/api/jobs/dead` keeps surfacing them after a restart — without
+    /// this the rows persisted on disk but the API returned `[]` until
+    /// a new dead-letter happened, hiding the very rows operators need
+    /// to triage.
+    ///
+    /// Returns the number of jobs restored across both pending + dead.
     ///
     /// Call this once at startup, before workers begin processing.
     pub fn restore_from(&self, store: &crate::job_store::JobStore) -> usize {
         let jobs = match store.load_pending() {
             Ok(j) => j,
-            Err(_) => return 0,
+            Err(_) => Vec::new(),
+        };
+        let dead = match store.load_dead() {
+            Ok(j) => j,
+            Err(_) => Vec::new(),
         };
 
         let mut pending = self.pending.lock().unwrap();
-        let count = jobs.len();
+        let pending_count = jobs.len();
 
         for mut job in jobs {
             // Jobs that were mid-flight when the server died should be
@@ -617,22 +628,40 @@ impl JobQueue {
             pending.insert(pos, job);
         }
 
+        // Re-populate dead-letter queue. `load_dead` returns rows in
+        // completed_at DESC; reverse so push_back preserves insertion
+        // order semantics (oldest first, newest at the back — matches
+        // the live `fail()` path).
+        let dead_count = dead.len();
+        {
+            let mut dead_letters = self.dead_letters.lock().unwrap();
+            for job in dead.into_iter().rev() {
+                dead_letters.push_back(job);
+            }
+        }
+
         // Ensure the ID counter doesn't collide with restored IDs.
-        // Parse the numeric suffix from "job_N" and set next_id above the max.
-        let max_id = pending
+        // Walk both queues to find the max numeric suffix.
+        let max_pending = pending
             .iter()
-            .filter_map(|j| {
-                j.id.strip_prefix("job_")
-                    .and_then(|n| n.parse::<u64>().ok())
-            })
+            .filter_map(|j| j.id.strip_prefix("job_").and_then(|n| n.parse::<u64>().ok()))
             .max()
             .unwrap_or(0);
+        let max_dead = self
+            .dead_letters
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|j| j.id.strip_prefix("job_").and_then(|n| n.parse::<u64>().ok()))
+            .max()
+            .unwrap_or(0);
+        let max_id = max_pending.max(max_dead);
         let current = self.next_id.load(Ordering::Relaxed);
         if max_id >= current {
             self.next_id.store(max_id + 1, Ordering::Relaxed);
         }
 
-        count
+        pending_count + dead_count
     }
 }
 
@@ -1106,5 +1135,55 @@ mod tests {
         let new_id = q.enqueue("new", serde_json::json!({}));
         let num: u64 = new_id.strip_prefix("job_").unwrap().parse().unwrap();
         assert!(num > 200);
+    }
+
+    #[test]
+    fn restore_from_store_repopulates_dead_letters() {
+        // Regression: dead-letter rows persisted on disk used to be
+        // lost from `/api/jobs/dead` after a restart because
+        // `restore_from` only loaded pending/running/retrying. Now it
+        // re-populates the in-memory dead-letter queue too, so
+        // operators don't lose visibility into failed jobs at the
+        // first deploy.
+        let store = crate::job_store::JobStore::in_memory().unwrap();
+
+        let dead_job = Job {
+            id: "job_999".into(),
+            name: "provisionMachine".into(),
+            payload: serde_json::json!({"projectId": "p_1"}),
+            priority: Priority::Normal,
+            status: JobStatus::Dead,
+            max_retries: 3,
+            retry_count: 3,
+            queue: "functions".into(),
+            delay_secs: 0,
+            error: Some("UNAUTHENTICATED: log in first".into()),
+            created_at: "5000Z".into(),
+            started_at: Some("5001Z".into()),
+            completed_at: Some("5050Z".into()),
+            auth: None,
+        };
+        store.save(&dead_job).unwrap();
+
+        let q = JobQueue::new(100);
+        let restored = q.restore_from(&store);
+        assert_eq!(restored, 1);
+        assert_eq!(q.pending_count(), 0);
+
+        let dead = q.dead_letters();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].id, "job_999");
+        assert_eq!(dead[0].name, "provisionMachine");
+        assert_eq!(
+            dead[0].error.as_deref(),
+            Some("UNAUTHENTICATED: log in first")
+        );
+
+        // ID counter must also account for restored dead-letter IDs,
+        // otherwise the next enqueue collides and INSERT OR REPLACE
+        // overwrites the dead row.
+        let new_id = q.enqueue("fresh", serde_json::json!({}));
+        let num: u64 = new_id.strip_prefix("job_").unwrap().parse().unwrap();
+        assert!(num > 999, "next_id should be past dead job ids, got {num}");
     }
 }
