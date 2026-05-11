@@ -1,0 +1,129 @@
+---
+title: Stripe billing
+description: "Hosted Checkout sessions + signed webhook verification — wire up subscription billing without spinning up your own billing service."
+---
+
+Pylon ships a minimal Stripe integration in the binary: mint a hosted Checkout Session for the current user, accept Stripe webhooks with full signature verification. The rest of your billing logic (entitlements, plan limits, dunning) is plugin / app-code territory — Pylon doesn't try to be a billing service, it gets you to the point where you can react to Stripe events with your own business logic.
+
+## What's implemented
+
+| Surface | Behavior |
+| --- | --- |
+| `POST /api/billing/checkout` | Mint a Stripe Checkout Session URL for the current user. Auto-creates the Stripe Customer on first use. |
+| `POST /api/billing/webhook` | Signature-verified Stripe event ingress. Currently logs the event; plugin hook coming. |
+
+What's NOT in the framework today:
+
+- Plan / entitlement state machine — your app code reads webhook events and writes its own state.
+- Hosted Billing Portal — there's no `/api/billing/portal` endpoint yet. Apps that need this construct the URL via Stripe's API directly.
+- Per-org billing — checkout is keyed on `user_id`, not `tenantId`. For org-scoped subscriptions, your app stores `stripeCustomerId` on the Org entity and your handlers route accordingly.
+
+## Schema
+
+User entity needs `stripeCustomerId`:
+
+```typescript
+import { entity, field } from "@pylonsync/sdk";
+
+export const User = entity("User", {
+  email: field.string().unique(),
+  stripeCustomerId: field.string().optional(),  // cus_... — auto-created on first /checkout
+  // ...
+});
+```
+
+## Creating a Checkout Session
+
+```bash
+curl -X POST https://your-app/api/billing/checkout \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "priceIds": ["price_1ABCxyz..."],
+    "mode": "subscription",
+    "successUrl": "https://your-app.com/billing/success",
+    "cancelUrl": "https://your-app.com/billing/cancel"
+  }'
+```
+
+Response:
+
+```json
+{
+  "url": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "id": "cs_test_..."
+}
+```
+
+The client redirects the browser to `url`. Stripe handles card collection, 3DS, etc. On success Stripe redirects back to `successUrl`.
+
+Fields:
+
+- **`priceIds`** (required) — array of Stripe Price ids to add as line items.
+- **`mode`** — `"subscription"` (default) or `"payment"` for one-shot purchases.
+- **`successUrl`** — defaults to `/billing/success`.
+- **`cancelUrl`** — defaults to `/billing/cancel`.
+
+On first `/checkout` for a given user, Pylon calls Stripe's API to create a Customer record using the user's email, then writes the new `cus_...` id to `User.stripeCustomerId`. Subsequent calls reuse that id.
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 401 | `AUTH_REQUIRED` | Caller isn't signed in |
+| 400 | `MISSING_PRICES` | `priceIds` array is empty or absent |
+| 501 | `STRIPE_NOT_CONFIGURED` | `PYLON_STRIPE_API_KEY` is not set |
+| 502 | `STRIPE_FAILED` | Stripe's API returned an error (customer create OR checkout create) |
+
+## Receiving webhooks
+
+In your Stripe dashboard, configure the webhook endpoint:
+
+```
+https://your-app.com/api/billing/webhook
+```
+
+Set the signing secret on Pylon:
+
+```bash
+PYLON_STRIPE_API_KEY=sk_live_...
+PYLON_STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+Stripe POSTs events to `/api/billing/webhook` with a `Stripe-Signature` header. Pylon verifies the HMAC-SHA256 signature against `PYLON_STRIPE_WEBHOOK_SECRET` and validates the timestamp is within Stripe's tolerance (defends against replay).
+
+On success Pylon currently logs the event at `tracing::info!` and returns:
+
+```json
+{ "received": true }
+```
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 400 | `WEBHOOK_INVALID` | Signature verification failed (wrong secret, replayed timestamp, bad payload) |
+| 501 | `STRIPE_NOT_CONFIGURED` / `WEBHOOK_NOT_CONFIGURED` | One of the env vars is missing |
+
+**Plugin hook for app code** — Pylon's roadmap includes `plugin_hooks.on_billing_event` so apps can react to events (flip user's plan, schedule grace-period jobs, etc.) without forking the framework. Today, apps that need event reaction proxy the webhook through their own handler that verifies + dispatches.
+
+## Configuration
+
+```bash
+PYLON_STRIPE_API_KEY=sk_live_...               # required — enables /checkout
+PYLON_STRIPE_WEBHOOK_SECRET=whsec_...          # required — enables /webhook
+```
+
+Use `sk_test_...` and `whsec_test_...` in dev. Stripe's CLI (`stripe listen --forward-to localhost:4321/api/billing/webhook`) is the easiest way to test the webhook path locally.
+
+## Security guarantees
+
+- **Webhook signature verification is mandatory.** Pylon refuses to process unverified events — there's no `WEBHOOK_INSECURE_SKIP_SIGNATURE` flag. The `Stripe-Signature` header is HMAC-SHA256-verified using `PYLON_STRIPE_WEBHOOK_SECRET` and the request body's exact bytes.
+- **Replay protection** via the timestamp + tolerance check baked into Stripe's signature format.
+- **Customer id binds to user_id** — checkout always pulls the Stripe customer from the caller's row, never accepts a caller-supplied `customerId`. A user can't trigger checkout against another user's Stripe customer.
+- **Failed Stripe API calls return 502, not 500** — the caller gets a clear "upstream issue" signal instead of a generic server error.
+
+## Where to go next
+
+- **[Sessions](/auth/sessions)** — `/checkout` is gated on authenticated session
+- **[Organizations](/auth/organizations)** — for per-org billing, store `stripeCustomerId` on the Org entity and key your checkout flow on `auth.tenantId`

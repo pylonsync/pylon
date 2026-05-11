@@ -1,0 +1,196 @@
+---
+title: SSO (per-org)
+description: "Per-organization OIDC + SAML 2.0 — each org owner configures their own IdP, members sign in through it."
+---
+
+Per-org SSO lets each organization plug in their own identity provider (Okta, Auth0, Azure AD, Google Workspace, Keycloak, OneLogin, Ping, JumpCloud, anything OIDC-compliant). Members sign in by going to their org's start URL; the framework handles discovery, PKCE, nonce, state, and auto-join.
+
+Both protocols ship in the binary:
+
+- **OIDC** — discovery doc + PKCE (S256) + nonce + state, single-use.
+- **SAML 2.0** — SP-Initiated AuthnRequest (HTTP-Redirect), Response via HTTP-POST to the ACS, XML signature verified with the configured IdP cert.
+
+## Trust model
+
+Org owners explicitly choose their IdP. The framework doesn't second-guess that choice — it validates the IdP's discovery endpoints use HTTPS, but doesn't dictate which providers are acceptable.
+
+Domain claims are first-come-first-served per Pylon deployment. The framework refuses to let any org claim well-known freemail domains (`gmail.com`, `outlook.com`, `icloud.com`, etc.) so an org owner can't intercept domain-detection sign-ins for every Gmail user.
+
+Operators on multi-tenant Pylon deployments should set `PYLON_SSO_ALLOWED_DOMAINS` as a positive allowlist — any domain not in the list is rejected on `PUT /orgs/:id/sso` or `/saml`.
+
+## Endpoints
+
+All under `/api/auth/`.
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/orgs/:id/sso` | GET | any member | Read redacted OIDC config |
+| `/orgs/:id/sso` | PUT | Owner | Configure OIDC SSO |
+| `/orgs/:id/sso` | DELETE | Owner | Remove OIDC SSO |
+| `/orgs/:id/sso/start` | GET | none | Begin OIDC sign-in (302 to IdP) |
+| `/orgs/:id/sso/callback` | GET | none | IdP redirects here with code+state |
+| `/orgs/:id/saml` | GET | any member | Read SAML config |
+| `/orgs/:id/saml` | PUT | Owner | Configure SAML |
+| `/orgs/:id/saml` | DELETE | Owner | Remove SAML |
+| `/orgs/:id/saml/start` | GET | none | Begin SAML sign-in (302 to IdP) |
+| `/orgs/:id/saml/acs` | POST | none | SAML ACS — IdP POSTs the SAMLResponse here |
+| `/sso/discover` | GET | none | Resolve `?email=user@acme.com` → org's start URL |
+
+## Configuring OIDC SSO
+
+The org's Owner posts the IdP's issuer URL plus client credentials. Pylon fetches `<issuer>/.well-known/openid-configuration` automatically and caches the four endpoints (authorization, token, userinfo, jwks).
+
+```bash
+curl -X PUT https://your-app/api/auth/orgs/org_acme/sso \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "issuer_url": "https://acme.okta.com",
+    "client_id": "0oa1abcd2efgh3ijk4",
+    "client_secret": "OktaSecret...",
+    "default_role": "member",
+    "email_domains": ["acme.com", "acme.io"]
+  }'
+```
+
+Required: `issuer_url`, `client_id`, `client_secret`. Optional: `default_role` (`member` | `admin`, default `member` — **`owner` is refused** so an IdP misconfiguration can't silently hand over org control), `email_domains` (claimed domains for the `/sso/discover` flow; lowercased on store).
+
+Pylon stores the `client_secret` encrypted at rest when `PYLON_SECRET` is set, falling back to a `plain:` envelope in dev mode (with a loud boot-time warning in prod). See [Sessions](/auth/sessions) for the at-rest encryption story.
+
+Response on success:
+
+```json
+{ "configured": true }
+```
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 400 | `MISSING_FIELDS` | `issuer_url` / `client_id` / `client_secret` missing |
+| 400 | `BAD_DEFAULT_ROLE` | `default_role: "owner"` is refused |
+| 400 | `DOMAIN_BLOCKLISTED` | Claimed a freemail domain |
+| 400 | `DOMAIN_NOT_ALLOWED` | Not in `PYLON_SSO_ALLOWED_DOMAINS` (when set) |
+| 400 | `DISCOVERY_FAILED` | `<issuer>/.well-known/openid-configuration` unreachable or invalid |
+| 409 | `DOMAIN_ALREADY_CLAIMED` | Another org already claimed one of the email domains |
+| 500 | `SSO_SECRET_SEAL_FAILED` | `PYLON_SECRET` is set but the ChaCha20-Poly1305 seal failed |
+
+## OIDC sign-in flow
+
+1. Client redirects user to `GET /api/auth/orgs/org_acme/sso/start?callback=<success_url>&error_callback=<error_url>`.
+2. Pylon validates both URLs against `PYLON_TRUSTED_ORIGINS`, mints a single-use state + PKCE verifier + nonce, persists them, and 302s to the IdP's authorization endpoint with `scope=openid email profile`, `response_type=code`, `code_challenge_method=S256`.
+3. IdP authenticates the user and 302s back to `/api/auth/orgs/org_acme/sso/callback?code=...&state=...`.
+4. Pylon consumes the state (single-use), exchanges `code` for tokens against the IdP's token endpoint with the PKCE verifier, validates the id_token's `nonce` claim per OIDC §3.1.2.1, fetches userinfo for `email` + `name`.
+5. Pylon either matches the user's email to an existing User row OR creates one. `emailVerified` is stamped to now — the IdP just vouched for it.
+6. If the user isn't already a member of the org, they're added with the configured `default_role`. Idempotent — re-signing-in via SSO doesn't downgrade an admin.
+7. Pylon mints a session, writes the auth cookie, audits a `SignIn` event with `method=org_sso`, and 302s to the caller's `callback` URL.
+
+On error: Pylon 302s to the `error_callback` URL with `?sso_error=<code>&sso_error_message=<msg>` query params so the client can render a friendly message.
+
+`PYLON_PUBLIC_URL` is required so Pylon can construct the redirect URI to register with the IdP. Without it, `/sso/start` returns `500 REDIRECT_URI_UNAVAILABLE`.
+
+## Configuring SAML
+
+```bash
+curl -X PUT https://your-app/api/auth/orgs/org_acme/saml \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "idp_entity_id": "https://idp.okta.com/exk1abcd...",
+    "idp_sso_url": "https://acme.okta.com/app/abc/sso/saml",
+    "idp_x509_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+    "default_role": "member",
+    "email_domains": ["acme.com"],
+    "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+    "name_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
+  }'
+```
+
+Required: `idp_entity_id`, `idp_sso_url` (must be `https://`), `idp_x509_cert_pem`. Optional: `default_role`, `email_domains`, `email_attribute` (defaults to the standard `emailaddress` claim URI), `name_attribute`.
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 400 | `MISSING_FIELDS` | One of the three required fields is empty |
+| 400 | `INSECURE_SSO_URL` | `idp_sso_url` is not `https://` |
+| 400 | `BAD_DEFAULT_ROLE` | `default_role: "owner"` refused |
+| 400 | `DOMAIN_BLOCKLISTED` / `DOMAIN_NOT_ALLOWED` | Same as OIDC |
+
+## SAML sign-in flow
+
+1. Client redirects to `GET /api/auth/orgs/org_acme/saml/start?callback=<success_url>&error_callback=<error_url>`.
+2. Pylon builds a SAML `AuthnRequest`, deflates + base64-encodes it for the HTTP-Redirect binding, 302s to the IdP's SSO URL with `SAMLRequest=...&RelayState=<state>`.
+3. IdP authenticates the user and HTTP-POSTs a `SAMLResponse` to `POST /api/auth/orgs/org_acme/saml/acs`.
+4. Pylon parses the XML, verifies the digital signature against the configured `idp_x509_cert_pem` using `xmlsec1`, validates assertions, extracts the email + display name from the configured attributes.
+5. Same user-lookup / auto-join / session-mint flow as OIDC.
+
+`xmlsec1` + `libxml2` are required as system dependencies. The Pylon docker image includes them. For self-hosted from-source builds:
+
+```bash
+# macOS
+brew install libxmlsec1 libxml2
+
+# Debian / Ubuntu
+apt-get install libxmlsec1-dev libxml2-dev
+```
+
+## Email-domain discovery
+
+A sign-in form can ask for the user's email first and route to the right SSO automatically:
+
+```bash
+curl https://your-app/api/auth/sso/discover?email=alice@acme.com
+```
+
+OIDC match:
+
+```json
+{
+  "org_id": "org_acme",
+  "kind": "oidc",
+  "start_url": "/api/auth/orgs/org_acme/sso/start"
+}
+```
+
+SAML match:
+
+```json
+{
+  "org_id": "org_acme",
+  "kind": "saml",
+  "start_url": "/api/auth/orgs/org_acme/saml/start"
+}
+```
+
+No claim → `404 NO_SSO_FOR_DOMAIN`. The response never reveals anything about the user — it's purely a per-domain routing hint.
+
+OIDC is checked first; if both protocols claim the same domain, OIDC wins.
+
+## Security guarantees
+
+- **State + PKCE + nonce** on OIDC. State is single-use, scoped to the org, and re-used or wrong-org states return `403 INVALID_SSO_STATE`.
+- **PKCE S256** binds the token exchange to the same client that started the flow. A leaked authorization code can't be redeemed without the matching `code_verifier`.
+- **Nonce binding** per OIDC §3.1.2.1 defeats id_token replay across distinct sign-in attempts.
+- **Redirect-URL allowlist** — both `callback` and `error_callback` are validated against `PYLON_TRUSTED_ORIGINS` before the IdP gets to see them.
+- **SAML signature verification** with `xmlsec1` — assertions without a valid signature from the configured cert are rejected.
+- **`https://` enforced** on `idp_sso_url`.
+- **Freemail domain blocklist** — common consumer-mail domains (gmail, yahoo, outlook, icloud, hotmail, live, msn, aol, mail.com, protonmail / proton.me, gmx, yandex, qq, 163, 126, fastmail, mac.com, me.com, the full list lives in `BLOCKLIST_FREEMAIL_DOMAINS` in `crates/auth/src/org_sso.rs`) refuse to be claimed by any org.
+- **Operator domain allowlist** via `PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io,...`.
+- **Default role can never be `owner`** — IdP-mediated owner-promotion would let an IdP misconfiguration silently hand over org control.
+- **`client_secret` encrypted at rest** when `PYLON_SECRET` is set.
+- **Auto-join is idempotent** — re-signing-in via SSO doesn't change an existing member's role. To re-apply the IdP's default role, remove the membership and let the next sign-in re-add it.
+
+## Configuration
+
+```bash
+PYLON_PUBLIC_URL=https://your-app.com           # required for SSO callbacks
+PYLON_SECRET=<openssl rand -hex 32>             # encrypts client_secret at rest
+PYLON_TRUSTED_ORIGINS=https://your-app.com,...  # callback URL allowlist
+PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io      # optional: positive domain allowlist
+```
+
+## Where to go next
+
+- **[Organizations](/auth/organizations)** — the org model SSO auto-joins users to
+- **[OAuth](/auth/oauth)** — global OAuth (Google + GitHub for everyone) vs per-org SSO

@@ -1,0 +1,135 @@
+---
+title: JWT sessions
+description: "Optional stateless `Authorization: Bearer <jwt>` mode — exchange an opaque session for a short-lived signed JWT."
+---
+
+By default Pylon sessions are opaque 256-bit tokens — server-resolved, revocable, no signing key to rotate. That's the right shape for most apps.
+
+When you need a **stateless** token format — to authenticate microservices that can verify without a session-store round-trip, or to ride through systems that expect "the JWT shape" — Pylon mints HS256 JWTs from an existing session. The opaque session stays the source of truth (revoke / refresh / list still hit it); the JWT is a short-lived projection that downstream services validate independently.
+
+## When to use JWTs (and when not to)
+
+| Want | Use |
+| --- | --- |
+| Browser session, native app sign-in | Opaque session (default) — revocable, no key to rotate |
+| Service-to-service that can't pay the session-store round-trip | HS256 JWT |
+| Accept tokens minted elsewhere (e.g. Auth0, third-party SSO) | Use the `jwt` plugin instead of `/api/auth/jwt` |
+| Need to revoke a specific token before it expires | Opaque session, not JWT |
+
+JWTs **cannot be revoked before they expire**. That's why the default lifetime is short (1 hour) and the opaque session is still the canonical revoke target. If a JWT leaks, you have to wait it out or rotate `PYLON_JWT_SECRET` (which invalidates every JWT).
+
+## Algorithm
+
+- **HS256** (HMAC-SHA256). Symmetric — `PYLON_JWT_SECRET` is both signer and verifier.
+- No RS256 / EdDSA / asymmetric mode in `mint`. Symmetric is the right choice when one Pylon binary mints + verifies. If multiple services need to verify, share the secret over your existing secrets channel.
+- Standard JWT envelope: `<base64url-header>.<base64url-payload>.<base64url-signature>`.
+
+## Endpoint
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/api/auth/jwt` | POST | authenticated session | Exchange the current session for a JWT |
+
+```bash
+curl -X POST https://your-app/api/auth/jwt \
+  -H 'Authorization: Bearer pylon_session_token'
+```
+
+Response:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_at": 1735003600
+}
+```
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 401 | `AUTH_REQUIRED` | Caller isn't signed in |
+| 501 | `JWT_NOT_CONFIGURED` | `PYLON_JWT_SECRET` is not set or empty |
+
+The JWT carries the caller's identity at mint time — `sub` (user id), `tenant_id`, `roles`. A `select-org` after minting **does not** retroactively update the JWT; the next call to `/api/auth/jwt` reflects the new active tenant.
+
+## Claims
+
+```typescript
+type JwtClaims = {
+  sub: string;            // user_id
+  iat: number;            // issued-at (unix seconds)
+  exp: number;            // expires-at (unix seconds)
+  iss: string;            // PYLON_JWT_ISSUER (defaults to "pylon")
+  tenant_id?: string;     // active org at mint time
+  roles: string[];        // RBAC roles at mint time
+}
+```
+
+## Bearer flow
+
+A request can carry **either** an opaque session token **or** a JWT in `Authorization: Bearer`. Pylon's token resolver tries in priority order:
+
+1. Admin token (constant-time compare)
+2. `pk.*` API key
+3. JWT (when `PYLON_JWT_SECRET` is set AND the token's 3-segment shape looks like a JWT)
+4. Session token
+
+JWT verification runs on every request that carries a JWT-shaped bearer — signature, `alg=HS256`, `exp` not in the past, `iss` matches `PYLON_JWT_ISSUER` if set.
+
+If verification fails, Pylon returns `401` with one of:
+
+| Code | Reason |
+| --- | --- |
+| `INVALID_JWT` | Signature mismatch, expired, wrong issuer, malformed |
+| `JWT_MISCONFIGURED` | `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing — refuse-to-validate by design (see Security guarantees) |
+
+## Configuration
+
+```bash
+PYLON_JWT_SECRET=<openssl rand -hex 32>   # required to enable JWT mint + verify
+PYLON_JWT_ISSUER=https://your-app.com     # REQUIRED in production (see below)
+PYLON_JWT_LIFETIME_SECS=3600              # 1 hour default
+```
+
+### Why `PYLON_JWT_ISSUER` is required
+
+Without an issuer pin, any JWT minted with the same HS256 secret for any issuer would verify. If you share `PYLON_JWT_SECRET` with another system (microservices, accept-third-party-tokens setup), a token minted for that system's `sub` could sign into Pylon as that user. Setting `PYLON_JWT_ISSUER` and requiring the `iss` claim to match closes that hole.
+
+If `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing, Pylon refuses to verify any JWT (`JWT_MISCONFIGURED`) — the safest default while the operator fixes the config. This caught a real audit finding (Wave-5 codex review).
+
+## Accepting JWTs minted elsewhere
+
+`/api/auth/jwt` is for **issuing**. If you want Pylon to accept JWTs minted by another system (e.g., your Auth0 tenant, a homegrown SSO), use the `jwt` plugin instead:
+
+```typescript
+import { app } from "@pylonsync/sdk";
+import { jwtPlugin } from "@pylonsync/sdk/plugins";
+
+export default app({
+  // ...
+  plugins: [
+    jwtPlugin({
+      issuer: "https://acme.auth0.com/",
+      jwksUri: "https://acme.auth0.com/.well-known/jwks.json",
+      // or symmetric: secret: process.env.SHARED_HS256_SECRET
+    }),
+  ],
+});
+```
+
+That plugin validates inbound JWTs against the upstream issuer's JWKS (RS256 / ES256) without minting any of its own. See [plugins/integrations](/plugins/integrations).
+
+## Security guarantees
+
+- **HS256 + 256-bit secret** — `openssl rand -hex 32` produces a 32-byte secret. Anything shorter and `PYLON_JWT_SECRET` validates but the security argument weakens.
+- **`alg=HS256` enforced** — the `alg=none` attack and HS256/RS256 algorithm-confusion attack don't apply; Pylon's verify rejects any header where `alg != "HS256"`.
+- **Issuer pin** — refuse-to-validate when `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing.
+- **No revoke story** — JWTs are valid until `exp`. Keep lifetimes short (1 hour default). The underlying opaque session is still revocable via `/api/auth/session` / `/sessions` DELETE.
+- **Claims captured at mint time** — `tenant_id` and `roles` snapshot the session at issuance. Updating roles or running `/select-org` doesn't invalidate existing JWTs.
+
+## Where to go next
+
+- **[Sessions](/auth/sessions)** — the opaque-token default and why it's usually the right answer
+- **[API keys](/auth/api-keys)** — long-lived server-to-server bearer tokens, also stateless but with explicit revoke
+- **[Plugins / integrations](/plugins/integrations)** — accepting JWTs from upstream IdPs

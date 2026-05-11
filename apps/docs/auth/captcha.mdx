@@ -1,0 +1,97 @@
+---
+title: CAPTCHA
+description: "Gate magic-code send, password register, phone send-code, and magic-link send with hCaptcha, Cloudflare Turnstile, or reCAPTCHA."
+---
+
+Magic-code and password sign-in are abuse magnets — bot networks send-code-spam every known email to phish, run credential-stuffing dictionaries against `/password/login`, or burn through SMS quotas via `/phone/send-code`. Pylon's built-in CAPTCHA gate sits in front of those endpoints; configure one env var pair and unauthenticated bots get bounced before they reach the rate limiter.
+
+Three providers ship in the box:
+
+- **hCaptcha** — independent, privacy-focused, free up to ~1M/month
+- **Cloudflare Turnstile** — invisible challenge, free for any volume
+- **Google reCAPTCHA** — v2 + v3 token shapes
+
+## Gated endpoints
+
+When `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` are both set, these endpoints require a `captchaToken` in the request body:
+
+| Endpoint | Method | Why gated |
+| --- | --- | --- |
+| `/api/auth/magic/send` | POST | Bot can send-code-spam every email in a list to phish or harvest |
+| `/api/auth/password/register` | POST | Trivial account creation → spam content / abuse fanout |
+| `/api/auth/phone/send-code` | POST | Burns Twilio (or other SMS provider) quotas |
+| `/api/auth/magic-link/send` | POST | Same as magic/send but for password-reset links |
+
+When the env vars are unset, the gate is skipped entirely — existing apps keep working unchanged.
+
+## Configuration
+
+```bash
+PYLON_CAPTCHA_PROVIDER=hcaptcha     # hcaptcha | turnstile | cloudflare | recaptcha | google
+PYLON_CAPTCHA_SECRET=0xCAPTCHA_secret_from_provider_dashboard
+```
+
+Provider aliases:
+
+- `turnstile` and `cloudflare` both select Turnstile.
+- `recaptcha` and `google` both select reCAPTCHA.
+
+The framework calls each provider's `siteverify` endpoint with the supplied token + the request's peer IP:
+
+- hCaptcha: `https://api.hcaptcha.com/siteverify`
+- Turnstile: `https://challenges.cloudflare.com/turnstile/v0/siteverify`
+- reCAPTCHA: `https://www.google.com/recaptcha/api/siteverify`
+
+The client-side public site key lives in your frontend; the server-side secret lives in `PYLON_CAPTCHA_SECRET`. Get both from the provider's dashboard.
+
+## Client integration
+
+```html
+<!-- hCaptcha example -->
+<script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+
+<form id="signup">
+  <input type="email" name="email" />
+  <div class="h-captcha" data-sitekey="<your hCaptcha site key>"></div>
+  <button>Send code</button>
+</form>
+
+<script>
+  document.getElementById("signup").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = e.target.email.value;
+    const captchaToken = e.target.querySelector("[name='h-captcha-response']").value;
+
+    await fetch("/api/auth/magic/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, captchaToken }),
+    });
+  });
+</script>
+```
+
+For Turnstile, the form input is `cf-turnstile-response`; for reCAPTCHA it's `g-recaptcha-response`. All three resolve to a single `captchaToken` field on the wire to Pylon.
+
+## Verify behavior
+
+Missing or invalid token returns `400 CAPTCHA_FAILED`:
+
+```json
+{
+  "error": {
+    "code": "CAPTCHA_FAILED",
+    "message": "CAPTCHA verification failed"
+  }
+}
+```
+
+The actual provider response (error codes like `missing-input-response`, `invalid-input-response`) is logged server-side with `tracing::warn!` so operators can debug from logs without leaking which check failed back to the client.
+
+The gate runs **before** the rate limiter and **before** any DB / email work — bots that fail the challenge don't consume rate-limit budget or trigger downstream actions.
+
+## Where to go next
+
+- **[Magic codes](/auth/magic-codes)** — primary gated endpoint
+- **[Password](/auth/password)** — register flow uses the same gate
+- **[Phone / SMS](/auth/phone)** — `/phone/send-code` is gated identically

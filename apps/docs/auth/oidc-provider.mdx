@@ -1,0 +1,80 @@
+---
+title: OIDC provider
+description: "Pylon as an OIDC IdP for other systems — discovery doc + JWKS endpoints, optional RSA key publication."
+---
+
+Pylon can be the **identity provider** other systems sign into through. Apps that ship with their own internal tools, microservices, or third-party SaaS that accepts "any OIDC IdP" point at Pylon's discovery doc and treat your Pylon-issued JWTs as the identity layer.
+
+## What ships
+
+- **`/.well-known/openid-configuration`** — standard OIDC discovery doc, root-mounted (no `/api/` prefix) so third-party clients find it without configuration tweaks.
+- **`/oidc/jwks`** — JWKS endpoint that publishes the RSA public key when configured.
+
+The token issuance side reuses the existing JWT mint at [`/api/auth/jwt`](/auth/jwt). HS256 is the default; for downstream verification by third parties, switch to RSA and publish the public key via JWKS.
+
+## Endpoints
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/.well-known/openid-configuration` | GET | none | OIDC discovery document |
+| `/oidc/jwks` | GET | none | Public-key JWKS (empty when only HS256 is configured) |
+
+## Discovery document
+
+```bash
+curl https://your-app/.well-known/openid-configuration
+```
+
+Pylon emits the standard OIDC discovery doc with `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, supported scopes, response types, signing algorithms. The issuer is sourced in priority order:
+
+1. `PYLON_OIDC_ISSUER` env var (e.g. `https://auth.your-app.com`)
+2. Request's `Host` header → `https://<host>`
+3. `http://localhost:4321` (dev fallback)
+
+In production, **set `PYLON_OIDC_ISSUER` explicitly**. Relying on `Host` works fine until you front Pylon with a reverse proxy that doesn't forward it the way you expect.
+
+## JWKS endpoint
+
+```bash
+curl https://your-app/oidc/jwks
+```
+
+Returns:
+
+- **`{ "keys": [] }`** when Pylon is configured with HS256 only (the default). HS256 is symmetric — there's no public key to publish. This is a correct OIDC response, not a misconfiguration; it means "no asymmetric verification keys are published." Downstream services that need to validate Pylon-issued JWTs must share the HS256 secret out-of-band.
+
+- **`{ "keys": [...] }`** with a single RSA key when `PYLON_OIDC_JWKS_RSA_N` is set. The exponent defaults to `AQAB` (65537), the key id defaults to `pylon-default`.
+
+To publish an RSA public key:
+
+```bash
+PYLON_OIDC_JWKS_RSA_N=<base64url-encoded RSA modulus>
+PYLON_OIDC_JWKS_RSA_E=AQAB              # optional; defaults to standard 65537
+PYLON_OIDC_JWKS_KID=pylon-2026-01       # optional key id; defaults to "pylon-default"
+```
+
+Note: setting these env vars only publishes the public key. It does **not** flip JWT signing from HS256 to RS256 — Pylon still mints HS256 by default. The intent is for apps that handle their own RS256 minting externally (e.g. via a sidecar signer) to publish the matching public key through Pylon's JWKS endpoint so consumers verify against a stable URL.
+
+## Configuration
+
+```bash
+PYLON_OIDC_ISSUER=https://auth.your-app.com    # advertised in discovery doc
+PYLON_OIDC_JWKS_RSA_N=<base64url modulus>      # optional — publishes RSA public key
+PYLON_OIDC_JWKS_RSA_E=AQAB                     # optional
+PYLON_OIDC_JWKS_KID=pylon-default              # optional
+```
+
+## Scope
+
+Pylon's OIDC provider surface is **discovery + JWKS only** today. Authorization-code flow, dynamic client registration, and token endpoint are not implemented. The recommended pattern is:
+
+1. Users sign in to your Pylon-backed app via any built-in method (magic code, password, OAuth, passkey, etc.).
+2. Your app calls [`/api/auth/jwt`](/auth/jwt) to mint a JWT for the user.
+3. The JWT is passed to downstream services that verify it against your shared HS256 secret OR a published RSA public key via this JWKS endpoint.
+
+If you need the full `/authorize` + `/token` flow with Pylon-issued auth codes, that's not currently supported — use [per-org SSO](/auth/sso) in reverse (Pylon → external IdP) or contribute the implementation upstream.
+
+## Where to go next
+
+- **[JWT sessions](/auth/jwt)** — minting the tokens downstream services verify
+- **[SSO](/auth/sso)** — the other direction (external IdPs signing INTO Pylon)

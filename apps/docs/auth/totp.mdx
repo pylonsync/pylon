@@ -1,0 +1,172 @@
+---
+title: TOTP / 2FA
+description: "RFC 6238 time-based one-time passwords — enroll, verify, backup codes, encryption at rest."
+---
+
+Pylon ships RFC 6238 TOTP in the binary — works with Google Authenticator, 1Password, Authy, Apple's Passwords, Bitwarden, and every other authenticator app. Plus single-use backup codes (SHA-256 hashed at rest), per-account rate limiting on verify, and at-rest encryption of the TOTP seed.
+
+## Algorithm
+
+- **HOTP** (RFC 4226) with SHA-1 HMAC, 6 digits — the universal mode every authenticator app implements.
+- **TOTP** (RFC 6238) with a 30-second step and ±1 step tolerance window on verify (so codes near the rollover boundary still validate).
+- **160-bit secret**, base32-encoded for the provisioning URL.
+
+## Endpoints
+
+All under `/api/auth/`. Enrollment + management require a real session — API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN`.
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/totp/enroll` | POST | session | Mint a fresh TOTP secret + provisioning URL |
+| `/totp/verify` | POST | session | Confirm a TOTP code; finalize enrollment on first success |
+| `/totp/disable` | POST | session | Remove TOTP (requires a current code) |
+| `/totp/backup-codes/regenerate` | POST | session | Mint a new set of backup codes (invalidates old) |
+
+The user entity in your schema needs three optional fields:
+
+```typescript
+import { entity, field } from "@pylonsync/sdk";
+
+export const User = entity("User", {
+  email: field.string(),
+  totpSecret:       field.string().optional(),  // sealed envelope: `enc:...` or plaintext base32 in dev
+  totpVerified:     field.bool().optional(),    // true after the first successful verify
+  totpBackupCodes:  field.json().optional(),    // string[] of SHA-256 hex hashes
+});
+```
+
+## Enrolling
+
+```bash
+curl -X POST https://your-app/api/auth/totp/enroll \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+{
+  "secret": "JBSWY3DPEHPK3PXP",
+  "url": "otpauth://totp/Acme:alice@acme.com?secret=JBSWY3DPEHPK3PXP&issuer=Acme&algorithm=SHA1&digits=6&period=30",
+  "issuer": "Acme",
+  "account": "alice@acme.com"
+}
+```
+
+The client renders `url` as a QR code (or shows `secret` for manual entry). The user scans, opens their authenticator app, then calls `/totp/verify` with the current 6-digit code to finalize enrollment.
+
+The secret is persisted **immediately** in `totpVerified=false` state. Until `/totp/verify` succeeds for the first time, the secret is "pending". Re-calling `/totp/enroll` while pending rotates the secret freely.
+
+**Re-enrollment when already verified** requires the current TOTP code in the body so an attacker with only the session cookie can't silently rotate the secret to one they control:
+
+```bash
+curl -X POST https://your-app/api/auth/totp/enroll \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "123456"}'
+```
+
+Wrong code → `401 INVALID_TOTP_CODE`. Same posture as `/password/change` requiring the current password.
+
+## Verifying
+
+```bash
+curl -X POST https://your-app/api/auth/totp/verify \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "123456"}'
+```
+
+Response:
+
+```json
+{ "verified": true, "enrolled": true, "trust_device": false }
+```
+
+- `enrolled: true` is set only on the **first** successful verify (when `totpVerified` flipped from `false` to `true`).
+- `trust_device: true` is set when the request body included `trust_device: true` and Pylon minted a `pylon_trusted_device` cookie. See [Trusted devices](/auth/trusted-devices).
+
+Failure modes:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 400 | `TOTP_NOT_ENROLLED` | Call `/totp/enroll` first |
+| 401 | `INVALID_TOTP_CODE` | Wrong code (or wrong backup code) |
+| 429 | `RATE_LIMITED` | Per-account rate limit hit; `retry_after_secs` in the response |
+| 500 | `TOTP_BAD_SECRET` | Stored seed corrupt or `PYLON_TOTP_ENCRYPTION_KEY` missing |
+| 409 | `TOTP_RACE` | Two parallel verifies tried to consume the same backup code — only one wins |
+
+## Backup codes
+
+If `totpBackupCodes` is populated on the user row, `/totp/verify` accepts a backup code as an alternative to the live TOTP code. Backup codes are SHA-256-hashed at rest (hex-encoded) — the plaintext is shown to the user **once** at generation time.
+
+Generating a fresh set invalidates the previous one:
+
+```bash
+curl -X POST https://your-app/api/auth/totp/backup-codes/regenerate \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "123456"}'
+```
+
+The current TOTP code is required. Response includes the plaintext codes (one-shot — not persisted plaintext server-side):
+
+```json
+{
+  "codes": ["abcd-1234", "efgh-5678", ...]
+}
+```
+
+Consumption is single-use. Pylon does a CAS-style "consume the matching index, re-read the row, fail with `409 TOTP_RACE` if a parallel verify swapped in a version where the consumed code came back" check so two concurrent verifies with the same backup code can't both succeed.
+
+## Disabling
+
+```bash
+curl -X POST https://your-app/api/auth/totp/disable \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "123456"}'
+```
+
+Requires a current code. Wipes `totpSecret`, `totpVerified`, and `totpBackupCodes` from the user row.
+
+## At-rest encryption
+
+The TOTP seed is sensitive — anyone with the bytes can generate codes forever. When `PYLON_TOTP_ENCRYPTION_KEY` is set, Pylon seals the seed with an HMAC-SHA256 stream cipher (counter mode, 16-byte CSPRNG nonce) keyed off the env var before persisting:
+
+```bash
+PYLON_TOTP_ENCRYPTION_KEY=<any 32+ byte value, e.g. `openssl rand -hex 32`>
+```
+
+Stored shape: `enc:<nonce-hex>:<ciphertext-hex>`. The construction is not AEAD — there's no integrity tag — but a flipped bit just produces a TOTP code that doesn't verify, prompting the user to re-enroll. Acceptable trade-off vs pulling in an AEAD dep.
+
+Without the key, Pylon stores the plaintext base32 and logs a loud warning at boot:
+
+```
+[totp] PYLON_TOTP_ENCRYPTION_KEY is not set — 2FA seeds stored unencrypted.
+```
+
+Generate a key:
+
+```bash
+openssl rand -hex 32
+```
+
+Rotation: set the new key, leave the old one in place — `unseal_secret` accepts both `enc:...` blobs (decrypts with current key) and plaintext (legacy). Walk the user table and rotate seeds by re-sealing with the new key during a deploy.
+
+## Rate limiting
+
+Verify is per-account rate-limited via the shared `AuthRateLimiter` (the same one that gates password login). Hit the limit and the response is `429 RATE_LIMITED` with `retry_after_secs`. Defends against an attacker who guesses the live code (~1 in a million per try) **or** tries to churn through backup codes.
+
+## Configuration
+
+```bash
+PYLON_TOTP_ISSUER=Acme                # branded label in authenticator apps; defaults to manifest.name
+PYLON_TOTP_ENCRYPTION_KEY=<openssl rand -hex 32>  # at-rest seed encryption (HMAC-SHA256 stream cipher)
+```
+
+## Where to go next
+
+- **[Passkeys](/auth/passkeys)** — phishing-resistant FIDO2 instead of (or alongside) TOTP
+- **[Trusted devices](/auth/trusted-devices)** — `trust_device: true` on `/totp/verify` to skip the prompt for 30 days
+- **[Password](/auth/password)** — TOTP usually pairs with email/password sign-in

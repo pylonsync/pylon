@@ -1,0 +1,267 @@
+---
+title: Organizations
+description: "Multi-tenant orgs with owner/admin/member roles, email invites, and active-tenant session state."
+---
+
+Pylon ships a complete org / workspace / team layer in the binary. Users create orgs, invite teammates by email, change member roles, select an active tenant per session, and policies see the active tenant as `auth.tenantId`. No external "teams" service to bolt on.
+
+## Data model
+
+```rust
+struct Org {
+  id: String,         // org_<24-char-base64url>
+  name: String,
+  created_by: String, // immutable — distinct from "owner"
+  created_at: u64,    // unix epoch seconds
+}
+
+struct Membership {
+  org_id: String,
+  user_id: String,
+  role: OrgRole,      // Owner | Admin | Member
+  joined_at: u64,
+}
+
+struct Invite {
+  id: String,         // inv_<24-char-base64url>
+  org_id: String,
+  email: String,      // lowercased on store
+  role: OrgRole,
+  invited_by: String,
+  token_hash: String, // Argon2 hash; plaintext only ever in the email
+  token_prefix: String, // first 8 chars for display in management UIs
+  created_at: u64,
+  expires_at: u64,    // created_at + 7 days
+  accepted_at: Option<u64>,
+}
+```
+
+## Roles
+
+| Role | Manage members | Delete org | Transfer ownership |
+| --- | --- | --- | --- |
+| Owner | Yes | Yes | Yes |
+| Admin | Yes | No | No |
+| Member | No | No | No |
+
+Multiple owners are allowed — the convention is to promote a successor before stepping down.
+
+## Endpoints
+
+All under `/api/auth/`. **Org management requires a session.** API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN` — a leaked `pk.*` key can't create orgs or change member roles.
+
+| Endpoint | Method | Role | Purpose |
+| --- | --- | --- | --- |
+| `/orgs` | POST | any session | Create an org; caller becomes Owner |
+| `/orgs` | GET | any session | List orgs the caller belongs to |
+| `/orgs/:id` | GET | any member | Org details + caller's role |
+| `/orgs/:id` | DELETE | Owner | Delete the org |
+| `/orgs/:id/members` | GET | any member | List members |
+| `/orgs/:id/members/:user_id` | PUT | Owner/Admin | Change role |
+| `/orgs/:id/members/:user_id` | DELETE | Owner/Admin (or self) | Remove member |
+| `/orgs/:id/invites` | POST | Owner/Admin | Send email invite |
+| `/orgs/:id/invites` | GET | Owner/Admin | List pending invites |
+| `/orgs/:id/invites/:invite_id` | DELETE | Owner/Admin | Revoke pending invite |
+| `/invites/:token/accept` | POST | invited user | Accept an invite |
+| `/select-org` | POST | any session | Switch the session's active tenant |
+
+Non-member callers get `404 ORG_NOT_FOUND` on `/orgs/:id/*` — by design, so probing can't enumerate org ids.
+
+## Creating an org
+
+```bash
+curl -X POST https://your-app/api/auth/orgs \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Acme Corp"}'
+```
+
+Response:
+
+```json
+{
+  "id": "org_a1b2c3...",
+  "name": "Acme Corp",
+  "created_at": 1735000000,
+  "role": "owner"
+}
+```
+
+The caller is auto-added as `Owner`. `created_by` is set to the caller's user id and is immutable.
+
+## Listing user's orgs
+
+```bash
+curl https://your-app/api/auth/orgs \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+[
+  { "id": "org_a1b2", "name": "Acme Corp",  "role": "owner",  "created_at": 1735000000 },
+  { "id": "org_c3d4", "name": "Side Hustle","role": "admin",  "created_at": 1735100000 }
+]
+```
+
+A user can belong to as many orgs as they like; orgs are not exclusive.
+
+## Inviting a teammate
+
+```bash
+curl -X POST https://your-app/api/auth/orgs/org_a1b2/invites \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "alice@acme.com", "role": "member"}'
+```
+
+Response:
+
+```json
+{
+  "id": "inv_xyz",
+  "email": "alice@acme.com",
+  "role": "member",
+  "expires_at": 1735604800,
+  "accept_url": "https://your-app/api/auth/invites/<token>/accept",
+  "token": "<plaintext token, dev mode only>"
+}
+```
+
+Pylon sends the email automatically using the configured `EMAIL_PROVIDER` (or `ctx.email`). The plaintext token is **only returned in the response in dev mode**; in production the inviter sees the invite in their dashboard and the invitee gets the email.
+
+Invites are:
+
+- **Argon2-hashed at rest** — a DB read can't extract active invite links.
+- **Single-use** — `accepted_at` is CAS-stamped before the membership is created so two parallel accepts can't both succeed.
+- **Email-bound** — the accepting user's account email must match the invite's `email`, lowercase compare. Wrong account signed in → `400 WRONG_EMAIL`.
+- **7-day TTL** — `created_at + 7 * 24 * 60 * 60`. Expired invites return `400 INVITE_EXPIRED` on accept.
+
+## Accepting an invite
+
+The invitee signs into Pylon (any method — magic code, password, OAuth), then:
+
+```bash
+curl -X POST https://your-app/api/auth/invites/<token>/accept \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+{ "org_id": "org_a1b2", "role": "member" }
+```
+
+Error cases (all `400` except `401` for unauthenticated):
+
+| Code | Meaning |
+| --- | --- |
+| `INVITE_NOT_FOUND` | Token doesn't match any invite |
+| `INVITE_EXPIRED` | TTL passed |
+| `ALREADY_ACCEPTED` | Token was already burned |
+| `WRONG_EMAIL` | Signed-in account's email doesn't match the invite |
+| `ALREADY_MEMBER` | Caller is already a member of the org |
+
+The original invite row is **kept** (not deleted) with `accepted_at` stamped — preserves the audit trail.
+
+## Managing roles
+
+```bash
+# Promote a member to admin
+curl -X PUT https://your-app/api/auth/orgs/org_a1b2/members/usr_alice \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"role": "admin"}'
+```
+
+Guardrails enforced server-side:
+
+- **Only Owners can promote to Owner.** Admins can't self-promote. `400 BAD_ROLE` for unknown roles, `403 FORBIDDEN` for "only owners can promote a member to owner".
+- **The last Owner cannot be demoted.** Demote attempt that would leave 0 owners returns `400 LAST_OWNER`. Promote someone else to Owner first, then demote.
+- **The last Owner cannot be removed.** Same `400 LAST_OWNER` on `DELETE /members/:user_id`.
+
+Self-removal is allowed for any role except a last-Owner without successor.
+
+## Active tenant — `auth.tenantId`
+
+A session can have an active org. The active tenant is what policies, change-event filters, and `ctx.auth.tenantId` see:
+
+```bash
+curl -X POST https://your-app/api/auth/select-org \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"orgId": "org_a1b2"}'
+```
+
+The server **verifies membership** before committing — if the caller isn't a member of `org_a1b2`, it returns `403 NOT_A_MEMBER`. Clients can't impersonate an org they don't belong to.
+
+Pass `null` to leave the org (drop back to the "no active tenant" state):
+
+```bash
+curl -X POST https://your-app/api/auth/select-org \
+  -H 'Authorization: Bearer pylon_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"orgId": null}'
+```
+
+`tenantId` flows through:
+
+- **Policies** — `data.orgId == auth.tenantId` row-scopes reads + writes.
+- **TenantScopePlugin** — auto-stamps `tenantId` on insert; rejects non-admin cross-tenant inserts at `before_insert`.
+- **`ctx.auth.tenantId`** in TypeScript functions.
+- **WS / SSE change-event broadcasts** — per-client filtered by `policy.check_entity_read(entity, &client.auth, &row)` so subscribers only see events for rows they can read.
+
+See [RBAC](/auth/rbac) for the policy-DSL side.
+
+## Tenant scoping in your schema
+
+The convention is to add a `tenantId` field on org-scoped entities and let `TenantScopePlugin` handle stamping:
+
+```typescript
+import { entity, field } from "@pylonsync/sdk";
+
+export const Document = entity("Document", {
+  title: field.string(),
+  body:  field.string(),
+  tenantId: field.id("Org"),  // auto-stamped from auth.tenantId on insert
+});
+
+export const documentPolicy = policy({
+  entity: "Document",
+  allowRead:   "auth.tenantId == data.tenantId",
+  allowInsert: "auth.tenantId == data.tenantId",
+  allowUpdate: "auth.tenantId == data.tenantId",
+  allowDelete: "auth.tenantId == data.tenantId",
+});
+```
+
+A non-admin caller who tries `ctx.db.insert("Document", { tenantId: "other-org", ... })` gets `403 CROSS_TENANT_INSERT` from the plugin before the row hits the DB.
+
+## Per-org SSO
+
+Each org can have its own SSO IdP. See [SSO](/auth/sso) for OIDC + SAML configuration.
+
+| Endpoint | Method | Role | Purpose |
+| --- | --- | --- | --- |
+| `/orgs/:id/sso` | GET | any member | Read redacted OIDC SSO config |
+| `/orgs/:id/sso` | PUT | Owner | Configure OIDC SSO |
+| `/orgs/:id/sso` | DELETE | Owner | Remove SSO config |
+| `/orgs/:id/saml` | GET | any member | Read SAML config |
+| `/orgs/:id/saml` | PUT | Owner | Configure SAML |
+| `/orgs/:id/saml` | DELETE | Owner | Remove SAML config |
+
+## Security guarantees
+
+- **Membership-check on every `/orgs/:id/*` route** — non-members see `404 ORG_NOT_FOUND` regardless of role.
+- **API-key auth refused** for all org-management routes. Real session required.
+- **Invites are Argon2-hashed at rest** with single-use CAS on accept.
+- **Email-bound invites** — accepting user's email must match the invite.
+- **Last-Owner protection** — demote/remove that would orphan the org is rejected.
+- **Object-level auth on `DELETE /orgs/:id/invites/:invite_id`** — the URL's `org_id` is matched against the invite row before revoke, so an admin of org A can't revoke an invite from org B even if they know the id.
+
+## Where to go next
+
+- **[Sessions](/auth/sessions)** — `select-org`, multi-tenant session state
+- **[RBAC](/auth/rbac)** — policies that read `auth.tenantId` and `auth.hasRole(...)`
+- **[SSO](/auth/sso)** — per-org OIDC + SAML

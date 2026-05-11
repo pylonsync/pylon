@@ -1,0 +1,141 @@
+---
+title: SCIM 2.0
+description: "RFC 7644 user provisioning — Okta, Azure AD, and other IdPs can create / read / deactivate users in Pylon."
+---
+
+SCIM 2.0 is the standard "your IdP creates and deactivates users in your app automatically" protocol. Okta, Azure AD, OneLogin, JumpCloud, and others all speak it. Pylon ships a minimal SCIM 2.0 server in the binary — `Users` endpoint, bearer-token gated, soft-delete on `DELETE`.
+
+## What's implemented
+
+Scope is **deliberately narrow**: User provisioning only. Not Groups, not Bulk, not the full SCIM filter grammar. Enough to plug into Okta's "Provisioning" tab and have new hires automatically appear, departed employees automatically deactivate.
+
+| Endpoint | Method | Behavior |
+| --- | --- | --- |
+| `/scim/v2/Users` | POST | Create a User from the SCIM-shaped payload |
+| `/scim/v2/Users` | GET | List all users (returns `ScimListResponse`) |
+| `/scim/v2/Users/:id` | GET | Get a User by id |
+| `/scim/v2/Users/:id` | DELETE | Soft-delete (sets `scimActive: false`); returns 204 |
+
+Note these are mounted at the **root path** `/scim/v2/...`, NOT under `/api/auth/`. Most IdPs expect SCIM at a top-level path.
+
+## Schema
+
+The user entity needs three SCIM-shaped fields:
+
+```typescript
+import { entity, field } from "@pylonsync/sdk";
+
+export const User = entity("User", {
+  email: field.string().unique(),
+  displayName: field.string().optional(),
+  scimId: field.string().optional(),           // IdP's id for this user
+  scimActive: field.bool().optional(),         // true on create; false on SCIM DELETE
+  createdAt: field.string(),
+});
+```
+
+`scimActive=false` is the soft-delete signal — your app code should refuse sign-in / hide the user when this flag is false. Pylon doesn't auto-revoke sessions on SCIM deactivate; if you want that behavior, watch the User entity for updates and revoke matching sessions in a plugin or scheduled job.
+
+## Authentication
+
+Bearer-token gated:
+
+```bash
+Authorization: Bearer <PYLON_SCIM_TOKEN>
+```
+
+Token comparison is constant-time. Without `PYLON_SCIM_TOKEN` set, the env-var pull returns `None` and `check_bearer` returns false for every token — every SCIM request gets `401`.
+
+```bash
+PYLON_SCIM_TOKEN=<generate a high-entropy token, e.g. `openssl rand -hex 32`>
+```
+
+## Creating a user
+
+Okta and other IdPs POST a payload conforming to RFC 7643:
+
+```bash
+curl -X POST https://your-app/scim/v2/Users \
+  -H 'Authorization: Bearer <PYLON_SCIM_TOKEN>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+    "userName": "alice@acme.com",
+    "name": {
+      "givenName": "Alice",
+      "familyName": "Smith"
+    },
+    "emails": [{ "value": "alice@acme.com", "primary": true }],
+    "active": true
+  }'
+```
+
+Response (201 Created):
+
+```json
+{
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "id": "usr_xyz",
+  "userName": "alice@acme.com",
+  "active": true,
+  ...
+}
+```
+
+Pylon maps:
+
+- `userName` → no direct mapping; primary email goes to `email`
+- `emails[primary=true].value` → `email`
+- `displayName` or `name.givenName + name.familyName` → `displayName`
+- `id` → `scimId` (your IdP's stable id for the user)
+- `active` → `scimActive`
+
+Duplicate emails return `409` with SCIM-shaped error JSON.
+
+## Listing users
+
+```bash
+curl https://your-app/scim/v2/Users \
+  -H 'Authorization: Bearer <PYLON_SCIM_TOKEN>'
+```
+
+Response:
+
+```json
+{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+  "totalResults": 42,
+  "Resources": [ ...ScimUser... ]
+}
+```
+
+Pagination + filtering (`?startIndex=&count=&filter=`) are **not yet implemented**. Lists are bounded by your User table size; if you have 50k+ users provisioned via SCIM, plan accordingly.
+
+## Soft delete
+
+```bash
+curl -X DELETE https://your-app/scim/v2/Users/usr_xyz \
+  -H 'Authorization: Bearer <PYLON_SCIM_TOKEN>'
+```
+
+Returns `204 No Content`. The row stays in the DB with `scimActive: false`. Hard delete is your app's call — typically a periodic job that hard-deletes rows that have been `scimActive: false` for N days.
+
+## Security guarantees
+
+- **Bearer-token gated** with constant-time compare against `PYLON_SCIM_TOKEN`.
+- **Missing env var = 401 for every request** — fail closed, no silent-permissive mode.
+- **SCIM-shaped error responses** (RFC 7644 §3.12) — `schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"]`, `status`, `detail`.
+
+## Configuration
+
+```bash
+PYLON_SCIM_TOKEN=<openssl rand -hex 32>     # required to enable SCIM
+```
+
+Set this on the Pylon side, then paste it into your IdP's SCIM provisioning config alongside `https://your-app.com/scim/v2/`. The IdP discovers the endpoint by probing — it'll send a few test requests, see SCIM-shaped responses, and confirm.
+
+## Where to go next
+
+- **[SSO](/auth/sso)** — per-org OIDC + SAML, the sign-in side of the same IdP integration
+- **[OIDC Provider](/auth/oidc-provider)** — Pylon as IdP for other systems
+- **[API keys](/auth/api-keys)** — a different "server-to-server" token shape for app integrations

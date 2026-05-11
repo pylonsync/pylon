@@ -1,0 +1,196 @@
+---
+title: Passkeys / WebAuthn
+description: "FIDO2 / WebAuthn passkeys with ES256 + Ed25519 signature verification, counter-regression detection, and built-in challenge persistence."
+---
+
+Passkeys (FIDO2 / WebAuthn) are phishing-resistant credentials backed by the user's device's secure enclave or hardware key. Pylon ships a complete WebAuthn server implementation in the binary — challenge mint, signature verification (ES256 + Ed25519), counter-regression detection, key management endpoints. No `@simplewebauthn` or `webauthn-rs` to bolt on.
+
+## Supported algorithms
+
+The verify path supports the two algorithms every shipping authenticator implements:
+
+- **ES256** (`alg=-7`) — ECDSA P-256, the default for Apple / iCloud Keychain, 1Password, most YubiKeys.
+- **Ed25519** (`alg=-8`) — Edwards-curve, used by newer Linux + Android authenticators.
+
+RS256, EdDSA curve negotiation beyond Ed25519, and the attestation chain are deliberately not implemented — every authenticator in practical use signs with one of the two supported algorithms, and pylon focuses on the assertion path that matters for sign-in.
+
+## Endpoints
+
+All under `/api/auth/`:
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/passkey/register/begin` | POST | session | Issue a registration challenge |
+| `/passkey/register/finish` | POST | session | Persist a new credential after the authenticator signs |
+| `/passkey/login/begin` | POST | none | Issue an assertion challenge |
+| `/passkey/login/finish` | POST | none | Verify the assertion → mint session |
+| `/passkey/keys` | GET | session | List the caller's passkeys |
+| `/passkey/keys/:id` | DELETE | session | Revoke a passkey by id |
+
+## Registering a passkey
+
+The user must already be signed in (this is a credential add for an existing account).
+
+```javascript
+// 1. Browser asks Pylon for a challenge.
+const begin = await fetch("/api/auth/passkey/register/begin", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${session}` },
+});
+const { challenge, rpId, userId, userName } = await begin.json();
+
+// 2. Browser calls navigator.credentials.create() with the challenge.
+const credential = await navigator.credentials.create({
+  publicKey: {
+    rp: { name: "Your App", id: rpId },
+    user: {
+      id: new TextEncoder().encode(userId),
+      name: userName,
+      displayName: userName,
+    },
+    challenge: Uint8Array.from(atob(challenge), c => c.charCodeAt(0)),
+    pubKeyCredParams: [
+      { alg: -7,  type: "public-key" }, // ES256
+      { alg: -8,  type: "public-key" }, // Ed25519
+    ],
+    authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+  },
+});
+
+// 3. Send the credential back to Pylon.
+await fetch("/api/auth/passkey/register/finish", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${session}`, "Content-Type": "application/json" },
+  body: JSON.stringify({
+    challenge,
+    credentialId: base64url(credential.rawId),
+    publicKey:    base64url(extractPublicKey(credential.response)),  // COSE_Key
+    name: "MacBook Pro Touch ID",  // optional, for the user's "your passkeys" list
+  }),
+});
+```
+
+The `challenge` is single-use — it's consumed inside `/finish` regardless of success or failure, so a replay attempt gets `401 BAD_CHALLENGE`. Without the right challenge cookie, the call to `/finish` fails fast.
+
+## Signing in with a passkey
+
+```javascript
+// 1. Pylon mints an assertion challenge (no session required).
+const begin = await fetch("/api/auth/passkey/login/begin", { method: "POST" });
+const { challenge, rpId } = await begin.json();
+
+// 2. Browser asks the authenticator to sign.
+const assertion = await navigator.credentials.get({
+  publicKey: {
+    challenge: Uint8Array.from(atob(challenge), c => c.charCodeAt(0)),
+    rpId,
+    userVerification: "preferred",
+  },
+});
+
+// 3. Send the assertion to Pylon.
+const r = await fetch("/api/auth/passkey/login/finish", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    credentialId:      base64url(assertion.rawId),
+    authenticatorData: base64url(assertion.response.authenticatorData),
+    clientDataJSON:    base64url(assertion.response.clientDataJSON),
+    signature:         base64url(assertion.response.signature),
+  }),
+});
+
+// Response: { token, user_id, expires_at }
+const { token, user_id, expires_at } = await r.json();
+```
+
+Pylon verifies the assertion server-side:
+
+1. Decode `clientDataJSON` and confirm `origin == PYLON_WEBAUTHN_ORIGIN` and `type == "webauthn.get"`.
+2. Confirm the `rpIdHash` in `authenticatorData` matches SHA-256(`PYLON_WEBAUTHN_RP_ID`).
+3. Recompute the signed payload (`authenticatorData || SHA-256(clientDataJSON)`).
+4. ECDSA-P256 or Ed25519 verify against the stored public key.
+5. Counter-regression check: the new sign count must be strictly greater than the stored value (with 0 → 0 as the only allowed equality, for authenticators that don't increment).
+6. Update `sign_count` + `last_used_at`; mint a session.
+
+Failure modes:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 401 | `PASSKEY_VERIFY_FAILED` | bad challenge, bad signature, wrong origin/rpId, counter regression, unknown credential |
+
+## Counter regression
+
+WebAuthn authenticators increment a 32-bit counter on every signature. A clone of an authenticator (or a leaked private key) would replay an old counter value — Pylon's verify path rejects any assertion whose `sign_count` is **less than or equal** to the stored value (with one exception: authenticators that legitimately don't implement counters keep emitting `0`, which is permitted as long as the stored value is also `0`).
+
+When a regression fires, the assertion is rejected with `PASSKEY_VERIFY_FAILED`. The right operational response is to revoke that credential and have the user re-register.
+
+## Listing + revoking keys
+
+```bash
+curl https://your-app/api/auth/passkey/keys \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+[
+  {
+    "id": "cred_a1b2...",
+    "name": "MacBook Pro Touch ID",
+    "created_at": 1735000000,
+    "last_used_at": 1735100000
+  }
+]
+```
+
+Revoke:
+
+```bash
+curl -X DELETE https://your-app/api/auth/passkey/keys/cred_a1b2 \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Only the credential's owner can revoke it (caller's `user_id` must match the stored passkey's `user_id`).
+
+## Configuration
+
+```bash
+PYLON_WEBAUTHN_RP_ID=your-app.com                  # registrable domain — must match Origin's host
+PYLON_WEBAUTHN_ORIGIN=https://your-app.com         # full origin clients sign against
+```
+
+Defaults are `localhost` / `https://localhost` for dev. **Production must set both** — a mismatch between `rpIdHash` in the assertion and the configured `RP_ID` will reject every login with `PASSKEY_VERIFY_FAILED`.
+
+For subdomain apps, `RP_ID` should be the parent — set to `example.com` so credentials work across `app.example.com` and `admin.example.com`. Browsers enforce the same-registrable-domain rule client-side.
+
+## Composing the verify path
+
+If you need a custom passkey flow (e.g., step-up auth for a specific high-value action), import the building block directly:
+
+```rust
+use pylon_auth::webauthn::{verify_assertion, AssertionInput};
+
+let key = verify_assertion(
+    passkey_store,
+    &AssertionInput {
+        credential_id: &cred_id,
+        authenticator_data: &auth_data,
+        client_data_json: &client_data,
+        signature: &sig,
+        user_handle: None,
+    },
+    "https://your-app.com",
+    "your-app.com",
+    None,  // optional override challenge — pass Some(b"...") to bind to a specific value
+)?;
+```
+
+`verify_assertion` does the full ES256 / Ed25519 verify, counter check, and metadata update. The `pylon-auth` crate is `Send + Sync` — drop it into any handler.
+
+## Where to go next
+
+- **[TOTP / 2FA](/auth/totp)** — software-token 2FA for accounts without a passkey
+- **[Trusted devices](/auth/trusted-devices)** — remember-this-browser cookie that skips the second factor on re-login
+- **[Sessions](/auth/sessions)** — what `/login/finish` mints
