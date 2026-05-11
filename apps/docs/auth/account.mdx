@@ -1,0 +1,96 @@
+---
+title: Account deletion
+description: "GDPR-style hard account deletion — revoke every session, API key, OAuth link, trusted device, and delete the User row in one call."
+---
+
+`DELETE /api/auth/account` is the "user clicked Delete Account" button. It wipes the user's auth state across every system Pylon owns — sessions, API keys, linked OAuth accounts, trusted-device records, and the User row itself — in one transactional sweep. App-owned tables that reference the user are **not** cascade-deleted (see below) — the host schema is the source of truth for what gets purged.
+
+## Endpoint
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/api/auth/account` | DELETE | session | Hard-delete the caller's account |
+
+## What gets wiped
+
+Pylon performs the following in order:
+
+1. **Revoke all sessions** for the user. The caller's current session is invalidated first so a slow user-row delete can't leave a usable session.
+2. **Revoke all API keys** owned by the user (`pk.*` bearer tokens).
+3. **Unlink all OAuth accounts** — Google, GitHub, Apple, etc. credentials that were linked to this user.
+4. **Revoke all trusted devices** — the `pylon_trusted_device` records for this user.
+5. **Delete the User row** itself from the entity backing the auth user.
+6. **Clear the session cookie** on the response so the browser drops it.
+7. **Audit log** an `AccountDelete` event with counts of each category.
+
+```bash
+curl -X DELETE https://your-app/api/auth/account \
+  -H 'Authorization: Bearer pylon_token'
+```
+
+Response:
+
+```json
+{
+  "deleted": true,
+  "revoked_sessions": 3,
+  "revoked_api_keys": 2,
+  "unlinked_accounts": 1
+}
+```
+
+Errors:
+
+| Status | Code | Reason |
+| --- | --- | --- |
+| 401 | `AUTH_REQUIRED` | No session |
+| 403 | `API_KEY_AUTH_FORBIDDEN` | API-key auth can't delete the account — real session required |
+| 400 | (storage error code) | The User row delete failed (storage layer rejection) |
+
+## App-owned tables don't cascade
+
+This is the most important caveat: **Pylon does NOT cascade-delete your app's tables.** If the user has 47 Project rows pointing at their `user_id`, those rows survive the delete. The host schema is the source of truth — your app declares its own deletion semantics.
+
+The canonical pattern is a plugin hook that fires before the user row is wiped:
+
+```typescript
+// crates/plugin/src/builtin/before_delete_user.ts (sketch)
+import { plugin } from "@pylonsync/sdk";
+
+export default plugin({
+  name: "delete-user-data",
+  on: { delete: { entity: "User" } },
+  async beforeDelete(ctx, { id: userId }) {
+    // Purge app tables that point at this user.
+    const projects = await ctx.db.query("Project", { ownerId: userId });
+    for (const p of projects) await ctx.db.delete("Project", p.id);
+    // ...etc
+  },
+});
+```
+
+Or do it inside a mutation wrapper, or with a scheduled cleanup job after the delete. The framework leaves the policy decision to your app — some apps tombstone, some hard-delete, some anonymize the user_id and keep history.
+
+## Confirming first
+
+Don't expose this endpoint without a confirmation step in your UI. Pylon doesn't require a password / TOTP re-prompt on the API itself — design the front-end flow to confirm:
+
+```typescript
+// Dashboard flow:
+// 1. User clicks "Delete account"
+// 2. Modal asks them to type their email to confirm
+// 3. Frontend calls /password/login to verify the password (or /totp/verify for 2FA)
+// 4. Only then calls /api/auth/account DELETE
+```
+
+For high-stakes apps, gate the call on a fresh TOTP code or re-issued session within the last 5 minutes.
+
+## Audit trail
+
+The `AccountDelete` audit event is written **before** the user row is deleted, so the event row survives. Read via [`/api/auth/audit`](/auth/overview#endpoints) — gives operators a record of which users self-deleted and when, with counts of what was wiped.
+
+## Where to go next
+
+- **[Sessions](/auth/sessions)** — revoke a single session without deleting the account
+- **[API keys](/auth/api-keys)** — revoke a single key without deleting the account
+- **[GDPR export](/operations/incident)** — `/api/admin/users/:id/export` companion endpoint for data portability

@@ -215,9 +215,34 @@ PYLON_COOKIE_SECURE=true         # forces HTTPS-only cookies
 
 ## Where to go next
 
+### Sign-in methods
+
 - **[Magic codes](/auth/magic-codes)** — the simplest sign-in flow; what most apps should use first
 - **[Password](/auth/password)** — email + password with Argon2 hashing
-- **[OAuth](/auth/oauth)** — Google + GitHub
+- **[OAuth](/auth/oauth)** — Google + GitHub + 23 more built-in providers
+- **[Passkeys](/auth/passkeys)** — phishing-resistant FIDO2 / WebAuthn
+- **[Phone / SMS](/auth/phone)** — E.164 sign-in via Twilio (or any custom SmsSender)
+- **[SIWE](/auth/siwe)** — Sign-In With Ethereum, EIP-4361
+- **[SSO](/auth/sso)** — per-org OIDC + SAML, members sign in through their IdP
+
+### Sessions + tokens
+
 - **[Sessions](/auth/sessions)** — token lifetime, refresh, revoke, persistent storage, cookies
-- **[RBAC](/auth/rbac)** — roles, the active tenant, multi-org apps
 - **[API keys](/auth/api-keys)** — long-lived keys for server-to-server calls
+- **[JWT sessions](/auth/jwt)** — stateless `Bearer <jwt>` mode for microservices
+
+### Account features
+
+- **[RBAC](/auth/rbac)** — roles, the active tenant, multi-org apps
+- **[Organizations](/auth/organizations)** — multi-tenant orgs, invites, member management
+- **[TOTP / 2FA](/auth/totp)** — RFC 6238 + backup codes
+- **[Trusted devices](/auth/trusted-devices)** — remember-this-browser cookie
+- **[Email verification](/auth/email-verification)** — confirm a user owns their email
+- **[Account deletion](/auth/account)** — GDPR-style hard delete
+
+### Hardening + integrations
+
+- **[CAPTCHA](/auth/captcha)** — gate sign-in endpoints with hCaptcha / Turnstile / reCAPTCHA
+- **[Stripe billing](/auth/billing)** — hosted Checkout + signed webhooks
+- **[SCIM 2.0](/auth/scim)** — Okta / Azure AD user provisioning
+- **[OIDC provider](/auth/oidc-provider)** — Pylon as IdP for other systems

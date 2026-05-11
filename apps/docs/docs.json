@@ -53,7 +53,21 @@
               "auth/oauth",
               "auth/sessions",
               "auth/rbac",
-              "auth/api-keys"
+              "auth/api-keys",
+              "auth/organizations",
+              "auth/sso",
+              "auth/passkeys",
+              "auth/totp",
+              "auth/trusted-devices",
+              "auth/jwt",
+              "auth/captcha",
+              "auth/phone",
+              "auth/siwe",
+              "auth/billing",
+              "auth/email-verification",
+              "auth/account",
+              "auth/scim",
+              "auth/oidc-provider"
             ]
           },
           {
