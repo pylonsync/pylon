@@ -8,7 +8,7 @@
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-use crate::jobs::{Job, JobStatus, Priority};
+use crate::jobs::{Job, JobAuth, JobStatus, Priority};
 
 /// SQLite-backed persistent storage for jobs.
 pub struct JobStore {
@@ -61,17 +61,42 @@ impl JobStore {
             CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue);
         ",
         )
-        .map_err(|e| format!("Schema init failed: {e}"))
+        .map_err(|e| format!("Schema init failed: {e}"))?;
+        // Migration: add the `auth` column if it doesn't already exist
+        // (pre-0.3.76 databases won't have it). SQLite has no
+        // IF NOT EXISTS on ALTER, so probe pragma_table_info first.
+        // Stored as a JSON string of `JobAuth` so we don't need three
+        // separate columns for {user_id, is_admin, tenant_id}.
+        let has_auth: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'auth'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|_| true)
+            .unwrap_or(false);
+        if !has_auth {
+            conn.execute("ALTER TABLE jobs ADD COLUMN auth TEXT", [])
+                .map_err(|e| format!("Schema migration (add auth) failed: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Save a job (insert or update).
     pub fn save(&self, job: &Job) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
+        let auth_json = match &job.auth {
+            Some(a) => Some(
+                serde_json::to_string(a)
+                    .map_err(|e| format!("auth serialize failed: {e}"))?,
+            ),
+            None => None,
+        };
         conn.execute(
             "INSERT OR REPLACE INTO jobs \
              (id, name, payload, priority, status, max_retries, retry_count, \
-              queue, delay_secs, error, created_at, started_at, completed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              queue, delay_secs, error, created_at, started_at, completed_at, auth) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 job.id,
                 job.name,
@@ -86,6 +111,7 @@ impl JobStore {
                 job.created_at,
                 job.started_at,
                 job.completed_at,
+                auth_json,
             ],
         )
         .map_err(|e| format!("Save failed: {e}"))?;
@@ -98,7 +124,7 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
                  FROM jobs WHERE id = ?1",
             )
             .map_err(|e| format!("Prepare failed: {e}"))?;
@@ -120,7 +146,7 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
                  FROM jobs \
                  WHERE status IN ('pending', 'running', 'retrying') \
                  ORDER BY priority DESC, created_at ASC",
@@ -146,7 +172,7 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
                  FROM jobs \
                  WHERE status = 'dead' \
                  ORDER BY completed_at DESC",
@@ -202,6 +228,11 @@ impl JobStore {
 // ---------------------------------------------------------------------------
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> Job {
+    let auth: Option<JobAuth> = row
+        .get::<_, Option<String>>(13)
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
     Job {
         id: row.get(0).unwrap_or_default(),
         name: row.get(1).unwrap_or_default(),
@@ -217,6 +248,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Job {
         created_at: row.get(10).unwrap_or_default(),
         started_at: row.get(11).ok(),
         completed_at: row.get(12).ok(),
+        auth,
     }
 }
 
@@ -284,6 +316,7 @@ mod tests {
             created_at: "1000Z".to_string(),
             started_at: None,
             completed_at: None,
+            auth: None,
         }
     }
 
@@ -329,6 +362,40 @@ mod tests {
     fn load_nonexistent_returns_none() {
         let store = JobStore::in_memory().unwrap();
         assert!(store.load("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn auth_round_trips_through_save_and_load() {
+        // 0.3.76 schema-migration regression: scheduled jobs carry the
+        // caller's identity in `auth`. The persistent store must
+        // serialize + deserialize the field so restart-recovery doesn't
+        // silently downgrade scheduled callbacks to anonymous.
+        let store = JobStore::in_memory().unwrap();
+        let mut job = make_job("job_auth", JobStatus::Pending);
+        job.auth = Some(JobAuth {
+            user_id: Some("u-alice".into()),
+            is_admin: true,
+            tenant_id: Some("org_acme".into()),
+        });
+        store.save(&job).unwrap();
+
+        let loaded = store.load("job_auth").unwrap().unwrap();
+        let a = loaded.auth.expect("auth column populated");
+        assert_eq!(a.user_id.as_deref(), Some("u-alice"));
+        assert!(a.is_admin);
+        assert_eq!(a.tenant_id.as_deref(), Some("org_acme"));
+    }
+
+    #[test]
+    fn missing_auth_column_value_is_none() {
+        // Existing rows on disk (pre-migration) deserialize with `auth = None`.
+        // The schema migration adds the column but leaves existing rows
+        // with NULL; row_to_job must treat that as "no auth identity".
+        let store = JobStore::in_memory().unwrap();
+        let job = make_job("job_no_auth", JobStatus::Pending);
+        store.save(&job).unwrap();
+        let loaded = store.load("job_no_auth").unwrap().unwrap();
+        assert!(loaded.auth.is_none());
     }
 
     #[test]

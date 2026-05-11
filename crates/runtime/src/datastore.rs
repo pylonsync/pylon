@@ -24,6 +24,10 @@ pub(crate) struct PendingSchedule {
     pub args: serde_json::Value,
     pub delay_ms: Option<u64>,
     pub run_at: Option<u64>,
+    /// Identity captured at schedule time. Threaded into the job
+    /// when the surrounding mutation commits so the eventual handler
+    /// runs as the scheduling caller.
+    pub auth: Option<crate::jobs::JobAuth>,
 }
 
 thread_local! {
@@ -2215,13 +2219,14 @@ impl FnOpsImpl {
                 }
                 _ => 0,
             };
-            if let Err(e) = self.job_queue.try_enqueue_with_options(
+            if let Err(e) = self.job_queue.try_enqueue_with_auth(
                 &sched.fn_name,
                 sched.args,
                 crate::jobs::Priority::Normal,
                 delay_secs,
                 3,
                 "functions",
+                sched.auth,
             ) {
                 // Schedule was already acked OK to the TS handler — the
                 // mutation has committed. Best we can do now is log
@@ -2633,6 +2638,22 @@ pub fn try_spawn_functions(
                 }
             }
 
+            // Propagate the scheduling caller's identity to the job
+            // so the eventual handler runs as that caller, not as
+            // anonymous. Without this every scheduled callback ran
+            // with `user_id: None, is_admin: false`, which broke
+            // apps whose internal mutations reject anonymous direct
+            // callers as a defense against HTTP smuggling. The
+            // smuggle gate above already enforces chain-of-custody
+            // (only admin/internal callers can schedule internal
+            // targets), so admin-scheduled jobs running as admin
+            // is consistent — not a new escalation path.
+            let job_auth = crate::jobs::JobAuth {
+                user_id: caller.caller_user_id.clone(),
+                is_admin: caller.caller_is_admin,
+                tenant_id: caller.caller_tenant_id.clone(),
+            };
+
             // Check the thread-local first. If we're inside a mutation, the
             // buffer is `Some` and we defer.
             let buffered = MUTATION_SCHEDULE_BUFFER.with(|cell| {
@@ -2644,6 +2665,7 @@ pub fn try_spawn_functions(
                             args: args.clone(),
                             delay_ms,
                             run_at,
+                            auth: Some(job_auth.clone()),
                         });
                     })
                     .is_some()
@@ -2667,13 +2689,14 @@ pub fn try_spawn_functions(
                 }
                 _ => 0,
             };
-            job_queue.try_enqueue_with_options(
+            job_queue.try_enqueue_with_auth(
                 fn_name,
                 args,
                 crate::jobs::Priority::Normal,
                 delay_secs,
                 3,
                 "functions",
+                Some(job_auth),
             )
         },
     ));
@@ -2741,10 +2764,23 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
                         )
                     }
                 };
-                let auth = FnAuth {
-                    user_id: None,
-                    is_admin: false,
-                    tenant_id: None,
+                // Run the handler with the auth identity that was
+                // captured at schedule time (propagated through
+                // ScheduleCallerInfo → PendingSchedule → Job.auth).
+                // Falls back to anonymous when the job was enqueued
+                // without auth — e.g. framework cron jobs, manual
+                // dead-letter retries, pre-0.3.76 persisted jobs.
+                let auth = match &job.auth {
+                    Some(a) => FnAuth {
+                        user_id: a.user_id.clone(),
+                        is_admin: a.is_admin,
+                        tenant_id: a.tenant_id.clone(),
+                    },
+                    None => FnAuth {
+                        user_id: None,
+                        is_admin: false,
+                        tenant_id: None,
+                    },
                 };
                 match ops.call(&fn_name, job.payload.clone(), auth, None, None) {
                     Ok(_) => crate::jobs::JobResult::Success,

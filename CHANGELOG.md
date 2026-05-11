@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.76](https://github.com/pylonsync/pylon/compare/v0.3.75...v0.3.76) (2026-05-11)
+
+
+### Bug Fixes
+
+* **runtime/scheduler:** P0 — `ctx.scheduler.runAfter` / `runAt` now propagates the scheduling caller's identity (user_id, is_admin, tenant_id) to the dispatched job instead of running every scheduled callback with anonymous auth. Apps whose internal mutations reject anonymous direct callers (a common defense against HTTP smuggling) silently failed every scheduled handler — pylon-cloud's `provisionMachine` hit this on first cloud-side create, dead-lettering after 3 retries on `UNAUTHENTICATED`. New `JobAuth` field on `Job` carries the identity through the in-memory queue + the SQLite job store (schema migrated on open; existing rows deserialize as `auth = None` → anonymous, matching pre-fix behavior). Framework cron jobs (`pylon.cache.cleanup`, `pylon.rooms.cleanup`) and dead-letter retries keep the anonymous default. The schedule-time smuggle gate (added in 0.3.73) already enforces chain-of-custody — only admin/internal callers can enqueue internal:true targets — so admin-scheduled jobs running as admin is consistent, not a new escalation surface. Two regression tests cover the round-trip + the back-compat anonymous default.
+
 ## [0.3.75](https://github.com/pylonsync/pylon/compare/v0.3.74...v0.3.75) (2026-05-11)
 
 

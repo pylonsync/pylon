@@ -45,6 +45,13 @@ pub struct ScheduleCallerInfo {
     /// Whether the calling function ran with an admin AuthContext.
     /// Admins skip the gate entirely.
     pub caller_is_admin: bool,
+    /// User id of the scheduling caller, if any. Propagated to the
+    /// job so the scheduled callback runs with the caller's identity
+    /// (matches the semantics of a direct call).
+    pub caller_user_id: Option<String>,
+    /// Active tenant of the scheduling caller, if any. Same propagation
+    /// rationale as `caller_user_id`.
+    pub caller_tenant_id: Option<String>,
 }
 
 /// Callback invoked when a function calls `ctx.scheduler.runAfter/runAt`.
@@ -409,6 +416,8 @@ impl FnRunner {
         caller_internal: bool,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
         let caller_is_admin = auth.is_admin;
+        let caller_user_id = auth.user_id.clone();
+        let caller_tenant_id = auth.tenant_id.clone();
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
 
@@ -502,6 +511,8 @@ impl FnRunner {
                     let caller = ScheduleCallerInfo {
                         caller_internal,
                         caller_is_admin,
+                        caller_user_id: caller_user_id.clone(),
+                        caller_tenant_id: caller_tenant_id.clone(),
                     };
                     let hook_result: Result<String, String> = {
                         let hook = self.schedule_hook.lock().unwrap();

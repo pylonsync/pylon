@@ -50,6 +50,32 @@ pub enum JobStatus {
     Dead,
 }
 
+/// Auth context propagated from the function that scheduled this job.
+///
+/// Scheduled function jobs run with the identity of the caller that
+/// invoked `ctx.scheduler.runAfter/runAt` — same semantics as a direct
+/// call. Without this, every scheduled callback ran with anonymous
+/// auth (`user_id: None, is_admin: false`), which broke any app whose
+/// internal mutations reject anonymous callers as a defense against
+/// direct HTTP smuggling. The smuggle-gate already enforces chain-of-
+/// custody at schedule time (only admins or internal:true callers may
+/// enqueue internal:true targets), so propagating the caller's
+/// identity to the job is consistent with that gate — not a new
+/// privilege-escalation surface.
+///
+/// `None` on a Job means "default anonymous" — used for the framework's
+/// built-in cron jobs (`pylon.cache.cleanup`, `pylon.rooms.cleanup`)
+/// and any caller that explicitly opted out.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct JobAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
+
 /// A job in the queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -68,6 +94,11 @@ pub struct Job {
     pub delay_secs: u64,
     /// Queue name (for routing to specific workers).
     pub queue: String,
+    /// Auth identity to dispatch the handler with. `None` falls back
+    /// to anonymous (no user, not admin). `#[serde(default)]` keeps
+    /// older persisted jobs deserializable after this field landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<JobAuth>,
 }
 
 /// Result of processing a job.
@@ -211,6 +242,24 @@ impl JobQueue {
         max_retries: u32,
         queue: &str,
     ) -> Result<String, String> {
+        self.try_enqueue_with_auth(name, payload, priority, delay_secs, max_retries, queue, None)
+    }
+
+    /// Enqueue with an explicit auth identity. The worker dispatches
+    /// the handler with this identity — used by the function-scheduler
+    /// hook so a scheduled callback runs as the function that scheduled
+    /// it, not as anonymous.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_enqueue_with_auth(
+        &self,
+        name: &str,
+        payload: serde_json::Value,
+        priority: Priority,
+        delay_secs: u64,
+        max_retries: u32,
+        queue: &str,
+        auth: Option<JobAuth>,
+    ) -> Result<String, String> {
         let id = format!("job_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let now = now_iso();
         let job = Job {
@@ -227,6 +276,7 @@ impl JobQueue {
             error: None,
             delay_secs,
             queue: queue.to_string(),
+            auth,
         };
         self.try_enqueue_job(job)
     }
@@ -688,6 +738,57 @@ mod tests {
     }
 
     #[test]
+    fn try_enqueue_with_auth_round_trips_auth_on_dequeue() {
+        // Regression: scheduled jobs previously ran with anonymous auth.
+        // The 0.3.76 fix routes the scheduling caller's identity through
+        // Job.auth so the handler sees the same `user_id`/`is_admin`/
+        // `tenant_id` they would have seen on a direct call.
+        let q = JobQueue::new(100);
+        let auth = JobAuth {
+            user_id: Some("u-alice".into()),
+            is_admin: true,
+            tenant_id: Some("org_acme".into()),
+        };
+        let id = q
+            .try_enqueue_with_auth(
+                "provisionMachine",
+                serde_json::json!({"projectId": "p_1"}),
+                Priority::Normal,
+                0,
+                3,
+                "functions",
+                Some(auth.clone()),
+            )
+            .unwrap();
+        assert!(id.starts_with("job_"));
+
+        let job = q.dequeue(Duration::from_millis(10)).unwrap();
+        let job_auth = job.auth.expect("auth should round-trip");
+        assert_eq!(job_auth.user_id.as_deref(), Some("u-alice"));
+        assert!(job_auth.is_admin);
+        assert_eq!(job_auth.tenant_id.as_deref(), Some("org_acme"));
+    }
+
+    #[test]
+    fn try_enqueue_with_options_leaves_auth_none() {
+        // Callers using the original options API (framework cron jobs,
+        // dead-letter retry, etc) must keep their pre-0.3.76 behavior
+        // of dispatching with no auth context.
+        let q = JobQueue::new(100);
+        q.try_enqueue_with_options(
+            "pylon.cache.cleanup",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            3,
+            "default",
+        )
+        .unwrap();
+        let job = q.dequeue(Duration::from_millis(10)).unwrap();
+        assert!(job.auth.is_none(), "auth should default to None");
+    }
+
+    #[test]
     fn dequeue_returns_none_on_empty() {
         let q = JobQueue::new(100);
         assert!(q.dequeue(Duration::from_millis(10)).is_none());
@@ -969,6 +1070,7 @@ mod tests {
             created_at: "1000Z".into(),
             started_at: None,
             completed_at: None,
+            auth: None,
         };
         let running_job = Job {
             id: "job_200".into(),
@@ -984,6 +1086,7 @@ mod tests {
             created_at: "2000Z".into(),
             started_at: Some("2001Z".into()),
             completed_at: None,
+            auth: None,
         };
 
         store.save(&pending_job).unwrap();
