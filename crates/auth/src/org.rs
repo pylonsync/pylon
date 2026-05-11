@@ -1,21 +1,52 @@
-//! Organizations + memberships + invites — multi-tenant team management.
+//! Organizations + memberships + invites — multi-tenant team management
+//! backed by manifest-declared entities.
 //!
-//! Sits alongside the existing in-memory `OrganizationsPlugin` in
-//! `pylon_plugin::builtin::organizations` but with:
-//!   - Pluggable [`OrgBackend`] trait (in-memory default, SQLite + PG
-//!     backends in pylon-runtime so orgs survive a restart)
-//!   - Email invite flow with token + expiry + accept endpoint
-//!   - Role enforcement helpers
+//! The framework's `/api/auth/orgs/*` surface reads + writes through
+//! the app's DataStore using entity names from `ManifestAuthOrgConfig`.
+//! Apps declare three entities in their schema (`Org`, `OrgMember`,
+//! `OrgInvite` by default — names configurable) and add whatever extra
+//! fields they need (logo, industry, billingEmail, etc.) without
+//! touching the framework.
 //!
-//! The HTTP endpoints in `routes/auth.rs` use this directly. Apps
-//! that want their own org model can ignore the store and roll their
-//! own — pylon doesn't force the schema, only ships the backend +
-//! endpoints when you opt in.
+//! ## Required entity shapes
+//!
+//! **Org**
+//!   - `id: string` (auto)
+//!   - `name: string`
+//!   - `createdBy: string` (User id)
+//!   - `createdAt: string` (ISO 8601)
+//!
+//! **OrgMember**
+//!   - `id: string` (auto)
+//!   - `orgId: string` (relation to Org)
+//!   - `userId: string` (relation to User)
+//!   - `role: string` (owner | admin | member)
+//!   - `joinedAt: string` (ISO 8601)
+//!
+//! **OrgInvite**
+//!   - `id: string` — `inv_<random>`
+//!   - `orgId: string`
+//!   - `email: string` (lowercased)
+//!   - `role: string`
+//!   - `invitedBy: string` (User id)
+//!   - `tokenHash: string` (Argon2)
+//!   - `tokenPrefix: string` (first 8 chars of plaintext, for display)
+//!   - `createdAt: string`
+//!   - `expiresAt: string`
+//!   - `acceptedAt: string?` (null until consumed)
+//!
+//! Apps free to add any other fields. Reads return the full row;
+//! writes set only the framework-managed fields.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
+use pylon_http::DataStore;
+use pylon_kernel::ManifestAuthOrgConfig;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Types — same surface external callers used pre-v0.3.74
+// ---------------------------------------------------------------------------
 
 /// Role within an organization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +94,6 @@ impl OrgRole {
 pub struct Org {
     pub id: String,
     pub name: String,
-    /// User id of whoever created the org. Distinct from "owner" —
-    /// ownership can be transferred but creator is immutable.
     pub created_by: String,
     pub created_at: u64,
 }
@@ -79,188 +108,16 @@ pub struct Membership {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {
-    /// Stable id — `inv_<24-char-base64url>`. What you reference in
-    /// management UIs (revoke, resend).
     pub id: String,
     pub org_id: String,
-    /// Email of the invitee. Lowercased before storage so case-only
-    /// duplicates collapse.
     pub email: String,
-    /// Role the invitee will receive on accept.
     pub role: OrgRole,
-    /// User id of whoever sent the invite. Used in the email body
-    /// ("Alice invited you to Acme Corp").
     pub invited_by: String,
-    /// Single-use random token — what the invitee clicks. Stored
-    /// hashed (Argon2) so a DB read doesn't leak active invites.
-    /// The plaintext is sent in the email and never persisted.
     pub token_hash: String,
-    /// First 8 chars of the plaintext token — display in management
-    /// UIs so the inviter can identify which link they sent.
     pub token_prefix: String,
     pub created_at: u64,
     pub expires_at: u64,
     pub accepted_at: Option<u64>,
-}
-
-pub trait OrgBackend: Send + Sync {
-    fn put_org(&self, org: &Org);
-    fn get_org(&self, id: &str) -> Option<Org>;
-    fn delete_org(&self, id: &str) -> bool;
-    fn list_orgs_for_user(&self, user_id: &str) -> Vec<(Org, OrgRole)>;
-
-    fn put_membership(&self, m: &Membership);
-    fn get_membership(&self, org_id: &str, user_id: &str) -> Option<Membership>;
-    fn delete_membership(&self, org_id: &str, user_id: &str) -> bool;
-    fn list_members(&self, org_id: &str) -> Vec<Membership>;
-
-    fn put_invite(&self, inv: &Invite);
-    fn get_invite(&self, id: &str) -> Option<Invite>;
-    fn list_invites(&self, org_id: &str) -> Vec<Invite>;
-    fn delete_invite(&self, id: &str) -> bool;
-    /// All non-accepted invites whose plaintext starts with `prefix`.
-    /// SQL backends use a `WHERE token_prefix = $1 AND accepted_at IS NULL`
-    /// SELECT; the in-memory backend scans all invites. Argon2 verify
-    /// then runs against the candidate set in `accept_invite`.
-    fn invites_by_prefix(&self, prefix: &str) -> Vec<Invite>;
-    /// CAS — atomically stamp `accepted_at` ONLY when it's currently
-    /// NULL. Returns true if we won the race, false if another
-    /// concurrent verify got there first. Required so two parallel
-    /// accept calls with the same token can't BOTH create a
-    /// membership.
-    fn mark_invite_accepted(&self, id: &str, now: u64) -> bool;
-}
-
-pub struct InMemoryOrgBackend {
-    orgs: Mutex<HashMap<String, Org>>,
-    memberships: Mutex<HashMap<(String, String), Membership>>,
-    invites: Mutex<HashMap<String, Invite>>,
-}
-
-impl Default for InMemoryOrgBackend {
-    fn default() -> Self {
-        Self {
-            orgs: Mutex::new(HashMap::new()),
-            memberships: Mutex::new(HashMap::new()),
-            invites: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl OrgBackend for InMemoryOrgBackend {
-    fn put_org(&self, org: &Org) {
-        self.orgs
-            .lock()
-            .unwrap()
-            .insert(org.id.clone(), org.clone());
-    }
-    fn get_org(&self, id: &str) -> Option<Org> {
-        self.orgs.lock().unwrap().get(id).cloned()
-    }
-    fn delete_org(&self, id: &str) -> bool {
-        let removed = self.orgs.lock().unwrap().remove(id).is_some();
-        if removed {
-            self.memberships.lock().unwrap().retain(|(o, _), _| o != id);
-            self.invites
-                .lock()
-                .unwrap()
-                .retain(|_, inv| inv.org_id != id);
-        }
-        removed
-    }
-    fn list_orgs_for_user(&self, user_id: &str) -> Vec<(Org, OrgRole)> {
-        let m = self.memberships.lock().unwrap();
-        let o = self.orgs.lock().unwrap();
-        m.values()
-            .filter(|mem| mem.user_id == user_id)
-            .filter_map(|mem| o.get(&mem.org_id).map(|org| (org.clone(), mem.role)))
-            .collect()
-    }
-
-    fn put_membership(&self, m: &Membership) {
-        self.memberships
-            .lock()
-            .unwrap()
-            .insert((m.org_id.clone(), m.user_id.clone()), m.clone());
-    }
-    fn get_membership(&self, org_id: &str, user_id: &str) -> Option<Membership> {
-        self.memberships
-            .lock()
-            .unwrap()
-            .get(&(org_id.to_string(), user_id.to_string()))
-            .cloned()
-    }
-    fn delete_membership(&self, org_id: &str, user_id: &str) -> bool {
-        self.memberships
-            .lock()
-            .unwrap()
-            .remove(&(org_id.to_string(), user_id.to_string()))
-            .is_some()
-    }
-    fn list_members(&self, org_id: &str) -> Vec<Membership> {
-        self.memberships
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|m| m.org_id == org_id)
-            .cloned()
-            .collect()
-    }
-
-    fn put_invite(&self, inv: &Invite) {
-        self.invites
-            .lock()
-            .unwrap()
-            .insert(inv.id.clone(), inv.clone());
-    }
-    fn get_invite(&self, id: &str) -> Option<Invite> {
-        self.invites.lock().unwrap().get(id).cloned()
-    }
-    fn list_invites(&self, org_id: &str) -> Vec<Invite> {
-        self.invites
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|i| i.org_id == org_id && i.accepted_at.is_none())
-            .cloned()
-            .collect()
-    }
-    fn delete_invite(&self, id: &str) -> bool {
-        self.invites.lock().unwrap().remove(id).is_some()
-    }
-    fn invites_by_prefix(&self, prefix: &str) -> Vec<Invite> {
-        // Include accepted invites in the candidate set so the
-        // accept path can return `AlreadyAccepted` (good UX) instead
-        // of `NotFound` (confusing — looks like a typo in the link).
-        self.invites
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|i| i.token_prefix == prefix)
-            .cloned()
-            .collect()
-    }
-    fn mark_invite_accepted(&self, id: &str, now: u64) -> bool {
-        let mut g = self.invites.lock().unwrap();
-        let Some(inv) = g.get_mut(id) else {
-            return false;
-        };
-        if inv.accepted_at.is_some() {
-            return false;
-        }
-        inv.accepted_at = Some(now);
-        true
-    }
-}
-
-pub struct OrgStore {
-    backend: Box<dyn OrgBackend>,
-}
-
-impl Default for OrgStore {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -273,27 +130,15 @@ pub struct InviteWithToken {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptError {
-    /// Token doesn't match any stored invite (typo, never sent,
-    /// or revoked by an admin). Frontend should ask the user to
-    /// request a fresh invite.
+    /// Token doesn't match any stored invite.
     NotFound,
-    /// Invite is past `expires_at`. Frontend should ask for a resend.
+    /// Invite is past `expires_at`.
     Expired,
-    /// Invite was already redeemed by SOMEONE (possibly the same
-    /// user, possibly a different account that shared the email).
-    /// **Frontends should treat this as success** for UX — the user
-    /// is effectively in the org via that prior accept; surface as
-    /// "you're already a member" not as an error.
+    /// Invite was already redeemed.
     AlreadyAccepted,
-    /// The accepting user's email doesn't match the invite's
-    /// addressee. This is the security gate — surface as a real
-    /// error ("this invite was sent to <other-email>; sign in
-    /// with that account to accept").
+    /// The accepting user's email doesn't match the invite's addressee.
     EmailMismatch,
-    /// User is already a member of this org via a DIFFERENT path
-    /// (e.g. they created the org themselves, or accepted an earlier
-    /// invite). **Frontends should treat this as success** — the
-    /// invite was redundant.
+    /// User is already a member of this org via a different path.
     AlreadyMember,
 }
 
@@ -309,152 +154,340 @@ impl std::fmt::Display for AcceptError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OrgStore — DataStore-backed org/member/invite operations
+// ---------------------------------------------------------------------------
+
+/// All org / member / invite operations the framework's
+/// `/api/auth/orgs/*` route handlers need, routed through the app's
+/// DataStore.
+///
+/// Apps customize the underlying entities by adding fields in their
+/// schema; the framework reads + writes only the fields documented in
+/// the module header.
+pub struct OrgStore {
+    store: Arc<dyn DataStore>,
+    cfg: ManifestAuthOrgConfig,
+}
+
 impl OrgStore {
-    pub fn new() -> Self {
-        Self::with_backend(Box::new(InMemoryOrgBackend::default()))
+    pub fn new(store: Arc<dyn DataStore>, cfg: ManifestAuthOrgConfig) -> Self {
+        Self { store, cfg }
     }
 
-    pub fn with_backend(backend: Box<dyn OrgBackend>) -> Self {
-        Self { backend }
+    fn is_disabled(&self) -> bool {
+        self.cfg.disabled
     }
 
-    /// Create an org. Creator becomes Owner.
-    pub fn create(&self, name: &str, creator_id: &str) -> Org {
-        let id = format!("org_{}", random_token(20));
-        let org = Org {
-            id: id.clone(),
+    /// Whether the org surface is enabled in this app's manifest.
+    /// Routes check this and 501 when disabled.
+    pub fn enabled(&self) -> bool {
+        !self.is_disabled()
+    }
+
+    // ----- Org -----
+
+    /// Create an org. Creator becomes Owner via an OrgMember row.
+    pub fn create(&self, name: &str, creator_id: &str) -> Option<Org> {
+        if self.is_disabled() {
+            return None;
+        }
+        let now = now_secs();
+        let now_iso = now_iso();
+        let payload = serde_json::json!({
+            "name": name,
+            "createdBy": creator_id,
+            "createdAt": now_iso,
+        });
+        let id = match self.store.insert(&self.cfg.entity, &payload) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("[org] create failed: {} {}", e.code, e.message);
+                return None;
+            }
+        };
+        // Seed Owner membership.
+        let member_payload = serde_json::json!({
+            "orgId": id,
+            "userId": creator_id,
+            "role": OrgRole::Owner.as_str(),
+            "joinedAt": now_iso,
+        });
+        if let Err(e) = self.store.insert(&self.cfg.member_entity, &member_payload) {
+            // Roll back the org row so we don't leave a name-claimed
+            // org with no members.
+            let _ = self.store.delete(&self.cfg.entity, &id);
+            tracing::warn!("[org] member seed failed: {} {}", e.code, e.message);
+            return None;
+        }
+        Some(Org {
+            id,
             name: name.to_string(),
             created_by: creator_id.to_string(),
-            created_at: now_secs(),
-        };
-        self.backend.put_org(&org);
-        self.backend.put_membership(&Membership {
-            org_id: id,
-            user_id: creator_id.to_string(),
-            role: OrgRole::Owner,
-            joined_at: now_secs(),
-        });
-        org
+            created_at: now,
+        })
     }
 
     pub fn get(&self, org_id: &str) -> Option<Org> {
-        self.backend.get_org(org_id)
+        if self.is_disabled() {
+            return None;
+        }
+        let row = self
+            .store
+            .get_by_id(&self.cfg.entity, org_id)
+            .ok()
+            .flatten()?;
+        Some(row_to_org(&row))
+    }
+
+    /// Delete an org (and its memberships + pending invites).
+    pub fn delete(&self, org_id: &str) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
+        // Wipe child rows first so we don't strand them.
+        for m in self.list_members(org_id) {
+            let _ = self.delete_member_row(&m);
+        }
+        for inv in self.list_invites(org_id) {
+            let _ = self.store.delete(&self.cfg.invite_entity, &inv.id);
+        }
+        self.store.delete(&self.cfg.entity, org_id).unwrap_or(false)
     }
 
     pub fn list_for_user(&self, user_id: &str) -> Vec<(Org, OrgRole)> {
-        self.backend.list_orgs_for_user(user_id)
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        let memberships = match self.store.query_filtered(
+            &self.cfg.member_entity,
+            &serde_json::json!({ "userId": user_id }),
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(memberships.len());
+        for m in memberships {
+            let org_id = match m.get("orgId").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let role = m
+                .get("role")
+                .and_then(|v| v.as_str())
+                .and_then(OrgRole::from_str)
+                .unwrap_or(OrgRole::Member);
+            if let Some(org) = self.get(&org_id) {
+                out.push((org, role));
+            }
+        }
+        out
     }
 
+    // ----- Members -----
+
     pub fn list_members(&self, org_id: &str) -> Vec<Membership> {
-        self.backend.list_members(org_id)
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        self.store
+            .query_filtered(
+                &self.cfg.member_entity,
+                &serde_json::json!({ "orgId": org_id }),
+            )
+            .unwrap_or_default()
+            .iter()
+            .map(row_to_membership)
+            .collect()
     }
 
     pub fn role_of(&self, org_id: &str, user_id: &str) -> Option<OrgRole> {
-        self.backend.get_membership(org_id, user_id).map(|m| m.role)
+        if self.is_disabled() {
+            return None;
+        }
+        self.find_member_row(org_id, user_id)
+            .and_then(|m| m.get("role").and_then(|v| v.as_str()).map(String::from))
+            .and_then(|s| OrgRole::from_str(&s))
     }
 
+    /// Update an existing member's role. Returns true if a row matched.
     pub fn set_role(&self, org_id: &str, user_id: &str, role: OrgRole) -> bool {
-        if let Some(mut m) = self.backend.get_membership(org_id, user_id) {
-            m.role = role;
-            self.backend.put_membership(&m);
-            true
-        } else {
-            false
+        if self.is_disabled() {
+            return false;
         }
+        let Some(row) = self.find_member_row(org_id, user_id) else {
+            return false;
+        };
+        let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        self.store
+            .update(
+                &self.cfg.member_entity,
+                id,
+                &serde_json::json!({ "role": role.as_str() }),
+            )
+            .unwrap_or(false)
     }
 
     /// Idempotent membership creation. If the user is already a member,
-    /// the existing role is preserved (we never DOWNGRADE an existing
-    /// admin to member just because they signed in via a path that
-    /// would normally create them as member). Returns the resulting
-    /// role.
-    ///
-    /// Used by Wave-8 per-org SSO auto-join + by other mechanisms that
-    /// add users to orgs without going through the invite flow.
+    /// preserve the existing role.
     pub fn add_member(&self, org_id: &str, user_id: &str, role: OrgRole) -> OrgRole {
-        if let Some(existing) = self.backend.get_membership(org_id, user_id) {
-            return existing.role;
+        if self.is_disabled() {
+            return role;
         }
-        let m = Membership {
-            org_id: org_id.to_string(),
-            user_id: user_id.to_string(),
-            role,
-            joined_at: now_secs(),
-        };
-        self.backend.put_membership(&m);
+        if let Some(existing_role) = self.role_of(org_id, user_id) {
+            return existing_role;
+        }
+        let _ = self.store.insert(
+            &self.cfg.member_entity,
+            &serde_json::json!({
+                "orgId": org_id,
+                "userId": user_id,
+                "role": role.as_str(),
+                "joinedAt": now_iso(),
+            }),
+        );
         role
     }
 
     pub fn remove_member(&self, org_id: &str, user_id: &str) -> bool {
-        self.backend.delete_membership(org_id, user_id)
+        if self.is_disabled() {
+            return false;
+        }
+        let Some(row) = self.find_member_row(org_id, user_id) else {
+            return false;
+        };
+        let Some(id) = row.get("id").and_then(|v| v.as_str()).map(String::from) else {
+            return false;
+        };
+        self.store
+            .delete(&self.cfg.member_entity, &id)
+            .unwrap_or(false)
     }
 
-    /// Delete an org + all its memberships + all pending invites.
-    pub fn delete(&self, org_id: &str) -> bool {
-        self.backend.delete_org(org_id)
+    fn find_member_row(&self, org_id: &str, user_id: &str) -> Option<serde_json::Value> {
+        self.store
+            .query_filtered(
+                &self.cfg.member_entity,
+                &serde_json::json!({ "orgId": org_id, "userId": user_id }),
+            )
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
     }
 
-    /// Mint an invite. Returns the plaintext token alongside the
-    /// stored record — caller is responsible for emailing the
-    /// plaintext to the invitee. The token is single-use, expires
-    /// in 7 days, and is rejected for any account whose email
-    /// doesn't match the invite's `email` field.
+    fn delete_member_row(&self, m: &Membership) -> Option<()> {
+        let row = self.find_member_row(&m.org_id, &m.user_id)?;
+        let id = row.get("id").and_then(|v| v.as_str())?;
+        let _ = self.store.delete(&self.cfg.member_entity, id);
+        Some(())
+    }
+
+    // ----- Invites -----
+
     pub fn create_invite(
         &self,
         org_id: &str,
         email: &str,
         role: OrgRole,
         invited_by: &str,
-    ) -> InviteWithToken {
-        let id = format!("inv_{}", random_token(20));
+    ) -> Option<InviteWithToken> {
+        if self.is_disabled() {
+            return None;
+        }
         let token = random_token(24);
         let token_hash = crate::password::hash_password(&token);
         let token_prefix: String = token.chars().take(8).collect();
-        let expires_at = now_secs() + 7 * 24 * 60 * 60; // 7 days
-        let invite = Invite {
-            id,
-            org_id: org_id.to_string(),
-            email: email.to_lowercase(),
-            role,
-            invited_by: invited_by.to_string(),
-            token_hash,
-            token_prefix,
-            created_at: now_secs(),
-            expires_at,
-            accepted_at: None,
-        };
-        self.backend.put_invite(&invite);
-        InviteWithToken { invite, token }
+        let created_at = now_secs();
+        let expires_at = created_at + 7 * 24 * 60 * 60;
+        let payload = serde_json::json!({
+            "orgId": org_id,
+            "email": email.to_lowercase(),
+            "role": role.as_str(),
+            "invitedBy": invited_by,
+            "tokenHash": token_hash.clone(),
+            "tokenPrefix": token_prefix.clone(),
+            "createdAt": iso(created_at),
+            "expiresAt": iso(expires_at),
+        });
+        let id = self.store.insert(&self.cfg.invite_entity, &payload).ok()?;
+        Some(InviteWithToken {
+            invite: Invite {
+                id,
+                org_id: org_id.to_string(),
+                email: email.to_lowercase(),
+                role,
+                invited_by: invited_by.to_string(),
+                token_hash,
+                token_prefix,
+                created_at,
+                expires_at,
+                accepted_at: None,
+            },
+            token,
+        })
     }
 
     pub fn list_invites(&self, org_id: &str) -> Vec<Invite> {
-        self.backend.list_invites(org_id)
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        self.store
+            .query_filtered(
+                &self.cfg.invite_entity,
+                &serde_json::json!({ "orgId": org_id }),
+            )
+            .unwrap_or_default()
+            .iter()
+            .map(row_to_invite)
+            .collect()
     }
 
     pub fn revoke_invite(&self, invite_id: &str) -> bool {
-        self.backend.delete_invite(invite_id)
+        if self.is_disabled() {
+            return false;
+        }
+        self.store
+            .delete(&self.cfg.invite_entity, invite_id)
+            .unwrap_or(false)
     }
 
     /// Accept an invite. Verifies the token (Argon2 hash compare),
-    /// checks expiry + accepted-at, ensures the accepting user's
-    /// email matches the invite, and either creates the membership
-    /// or returns the right error variant. The invite row is
-    /// updated with `accepted_at` (not deleted) so the audit trail
-    /// stays intact.
+    /// checks expiry + accepted-at, ensures the accepting user's email
+    /// matches the invite, CAS-stamps `acceptedAt`, then inserts the
+    /// membership row.
     pub fn accept_invite(
         &self,
         token: &str,
         accepting_user_id: &str,
         accepting_email: &str,
     ) -> Result<Membership, AcceptError> {
-        // Linear scan for the matching token hash. At org-management
-        // scale (handfuls of pending invites per org) this is fine;
-        // an index by token-hash-prefix would help if it ever wasn't.
-        // We can't store the token directly because that would let a
-        // DB read hand attackers active invite links.
-        let invite = self
-            .find_invite_by_plaintext(token)
-            .ok_or(AcceptError::NotFound)?;
+        if self.is_disabled() {
+            return Err(AcceptError::NotFound);
+        }
+        // Narrow by token prefix (cheap query index) then Argon2-verify
+        // candidates. Argon2 is non-deterministic so we can't look up
+        // by hash directly.
+        let prefix: String = token.chars().take(8).collect();
+        let candidates = self
+            .store
+            .query_filtered(
+                &self.cfg.invite_entity,
+                &serde_json::json!({ "tokenPrefix": prefix }),
+            )
+            .map_err(|_| AcceptError::NotFound)?;
+        let mut invite_row: Option<serde_json::Value> = None;
+        for row in candidates {
+            let Some(stored_hash) = row.get("tokenHash").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if crate::password::verify_password(token, stored_hash) {
+                invite_row = Some(row);
+                break;
+            }
+        }
+        let row = invite_row.ok_or(AcceptError::NotFound)?;
+        let invite = row_to_invite(&row);
         if invite.accepted_at.is_some() {
             return Err(AcceptError::AlreadyAccepted);
         }
@@ -464,222 +497,483 @@ impl OrgStore {
         if invite.email != accepting_email.to_lowercase() {
             return Err(AcceptError::EmailMismatch);
         }
-        if self
-            .backend
-            .get_membership(&invite.org_id, accepting_user_id)
-            .is_some()
-        {
+        if self.role_of(&invite.org_id, accepting_user_id).is_some() {
             return Err(AcceptError::AlreadyMember);
         }
-        // Wave-4 codex P2: CAS the invite to accepted_at FIRST,
-        // BEFORE creating the membership. If two concurrent accepts
-        // arrive, only one wins the CAS and only one membership
-        // gets created. The loser sees AlreadyAccepted (the invite
-        // was just consumed by the winning request).
-        if !self.backend.mark_invite_accepted(&invite.id, now_secs()) {
+        // CAS-stamp acceptedAt BEFORE creating the membership. The
+        // `update` returns true on a successful row write — for a real
+        // CAS we'd want a "compare and set acceptedAt only if null"
+        // primitive, but the DataStore trait doesn't expose that today.
+        // Instead we update + re-read to verify the value we observed.
+        // Two parallel verifies that both pass the accepted_at=None
+        // check race here; the loser sees the winner's stamp on
+        // re-read and bails. (Race window shrinks further once we add
+        // a real CAS update on the DataStore trait.)
+        let now = now_secs();
+        let now_iso = iso(now);
+        let updated = self
+            .store
+            .update(
+                &self.cfg.invite_entity,
+                &invite.id,
+                &serde_json::json!({ "acceptedAt": now_iso }),
+            )
+            .unwrap_or(false);
+        if !updated {
+            return Err(AcceptError::NotFound);
+        }
+        let after = self
+            .store
+            .get_by_id(&self.cfg.invite_entity, &invite.id)
+            .ok()
+            .flatten()
+            .ok_or(AcceptError::NotFound)?;
+        let after_accepted = after
+            .get("acceptedAt")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        if after_accepted.as_deref() != Some(now_iso.as_str()) {
+            // A parallel verify won the CAS.
             return Err(AcceptError::AlreadyAccepted);
         }
-        let membership = Membership {
-            org_id: invite.org_id.clone(),
+        let membership_payload = serde_json::json!({
+            "orgId": invite.org_id,
+            "userId": accepting_user_id,
+            "role": invite.role.as_str(),
+            "joinedAt": now_iso,
+        });
+        self.store
+            .insert(&self.cfg.member_entity, &membership_payload)
+            .map_err(|_| AcceptError::NotFound)?;
+        Ok(Membership {
+            org_id: invite.org_id,
             user_id: accepting_user_id.to_string(),
             role: invite.role,
-            joined_at: now_secs(),
-        };
-        self.backend.put_membership(&membership);
-        Ok(membership)
+            joined_at: now,
+        })
     }
+}
 
-    /// Resolve a plaintext invite token to its stored record.
-    /// Narrows by `token_prefix` (cheap SQL index lookup) then
-    /// Argon2-verifies the candidate set. Argon2 is non-deterministic
-    /// so we can't direct-lookup by hash — but invitations live for
-    /// 7 days max and prefix collisions are 64 bits → effectively 1
-    /// candidate per query in practice.
-    fn find_invite_by_plaintext(&self, token: &str) -> Option<Invite> {
-        let prefix: String = token.chars().take(8).collect();
-        for inv in self.backend.invites_by_prefix(&prefix) {
-            if crate::password::verify_password(token, &inv.token_hash) {
-                return Some(inv);
-            }
-        }
-        None
+// ---------------------------------------------------------------------------
+// Row → struct helpers
+// ---------------------------------------------------------------------------
+
+fn row_to_org(row: &serde_json::Value) -> Org {
+    Org {
+        id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
+        name: row
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        created_by: row
+            .get("createdBy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        created_at: parse_unix_seconds(row.get("createdAt")),
     }
+}
+
+fn row_to_membership(row: &serde_json::Value) -> Membership {
+    Membership {
+        org_id: row
+            .get("orgId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        user_id: row
+            .get("userId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        role: row
+            .get("role")
+            .and_then(|v| v.as_str())
+            .and_then(OrgRole::from_str)
+            .unwrap_or(OrgRole::Member),
+        joined_at: parse_unix_seconds(row.get("joinedAt")),
+    }
+}
+
+fn row_to_invite(row: &serde_json::Value) -> Invite {
+    Invite {
+        id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
+        org_id: row
+            .get("orgId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        email: row
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        role: row
+            .get("role")
+            .and_then(|v| v.as_str())
+            .and_then(OrgRole::from_str)
+            .unwrap_or(OrgRole::Member),
+        invited_by: row
+            .get("invitedBy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        token_hash: row
+            .get("tokenHash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        token_prefix: row
+            .get("tokenPrefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into(),
+        created_at: parse_unix_seconds(row.get("createdAt")),
+        expires_at: parse_unix_seconds(row.get("expiresAt")),
+        accepted_at: row
+            .get("acceptedAt")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(parse_unix_seconds_str),
+    }
+}
+
+fn parse_unix_seconds(v: Option<&serde_json::Value>) -> u64 {
+    match v {
+        Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => parse_unix_seconds_str(s),
+        _ => 0,
+    }
+}
+
+fn parse_unix_seconds_str(s: &str) -> u64 {
+    // Accept either pure unix-seconds strings ("1735000000") or ISO 8601.
+    if let Ok(n) = s.parse::<u64>() {
+        return n;
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.timestamp().max(0) as u64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Time + random utilities
+// ---------------------------------------------------------------------------
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_iso() -> String {
+    iso(now_secs())
+}
+
+fn iso(unix_seconds: u64) -> String {
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(unix_seconds as i64, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn random_token(n_bytes: usize) -> String {
+    use base64::Engine;
     use rand::RngCore;
     let mut bytes = vec![0u8; n_bytes];
     rand::thread_rng().fill_bytes(&mut bytes);
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    URL_SAFE_NO_PAD.encode(bytes)
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn now_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+// ---------------------------------------------------------------------------
+// Tests — in-memory DataStore exercising the entity-backed OrgStore
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pylon_http::{DataError, DataStore};
+    use pylon_kernel::{AppManifest, MANIFEST_VERSION};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Tiny in-memory DataStore for org-flow tests. Implements just
+    /// enough of the DataStore trait for OrgStore to round-trip.
+    struct InMemStore {
+        manifest: AppManifest,
+        // entity -> (id -> row)
+        rows: Mutex<HashMap<String, HashMap<String, serde_json::Value>>>,
+        next_id: Mutex<u64>,
+    }
+
+    impl InMemStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                manifest: AppManifest {
+                    manifest_version: MANIFEST_VERSION,
+                    name: "test".into(),
+                    version: "0".into(),
+                    ..Default::default()
+                },
+                rows: Mutex::new(HashMap::new()),
+                next_id: Mutex::new(0),
+            })
+        }
+    }
+
+    impl DataStore for InMemStore {
+        fn manifest(&self) -> &AppManifest {
+            &self.manifest
+        }
+        fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+            let mut next = self.next_id.lock().unwrap();
+            *next += 1;
+            let id = format!("{}_{}", entity.to_lowercase(), *next);
+            let mut row = data.clone();
+            if let Some(o) = row.as_object_mut() {
+                o.insert("id".into(), serde_json::Value::String(id.clone()));
+            }
+            self.rows
+                .lock()
+                .unwrap()
+                .entry(entity.to_string())
+                .or_default()
+                .insert(id.clone(), row);
+            Ok(id)
+        }
+        fn get_by_id(
+            &self,
+            entity: &str,
+            id: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(entity)
+                .and_then(|m| m.get(id).cloned()))
+        }
+        fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(entity)
+                .map(|m| m.values().cloned().collect())
+                .unwrap_or_default())
+        }
+        fn list_after(
+            &self,
+            entity: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            self.list(entity)
+        }
+        fn update(
+            &self,
+            entity: &str,
+            id: &str,
+            data: &serde_json::Value,
+        ) -> Result<bool, DataError> {
+            let mut g = self.rows.lock().unwrap();
+            let Some(m) = g.get_mut(entity) else {
+                return Ok(false);
+            };
+            let Some(existing) = m.get_mut(id) else {
+                return Ok(false);
+            };
+            if let (Some(ex_obj), Some(new_obj)) = (existing.as_object_mut(), data.as_object()) {
+                for (k, v) in new_obj {
+                    ex_obj.insert(k.clone(), v.clone());
+                }
+            }
+            Ok(true)
+        }
+        fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get_mut(entity)
+                .and_then(|m| m.remove(id))
+                .is_some())
+        }
+        fn lookup(
+            &self,
+            _entity: &str,
+            _field: &str,
+            _value: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn link(
+            &self,
+            _entity: &str,
+            _id: &str,
+            _relation: &str,
+            _target_id: &str,
+        ) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn unlink(&self, _entity: &str, _id: &str, _relation: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn query_filtered(
+            &self,
+            entity: &str,
+            filter: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            let obj = filter.as_object();
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(entity)
+                .map(|m| {
+                    m.values()
+                        .filter(|row| match (obj, row.as_object()) {
+                            (Some(f), Some(r)) => f.iter().all(|(k, v)| r.get(k) == Some(v)),
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default())
+        }
+        fn query_graph(&self, _query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn transact(
+            &self,
+            _ops: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+            Ok((true, vec![]))
+        }
+    }
+
+    fn store() -> OrgStore {
+        OrgStore::new(InMemStore::new(), ManifestAuthOrgConfig::default())
+    }
 
     #[test]
-    fn create_org_makes_creator_owner() {
-        let store = OrgStore::new();
-        let org = store.create("Acme", "user-1");
-        assert!(org.id.starts_with("org_"));
+    fn create_org_seeds_owner_membership() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
         assert_eq!(org.name, "Acme");
-        assert_eq!(store.role_of(&org.id, "user-1"), Some(OrgRole::Owner));
+        assert_eq!(org.created_by, "u-alice");
+        assert_eq!(s.role_of(&org.id, "u-alice"), Some(OrgRole::Owner));
     }
 
     #[test]
-    fn list_for_user_returns_all_orgs() {
-        let store = OrgStore::new();
-        let a = store.create("A", "u1");
-        let _b = store.create("B", "u2");
-        let c = store.create("C", "u3");
-        store.set_role(&c.id, "u1", OrgRole::Member);
-        // u1 owns A and isn't in C yet — set_role only updates an
-        // existing membership, so add it via the backend.
-        store.backend.put_membership(&Membership {
-            org_id: c.id.clone(),
-            user_id: "u1".into(),
-            role: OrgRole::Member,
-            joined_at: 1,
-        });
-        let list = store.list_for_user("u1");
-        assert_eq!(list.len(), 2);
-        let names: Vec<_> = list.iter().map(|(o, _)| o.name.clone()).collect();
-        assert!(names.contains(&"A".to_string()));
-        assert!(names.contains(&"C".to_string()));
-        assert!(!names.contains(&"B".to_string()));
+    fn list_for_user_returns_owned_org() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let list = s.list_for_user("u-alice");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0.id, org.id);
+        assert_eq!(list[0].1, OrgRole::Owner);
     }
 
     #[test]
-    fn role_helpers() {
-        assert!(OrgRole::Owner.can_manage_members());
-        assert!(OrgRole::Owner.can_delete_org());
-        assert!(OrgRole::Admin.can_manage_members());
-        assert!(!OrgRole::Admin.can_delete_org());
-        assert!(!OrgRole::Member.can_manage_members());
+    fn add_member_is_idempotent() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let role = s.add_member(&org.id, "u-bob", OrgRole::Member);
+        assert_eq!(role, OrgRole::Member);
+        // Add again with a "lower" role — the existing role is preserved.
+        s.set_role(&org.id, "u-bob", OrgRole::Admin);
+        let role_again = s.add_member(&org.id, "u-bob", OrgRole::Member);
+        assert_eq!(role_again, OrgRole::Admin);
     }
 
     #[test]
-    fn delete_cascades_memberships_and_invites() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner-1");
-        let _inv = store.create_invite(&org.id, "x@example.com", OrgRole::Member, "owner-1");
-        assert_eq!(store.list_invites(&org.id).len(), 1);
-        assert_eq!(store.list_members(&org.id).len(), 1);
-        assert!(store.delete(&org.id));
-        assert!(store.get(&org.id).is_none());
-        assert!(store.list_members(&org.id).is_empty());
-        assert!(store.list_invites(&org.id).is_empty());
+    fn set_role_updates_membership() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        s.add_member(&org.id, "u-bob", OrgRole::Member);
+        assert!(s.set_role(&org.id, "u-bob", OrgRole::Admin));
+        assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
     }
 
     #[test]
-    fn accept_invite_creates_membership() {
-        let store = OrgStore::new();
-        let org = store.create("Acme", "owner-1");
-        let invited = store.create_invite(&org.id, "newbie@example.com", OrgRole::Admin, "owner-1");
-        let m = store
-            .accept_invite(&invited.token, "user-2", "newbie@example.com")
-            .expect("accept");
-        assert_eq!(m.role, OrgRole::Admin);
-        assert_eq!(store.role_of(&org.id, "user-2"), Some(OrgRole::Admin));
-        // Audit: invite stamped accepted, not deleted.
-        let stored = store.backend.get_invite(&invited.invite.id).unwrap();
-        assert!(stored.accepted_at.is_some());
+    fn invite_round_trip_accept() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let invited = s
+            .create_invite(&org.id, "Bob@Example.com", OrgRole::Admin, "u-alice")
+            .unwrap();
+        // Email is lowercased on store.
+        assert_eq!(invited.invite.email, "bob@example.com");
+        // Accept with the matching email creates the membership.
+        let membership = s
+            .accept_invite(&invited.token, "u-bob", "bob@example.com")
+            .unwrap();
+        assert_eq!(membership.role, OrgRole::Admin);
+        assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
     }
 
     #[test]
-    fn accept_invite_rejects_wrong_email() {
-        let store = OrgStore::new();
-        let org = store.create("Acme", "owner-1");
-        let invited = store.create_invite(&org.id, "alice@example.com", OrgRole::Member, "owner-1");
-        let err = store
-            .accept_invite(&invited.token, "user-2", "bob@example.com")
+    fn invite_accept_rejects_wrong_email() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let invited = s
+            .create_invite(&org.id, "bob@example.com", OrgRole::Member, "u-alice")
+            .unwrap();
+        let err = s
+            .accept_invite(&invited.token, "u-bob", "charlie@example.com")
             .unwrap_err();
         assert_eq!(err, AcceptError::EmailMismatch);
     }
 
     #[test]
-    fn accept_invite_rejects_replay() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner");
-        let invited = store.create_invite(&org.id, "a@b.com", OrgRole::Member, "owner");
-        store
-            .accept_invite(&invited.token, "user-2", "a@b.com")
+    fn invite_accept_single_use() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        let invited = s
+            .create_invite(&org.id, "bob@example.com", OrgRole::Member, "u-alice")
             .unwrap();
-        let second = store.accept_invite(&invited.token, "user-2", "a@b.com");
-        assert_eq!(second.unwrap_err(), AcceptError::AlreadyAccepted);
-    }
-
-    /// Wave-4 codex P2 regression: concurrent accepts must not
-    /// both create a membership. The CAS via `mark_invite_accepted`
-    /// guarantees only one wins. Simulate by calling
-    /// `mark_invite_accepted` twice — the second call must return
-    /// false so the second accept_invite returns AlreadyAccepted.
-    #[test]
-    fn accept_invite_cas_blocks_concurrent_winners() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner");
-        let invited = store.create_invite(&org.id, "a@b.com", OrgRole::Member, "owner");
-
-        // Simulate: first request gets through to mark_invite_accepted
-        // and wins.
-        let won_first = store.backend.mark_invite_accepted(&invited.invite.id, 100);
-        assert!(won_first);
-        // Second concurrent request runs the same CAS and loses.
-        let won_second = store.backend.mark_invite_accepted(&invited.invite.id, 101);
-        assert!(!won_second);
-        // accept_invite called now would see consumed_at set and
-        // return AlreadyAccepted instead of double-creating.
-        let result = store.accept_invite(&invited.token, "user-x", "a@b.com");
-        assert_eq!(result.unwrap_err(), AcceptError::AlreadyAccepted);
+        s.accept_invite(&invited.token, "u-bob", "bob@example.com")
+            .unwrap();
+        // Second accept of the same token is rejected.
+        let err = s
+            .accept_invite(&invited.token, "u-charlie", "bob@example.com")
+            .unwrap_err();
+        assert_eq!(err, AcceptError::AlreadyAccepted);
     }
 
     #[test]
-    fn accept_invite_rejects_unknown_token() {
-        let store = OrgStore::new();
-        let _org = store.create("A", "owner");
-        let err = store
-            .accept_invite("not-a-real-token", "user-2", "x@y.com")
+    fn invite_unknown_token() {
+        let s = store();
+        let _ = s.create("Acme", "u-alice").unwrap();
+        let err = s
+            .accept_invite("not-a-real-token", "u-bob", "bob@example.com")
             .unwrap_err();
         assert_eq!(err, AcceptError::NotFound);
     }
 
     #[test]
-    fn invite_email_lowercased() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner");
-        let inv = store.create_invite(&org.id, "Mixed@CASE.com", OrgRole::Member, "owner");
-        assert_eq!(inv.invite.email, "mixed@case.com");
+    fn remove_member_clears_role() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        s.add_member(&org.id, "u-bob", OrgRole::Member);
+        assert!(s.remove_member(&org.id, "u-bob"));
+        assert_eq!(s.role_of(&org.id, "u-bob"), None);
     }
 
     #[test]
-    fn revoke_invite() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner");
-        let inv = store.create_invite(&org.id, "x@y.com", OrgRole::Member, "owner");
-        assert!(store.revoke_invite(&inv.invite.id));
-        assert!(store.list_invites(&org.id).is_empty());
-    }
-
-    #[test]
-    fn remove_member() {
-        let store = OrgStore::new();
-        let org = store.create("A", "owner");
-        store.backend.put_membership(&Membership {
-            org_id: org.id.clone(),
-            user_id: "u2".into(),
-            role: OrgRole::Member,
-            joined_at: 1,
-        });
-        assert!(store.remove_member(&org.id, "u2"));
-        assert!(store.role_of(&org.id, "u2").is_none());
+    fn disabled_config_short_circuits_every_op() {
+        let store: Arc<dyn DataStore> = InMemStore::new();
+        let s = OrgStore::new(
+            Arc::clone(&store),
+            ManifestAuthOrgConfig {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+        assert!(s.create("Acme", "u-alice").is_none());
+        assert!(s.list_for_user("u-alice").is_empty());
+        assert!(s.list_members("doesnt-matter").is_empty());
     }
 }

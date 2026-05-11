@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.74](https://github.com/pylonsync/pylon/compare/v0.3.73...v0.3.74) (2026-05-11)
+
+
+### Breaking changes
+
+* **auth/org:** Org / OrgMember / OrgInvite are now **manifest entities** instead of hardcoded Rust structs. Apps that use the framework's `/api/auth/orgs/*` surface must declare `Org`, `OrgMember`, and `OrgInvite` entities in their schema with the required fields (see docs). The previous SQLite + Postgres `OrgBackend` impls are deleted — org / member / invite data now flows through the same DataStore as every other entity. **Migration**: pylon-cloud and other apps with their own `Organization` / `OrgMember` entities point the framework at their names via `auth.org.{ entity, member_entity, invite_entity }` in the manifest. Apps that want to keep custom flow can set `auth.org.disabled = true` and the framework's routes return 501. No data migration tool ships — if you have org data in the old SQLite/PG tables, write a one-time copy into your new entities before upgrading.
+
+
+### Features
+
+* **auth/org:** Apps customize the Org / OrgMember / OrgInvite schema freely. Add `logo`, `industry`, `billingEmail`, `plan`, `title`, `department`, anything else — the framework reads only the required fields it manages and leaves the rest alone. Same `/api/auth/orgs/*` HTTP surface; the underlying schema is now app-owned.
+
 ## [0.3.73](https://github.com/pylonsync/pylon/compare/v0.3.72...v0.3.73) (2026-05-10)
 
 

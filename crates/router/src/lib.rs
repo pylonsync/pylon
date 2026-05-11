@@ -2194,7 +2194,13 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
-        let orgs = pylon_auth::org::OrgStore::new();
+        // OrgStore reads/writes via DataStore. Tests share the
+        // routing-context stub.
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
@@ -2780,7 +2786,13 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
-        let orgs = pylon_auth::org::OrgStore::new();
+        // OrgStore reads/writes via DataStore. Tests share the
+        // routing-context stub.
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();
@@ -3312,7 +3324,13 @@ mod auth_gate_tests {
         let oauth_state = OAuthStateStore::new();
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
-        let orgs = pylon_auth::org::OrgStore::new();
+        // OrgStore reads/writes via DataStore. Tests share the
+        // routing-context stub.
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
         let passkeys = pylon_auth::webauthn::PasskeyStore::new();

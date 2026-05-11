@@ -3112,7 +3112,18 @@ pub(crate) fn handle(
             if name.is_empty() {
                 return Some((400, json_error("MISSING_NAME", "name is required")));
             }
-            let org = ctx.orgs.create(name, &user_id);
+            let org = match ctx.orgs.create(name, &user_id) {
+                Some(org) => org,
+                None => {
+                    return Some((
+                        500,
+                        json_error(
+                            "ORG_CREATE_FAILED",
+                            "Could not create org. Check the Org / OrgMember entities are declared in your manifest.",
+                        ),
+                    ));
+                }
+            };
             return Some((
                 200,
                 serde_json::json!({
@@ -3170,7 +3181,10 @@ pub(crate) fn handle(
         match parts.as_slice() {
             // /api/auth/orgs/:id
             [_id] if method == HttpMethod::Get => {
-                let org = ctx.orgs.get(org_id).expect("role implies org exists");
+                let org = match ctx.orgs.get(org_id) {
+                    Some(o) => o,
+                    None => return Some((404, json_error("ORG_NOT_FOUND", "Org not found"))),
+                };
                 return Some((
                     200,
                     serde_json::json!({
@@ -3658,11 +3672,30 @@ pub(crate) fn handle(
                     .unwrap_or("member");
                 let role = pylon_auth::org::OrgRole::from_str(role_str)
                     .unwrap_or(pylon_auth::org::OrgRole::Member);
-                let invited = ctx.orgs.create_invite(org_id, email, role, &user_id);
+                let invited = match ctx.orgs.create_invite(org_id, email, role, &user_id) {
+                    Some(inv) => inv,
+                    None => {
+                        return Some((
+                            500,
+                            json_error("INVITE_CREATE_FAILED", "Could not persist invite"),
+                        ));
+                    }
+                };
                 // Best-effort email — failure to send still returns
                 // success because the inviter can copy the link from
                 // the response (apps can hide it in production).
-                let org = ctx.orgs.get(org_id).expect("role implies exists");
+                let org = match ctx.orgs.get(org_id) {
+                    Some(o) => o,
+                    None => {
+                        return Some((
+                            404,
+                            json_error(
+                                "ORG_NOT_FOUND",
+                                "Org disappeared between membership check and invite create",
+                            ),
+                        ));
+                    }
+                };
                 let accept_url = format!(
                     "{}/api/auth/invites/{}/accept",
                     std::env::var("PYLON_PUBLIC_URL").unwrap_or_else(|_| String::new()),

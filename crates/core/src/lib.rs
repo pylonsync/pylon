@@ -129,10 +129,75 @@ pub struct ManifestAuthConfig {
     pub user: ManifestAuthUserConfig,
     #[serde(default)]
     pub session: ManifestAuthSessionConfig,
+    /// Org / membership / invite entity configuration. Apps that want
+    /// org features declare the three entities in their schema and
+    /// (optionally) override the entity names here. Default names are
+    /// `Org`, `OrgMember`, `OrgInvite` — apps following the convention
+    /// get zero-config.
+    #[serde(default)]
+    pub org: ManifestAuthOrgConfig,
     /// Per-app trusted origins for OAuth `?callback=` validation.
     /// Merged with anything in `PYLON_TRUSTED_ORIGINS` env.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_origins: Vec<String>,
+}
+
+/// Org / OrgMember / OrgInvite entity configuration.
+///
+/// Pylon's `/api/auth/orgs/*` surface reads + writes through the
+/// manifest's entity layer — apps declare these three entities in their
+/// schema and add whatever extra fields they need (logo, industry,
+/// billing email, etc.) without touching the framework.
+///
+/// Required fields per entity (the framework reads/writes these by name):
+///
+/// **Org** — `id`, `name`, `createdBy`, `createdAt`
+/// **OrgMember** — `id`, `orgId`, `userId`, `role`, `joinedAt`
+/// **OrgInvite** — `id`, `orgId`, `email`, `role`, `invitedBy`,
+///                `tokenHash`, `tokenPrefix`, `createdAt`, `expiresAt`,
+///                `acceptedAt` (optional)
+///
+/// Apps free to add any other field. Reads return the full row;
+/// writes only set framework-managed fields and leave the rest alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAuthOrgConfig {
+    /// Manifest entity name for the Org table. Default `"Org"`.
+    #[serde(default = "default_org_entity")]
+    pub entity: String,
+    /// Manifest entity name for the OrgMember (membership) table.
+    /// Default `"OrgMember"`.
+    #[serde(default = "default_member_entity")]
+    pub member_entity: String,
+    /// Manifest entity name for the OrgInvite table. Default
+    /// `"OrgInvite"`.
+    #[serde(default = "default_invite_entity")]
+    pub invite_entity: String,
+    /// When `true`, /api/auth/orgs/* endpoints return 501
+    /// ORG_NOT_CONFIGURED. Apps that don't want the framework's org
+    /// surface (e.g. they implement their own in TS) opt out here.
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+impl Default for ManifestAuthOrgConfig {
+    fn default() -> Self {
+        Self {
+            entity: default_org_entity(),
+            member_entity: default_member_entity(),
+            invite_entity: default_invite_entity(),
+            disabled: false,
+        }
+    }
+}
+
+fn default_org_entity() -> String {
+    "Org".into()
+}
+fn default_member_entity() -> String {
+    "OrgMember".into()
+}
+fn default_invite_entity() -> String {
+    "OrgInvite".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -73,30 +73,20 @@ pub(crate) fn handle(
             ));
         }
     };
-    // Row MUST exist before we merge a CRDT update. Otherwise an
-    // authed caller could push bytes for a row id they invented; the
-    // materialized SQLite row stays absent but the CRDT sidecar
-    // accumulates state — divergent + invisible-to-policy. Return
-    // 404 so the caller doesn't think their write landed. Caught in
-    // the 2026-05-10 codex pass-3 audit (P1 NEW).
-    let existing_row = match ctx.store.get_by_id(entity, row_id).ok().flatten() {
-        Some(row) => row,
-        None => {
-            return Some((
-                404,
-                json_error(
-                    "ROW_NOT_FOUND",
-                    "CRDT update targets a row that doesn't exist",
-                ),
-            ));
-        }
-    };
+    // Run the policy check FIRST against whatever existing row state
+    // we have (may be None). A deny-by-default policy bounces here
+    // with 403 — no further info leaks. Then we verify the row
+    // actually exists and 404 if not. This ordering means an
+    // unauth/wrong-tenant caller never learns whether the row
+    // exists; only callers who pass the policy gate see the
+    // ROW_NOT_FOUND signal.
+    let existing_row = ctx.store.get_by_id(entity, row_id).ok().flatten();
     if let pylon_policy::PolicyResult::Denied {
         policy_name,
         reason,
     } = ctx
         .policy_engine
-        .check_entity_update(entity, ctx.auth_ctx, Some(&existing_row))
+        .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref())
     {
         tracing::warn!(
             "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
@@ -107,6 +97,19 @@ pub(crate) fn handle(
                 "POLICY_DENIED",
                 "Access denied by policy",
                 "Check your auth token or the policy rules in your schema",
+            ),
+        ));
+    }
+    // Row MUST exist before we merge — otherwise CRDT sidecar state
+    // accumulates for non-existent materialized rows (divergent +
+    // invisible-to-policy). Caught in the 2026-05-10 codex pass-3
+    // audit (P1 NEW).
+    if existing_row.is_none() {
+        return Some((
+            404,
+            json_error(
+                "ROW_NOT_FOUND",
+                "CRDT update targets a row that doesn't exist",
             ),
         ));
     }

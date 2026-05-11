@@ -1,40 +1,89 @@
 ---
 title: Organizations
-description: "Multi-tenant orgs with owner/admin/member roles, email invites, and active-tenant session state."
+description: "Multi-tenant orgs with owner/admin/member roles, email invites, and active-tenant session state — declared as manifest entities so apps customize the schema freely."
 ---
 
 Pylon ships a complete org / workspace / team layer in the binary. Users create orgs, invite teammates by email, change member roles, select an active tenant per session, and policies see the active tenant as `auth.tenantId`. No external "teams" service to bolt on.
 
-## Data model
+**Apps customize the org / member / invite schema.** As of v0.3.74, the framework's `/api/auth/orgs/*` surface reads + writes through manifest-declared entities (`Org`, `OrgMember`, `OrgInvite` by default — names configurable). Add `logo`, `industry`, `billingEmail`, `plan`, anything you want — the framework reads the required fields it needs and leaves your custom fields alone.
 
-```rust
-struct Org {
-  id: String,         // org_<24-char-base64url>
-  name: String,
-  created_by: String, // immutable — distinct from "owner"
-  created_at: u64,    // unix epoch seconds
-}
+## Declaring the entities
 
-struct Membership {
-  org_id: String,
-  user_id: String,
-  role: OrgRole,      // Owner | Admin | Member
-  joined_at: u64,
-}
+Add three entities to your schema. Required fields per entity are listed; apps add any others freely.
 
-struct Invite {
-  id: String,         // inv_<24-char-base64url>
-  org_id: String,
-  email: String,      // lowercased on store
-  role: OrgRole,
-  invited_by: String,
-  token_hash: String, // Argon2 hash; plaintext only ever in the email
-  token_prefix: String, // first 8 chars for display in management UIs
-  created_at: u64,
-  expires_at: u64,    // created_at + 7 days
-  accepted_at: Option<u64>,
+```typescript
+import { entity, field } from "@pylonsync/sdk";
+
+// REQUIRED fields: id (auto), name, createdBy, createdAt
+export const Org = entity("Org", {
+  name: field.string(),
+  createdBy: field.id("User"),
+  createdAt: field.string(),  // ISO 8601
+
+  // Custom fields — your call:
+  logo: field.string().optional(),
+  industry: field.string().optional(),
+  billingEmail: field.string().optional(),
+  plan: field.string().optional(),  // "free" | "pro" | "enterprise"
+});
+
+// REQUIRED fields: id (auto), orgId, userId, role, joinedAt
+export const OrgMember = entity("OrgMember", {
+  orgId: field.id("Org"),
+  userId: field.id("User"),
+  role: field.string(),    // "owner" | "admin" | "member"
+  joinedAt: field.string(),
+
+  // Custom fields:
+  title: field.string().optional(),
+  department: field.string().optional(),
+});
+
+// REQUIRED fields: id (auto), orgId, email, role, invitedBy,
+// tokenHash, tokenPrefix, createdAt, expiresAt, acceptedAt (optional)
+export const OrgInvite = entity("OrgInvite", {
+  orgId: field.id("Org"),
+  email: field.string(),
+  role: field.string(),
+  invitedBy: field.id("User"),
+  tokenHash: field.string(),
+  tokenPrefix: field.string(),
+  createdAt: field.string(),
+  expiresAt: field.string(),
+  acceptedAt: field.string().optional(),
+});
+```
+
+## Renaming the entities
+
+If your codebase uses `Organization` instead of `Org` (or you have a legacy schema), point the framework at your names via the manifest:
+
+```typescript
+import { app } from "@pylonsync/sdk";
+
+export default app({
+  // ...
+  auth: {
+    org: {
+      entity: "Organization",
+      member_entity: "Membership",
+      invite_entity: "Invite",
+    },
+  },
+});
+```
+
+## Disabling the framework's org surface
+
+Apps that implement org management entirely in their own TypeScript (like older pylon-cloud builds) can opt out of `/api/auth/orgs/*`:
+
+```typescript
+auth: {
+  org: { disabled: true },
 }
 ```
+
+With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framework's `OrgStore` is a no-op. Use this when you want full control of the schema + flow.
 
 ## Roles
 

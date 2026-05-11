@@ -15,7 +15,9 @@ pub mod magic_code_backend;
 pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
-pub mod org_backend;
+// org_backend removed in v0.3.74 — org/member/invite now flow through
+// the manifest's entity layer via the DataStore. See
+// crates/auth/src/org.rs for the new EntityOrgStore.
 pub mod org_sso_backend;
 pub mod pg_loro_store;
 pub mod presence;

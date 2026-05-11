@@ -310,7 +310,13 @@ fn start_server(
     let oauth_state = auth_stores.oauth_state;
     let account_store = auth_stores.account_store;
     let api_keys = auth_stores.api_keys;
-    let orgs = auth_stores.orgs;
+    // OrgStore reads + writes through the manifest's entity layer
+    // (Org / OrgMember / OrgInvite by default). The runtime itself is
+    // the DataStore — wire it now that we have it.
+    let orgs = Arc::new(pylon_auth::org::OrgStore::new(
+        runtime.clone() as Arc<dyn pylon_http::DataStore>,
+        runtime.manifest().auth.org.clone(),
+    ));
     let siwe = auth_stores.siwe;
     let phone_codes = auth_stores.phone_codes;
     let passkeys = auth_stores.passkeys;
@@ -3371,7 +3377,6 @@ struct AuthStores {
     oauth_state: Arc<pylon_auth::OAuthStateStore>,
     account_store: Arc<pylon_auth::AccountStore>,
     api_keys: Arc<pylon_auth::api_key::ApiKeyStore>,
-    orgs: Arc<pylon_auth::org::OrgStore>,
     siwe: Arc<pylon_auth::siwe::NonceStore>,
     phone_codes: Arc<pylon_auth::phone::PhoneCodeStore>,
     passkeys: Arc<pylon_auth::webauthn::PasskeyStore>,
@@ -3445,7 +3450,6 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
         api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
-        orgs: Arc::new(pylon_auth::org::OrgStore::new()),
         siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
@@ -3496,13 +3500,6 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::api_key::ApiKeyStore::new()
         }
     };
-    let orgs = match crate::org_backend::SqliteOrgBackend::open(path) {
-        Ok(b) => pylon_auth::org::OrgStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] org SQLite backend unavailable: {e}");
-            pylon_auth::org::OrgStore::new()
-        }
-    };
     let verification = match crate::verification_backend::SqliteVerificationBackend::open(path) {
         Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
         Err(e) => {
@@ -3547,7 +3544,6 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
-        orgs: Arc::new(orgs),
         siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
@@ -3602,13 +3598,6 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
             pylon_auth::api_key::ApiKeyStore::new()
         }
     };
-    let orgs = match crate::org_backend::PostgresOrgBackend::connect(url) {
-        Ok(b) => pylon_auth::org::OrgStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG org backend unavailable: {e}");
-            pylon_auth::org::OrgStore::new()
-        }
-    };
     let verification = match crate::verification_backend::PostgresVerificationBackend::connect(url)
     {
         Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
@@ -3654,7 +3643,6 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         oauth_state: Arc::new(oauth_state),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
-        orgs: Arc::new(orgs),
         siwe: Arc::new(pylon_auth::siwe::NonceStore::new()),
         phone_codes: Arc::new(pylon_auth::phone::PhoneCodeStore::new()),
         passkeys: Arc::new(pylon_auth::webauthn::PasskeyStore::new()),
