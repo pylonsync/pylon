@@ -189,6 +189,44 @@ jobs:
             fi
           done
 
+          # Lockfile-vs-package.json consistency. `bun publish` rewrites
+          # `workspace:*` deps using the version bun resolved at the
+          # last install — and with `--frozen-lockfile` that's whatever
+          # bun.lock says, NOT the live package.json. If someone bumped
+          # versions without refreshing bun.lock (manual sed, or a
+          # release.sh that errored out mid-script), publish ships
+          # packages whose internal deps pin to a version that may not
+          # exist on npm. Real-world: v0.3.83 shipped react/react-native
+          # /stripe/feature-flags/webhooks with sdk@0.3.81 pins because
+          # bun.lock was still carrying 0.3.81 workspace metadata.
+          # Catch the drift here, before any tarball uploads.
+          drift="$(node -e "
+            const fs = require('fs');
+            const lock = JSON.parse(fs.readFileSync('bun.lock', 'utf8'));
+            const ws = lock.workspaces || {};
+            const out = [];
+            for (const [path, entry] of Object.entries(ws)) {
+              if (!path.startsWith('packages/')) continue;
+              const pkgJsonPath = path + '/package.json';
+              if (!fs.existsSync(pkgJsonPath)) continue;
+              const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+              const lockV = entry.version;
+              const fileV = pkg.version;
+              if (lockV && fileV && lockV !== fileV) {
+                out.push(path + ': bun.lock=' + lockV + ', package.json=' + fileV);
+              }
+            }
+            if (out.length) {
+              console.log(out.join('\n'));
+              process.exit(1);
+            }
+          " 2>&1)" || {
+            echo "::error::Lockfile drift detected — bun.lock workspace versions don't match package.json:" >&2
+            echo "$drift" >&2
+            echo "::error::Run \`./release.sh <version> --tag\` (which refreshes bun.lock from scratch) instead of bumping versions manually. The publish would ship broken internal @pylonsync/* deps to npm." >&2
+            exit 6
+          }
+
           # sync first: its siblings depend on it via workspace:*, so
           # the rewrite during their publish needs sync's published
           # version range to be queryable. (Bun rewrites to the local

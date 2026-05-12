@@ -592,8 +592,7 @@ fn start_server(
     // tolerate; we refuse it in prod because the server also accepts
     // `Authorization: Bearer …` so `*` would let any origin drive
     // bearer-auth APIs.
-    let manifest_trusted_origins: Vec<String> =
-        runtime.manifest().auth.trusted_origins.clone();
+    let manifest_trusted_origins: Vec<String> = runtime.manifest().auth.trusted_origins.clone();
     let cors_origin_env = match std::env::var("PYLON_CORS_ORIGIN") {
         Ok(v) => Some(v),
         Err(_) => None,

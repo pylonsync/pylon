@@ -158,10 +158,16 @@ while IFS= read -r -d '' f; do
 	perl -pi -e "s/^(\s*pylon-[a-z_-]+\s*=\s*\{[^}]*version\s*=\s*\")[0-9]+\.[0-9]+\.[0-9]+(\"[^}]*\})/\${1}$target\${2}/" "$f"
 done < <(find crates -maxdepth 2 -name Cargo.toml -print0)
 
-# 3. JS packages.
+# 3. JS packages. Depth 3 so nested `packages/plugins/*/package.json`
+# get bumped too — earlier `maxdepth 2` silently missed every plugin
+# package (stripe, feature-flags, webhooks) and the publish workflow
+# would then refuse to start because of version drift across the
+# workspace. Real-world bug: v0.3.84 cut after v0.3.83 shipped with
+# the plugin packages stranded at 0.3.83.
 while IFS= read -r -d '' f; do
+	[[ "$f" == *node_modules* ]] && continue
 	perl -pi -e "s/(\"version\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" "$f"
-done < <(find packages -maxdepth 2 -name package.json -print0)
+done < <(find packages -maxdepth 3 -name package.json -print0)
 
 # 3b. @pylonsync/cli's optionalDependencies pin to exact-version
 # strings of the platform sub-packages. The dispatcher uses

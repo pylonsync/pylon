@@ -3475,10 +3475,7 @@ mod tests {
         std::env::set_var(key_redirect, "https://custom.example.com/cb");
         let reg = OAuthRegistry::from_env();
         let discord = reg.get("discord").expect("discord registered");
-        assert_eq!(
-            discord.redirect_uri,
-            "https://custom.example.com/cb",
-        );
+        assert_eq!(discord.redirect_uri, "https://custom.example.com/cb",);
 
         std::env::remove_var(key_id);
         std::env::remove_var(key_secret);

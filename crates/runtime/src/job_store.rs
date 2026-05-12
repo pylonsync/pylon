@@ -86,10 +86,9 @@ impl JobStore {
     pub fn save(&self, job: &Job) -> Result<(), String> {
         let conn = self.conn.lock().unwrap();
         let auth_json = match &job.auth {
-            Some(a) => Some(
-                serde_json::to_string(a)
-                    .map_err(|e| format!("auth serialize failed: {e}"))?,
-            ),
+            Some(a) => {
+                Some(serde_json::to_string(a).map_err(|e| format!("auth serialize failed: {e}"))?)
+            }
             None => None,
         };
         conn.execute(

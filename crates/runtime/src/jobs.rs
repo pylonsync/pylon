@@ -242,7 +242,15 @@ impl JobQueue {
         max_retries: u32,
         queue: &str,
     ) -> Result<String, String> {
-        self.try_enqueue_with_auth(name, payload, priority, delay_secs, max_retries, queue, None)
+        self.try_enqueue_with_auth(
+            name,
+            payload,
+            priority,
+            delay_secs,
+            max_retries,
+            queue,
+            None,
+        )
     }
 
     /// Enqueue with an explicit auth identity. The worker dispatches
@@ -644,7 +652,10 @@ impl JobQueue {
         // Walk both queues to find the max numeric suffix.
         let max_pending = pending
             .iter()
-            .filter_map(|j| j.id.strip_prefix("job_").and_then(|n| n.parse::<u64>().ok()))
+            .filter_map(|j| {
+                j.id.strip_prefix("job_")
+                    .and_then(|n| n.parse::<u64>().ok())
+            })
             .max()
             .unwrap_or(0);
         let max_dead = self
@@ -652,7 +663,10 @@ impl JobQueue {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|j| j.id.strip_prefix("job_").and_then(|n| n.parse::<u64>().ok()))
+            .filter_map(|j| {
+                j.id.strip_prefix("job_")
+                    .and_then(|n| n.parse::<u64>().ok())
+            })
             .max()
             .unwrap_or(0);
         let max_id = max_pending.max(max_dead);
