@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.80](https://github.com/pylonsync/pylon/compare/v0.3.79...v0.3.80) (2026-05-11)
+
+
+### Features
+
+* **stripe:** new `@pylonsync/stripe` package — declarative billing for Pylon apps. Replaces the ~400 lines of per-app Stripe boilerplate (customer creation, checkout, billing portal, webhook signature + event routing, plan derivation, subscription state) with one config block: `stripe({ referenceType, plans, hooks })` returns a manifest fragment + handler factories. Auto-derives URL allowlist from `PYLON_PUBLIC_URL` (closes the "hardcoded yapless.com vs getyapless.com" bug class), wires the canonical `Subscription` entity with tenant-scoped policies, fires lifecycle hooks (`onSubscriptionActivate`/`Update`/`Cancel`, `onInvoice`, `onEvent`, `onCustomerCreate`), and ships idempotent webhook upsert via `_pylonStripeUpsertSubscription`. Built-in double-trial guard, RBAC via `authorizeReference` (default: org owners + admins, or self for `referenceType: 'user'`), constant-time signature verification with replay-window check + multi-secret rotation support. 13 tests cover signature verification + URL allowlist edge cases.
+
 ## [0.3.79](https://github.com/pylonsync/pylon/compare/v0.3.78...v0.3.79) (2026-05-11)
 
 
