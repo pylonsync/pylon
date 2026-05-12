@@ -1482,7 +1482,24 @@ impl OAuthRegistry {
                 Err(_) if spec.id == "apple" => String::new(),
                 Err(_) => continue,
             };
+            // Redirect URI precedence:
+            //   1. Explicit per-provider override (PYLON_OAUTH_<X>_REDIRECT)
+            //   2. Auto-derived from PYLON_PUBLIC_URL — what production
+            //      deployments want by default. Without this fallback,
+            //      Pylon Cloud customers and any binary deploy that
+            //      forgot to set the per-provider env shipped to Google
+            //      with `redirect_uri=http://localhost:3000/...` and got
+            //      "redirect_uri_mismatch" at the IdP — opaque error
+            //      that took ~30min to diagnose on yapless's launch.
+            //   3. The localhost dev default — only kicks in when neither
+            //      env is set (local development, mostly).
             let redirect_uri = std::env::var(format!("{prefix}_REDIRECT"))
+                .or_else(|_| {
+                    std::env::var("PYLON_PUBLIC_URL").map(|base| {
+                        let trimmed = base.trim_end_matches('/');
+                        format!("{trimmed}/api/auth/callback/{}", spec.id)
+                    })
+                })
                 .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{}", spec.id));
             let scopes_override = std::env::var(format!("{prefix}_SCOPES")).ok();
             let tenant = std::env::var(format!("{prefix}_TENANT")).ok();
@@ -1534,7 +1551,16 @@ impl OAuthRegistry {
                 Err(_) => continue,
             };
             let secret = std::env::var(format!("{prefix}_CLIENT_SECRET")).unwrap_or_default();
+            // Same PYLON_PUBLIC_URL fallback as the builtins above —
+            // generic OIDC providers (Auth0, Okta, Keycloak, etc.)
+            // should also get a sensible default redirect in prod.
             let redirect_uri = std::env::var(format!("{prefix}_REDIRECT"))
+                .or_else(|_| {
+                    std::env::var("PYLON_PUBLIC_URL").map(|base| {
+                        let trimmed = base.trim_end_matches('/');
+                        format!("{trimmed}/api/auth/callback/{name}")
+                    })
+                })
                 .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{name}"));
             reg.register(OAuthConfig {
                 provider: name,
@@ -3366,6 +3392,48 @@ mod tests {
         }"#;
         let err = provider::OidcDiscoveryDoc::parse(json).unwrap_err();
         assert!(err.contains("token_endpoint"), "got: {err}");
+    }
+
+    /// Regression: redirect URIs default to `http://localhost:3000/...`
+    /// only if neither `PYLON_OAUTH_<X>_REDIRECT` nor `PYLON_PUBLIC_URL`
+    /// is set. With `PYLON_PUBLIC_URL` configured (the typical
+    /// production case), the redirect derives from it. Without this
+    /// fallback every Pylon Cloud customer who didn't manually set
+    /// the per-provider redirect env shipped to Google with a
+    /// localhost redirect_uri and got "redirect_uri_mismatch" at the
+    /// IdP — found while debugging yapless's OAuth flow at launch.
+    #[test]
+    fn redirect_uri_falls_back_to_pylon_public_url() {
+        let key_id = "PYLON_OAUTH_DISCORD_CLIENT_ID";
+        let key_secret = "PYLON_OAUTH_DISCORD_CLIENT_SECRET";
+        let key_redirect = "PYLON_OAUTH_DISCORD_REDIRECT";
+        let key_public = "PYLON_PUBLIC_URL";
+        std::env::set_var(key_id, "discord-fallback-id");
+        std::env::set_var(key_secret, "discord-fallback-secret");
+        std::env::set_var(key_public, "https://api.example.com");
+        std::env::remove_var(key_redirect);
+
+        let reg = OAuthRegistry::from_env();
+        let discord = reg.get("discord").expect("discord registered");
+        assert_eq!(
+            discord.redirect_uri,
+            "https://api.example.com/api/auth/callback/discord",
+        );
+
+        // Explicit redirect still wins — it's the highest-precedence
+        // signal (operator override for unusual hosting setups).
+        std::env::set_var(key_redirect, "https://custom.example.com/cb");
+        let reg = OAuthRegistry::from_env();
+        let discord = reg.get("discord").expect("discord registered");
+        assert_eq!(
+            discord.redirect_uri,
+            "https://custom.example.com/cb",
+        );
+
+        std::env::remove_var(key_id);
+        std::env::remove_var(key_secret);
+        std::env::remove_var(key_redirect);
+        std::env::remove_var(key_public);
     }
 
     /// `OAuthRegistry::from_env` must auto-discover every provider

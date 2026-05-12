@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.79](https://github.com/pylonsync/pylon/compare/v0.3.78...v0.3.79) (2026-05-11)
+
+
+### Bug Fixes
+
+* **auth/oauth:** `PYLON_OAUTH_<provider>_REDIRECT` now falls back to `{PYLON_PUBLIC_URL}/api/auth/callback/<provider>` before the old `http://localhost:3000/...` default. Every production deploy that set `PYLON_PUBLIC_URL` (the typical case — Pylon Cloud sets it automatically) but forgot the per-provider `_REDIRECT` env shipped Google with `redirect_uri=http://localhost:3000/...` and got `redirect_uri_mismatch` at the IdP. Localhost only kicks in now when neither env is set (local dev). Applies to all builtins (google/github/microsoft/apple/discord/etc.) AND generic OIDC providers (Auth0/Okta/Keycloak/etc.).
+
 ## [0.3.78](https://github.com/pylonsync/pylon/compare/v0.3.77...v0.3.78) (2026-05-11)
 
 
