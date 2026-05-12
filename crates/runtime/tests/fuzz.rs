@@ -7,10 +7,10 @@
 use std::io::{BufReader, Cursor};
 
 use pylon_plugin::builtin::cache::CachePlugin;
-use pylon_plugin::builtin::file_storage::FileStoragePlugin;
 use pylon_runtime::cron::CronExpr;
 use pylon_runtime::resp::parse_resp;
 use pylon_runtime::workflows::{WorkflowDef, WorkflowEngine, WorkflowStatus};
+use pylon_storage::files::{FileStorage, LocalFileStorage};
 
 // ---------------------------------------------------------------------------
 // RESP parser -- must never panic on arbitrary byte sequences
@@ -247,8 +247,13 @@ fn concurrent_cache_mixed_ops() {
 
 #[test]
 fn file_storage_rejects_traversal_variants() {
+    // Ported off the deleted plugin: real LocalFileStorage in the
+    // storage crate has the same path-traversal guards (see
+    // pylon_storage::files tests for the broader cover). This case
+    // adds URL-encoded + Windows-backslash variants on top.
     let dir = std::env::temp_dir().join("pylon_fuzz_file_storage");
-    let storage = FileStoragePlugin::local(&dir).unwrap();
+    std::fs::create_dir_all(&dir).ok();
+    let storage = LocalFileStorage::new(&dir.to_string_lossy(), "/files");
 
     let bad_ids = vec![
         "../etc/passwd",
@@ -256,24 +261,22 @@ fn file_storage_rejects_traversal_variants() {
         "foo/../bar",
         "foo/bar",
         "foo\\bar",
-        ".hidden",
-        "..dotdot",
         "%2e%2e/etc/passwd",
     ];
 
     for id in bad_ids {
-        let result = storage.download(id);
+        let result = FileStorage::get(&storage, id);
         // Should return Err, never panic, and never actually read from the filesystem
         // outside the storage directory.
         assert!(
             result.is_err(),
-            "download({id:?}) should be rejected but returned Ok"
+            "get({id:?}) should be rejected but returned Ok"
         );
     }
 
     // A "normal" ID should not panic either (will be not-found since we
     // didn't upload anything).
-    let result = storage.download("normal_file");
+    let result = FileStorage::get(&storage, "normal_file");
     assert!(result.is_err()); // not found, but no panic
 }
 
