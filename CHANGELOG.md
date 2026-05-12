@@ -5,23 +5,27 @@
 
 ### Features
 
-* **organizations:** new `@pylonsync/organizations` package — declarative permission system + optional team support layered on the framework's entity-based org primitives (v0.3.74+). `permissions: { "x.y": ["owner", "admin"] }` config, `requirePermission(ctx, cfg, "x.y")` helper that replaces verbose `exists(OrgMember where ...)` policy expressions, `hasPermission` non-throwing variant, three public queries (orgPermissions / orgRoleOf / orgHasPermission) for client-side conditional rendering. Optional `teams: { enabled: true }` adds Team + TeamMember entities + create/delete/addMember/removeMember actions. Lifecycle hooks (onMemberAdd/Remove, onRoleChange, onInviteCreate/Accept/Revoke, onTeamCreate) for audit-log integration. 9 tests cover the permission resolution paths.
-* **email:** new `@pylonsync/email` package — provider-agnostic transactional email (Resend / Postmark / SES / SMTP / log), declarative template registry, idempotent sends with auto-derived keys, suppression list integration, lifecycle hooks for delivery events (sent/delivered/bounced/complained/opened/clicked). 7 tests cover the send path.
-* **two-factor:** new `@pylonsync/two-factor` package — RFC 6238 TOTP, RFC 4226 HOTP underneath, otpauth:// URI builder, single-use backup codes with hashed-at-rest storage, trusted-device tokens. Replay protection via `lastAcceptedCounter` (rejects same-window re-use per RFC 6238 §5.2). 11 tests across TOTP + backup-codes.
-* **api-keys:** new `@pylonsync/api-keys` package — `pk_live_*` / `pk_test_*` bearer tokens, SHA-256 hashed at rest with per-key salt, token-bucket rate limiter with linear refill, scoped permissions, expiration. Constant-time hash compare. 7 tests across key generation + rate limiting.
-* **audit-log:** new `@pylonsync/audit-log` package — append-only event store with WorkOS-compatible schema (actor / action / targets / context / metadata / occurredAt / organizationId / idempotencyKey), pluggable streaming destinations (`webhookDestination` HMAC-SHA256 signed, `datadogDestination`), retention pruning, idempotent inserts. Destination failures don't fail primary writes.
-* **feature-flags:** new `@pylonsync/feature-flags` package — local-eval feature flags with boolean + multivariate variants, percentage rollouts, targeting rules (eq/neq/in/not_in/gt/gte/lt/lte/contains/starts_with/ends_with/regex), JSON payloads per variant, deterministic FNV-1a bucketing. `isEnabled` / `getVariant` / `getPayload` / `evaluateAll` over an in-process catalog. 11 tests cover eval + bucketing distribution.
-* **webhooks:** new `@pylonsync/webhooks` package — Svix-compatible outbound webhook delivery. HMAC-SHA256 signed payloads with `webhook-id` / `webhook-timestamp` / `webhook-signature` headers, replay protection, secret rotation overlap (multiple v1 signatures during cutover), exponential-backoff retry schedule (default 5s → 5m → 30m → 2h → 5h → 10h → 14h → dead), per-endpoint event filtering, idempotent delivery via stable event ids, WebhookEndpoint + WebhookAttempt entities. 5 tests cover signature round-trip + rotation.
+* **organizations:** new `@pylonsync/organizations` package — declarative permission system + optional team support, layered on the framework's entity-based org primitives (v0.3.74+). `permissions: { "x.y": ["owner", "admin"] }` config + `requirePermission(ctx, cfg, "x.y")` helper replaces the verbose `exists(OrgMember where ...)` policy expressions. Optional `teams: { enabled: true }` adds Team + TeamMember entities. Net-new value: framework had no permission system, only role primitives.
+* **feature-flags:** new `@pylonsync/feature-flags` package — local-eval flags with boolean + multivariate variants, percentage rollouts, 11 targeting predicate ops, JSON payloads per variant, deterministic FNV-1a bucketing. Framework has no equivalent.
+* **webhooks:** new `@pylonsync/webhooks` package — Svix-compatible outbound webhook delivery (HMAC-SHA256 signed, replay protection, secret-rotation overlap, exponential-backoff retries). Framework has no outbound delivery.
 
 
 ### Refactoring
 
-* **plugin:** remove orphaned Rust plugin shells. The `crates/plugin/src/builtin/` directory hosted ~25 unused plugin modules — types-only sketches with no wiring into the runtime or SDK. The genuinely useful ones (cache, tenant_scope, rate_limit, ai_proxy, csrf, email SMTP, file_storage, net_guard, search) stay. The rest moved to TS packages: `organizations` → `@pylonsync/organizations`, `totp` → `@pylonsync/two-factor`, `api_keys` → `@pylonsync/api-keys`, `audit_log` → `@pylonsync/audit-log`, `feature_flags` → `@pylonsync/feature-flags`, `webhooks` → `@pylonsync/webhooks`, `stripe` → `@pylonsync/stripe` (signature primitive ported to TS). Deletes 21 files, ~5000 LOC of dead code. The TS replacements provide more features than the deleted Rust shells (which were never used by any app).
+* **plugin:** remove orphaned Rust plugin shells from `crates/plugin/src/builtin/`. Most were type-only sketches that never got wired into the runtime or SDK. The genuinely useful ones (cache, tenant_scope, rate_limit, ai_proxy, csrf, email SMTP, file_storage, net_guard, search) stay. The truly-dead ones get TS replacements only where the framework didn't already cover the use case — see Features above. Deletes 21 files, ~5000 LOC.
 
 
 ### Documentation
 
-* **plugins:** new docs pages under `/plugins/*` for every TS package: stripe, organizations, email, two-factor, api-keys, audit-log, feature-flags, webhooks. Each page: install, config, manifest fragment, wrapper-file pattern, env vars, lifecycle hooks, security notes. Overview restructured to split TS packages (new) from runtime Rust hooks (existing).
+* **plugins:** new docs pages under `/plugins/*` for stripe, organizations, feature-flags, webhooks. Each page covers install, config, manifest fragment, wrapper-file pattern, env vars, lifecycle hooks, security notes. Overview restructured to split TS packages from runtime Rust hooks.
+
+
+### Withdrawn (don't use these — they duplicated framework functionality)
+
+* ~~`@pylonsync/api-keys`~~ — Framework already provides `/api/auth/api-keys` (mint/list/revoke + bearer-auth verification). Removed.
+* ~~`@pylonsync/two-factor`~~ — Framework already provides `/api/auth/totp/*` (enroll/verify/disable + backup codes). Removed.
+* ~~`@pylonsync/email`~~ — Framework already supports SendGrid/Resend/Stack0/webhook via `PYLON_EMAIL_PROVIDER` env + `ctx.email.send()`. Removed.
+* ~~`@pylonsync/audit-log`~~ — Framework already provides `AuditAction`/`AuditEvent` + `/api/auth/audit{,/tenant}` routes. Removed.
 
 ## [0.3.80](https://github.com/pylonsync/pylon/compare/v0.3.79...v0.3.80) (2026-05-11)
 

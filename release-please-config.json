@@ -34,10 +34,6 @@
         { "type": "json", "path": "packages/next/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/stripe/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/organizations/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/email/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/two-factor/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/api-keys/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/audit-log/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/feature-flags/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/webhooks/package.json", "jsonpath": "$.version" }
       ]

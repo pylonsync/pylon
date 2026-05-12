@@ -3,6 +3,10 @@ title: Stripe billing
 description: "Hosted Checkout sessions + signed webhook verification — wire up subscription billing without spinning up your own billing service."
 ---
 
+<Note>
+  For most apps, use [`@pylonsync/stripe`](/plugins/stripe) — declarative `stripe({ plans, hooks })` config, canonical Subscription entity, lifecycle hooks (onSubscriptionActivate/Cancel/etc.), URL allowlist auto-derived from `PYLON_PUBLIC_URL`. This page documents the framework's binary-native `/api/billing/*` routes, which are still available for apps that want a bare-bones path.
+</Note>
+
 Pylon ships a minimal Stripe integration in the binary: mint a hosted Checkout Session for the current user, accept Stripe webhooks with full signature verification. The rest of your billing logic (entitlements, plan limits, dunning) is plugin / app-code territory — Pylon doesn't try to be a billing service, it gets you to the point where you can react to Stripe events with your own business logic.
 
 ## What's implemented

@@ -5,21 +5,25 @@ description: "Declarative TS packages + runtime Rust hooks for security, data hy
 
 Plugins are how you compose Pylon. Two flavors:
 
-1. **TS packages** (`@pylonsync/*`) — declarative config that returns a manifest fragment + handler factories. Most app-level features live here: billing, orgs/permissions, transactional email, 2FA, API keys, audit logs, feature flags, outbound webhooks.
+1. **TS packages** (`@pylonsync/*`) — declarative config that returns a manifest fragment + handler factories. Use these to add features the framework binary doesn't already cover.
 2. **Runtime Rust hooks** — wired automatically into the request path: rate limiting, tenant scoping, CORS, CSRF, caching, AI proxy, file storage, search.
+
+Features that ARE built into the framework binary already (no plugin needed):
+
+- **API keys** — `/api/auth/api-keys` routes for mint / list / revoke. See [Auth → API keys](/auth/api-keys).
+- **TOTP / 2FA** — `/api/auth/totp/*` routes for enroll / verify / disable + backup codes. See [Auth → TOTP](/auth/totp).
+- **Transactional email** — `PYLON_EMAIL_PROVIDER` env (sendgrid / resend / stack0 / webhook) + `ctx.email.send()`. See [Auth → Email verification](/auth/email-verification) for the framework's email-template flow.
+- **Audit log** — `AuditAction` / `AuditEvent` + `/api/auth/audit{,/tenant}` routes. Log via `ctx.audit.log(...)`.
+- **Organizations** — `Org` / `OrgMember` / `OrgInvite` as manifest entities + `/api/auth/orgs/*` routes. See [Auth → Organizations](/auth/organizations).
 
 ## TS packages
 
-| Package | Purpose |
-| --- | --- |
-| **[@pylonsync/stripe](/plugins/stripe)** | Declarative billing — plans, checkout, portal, webhooks, subscription state. |
-| **[@pylonsync/organizations](/plugins/organizations)** | Permission system + team support layered on the framework's entity-based orgs. |
-| **[@pylonsync/email](/plugins/email)** | Transactional email — Resend / Postmark / SES / SMTP, declarative templates, suppression. |
-| **[@pylonsync/two-factor](/plugins/two-factor)** | TOTP + backup codes + trusted-device cookies. |
-| **[@pylonsync/api-keys](/plugins/api-keys)** | Hashed `pk_*` bearer tokens, token-bucket rate limit, scoped permissions. |
-| **[@pylonsync/audit-log](/plugins/audit-log)** | Append-only event store, SIEM streaming destinations, retention pruning. |
-| **[@pylonsync/feature-flags](/plugins/feature-flags)** | Local-eval flags, percentage rollouts, targeting rules, multivariate variants. |
-| **[@pylonsync/webhooks](/plugins/webhooks)** | Outbound webhook delivery — Svix-compatible HMAC sigs, retry schedule, secret rotation. |
+| Package | Purpose | Net-new vs framework |
+| --- | --- | --- |
+| **[@pylonsync/stripe](/plugins/stripe)** | Declarative billing — plans, checkout, portal, cancel/restore, full webhook router, subscription entity. | Framework only ships a minimal `/api/billing/{checkout,webhook}` pair. This adds plans config, lifecycle hooks, Subscription state. |
+| **[@pylonsync/organizations](/plugins/organizations)** | Permission system + team support layered on the framework's entity-based orgs. | Framework has Org primitives; this adds the permission layer + teams. |
+| **[@pylonsync/feature-flags](/plugins/feature-flags)** | Local-eval flags, percentage rollouts, 11 targeting predicate ops, multivariate variants. | Framework has no equivalent. |
+| **[@pylonsync/webhooks](/plugins/webhooks)** | Outbound webhook delivery — Svix-compatible HMAC sigs, retry schedule, secret rotation. | Framework has no outbound delivery. |
 
 ## Runtime hooks
 

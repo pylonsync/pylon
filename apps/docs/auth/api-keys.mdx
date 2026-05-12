@@ -5,7 +5,7 @@ description: "Long-lived keys for server-to-server calls — create, scope, rota
 
 Sessions are the right shape for users — short-lived, refresh-able, revocable per device. For **server-to-server** calls (a webhook from Stripe, a cron job in another service, a CI script), you want long-lived **API keys** scoped to specific actions, not 30-day session tokens.
 
-The `api_keys` plugin ships this in the box.
+The framework ships this in the box.
 
 ## Enable the plugin
 
