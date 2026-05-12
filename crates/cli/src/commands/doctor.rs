@@ -73,14 +73,19 @@ fn check_bun() -> Check {
 }
 
 fn check_database() -> Check {
-    if std::fs::metadata("pylon.dev.db").is_ok() {
-        Check::pass("Database exists (pylon.dev.db)")
-    } else {
-        Check::warn(
-            "Database not found (pylon.dev.db)",
-            "run `pylon dev` to create it",
-        )
+    // `pylon dev` creates the SQLite file under `.pylon/dev.db` (see
+    // crates/cli/src/commands/dev.rs). Some older workspaces used a
+    // bare `pylon.dev.db` at cwd — accept either, prefer the new one.
+    const CANDIDATES: &[&str] = &[".pylon/dev.db", "pylon.dev.db"];
+    for path in CANDIDATES {
+        if std::fs::metadata(path).is_ok() {
+            return Check::pass(&format!("Database exists ({path})"));
+        }
     }
+    Check::warn(
+        "Database not found (checked .pylon/dev.db, pylon.dev.db)",
+        "run `pylon dev` to create it",
+    )
 }
 
 fn check_admin_token() -> Check {
@@ -259,13 +264,27 @@ fn check_disk_space() -> Check {
 }
 
 fn check_manifest() -> Check {
-    if std::fs::metadata("pylon.manifest.json").is_ok() {
-        Check::pass("Manifest found (pylon.manifest.json)")
-    } else if std::fs::metadata("app.ts").is_ok() {
-        Check::pass("Manifest found (app.ts)")
-    } else {
-        Check::error("No manifest found (expected pylon.manifest.json or app.ts)")
+    // Accept either the root layout (legacy / `pylon init --frontend=none`
+    // before workspace scaffold) or the workspace layout `pylon init`
+    // currently produces (`apps/api/app.ts` next to its sibling web/
+    // app). Also `schema.ts` — some downstream apps named theirs that
+    // way before the convention settled.
+    const CANDIDATES: &[&str] = &[
+        "pylon.manifest.json",
+        "app.ts",
+        "schema.ts",
+        "apps/api/pylon.manifest.json",
+        "apps/api/app.ts",
+        "apps/api/schema.ts",
+    ];
+    for path in CANDIDATES {
+        if std::fs::metadata(path).is_ok() {
+            return Check::pass(&format!("Manifest found ({path})"));
+        }
     }
+    Check::error(
+        "No manifest found (checked: pylon.manifest.json, app.ts, schema.ts, apps/api/{app,schema}.ts)",
+    )
 }
 
 fn check_migrations() -> Check {

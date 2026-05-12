@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
 use crate::client_codegen::generate_client_ts;
+use crate::commands::args::collect_positional;
 use crate::manifest::{parse_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
 use crate::studio_config;
@@ -76,11 +77,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && *a != "dev")
-        .map(|s| s.as_str())
-        .collect();
+    let positional: Vec<&str> = collect_positional(args, "dev");
 
     let entry_file = match positional.first() {
         Some(f) => f.to_string(),

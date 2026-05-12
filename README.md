@@ -99,7 +99,7 @@ pylon dev
 ### 4. Connect from React
 
 ```tsx
-import { init, db } from "@pylon/react";
+import { init, db } from "@pylonsync/react";
 init({ baseUrl: "http://localhost:4321" });
 
 function TodoList() {
@@ -120,7 +120,7 @@ function TodoList() {
 `functions/createTodo.ts`:
 
 ```ts
-import { mutation, v } from "@pylon/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
   args: { title: v.string() },
@@ -152,7 +152,7 @@ let shard = Shard::new("match_1", MyGame::default(), ShardConfig {
 Then connect from the client:
 
 ```tsx
-import { useShard } from "@pylon/react";
+import { useShard } from "@pylonsync/react";
 const { snapshot, send } = useShard("match_1", { subscriberId: "player_42" });
 ```
 

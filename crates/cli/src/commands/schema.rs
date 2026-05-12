@@ -388,7 +388,16 @@ pub fn run_push(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     if let Some(db_path) = sqlite_path {
-        // SQLite apply mode.
+        // SQLite apply mode. Ensure the parent dir exists so paths
+        // like `.pylon/dev.db` work on a fresh checkout (sqlite refuses
+        // to create the file if the directory isn't there). Without
+        // this, `pylon schema push --sqlite .pylon/dev.db` failed
+        // before `pylon dev` had created the .pylon/ dir.
+        if let Some(parent) = std::path::Path::new(db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
         let adapter = match pylon_storage::sqlite::SqliteAdapter::open(db_path) {
             Ok(a) => a,
             Err(e) => {

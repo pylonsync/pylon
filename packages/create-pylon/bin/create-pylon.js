@@ -422,7 +422,7 @@ platformLines.push("  → api      http://localhost:4321  (Pylon control plane)"
 if (platforms.includes("web"))
 	platformLines.push("  → web      http://localhost:3000  (Next.js)");
 if (platforms.includes("expo"))
-	platformLines.push(`  → expo     ${flags.pm} run dev:expo  (Metro + simulator)`);
+	platformLines.push(`  → expo     ${runDev}  (Metro + simulator, alongside web/api)`);
 if (platforms.includes("ios"))
 	platformLines.push(`  → ios      cd apps/ios && xcodegen generate && open *.xcodeproj`);
 if (platforms.includes("mac"))

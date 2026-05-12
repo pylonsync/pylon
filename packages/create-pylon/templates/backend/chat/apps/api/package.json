@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "pylon dev",
     "build": "pylon build",
-    "schema:push": "pylon schema push --sqlite dev.db",
-    "schema:inspect": "pylon schema inspect --sqlite dev.db"
+    "schema:push": "pylon schema push --sqlite .pylon/dev.db",
+    "schema:inspect": "pylon schema inspect --sqlite .pylon/dev.db"
   },
   "dependencies": {
     "@pylonsync/sdk": "^__PYLON_VERSION__",

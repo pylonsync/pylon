@@ -41,23 +41,32 @@ docker pull ghcr.io/pylonsync/pylon:latest
 ## 2. Scaffold a new app
 
 ```bash
-pylon init notes
+pylon init notes --frontend=none
 cd notes
 ```
 
-This creates two files:
+This scaffolds a Bun workspace with the API at `apps/api/`:
 
 ```
 notes/
-  app.ts             # schema + manifest entry point
-  tsconfig.json      # TypeScript config
+  apps/
+    api/
+      app.ts             # schema + manifest entry point
+      sdk.ts             # local re-export of @pylonsync/sdk
+      tsconfig.json
+      package.json
+  package.json           # workspace root
+  .gitignore
+  README.md
 ```
 
-You'll add a `functions/` directory by hand in step 4.
+`--frontend=none` skips the optional `apps/web/` scaffold. Drop the flag to also generate a Next.js, React, or TanStack frontend (or pick interactively when stdin is a TTY).
+
+You'll add a `functions/` directory under `apps/api/` by hand in step 4.
 
 ## 3. Define the schema
 
-Replace `app.ts` with:
+Replace `apps/api/app.ts` with:
 
 ```ts
 import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
@@ -101,7 +110,7 @@ The trailing `console.log` is required — `pylon dev` captures stdout as the ma
 
 ## 4. Add a server function
 
-Create `functions/createNote.ts`:
+Create `apps/api/functions/createNote.ts`:
 
 ```ts
 import { mutation, v } from "@pylonsync/functions";
@@ -127,19 +136,20 @@ export default mutation({
 
 The filename becomes the RPC name — this will be callable at `POST /api/fn/createNote`.
 
-Install `@pylonsync/functions` and `@pylonsync/sdk` so bun can resolve the imports at runtime:
+`pylon init` already adds `@pylonsync/sdk` + `@pylonsync/functions` to `apps/api/package.json`. If you skipped init or stripped the deps, install them manually:
 
 ```bash
-bun add @pylonsync/sdk @pylonsync/functions
+cd apps/api && bun add @pylonsync/sdk @pylonsync/functions
 ```
 
 ## 5. Run the server
 
 ```bash
-pylon dev app.ts
+cd apps/api
+pylon dev
 ```
 
-Pylon watches `app.ts` and `functions/*.ts`, auto-migrates the database (SQLite at `.pylon/dev.db` by default, Postgres if `DATABASE_URL` is set), and serves the API on `http://localhost:4321`.
+`pylon dev` auto-discovers `app.ts` (and `schema.ts` for legacy projects), watches `app.ts` and `functions/*.ts`, auto-migrates the database (SQLite at `.pylon/dev.db` by default, Postgres if `DATABASE_URL` is set), and serves the API on `http://localhost:4321`.
 
 Expected output:
 
