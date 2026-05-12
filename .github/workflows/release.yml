@@ -200,9 +200,14 @@ jobs:
           # /stripe/feature-flags/webhooks with sdk@0.3.81 pins because
           # bun.lock was still carrying 0.3.81 workspace metadata.
           # Catch the drift here, before any tarball uploads.
+          # bun.lock is JSONC (trailing commas) — JSON.parse rejects
+          # those, so strip them before parse. There are no block
+          # comments in bun.lock; only trailing commas need handling.
           drift="$(node -e "
             const fs = require('fs');
-            const lock = JSON.parse(fs.readFileSync('bun.lock', 'utf8'));
+            const raw = fs.readFileSync('bun.lock', 'utf8');
+            const cleaned = raw.replace(/,(\s*[}\]])/g, '\$1');
+            const lock = JSON.parse(cleaned);
             const ws = lock.workspaces || {};
             const out = [];
             for (const [path, entry] of Object.entries(ws)) {
