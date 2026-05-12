@@ -126,7 +126,7 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
     if let Err(e) = pylon_auth::validate_trusted_redirect(&callback, ctx.trusted_origins) {
         return (
             403,
-            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e:?}")),
+            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e}")),
         );
     }
     if let Err(e) = pylon_auth::validate_trusted_redirect(&error_callback, ctx.trusted_origins) {
@@ -134,7 +134,7 @@ fn handle_org_sso_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, S
             403,
             json_error(
                 "UNTRUSTED_ERROR_CALLBACK",
-                &format!("error_callback rejected: {e:?}"),
+                &format!("error_callback rejected: {e}"),
             ),
         );
     }
@@ -392,7 +392,7 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
     if let Err(e) = pylon_auth::validate_trusted_redirect(&callback, ctx.trusted_origins) {
         return (
             403,
-            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e:?}")),
+            json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e}")),
         );
     }
     // Wave-9 P1 fix: error_callback was previously persisted into
@@ -405,7 +405,7 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
             403,
             json_error(
                 "UNTRUSTED_ERROR_CALLBACK",
-                &format!("error_callback rejected: {e:?}"),
+                &format!("error_callback rejected: {e}"),
             ),
         );
     }
@@ -1739,7 +1739,7 @@ pub(crate) fn handle(
                         json_error_with_hint(
                             "UNTRUSTED_REDIRECT",
                             &format!("OAuth {kind} redirect rejected: {err}"),
-                            "Add the redirect's origin (scheme://host[:port]) to PYLON_TRUSTED_ORIGINS (comma-separated)",
+                            "Add the redirect's origin (scheme://host[:port]) to manifest.auth.trustedOrigins (or PYLON_TRUSTED_ORIGINS — comma-separated). Loopback (http://localhost[:port], 127.0.0.1, [::1]) is always trusted.",
                         ),
                     ));
                 }

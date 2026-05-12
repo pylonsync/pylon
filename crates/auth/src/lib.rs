@@ -1769,6 +1769,13 @@ impl OAuthStateStore {
 /// `"http://localhost:3000/dashboard?x=1"` matches the
 /// `"http://localhost:3000"` entry.
 ///
+/// `http://localhost`, `http://127.0.0.1`, and `http://[::1]` (any
+/// port) are ALWAYS trusted regardless of the allowlist contents.
+/// Dev workflows redirect through localhost; a fresh `pylon dev`
+/// without any manifest entry should still complete OAuth. The
+/// loopback addresses are not routable from the public internet, so
+/// auto-trusting them doesn't enable an open-redirect attack.
+///
 /// Borrowed wholesale from better-auth's `trustedOrigins` model:
 /// explicit allowlist, no implicit "same-origin trust," no env-var
 /// magic. An open-redirect via OAuth is one of the easier auth bugs
@@ -1786,11 +1793,53 @@ pub fn validate_trusted_redirect(
         return Err(TrustedOriginError::NotHttp);
     }
     let url_origin = origin_of(url);
-    if trusted_origins.iter().any(|t| t == &url_origin) {
+    if is_localhost_origin(&url_origin) || trusted_origins.iter().any(|t| t == &url_origin) {
         Ok(())
     } else {
         Err(TrustedOriginError::NotTrusted { origin: url_origin })
     }
+}
+
+/// Returns true when `origin` is a loopback HTTP origin —
+/// `http://localhost`, `http://127.0.0.1`, or `http://[::1]`, with
+/// or without an explicit port. Used by the CORS, CSRF, and OAuth-
+/// redirect gates so `pylon dev` works without any allowlist config.
+///
+/// Loopback addresses are not routable from the public internet, so
+/// auto-trusting them at every gate doesn't create an attack
+/// surface — a remote attacker can't make a victim's browser POST
+/// to the local server with the attacker's origin set to
+/// `http://localhost`.
+///
+/// `https://` is intentionally excluded — there's no realistic dev
+/// flow that uses TLS to localhost, and an `https://localhost`
+/// origin in a production CORS context smells like a misconfigured
+/// proxy that the operator should see fail loudly.
+pub fn is_localhost_origin(origin: &str) -> bool {
+    let host = match origin.strip_prefix("http://") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    // Trim any trailing path/query/fragment — defensive, callers
+    // should pass origins not URLs.
+    let host = host
+        .split(|c: char| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("");
+    // Strip the optional :port suffix. IPv6 loopback `[::1]:N` keeps
+    // its bracketed form intact because `[::1]` has no `:` *outside*
+    // the brackets.
+    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 — strip everything from the closing bracket on.
+        match rest.find(']') {
+            Some(end) => &host[..end + 2], // keep `[..]`
+            None => host,
+        }
+    } else {
+        // host[:port] — split on the last colon for IPv4/hostname.
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(host_no_port, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Reasons a redirect URL might be rejected by [`validate_trusted_redirect`].
@@ -1810,7 +1859,8 @@ impl std::fmt::Display for TrustedOriginError {
             }
             TrustedOriginError::NotTrusted { origin } => write!(
                 f,
-                "redirect origin {origin:?} is not in PYLON_TRUSTED_ORIGINS"
+                "OAuth redirect gate rejected origin {origin:?} — add it to \
+                 manifest.auth.trustedOrigins (or PYLON_TRUSTED_ORIGINS)"
             ),
         }
     }
@@ -3591,14 +3641,13 @@ mod tests {
 
     #[test]
     fn validate_trusted_redirect_basics() {
-        let trusted = vec!["http://localhost:3000".to_string()];
-        assert!(validate_trusted_redirect("http://localhost:3000/dashboard", &trusted).is_ok());
-        assert!(validate_trusted_redirect("http://localhost:3000", &trusted).is_ok());
-        assert!(validate_trusted_redirect("http://localhost:3000/x?y=1", &trusted).is_ok());
+        let trusted = vec!["https://app.example.com".to_string()];
+        assert!(validate_trusted_redirect("https://app.example.com/dashboard", &trusted).is_ok());
+        assert!(validate_trusted_redirect("https://app.example.com", &trusted).is_ok());
 
-        // Wrong port → wrong origin.
+        // Different host → not trusted.
         assert!(matches!(
-            validate_trusted_redirect("http://localhost:4321/dashboard", &trusted),
+            validate_trusted_redirect("https://evil.com/cb", &trusted),
             Err(TrustedOriginError::NotTrusted { .. })
         ));
         // Non-http scheme rejected even before trusted check (defense
@@ -3611,6 +3660,53 @@ mod tests {
             validate_trusted_redirect("", &trusted),
             Err(TrustedOriginError::Empty)
         ));
+    }
+
+    #[test]
+    fn loopback_origins_always_trusted_even_without_allowlist_entry() {
+        // No manifest entry, no env var — loopback still passes.
+        let empty: Vec<String> = Vec::new();
+        for url in [
+            "http://localhost/cb",
+            "http://localhost:3000/cb",
+            "http://localhost:5173",
+            "http://127.0.0.1/cb",
+            "http://127.0.0.1:4321/dashboard",
+            "http://[::1]/cb",
+            "http://[::1]:8080/x",
+        ] {
+            assert!(
+                validate_trusted_redirect(url, &empty).is_ok(),
+                "{url} should be auto-trusted as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn is_localhost_origin_recognises_loopback_variants() {
+        assert!(is_localhost_origin("http://localhost"));
+        assert!(is_localhost_origin("http://localhost:3000"));
+        assert!(is_localhost_origin("http://127.0.0.1"));
+        assert!(is_localhost_origin("http://127.0.0.1:4321"));
+        assert!(is_localhost_origin("http://[::1]"));
+        assert!(is_localhost_origin("http://[::1]:8080"));
+        // Defensive: tolerate a URL accidentally passed instead of an origin.
+        assert!(is_localhost_origin("http://localhost:3000/dashboard"));
+    }
+
+    #[test]
+    fn is_localhost_origin_rejects_non_loopback() {
+        // HTTPS to localhost is intentionally not auto-trusted — there
+        // is no realistic dev flow that uses TLS to localhost, and an
+        // `https://localhost` origin in production smells like a
+        // misconfigured proxy that should fail loudly.
+        assert!(!is_localhost_origin("https://localhost:3000"));
+        assert!(!is_localhost_origin("http://evil.com"));
+        assert!(!is_localhost_origin("http://localhost.attacker.com"));
+        assert!(!is_localhost_origin("http://127.0.0.1.attacker.com"));
+        assert!(!is_localhost_origin("http://10.0.0.1"));
+        assert!(!is_localhost_origin("http://192.168.1.1"));
+        assert!(!is_localhost_origin(""));
     }
 
     // -----------------------------------------------------------------

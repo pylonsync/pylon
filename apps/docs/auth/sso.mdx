@@ -78,7 +78,7 @@ Errors:
 ## OIDC sign-in flow
 
 1. Client redirects user to `GET /api/auth/orgs/org_acme/sso/start?callback=<success_url>&error_callback=<error_url>`.
-2. Pylon validates both URLs against `PYLON_TRUSTED_ORIGINS`, mints a single-use state + PKCE verifier + nonce, persists them, and 302s to the IdP's authorization endpoint with `scope=openid email profile`, `response_type=code`, `code_challenge_method=S256`.
+2. Pylon validates both URLs against `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`), mints a single-use state + PKCE verifier + nonce, persists them, and 302s to the IdP's authorization endpoint with `scope=openid email profile`, `response_type=code`, `code_challenge_method=S256`.
 3. IdP authenticates the user and 302s back to `/api/auth/orgs/org_acme/sso/callback?code=...&state=...`.
 4. Pylon consumes the state (single-use), exchanges `code` for tokens against the IdP's token endpoint with the PKCE verifier, validates the id_token's `nonce` claim per OIDC §3.1.2.1, fetches userinfo for `email` + `name`.
 5. Pylon either matches the user's email to an existing User row OR creates one. `emailVerified` is stamped to now — the IdP just vouched for it.
@@ -172,7 +172,7 @@ OIDC is checked first; if both protocols claim the same domain, OIDC wins.
 - **State + PKCE + nonce** on OIDC. State is single-use, scoped to the org, and re-used or wrong-org states return `403 INVALID_SSO_STATE`.
 - **PKCE S256** binds the token exchange to the same client that started the flow. A leaked authorization code can't be redeemed without the matching `code_verifier`.
 - **Nonce binding** per OIDC §3.1.2.1 defeats id_token replay across distinct sign-in attempts.
-- **Redirect-URL allowlist** — both `callback` and `error_callback` are validated against `PYLON_TRUSTED_ORIGINS` before the IdP gets to see them.
+- **Redirect-URL allowlist** — both `callback` and `error_callback` are validated against `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`) before the IdP gets to see them. Loopback is auto-trusted.
 - **SAML signature verification** with `xmlsec1` — assertions without a valid signature from the configured cert are rejected.
 - **`https://` enforced** on `idp_sso_url`.
 - **Freemail domain blocklist** — common consumer-mail domains (gmail, yahoo, outlook, icloud, hotmail, live, msn, aol, mail.com, protonmail / proton.me, gmx, yandex, qq, 163, 126, fastmail, mac.com, me.com, the full list lives in `BLOCKLIST_FREEMAIL_DOMAINS` in `crates/auth/src/org_sso.rs`) refuse to be claimed by any org.
@@ -186,7 +186,7 @@ OIDC is checked first; if both protocols claim the same domain, OIDC wins.
 ```bash
 PYLON_PUBLIC_URL=https://your-app.com           # required for SSO callbacks
 PYLON_SECRET=<openssl rand -hex 32>             # encrypts client_secret at rest
-PYLON_TRUSTED_ORIGINS=https://your-app.com,...  # callback URL allowlist
+PYLON_TRUSTED_ORIGINS=https://your-app.com,...  # OAuth callback allowlist (or declare in manifest.auth.trustedOrigins)
 PYLON_SSO_ALLOWED_DOMAINS=acme.com,acme.io      # optional: positive domain allowlist
 ```
 

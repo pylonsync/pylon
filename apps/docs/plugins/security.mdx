@@ -38,9 +38,54 @@ For per-route or per-function granularity, layer multiple instances:
 
 **On Pylon Cloud**, per-IP rate limiting is applied at the edge automatically. Use this plugin for app-specific budgets on top.
 
-## `cors`
+## Unified `trustedOrigins`
 
-Cross-Origin Resource Sharing headers for browser clients. Without this plugin, browsers block cross-origin XHR/fetch from your client to your Pylon server.
+Pylon has three browser-facing gates that each reject a request when the caller's origin isn't trusted:
+
+| Gate | What it protects | Error code |
+| --- | --- | --- |
+| **CORS** | Cross-origin XHR/fetch from the browser | `[cors]` warn-log on rejection |
+| **CSRF** | State-changing requests with cookie auth (POST/PATCH/PUT/DELETE) | `CSRF_REJECTED` |
+| **OAuth redirect** | `?callback=` / `?error_callback=` on `/api/auth/login/<provider>` | `UNTRUSTED_REDIRECT` |
+
+The single declarative source for all three is `manifest.auth.trustedOrigins`:
+
+```ts
+import { auth, buildManifest } from "@pylonsync/sdk";
+
+const manifest = buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [/* ... */],
+  routes: [/* ... */],
+  auth: auth({
+    trustedOrigins: [
+      "https://app.example.com",
+      "https://staging.example.com",
+    ],
+  }),
+});
+```
+
+That one list defaults CORS + CSRF + OAuth-redirect simultaneously. Loopback (`http://localhost`, `127.0.0.1`, `[::1]` — any port, http only) is **always auto-trusted at every gate**, so `pylon dev` works on whatever port you pick without manifest config.
+
+### Per-gate overrides
+
+Ops who need a different allowlist for one gate (e.g. allow `https://docs.example.com` to fetch the API but not initiate OAuth callbacks) can split via env vars — each overrides its gate's default:
+
+| Env var | Overrides | Notes |
+| --- | --- | --- |
+| `PYLON_CORS_ORIGIN` | CORS allowlist | Comma-separated. `*` refused in production. |
+| `PYLON_CSRF_ORIGINS` | CSRF allowlist | Comma-separated. |
+| `PYLON_TRUSTED_ORIGINS` | OAuth redirect allowlist | Comma-separated. Merged with manifest entries. |
+
+If none of the env vars are set, all three read from `manifest.auth.trustedOrigins`.
+
+In production with neither manifest entries nor env vars, the CORS gate fails to start with a clear error — there's no implicit wildcard fallback. `PYLON_DEV_MODE=true` relaxes that to `*` for local-only development.
+
+## `cors` (plugin, optional layer on top)
+
+The runtime always enforces CORS via the rules above. The `cors` plugin only exists for apps that need fine-grained method/header allowlists per route:
 
 ```jsonc
 {
@@ -55,23 +100,22 @@ Cross-Origin Resource Sharing headers for browser clients. Without this plugin, 
 }
 ```
 
-`PYLON_CORS_ORIGIN=*` is **refused in non-dev mode** for safety. Always enumerate origins explicitly in production.
+Most apps don't need this — the runtime gate is sufficient.
 
-## `csrf`
+## `csrf` (plugin, optional exempt-paths layer)
 
-Origin/Referer header check on state-changing requests when the auth token rides in a cookie. SPAs and native clients that use bearer tokens don't need this.
+The runtime always enforces CSRF on state-changing requests when the auth token rides in a cookie. The plugin only exists for apps that need per-path exemptions (webhook receivers that legitimately accept cross-origin POSTs with no cookie):
 
 ```jsonc
 {
   "name": "csrf",
   "config": {
-    "trusted_origins": ["https://your-app.com"],
     "exempt_paths": ["/api/webhooks/stripe"]
   }
 }
 ```
 
-Reads `PYLON_CSRF_ORIGINS` as the source of truth if set; the plugin config is the override.
+SPAs and native clients that use bearer tokens never trigger the CSRF gate — it only fires when there's a session cookie attached.
 
 ## `net_guard`
 
@@ -203,8 +247,6 @@ For a production deployment:
     { "name": "rate_limit",   "config": { "max_requests": 100, "window_secs": 60 } },
     { "name": "rate_limit",   "config": { "max_requests": 5,   "window_secs": 60, "route": "/api/auth/magic/send" } },
     { "name": "rate_limit",   "config": { "max_requests": 10,  "window_secs": 60, "route": "/api/auth/password/login" } },
-    { "name": "cors",         "config": { "allowed_origins": ["https://your-app.com"] } },
-    { "name": "csrf",         "config": { "trusted_origins": ["https://your-app.com"] } },
     { "name": "net_guard" },
     { "name": "audit_log",    "config": { "entities": ["User", "Subscription", "ApiKey"] } }
   ]
@@ -215,10 +257,10 @@ That gives you:
 
 - Per-IP request budget
 - Tighter limits on auth endpoints (brute force protection)
-- CORS for your browser app
-- CSRF for cookie auth
 - SSRF defense for any function that does outbound HTTP
 - Audit trail on the entities you'd want to investigate
+
+CORS + CSRF are handled by the runtime via `manifest.auth.trustedOrigins` — no plugin needed for the common case.
 
 ## Defense-in-depth pairings
 

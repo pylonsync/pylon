@@ -518,6 +518,12 @@ export function policiesToManifest(
  * (User entity named "User", strip `passwordHash`, 30-day sessions,
  * no cookie cache, trusted origins from `PYLON_TRUSTED_ORIGINS` env).
  *
+ * `trustedOrigins` is the unified source for **all three gates** —
+ * CORS, CSRF, and OAuth-redirect. Loopback origins
+ * (`http://localhost`, `127.0.0.1`, `[::1]`, any port) are always
+ * auto-trusted across all three gates so `pylon dev` works without
+ * any allowlist config.
+ *
  * @example
  * auth({
  *   user: {
@@ -590,7 +596,14 @@ export type AuthConfig = {
      */
     disabled?: boolean;
   };
-  /** Per-app trusted origins for OAuth `?callback=` validation. Merged with `PYLON_TRUSTED_ORIGINS` env. */
+  /**
+   * Per-app trusted origins. Single declarative source for the three
+   * browser-facing gates: CORS, CSRF, OAuth `?callback=` validation.
+   * Merged with `PYLON_TRUSTED_ORIGINS` (OAuth) / `PYLON_CORS_ORIGIN`
+   * (CORS) / `PYLON_CSRF_ORIGINS` (CSRF) env vars when ops need to
+   * split per-gate. Loopback (`http://localhost`, `127.0.0.1`, `[::1]`,
+   * any port) is always auto-trusted at every gate.
+   */
   trustedOrigins?: string[];
 };
 

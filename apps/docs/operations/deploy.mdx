@@ -18,12 +18,14 @@ PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 PYLON_ADMIN_TOKEN=<64+ random bytes, hex>
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db
 
-# Client-facing
-PYLON_CORS_ORIGIN=https://your-app.com
-PYLON_CSRF_ORIGINS=https://your-app.com
+# Client-facing — declarative: prefer manifest.auth.trustedOrigins
+# in app.ts (one source feeds CORS + CSRF + OAuth-redirect). These
+# env vars exist as per-gate overrides when ops need to split.
+# PYLON_CORS_ORIGIN=https://your-app.com
+# PYLON_CSRF_ORIGINS=https://your-app.com
 
-# Mode switch
-PYLON_DEV_MODE=false
+# Mode switch (default is false — only flip in dev)
+# PYLON_DEV_MODE=false
 ```
 
 Optional:
@@ -53,6 +55,7 @@ PYLON_COOKIE_SECURE=true
 Hard requirements that fail to start:
 
 - `PYLON_CORS_ORIGIN=*` in non-dev mode is refused
+- In non-dev mode, the CORS gate refuses to start with no trusted origins — declare in `manifest.auth.trustedOrigins` or set `PYLON_CORS_ORIGIN`
 - `PYLON_DEV_MODE=true` with `PYLON_ADMIN_TOKEN` unset is refused
 - `/api/__test__/reset` is disabled unless dev + in-memory + loopback
 

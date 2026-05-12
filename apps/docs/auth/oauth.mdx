@@ -135,7 +135,7 @@ server  →  validates state (CSRF check)                        │
 <a href="/api/auth/login/google?callback=/dashboard&redirect=1">Sign in with Google</a>
 ```
 
-`callback` (and the optional `error_callback`) MUST have an origin listed in `PYLON_TRUSTED_ORIGINS`.
+`callback` (and the optional `error_callback`) MUST have an origin listed in `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`). Loopback (`http://localhost`, `127.0.0.1`, `[::1]` — any port) is always auto-trusted, so `pylon dev` works without config. See [Security plugins → Unified trustedOrigins](/plugins/security#unified-trustedorigins).
 
 ### JSON flow (manual)
 
@@ -225,6 +225,6 @@ Use this in your sign-in UI to render only the buttons you've configured.
 | `OAUTH_PROVIDER_BROKEN` | 500 | OIDC discovery failed or provider misconfigured |
 | `OAUTH_INVALID_STATE` | 403 | State missing, expired, or replayed |
 | `OAUTH_TOKEN_EXCHANGE_FAILED` | 502 | Provider rejected the code exchange — common when client secret is wrong, redirect URI doesn't match, or PKCE verifier mismatch |
-| `UNTRUSTED_REDIRECT` | 403 | `?callback=` origin is not in `PYLON_TRUSTED_ORIGINS` |
+| `UNTRUSTED_REDIRECT` | 403 | `?callback=` origin is not in `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`). Loopback is auto-trusted. |
 
 Provider error messages are sanitized — `client_secret`, `code_verifier`, `refresh_token`, `id_token`, and `access_token` values are redacted before they end up in `oauth_error_message` redirect URLs or server logs.

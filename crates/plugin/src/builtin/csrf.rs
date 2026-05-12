@@ -32,8 +32,14 @@ impl CsrfPlugin {
     }
 
     /// Check whether `origin` is in the allowlist. A wildcard entry (`"*"`)
-    /// matches every origin.
+    /// matches every origin. Loopback (`http://localhost`, `127.0.0.1`,
+    /// `[::1]`, any port) is always trusted so `pylon dev` works without
+    /// any allowlist config — see `pylon_auth::is_localhost_origin` for
+    /// the rationale.
     fn is_allowed_origin(&self, origin: &str) -> bool {
+        if pylon_auth::is_localhost_origin(origin) {
+            return true;
+        }
         self.allowed_origins.iter().any(|o| o == origin || o == "*")
     }
 
@@ -101,7 +107,10 @@ impl CsrfPlugin {
             Some(ref o) if self.is_allowed_origin(o) => Ok(()),
             Some(ref o) => Err(PluginError {
                 code: "CSRF_REJECTED".into(),
-                message: format!("Origin '{}' not allowed", o),
+                message: format!(
+                    "CSRF gate rejected origin {o:?} — add it to \
+                     manifest.auth.trustedOrigins (or PYLON_CSRF_ORIGINS)"
+                ),
                 status: 403,
             }),
             // Server-to-server caller — see contract above.
@@ -254,6 +263,40 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code, "CSRF_REJECTED", "{method} with bad Origin");
         }
+    }
+
+    // -- Loopback auto-trust --
+
+    #[test]
+    fn loopback_origins_always_pass_even_with_empty_allowlist() {
+        // Empty allowlist — no manifest entry, no env var. Loopback
+        // should still get through so `pylon dev` works out of the box.
+        let csrf = CsrfPlugin::new(vec![]);
+        for origin in &[
+            "http://localhost",
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1",
+            "http://127.0.0.1:4321",
+            "http://[::1]",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                csrf.check("POST", Some(origin), None).is_ok(),
+                "{origin} should be auto-trusted as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn https_localhost_is_not_auto_trusted() {
+        // TLS-to-localhost smells like a misconfigured proxy in prod.
+        // Don't sneak it in via the loopback shortcut — require an
+        // explicit allowlist entry.
+        let csrf = CsrfPlugin::new(vec![]);
+        assert!(csrf
+            .check("POST", Some("https://localhost:3000"), None)
+            .is_err());
     }
 
     // -- Plugin trait --

@@ -579,43 +579,50 @@ fn start_server(
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
-    // CORS origin. Defaults to `*` in dev for convenience; in prod we refuse
-    // to start with a wildcard because the server sends `Access-Control-
-    // Allow-Credentials: true` elsewhere and also accepts `Authorization:
-    // Bearer <session>`. The combination of `*` + credentials is a spec
-    // violation that some browsers tolerate, and even when they don't it
-    // lets any origin drive bearer-auth APIs.
+    // CORS origin. Resolution order:
+    //   1. PYLON_CORS_ORIGIN (comma-separated) — operator override.
+    //   2. manifest.auth.trustedOrigins — unified declarative source
+    //      that also feeds the CSRF + OAuth-redirect gates.
+    //   3. Dev-mode default: `*` (loopback is auto-trusted by every
+    //      gate anyway via `is_localhost_origin`, but `*` keeps
+    //      curl/Postman from custom hosts working).
+    //   4. Prod with no manifest entries and no env: hard error.
+    //
+    // Wildcard + credentials is a spec violation some browsers
+    // tolerate; we refuse it in prod because the server also accepts
+    // `Authorization: Bearer …` so `*` would let any origin drive
+    // bearer-auth APIs.
+    let manifest_trusted_origins: Vec<String> =
+        runtime.manifest().auth.trusted_origins.clone();
     let cors_origin_env = match std::env::var("PYLON_CORS_ORIGIN") {
-        Ok(v) => v,
-        Err(_) if is_dev => "*".to_string(),
-        Err(_) => {
-            return Err(
-                "PYLON_CORS_ORIGIN must be set in production (non-dev mode). \
-                Set it to your frontend's origin (or comma-separated list), \
-                or set PYLON_DEV_MODE=true for local development."
-                    .into(),
-            );
-        }
+        Ok(v) => Some(v),
+        Err(_) => None,
     };
-    if !is_dev && cors_origin_env == "*" {
-        return Err("PYLON_CORS_ORIGIN=\"*\" is refused in production mode. \
-            Set it to an explicit origin (https://app.example.com), or a \
-            comma-separated list."
+    let cors_allowlist: Vec<String> = if let Some(v) = cors_origin_env.as_deref() {
+        v.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if !manifest_trusted_origins.is_empty() {
+        manifest_trusted_origins.clone()
+    } else if is_dev {
+        vec!["*".to_string()]
+    } else {
+        return Err(
+            "CORS gate has no trusted origins. Declare them in your manifest \
+             (auth({trustedOrigins: [...]})) or set PYLON_CORS_ORIGIN. \
+             PYLON_DEV_MODE=true relaxes this for local development."
+                .into(),
+        );
+    };
+    if !is_dev && cors_allowlist.iter().any(|o| o == "*") {
+        return Err("CORS gate refuses wildcard `*` in production. \
+            Declare explicit origins in manifest.auth.trustedOrigins, or \
+            set PYLON_CORS_ORIGIN to a comma-separated list."
             .into());
     }
-    // PYLON_CORS_ORIGIN supports a comma-separated allowlist so a single
-    // backend can serve multiple frontends (apex + custom domain, dev +
-    // staging + prod, etc.). Per-request we echo back the matching
-    // entry from the request's Origin header — without that, browsers
-    // reject the response because Access-Control-Allow-Origin must be
-    // exactly one value (or `*`), not a list.
-    let cors_allowlist: Vec<String> = cors_origin_env
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
     if cors_allowlist.is_empty() {
-        return Err("PYLON_CORS_ORIGIN parsed to an empty allowlist".into());
+        return Err("CORS gate parsed an empty allowlist from PYLON_CORS_ORIGIN".into());
     }
     // Validate each entry is a valid HTTP header value so per-request
     // header construction never panics on bad bytes.
@@ -662,15 +669,20 @@ fn start_server(
         pylon_auth::CookieConfig::from_env(&pylon_auth::CookieConfig::default_name_for(app_name))
     });
 
-    // CSRF protection. Enforced inline at the HTTP layer because the plugin
-    // trait's `on_request` hook doesn't see request headers. For
-    // state-changing methods (POST/PATCH/PUT/DELETE) we check Origin, then
-    // Referer, against the allowlist.
+    // CSRF protection. Enforced inline at the HTTP layer because the
+    // plugin trait's `on_request` hook doesn't see request headers.
+    // For state-changing methods (POST/PATCH/PUT/DELETE) we check
+    // Origin, then Referer, against the allowlist.
     //
-    // Allowlist resolution:
-    //   - PYLON_CSRF_ORIGINS (comma-separated) if set
-    //   - otherwise PYLON_CORS_ORIGIN (already validated above)
-    //   - in dev, fall back to allow-any to avoid breaking local tooling.
+    // Allowlist resolution (same shape as CORS / OAuth redirect — the
+    // three gates share a single declarative source):
+    //   1. PYLON_CSRF_ORIGINS (comma-separated) — per-gate override.
+    //   2. manifest.auth.trustedOrigins ∪ CORS allowlist (every
+    //      origin allowed for fetch is also allowed to drive a
+    //      cross-origin POST).
+    //   3. Dev: allow-any so localhost tooling on unusual ports
+    //      isn't blocked. Loopback is auto-trusted by the plugin
+    //      regardless of this list — see CsrfPlugin::is_allowed_origin.
     let csrf_origins: Vec<String> = match std::env::var("PYLON_CSRF_ORIGINS") {
         Ok(v) => v
             .split(',')
@@ -680,14 +692,18 @@ fn start_server(
         Err(_) => {
             if is_dev {
                 vec!["*".to_string()]
-            } else if !cors_allowlist.iter().any(|o| o == "*") {
-                // Inherit the full CORS allowlist as trusted origins
-                // for CSRF purposes — every origin allowed for fetch
-                // is also allowed to drive a cross-origin POST.
-                cors_allowlist.iter().cloned().collect()
             } else {
-                // Non-dev + wildcard was already rejected, but guard anyway.
-                vec![]
+                let mut merged: Vec<String> = cors_allowlist
+                    .iter()
+                    .filter(|o| o.as_str() != "*")
+                    .cloned()
+                    .collect();
+                for m in &manifest_trusted_origins {
+                    if !m.is_empty() && !merged.contains(m) {
+                        merged.push(m.clone());
+                    }
+                }
+                merged
             }
         }
     };
@@ -702,41 +718,24 @@ fn start_server(
     // which may differ from the dashboard's (e.g. dashboard at
     // /dashboard, API at api.example.com). Better-auth's `trustedOrigins`
     // is the model here — explicit allowlist, no implicit trust.
-    // Manifest-declared trusted origins (from auth({trustedOrigins: [...]})
-    // in app.ts) get merged with the env list. Manifest is the
-    // type-safe declarative source; env is the operator override for
-    // ops-only deploys.
-    let manifest_trusted: Vec<String> = runtime.manifest().auth.trusted_origins.clone();
-    let trusted_origins: Vec<String> = std::env::var("PYLON_TRUSTED_ORIGINS")
+    // Manifest-declared trusted origins (from auth({trustedOrigins:
+    // [...]}) in app.ts) get merged with the env list. Manifest is
+    // the type-safe declarative source; env is the operator override
+    // for ops-only deploys. Loopback origins are always auto-trusted
+    // by `validate_trusted_redirect` regardless of this list, so a
+    // fresh `pylon dev` completes OAuth without any config.
+    let trusted_origins_env: Vec<String> = std::env::var("PYLON_TRUSTED_ORIGINS")
         .map(|v| {
             v.split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
         })
-        .unwrap_or_else(|_| {
-            // Dev-mode default: trust localhost on the conventional
-            // ports so `pylon dev` + `next dev` works without env
-            // surgery. Production (PYLON_DEV_MODE=false or unset) gets
-            // an empty list, which fails-closed at the OAuth start
-            // endpoint with a clear error pointing the operator at
-            // PYLON_TRUSTED_ORIGINS.
-            if is_dev_early {
-                vec![
-                    "http://localhost:3000".to_string(),
-                    "http://localhost:4321".to_string(),
-                    "http://localhost:5173".to_string(),
-                    "http://127.0.0.1:3000".to_string(),
-                ]
-            } else {
-                Vec::new()
-            }
-        });
-    // Combine env + manifest, dedup, drop empties.
-    let mut combined: Vec<String> = trusted_origins;
-    for m in manifest_trusted {
-        if !m.is_empty() && !combined.contains(&m) {
-            combined.push(m);
+        .unwrap_or_default();
+    let mut combined: Vec<String> = trusted_origins_env;
+    for m in &manifest_trusted_origins {
+        if !m.is_empty() && !combined.contains(m) {
+            combined.push(m.clone());
         }
     }
     let trusted_origins = Arc::new(combined);
@@ -925,23 +924,42 @@ fn start_server(
         let we = Arc::clone(&workflow_engine);
         let fn_ops_ref = fn_ops_maybe.clone();
         let shards_ref = shard_registry.clone();
-        // Compute the per-request CORS origin to echo back: match the
-        // request's Origin header against the allowlist; fall back to
-        // the first allowlist entry on miss (which the browser then
-        // rejects, which is what we want — never silently let a wrong
-        // origin through). Wildcard allowlist short-circuits to "*".
+        // Compute the per-request CORS origin to echo back. Match the
+        // request's Origin header against the allowlist; loopback is
+        // always trusted via `is_localhost_origin` so dev tools on
+        // unusual ports work without manifest config. On miss we
+        // still emit a header (the first allowlist entry) so the
+        // browser surfaces the mismatch in DevTools — and we log
+        // `CORS_ORIGIN_NOT_ALLOWED` with the gate name + remediation
+        // so the operator doesn't have to guess which of three
+        // gates rejected the request.
+        let req_origin_header = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Origin"))
+            .map(|h| h.value.as_str().to_string());
         let cors_origin: String = {
-            let req_origin = request
-                .headers()
-                .iter()
-                .find(|h| h.field.equiv("Origin"))
-                .map(|h| h.value.as_str().to_string());
             if cors_allowlist.iter().any(|o| o == "*") {
                 "*".to_string()
             } else {
-                match req_origin {
-                    Some(o) if cors_allowlist.iter().any(|a| *a == o) => o,
-                    _ => cors_allowlist
+                match &req_origin_header {
+                    Some(o)
+                        if pylon_auth::is_localhost_origin(o)
+                            || cors_allowlist.iter().any(|a| a == o) =>
+                    {
+                        o.clone()
+                    }
+                    Some(o) => {
+                        tracing::warn!(
+                            "[cors] gate rejected origin {o:?} — add to \
+                             manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN"
+                        );
+                        cors_allowlist
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "null".to_string())
+                    }
+                    None => cors_allowlist
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "null".to_string()),
