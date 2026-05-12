@@ -75,7 +75,6 @@
             "pages": [
               "plugins/overview",
               "plugins/stripe",
-              "plugins/organizations",
               "plugins/feature-flags",
               "plugins/webhooks",
               "plugins/security",

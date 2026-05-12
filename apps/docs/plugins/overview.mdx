@@ -21,7 +21,6 @@ Features that ARE built into the framework binary already (no plugin needed):
 | Package | Purpose | Net-new vs framework |
 | --- | --- | --- |
 | **[@pylonsync/stripe](/plugins/stripe)** | Declarative billing — plans, checkout, portal, cancel/restore, full webhook router, subscription entity. | Framework only ships a minimal `/api/billing/{checkout,webhook}` pair. This adds plans config, lifecycle hooks, Subscription state. |
-| **[@pylonsync/organizations](/plugins/organizations)** | Permission system + team support layered on the framework's entity-based orgs. | Framework has Org primitives; this adds the permission layer + teams. |
 | **[@pylonsync/feature-flags](/plugins/feature-flags)** | Local-eval flags, percentage rollouts, 11 targeting predicate ops, multivariate variants. | Framework has no equivalent. |
 | **[@pylonsync/webhooks](/plugins/webhooks)** | Outbound webhook delivery — Svix-compatible HMAC sigs, retry schedule, secret rotation. | Framework has no outbound delivery. |
 

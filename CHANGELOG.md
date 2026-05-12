@@ -5,9 +5,13 @@
 
 ### Features
 
-* **organizations:** new `@pylonsync/organizations` package — declarative permission system + optional team support, layered on the framework's entity-based org primitives (v0.3.74+). `permissions: { "x.y": ["owner", "admin"] }` config + `requirePermission(ctx, cfg, "x.y")` helper replaces the verbose `exists(OrgMember where ...)` policy expressions. Optional `teams: { enabled: true }` adds Team + TeamMember entities. Net-new value: framework had no permission system, only role primitives.
-* **feature-flags:** new `@pylonsync/feature-flags` package — local-eval flags with boolean + multivariate variants, percentage rollouts, 11 targeting predicate ops, JSON payloads per variant, deterministic FNV-1a bucketing. Framework has no equivalent.
-* **webhooks:** new `@pylonsync/webhooks` package — Svix-compatible outbound webhook delivery (HMAC-SHA256 signed, replay protection, secret-rotation overlap, exponential-backoff retries). Framework has no outbound delivery.
+* **feature-flags:** new `@pylonsync/feature-flags` package (at `packages/plugins/feature-flags/`) — local-eval flags with boolean + multivariate variants, percentage rollouts, 11 targeting predicate ops, JSON payloads per variant, deterministic FNV-1a bucketing. Framework has no equivalent.
+* **webhooks:** new `@pylonsync/webhooks` package (at `packages/plugins/webhooks/`) — Svix-compatible outbound webhook delivery (HMAC-SHA256 signed, replay protection, secret-rotation overlap, exponential-backoff retries). Framework has no outbound delivery.
+
+
+### Project structure
+
+* New `packages/plugins/` subdirectory for optional TS extension packages. Keeps framework core (sdk, functions, sync), client bindings (react, next, swift), and CLI tooling visually separate from opt-in plugins. The `@pylonsync/stripe` package also moved here.
 
 
 ### Refactoring
@@ -26,6 +30,7 @@
 * ~~`@pylonsync/two-factor`~~ — Framework already provides `/api/auth/totp/*` (enroll/verify/disable + backup codes). Removed.
 * ~~`@pylonsync/email`~~ — Framework already supports SendGrid/Resend/Stack0/webhook via `PYLON_EMAIL_PROVIDER` env + `ctx.email.send()`. Removed.
 * ~~`@pylonsync/audit-log`~~ — Framework already provides `AuditAction`/`AuditEvent` + `/api/auth/audit{,/tenant}` routes. Removed.
+* ~~`@pylonsync/organizations`~~ — Framework already provides Org/OrgMember/OrgInvite as manifest entities + `/api/auth/orgs/*` routes. The plugin's "permission system" was just a thin TS wrapper over the policy DSL's existing `auth.hasRole(...)`. The "teams" feature inside it had no current consumer and will come back as a focused `@pylonsync/teams` package when one materializes. Removed.
 
 ## [0.3.80](https://github.com/pylonsync/pylon/compare/v0.3.79...v0.3.80) (2026-05-11)
 

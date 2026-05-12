@@ -427,20 +427,6 @@
         "create-pylon": "./bin/create-pylon.js",
       },
     },
-    "packages/feature-flags": {
-      "name": "@pylonsync/feature-flags",
-      "version": "0.3.81",
-      "dependencies": {
-        "@pylonsync/functions": "0.3.80",
-        "@pylonsync/sdk": "0.3.80",
-      },
-      "peerDependencies": {
-        "bun-types": "*",
-      },
-      "optionalPeers": [
-        "bun-types",
-      ],
-    },
     "packages/functions": {
       "name": "@pylonsync/functions",
       "version": "0.3.81",
@@ -489,12 +475,40 @@
         "react-dom": ">=19.0.0",
       },
     },
-    "packages/organizations": {
-      "name": "@pylonsync/organizations",
+    "packages/plugins/feature-flags": {
+      "name": "@pylonsync/feature-flags",
       "version": "0.3.81",
       "dependencies": {
-        "@pylonsync/functions": "0.3.80",
-        "@pylonsync/sdk": "0.3.80",
+        "@pylonsync/functions": "0.3.81",
+        "@pylonsync/sdk": "0.3.81",
+      },
+      "peerDependencies": {
+        "bun-types": "*",
+      },
+      "optionalPeers": [
+        "bun-types",
+      ],
+    },
+    "packages/plugins/stripe": {
+      "name": "@pylonsync/stripe",
+      "version": "0.3.81",
+      "dependencies": {
+        "@pylonsync/functions": "0.3.81",
+        "@pylonsync/sdk": "0.3.81",
+      },
+      "peerDependencies": {
+        "bun-types": "*",
+      },
+      "optionalPeers": [
+        "bun-types",
+      ],
+    },
+    "packages/plugins/webhooks": {
+      "name": "@pylonsync/webhooks",
+      "version": "0.3.81",
+      "dependencies": {
+        "@pylonsync/functions": "0.3.81",
+        "@pylonsync/sdk": "0.3.81",
       },
       "peerDependencies": {
         "bun-types": "*",
@@ -539,37 +553,9 @@
       "name": "@pylonsync/sdk",
       "version": "0.3.81",
     },
-    "packages/stripe": {
-      "name": "@pylonsync/stripe",
-      "version": "0.3.81",
-      "dependencies": {
-        "@pylonsync/functions": "0.3.79",
-        "@pylonsync/sdk": "0.3.79",
-      },
-      "peerDependencies": {
-        "bun-types": "*",
-      },
-      "optionalPeers": [
-        "bun-types",
-      ],
-    },
     "packages/sync": {
       "name": "@pylonsync/sync",
       "version": "0.3.81",
-    },
-    "packages/webhooks": {
-      "name": "@pylonsync/webhooks",
-      "version": "0.3.81",
-      "dependencies": {
-        "@pylonsync/functions": "0.3.80",
-        "@pylonsync/sdk": "0.3.80",
-      },
-      "peerDependencies": {
-        "bun-types": "*",
-      },
-      "optionalPeers": [
-        "bun-types",
-      ],
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -734,7 +720,7 @@
 
     "@pylonsync/example-ui": ["@pylonsync/example-ui@workspace:examples/_shared"],
 
-    "@pylonsync/feature-flags": ["@pylonsync/feature-flags@workspace:packages/feature-flags"],
+    "@pylonsync/feature-flags": ["@pylonsync/feature-flags@workspace:packages/plugins/feature-flags"],
 
     "@pylonsync/functions": ["@pylonsync/functions@workspace:packages/functions"],
 
@@ -742,21 +728,19 @@
 
     "@pylonsync/next": ["@pylonsync/next@workspace:packages/next"],
 
-    "@pylonsync/organizations": ["@pylonsync/organizations@workspace:packages/organizations"],
-
     "@pylonsync/react": ["@pylonsync/react@workspace:packages/react"],
 
     "@pylonsync/react-native": ["@pylonsync/react-native@workspace:packages/react-native"],
 
     "@pylonsync/sdk": ["@pylonsync/sdk@workspace:packages/sdk"],
 
-    "@pylonsync/stripe": ["@pylonsync/stripe@workspace:packages/stripe"],
+    "@pylonsync/stripe": ["@pylonsync/stripe@workspace:packages/plugins/stripe"],
 
     "@pylonsync/sync": ["@pylonsync/sync@workspace:packages/sync"],
 
     "@pylonsync/web": ["@pylonsync/web@workspace:apps/web"],
 
-    "@pylonsync/webhooks": ["@pylonsync/webhooks@workspace:packages/webhooks"],
+    "@pylonsync/webhooks": ["@pylonsync/webhooks@workspace:packages/plugins/webhooks"],
 
     "@pylonsync/workflows": ["@pylonsync/workflows@workspace:packages/workflows"],
 

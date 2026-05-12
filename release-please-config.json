@@ -32,10 +32,9 @@
         { "type": "json", "path": "packages/react/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/sync/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/next/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/stripe/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/organizations/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/feature-flags/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/webhooks/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "packages/plugins/stripe/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/plugins/feature-flags/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/plugins/webhooks/package.json", "jsonpath": "$.version" }
       ]
     }
   }

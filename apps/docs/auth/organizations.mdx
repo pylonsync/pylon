@@ -3,10 +3,6 @@ title: Organizations
 description: "Multi-tenant orgs with owner/admin/member roles, email invites, and active-tenant session state — declared as manifest entities so apps customize the schema freely."
 ---
 
-<Note>
-  This page documents the framework's org primitives (Org / OrgMember / OrgInvite entities + `/api/auth/orgs/*` routes). For a permission system on top (declarative `permissions: { "x.y": ["owner", "admin"] }` + `requirePermission(ctx, "x.y")`) and optional team support, see [`@pylonsync/organizations`](/plugins/organizations).
-</Note>
-
 Pylon ships a complete org / workspace / team layer in the binary. Users create orgs, invite teammates by email, change member roles, select an active tenant per session, and policies see the active tenant as `auth.tenantId`. No external "teams" service to bolt on.
 
 **Apps customize the org / member / invite schema.** As of v0.3.74, the framework's `/api/auth/orgs/*` surface reads + writes through manifest-declared entities (`Org`, `OrgMember`, `OrgInvite` by default — names configurable). Add `logo`, `industry`, `billingEmail`, `plan`, anything you want — the framework reads the required fields it needs and leaves your custom fields alone.
