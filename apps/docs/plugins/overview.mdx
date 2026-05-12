@@ -1,18 +1,34 @@
 ---
 title: Plugins overview
-description: "32 built-in plugins for security, data hygiene, search/AI, and integrations. How they work, how to enable them."
+description: "Declarative TS packages + runtime Rust hooks for security, data hygiene, search/AI, and integrations."
 ---
 
-Plugins are how you compose Pylon. Each one is a focused capability — rate limiting, audit logging, soft delete, vector search — that you turn on by adding it to your manifest. Most apps use 4–8 plugins. None are required; the binary works without any.
+Plugins are how you compose Pylon. Two flavors:
 
-## What's built in
+1. **TS packages** (`@pylonsync/*`) — declarative config that returns a manifest fragment + handler factories. Most app-level features live here: billing, orgs/permissions, transactional email, 2FA, API keys, audit logs, feature flags, outbound webhooks.
+2. **Runtime Rust hooks** — wired automatically into the request path: rate limiting, tenant scoping, CORS, CSRF, caching, AI proxy, file storage, search.
 
-| Group | Plugins |
+## TS packages
+
+| Package | Purpose |
 | --- | --- |
-| **[Security](/plugins/security)** | `password_auth`, `totp`, `api_keys`, `jwt`, `session_expiry`, `csrf`, `cors`, `net_guard`, `rate_limit` |
-| **[Data hygiene](/plugins/data)** | `validation`, `slugify`, `timestamps`, `computed`, `cascade`, `versioning`, `soft_delete`, `tenant_scope`, `organizations` |
-| **[Search & AI](/plugins/search-ai)** | `search`, `vector_search`, `ai_proxy`, `mcp` |
-| **[Integrations](/plugins/integrations)** | `file_storage`, `cache`, `cache_client`, `email`, `webhooks`, `stripe`, `feature_flags`, `audit_log` |
+| **[@pylonsync/stripe](/plugins/stripe)** | Declarative billing — plans, checkout, portal, webhooks, subscription state. |
+| **[@pylonsync/organizations](/plugins/organizations)** | Permission system + team support layered on the framework's entity-based orgs. |
+| **[@pylonsync/email](/plugins/email)** | Transactional email — Resend / Postmark / SES / SMTP, declarative templates, suppression. |
+| **[@pylonsync/two-factor](/plugins/two-factor)** | TOTP + backup codes + trusted-device cookies. |
+| **[@pylonsync/api-keys](/plugins/api-keys)** | Hashed `pk_*` bearer tokens, token-bucket rate limit, scoped permissions. |
+| **[@pylonsync/audit-log](/plugins/audit-log)** | Append-only event store, SIEM streaming destinations, retention pruning. |
+| **[@pylonsync/feature-flags](/plugins/feature-flags)** | Local-eval flags, percentage rollouts, targeting rules, multivariate variants. |
+| **[@pylonsync/webhooks](/plugins/webhooks)** | Outbound webhook delivery — Svix-compatible HMAC sigs, retry schedule, secret rotation. |
+
+## Runtime hooks
+
+| Group | Built-in |
+| --- | --- |
+| **[Security](/plugins/security)** | `csrf`, `net_guard`, `rate_limit` |
+| **[Data hygiene](/plugins/data)** | `tenant_scope` |
+| **[Search & AI](/plugins/search-ai)** | `search`, `ai_proxy` |
+| **[Integrations](/plugins/integrations)** | `file_storage`, `cache`, `cache_client`, `email` (SMTP) |
 
 Drill into each group's page for full plugin reference. This page covers the lifecycle and how plugins fit into the request path.
 

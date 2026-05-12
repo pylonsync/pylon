@@ -1,0 +1,122 @@
+---
+title: "@pylonsync/stripe"
+description: "Declarative billing for Pylon apps — customer creation, checkout, billing portal, webhooks, and subscription state in one config block."
+---
+
+`@pylonsync/stripe` replaces the ~400 lines every Pylon app rewrites when adding Stripe: customer creation, checkout session minting, billing portal, webhook signature verification, plan derivation, subscription state. One `stripe({plans, hooks})` block returns a manifest fragment + handler factories.
+
+## Install
+
+```bash
+bun add @pylonsync/stripe
+```
+
+## Config
+
+```ts
+import { buildManifest, app, entity, field } from "@pylonsync/sdk";
+import { stripe } from "@pylonsync/stripe";
+
+export const Org = entity("Org", {
+  name: field.string(),
+  slug: field.string().unique(),
+  createdBy: field.id("User"),
+  createdAt: field.string(),
+  stripeCustomerId: field.string().optional(),
+});
+
+export const billing = stripe({
+  referenceType: "org", // or "user"
+  plans: [
+    { name: "starter", priceId: process.env.STRIPE_PRICE_STARTER!, limits: { recordings: 50 } },
+    { name: "pro",     priceId: process.env.STRIPE_PRICE_PRO!,     limits: { recordings: 500 } },
+    { name: "scale",   priceId: process.env.STRIPE_PRICE_SCALE!,   limits: { recordings: -1 } },
+  ],
+  hooks: {
+    onSubscriptionActivate: async (ctx, { referenceId, plan }) => {
+      // analytics, welcome email
+    },
+    onInvoice: async (ctx, { eventType, invoice }) => {
+      // record audit, slack alert on payment_failed
+    },
+  },
+});
+
+export default app({
+  name: "myapp",
+  entities: [Org /* + your entities */, ...billing.manifest.entities],
+  actions:  [...billing.manifest.actions],
+  queries:  [...billing.manifest.queries],
+  policies: [...billing.manifest.policies],
+});
+```
+
+## Wrapper files
+
+Pylon loads function handlers by file. Create one-line wrappers under `functions/`:
+
+```ts
+// functions/createCheckoutSession.ts
+export { createCheckoutSession as default } from "../billing";
+```
+
+```ts
+// functions/createBillingPortalSession.ts
+export { createBillingPortalSession as default } from "../billing";
+```
+
+…and one per handler key exposed by `billing.handlers` (`cancelSubscription`, `restoreSubscription`, `stripeWebhook`, plus the `_pylonStripe*` internals).
+
+## Required env
+
+| Variable | Purpose |
+| --- | --- |
+| `STRIPE_SECRET_KEY` | API requests (set per Pylon Cloud project's Secrets UI). |
+| `STRIPE_WEBHOOK_SECRET` | Signature verification on `/api/webhooks/stripeWebhook`. |
+| `PYLON_PUBLIC_URL` | Auto-set by Pylon Cloud. Drives URL allowlist for `success_url`/`cancel_url`. |
+
+## Webhook endpoint
+
+Configure in Stripe Dashboard → Developers → Webhooks → Add endpoint:
+
+```
+URL:    https://api.<your-app>.com/api/webhooks/stripeWebhook
+Events: customer.subscription.created
+        customer.subscription.updated
+        customer.subscription.deleted
+        invoice.created
+        invoice.finalized
+        invoice.paid
+        invoice.payment_failed
+        invoice.voided
+```
+
+Copy the signing secret (`whsec_...`) → set as `STRIPE_WEBHOOK_SECRET` on your Pylon machine.
+
+## Lifecycle hooks
+
+| Hook | Fires |
+| --- | --- |
+| `onCustomerCreate` | After a Stripe customer is created (first checkout). |
+| `onSubscriptionActivate` | `customer.subscription.created` event. |
+| `onSubscriptionUpdate` | `customer.subscription.updated` event. |
+| `onSubscriptionCancel` | `customer.subscription.deleted` event. |
+| `onInvoice` | Any invoice event. |
+| `onEvent` | Catch-all for unhandled Stripe events. |
+| `getCheckoutSessionParams` | Inject tax/promo/idempotency-key params into checkout creation. |
+
+## RBAC
+
+The `authorizeReference` hook gates subscription mutations. Defaults:
+
+- `referenceType: "org"` — caller must be the org's owner or admin.
+- `referenceType: "user"` — caller must be the user themselves.
+- `referenceType: "custom"` — you must supply your own `authorizeReference`.
+
+## Security
+
+- **Constant-time signature verification** with 5-minute replay window and multi-secret rotation (supports overlap window during secret rotation).
+- **URL allowlist** auto-derived from `PYLON_PUBLIC_URL` + `PYLON_CORS_ORIGIN` — no hardcoded host strings.
+- **Three-signal plan resolver** (lookup_key → nickname → priceId match) — Stripe occasionally elides the first two on webhook payloads.
+- **Double-trial guard** — prior `Subscription` rows for the same reference disable the trial period regardless of plan config.
+- **Idempotent webhook upsert** via `stripeSubscriptionId` lookup, so Stripe retries produce the same state.

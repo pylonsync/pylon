@@ -1,0 +1,68 @@
+---
+title: "@pylonsync/feature-flags"
+description: "Local-eval feature flags — boolean + multivariate, percentage rollouts, targeting rules, JSON payloads per variant."
+---
+
+Local-eval means flag checks are pure in-memory computations — no network call per request. Determinism comes from a stable hash of the bucketing key (default `userId`).
+
+## Install
+
+```bash
+bun add @pylonsync/feature-flags
+```
+
+## Inline catalog
+
+```ts
+import { isEnabled, getVariant, evaluateAll } from "@pylonsync/feature-flags";
+
+const flags = {
+  "new-onboarding": {
+    type: "boolean",
+    default: true,
+    rollout: { percent: 25 },
+    targeting: [
+      { value: true, when: [{ property: "plan", op: "eq", value: "enterprise" }] },
+    ],
+  },
+  "ai-model": {
+    type: "multivariate",
+    default: "gpt-4",
+    variants: [
+      { name: "gpt-4",   weight: 80, payload: { maxTokens: 4096 } },
+      { name: "claude-opus", weight: 20, payload: { maxTokens: 8192 } },
+    ],
+  },
+} as const;
+
+const ctx = { userId: "u_42", properties: { plan: "pro" } };
+isEnabled(flags, "new-onboarding", ctx); // boolean
+getVariant(flags, "ai-model", ctx);      // "gpt-4" | "claude-opus"
+evaluateAll(flags, ctx);                 // { "new-onboarding": true, "ai-model": {maxTokens: 4096} }
+```
+
+## Predicates
+
+| Op | Behavior |
+| --- | --- |
+| `eq` / `neq` | Strict equality. |
+| `in` / `not_in` | Membership in a literal array. |
+| `gt` / `gte` / `lt` / `lte` | Numeric comparison. |
+| `contains` / `starts_with` / `ends_with` | String operators. |
+| `regex` | RegExp match (anchored at the caller's discretion). |
+
+Multiple predicates AND together within a `when` block. Multiple rules within a flag's `targeting` array fire in order; first match wins.
+
+## Bucketing
+
+`hashBucket(key, percent)` is FNV-1a — fast (sub-microsecond on hot paths), well-distributed, deterministic. Same hash PostHog/LaunchDarkly use for local-eval.
+
+For per-tenant rollouts (every member of a tenant sees the same value), set `rollout.key = "orgId"`. For cohort experiments, supply a custom property key.
+
+## SSR bootstrap
+
+`evaluateAll(flags, ctx)` resolves every flag's current value. Serialize the result into the SSR-rendered HTML so the client doesn't have to wait for a flag fetch — eliminates the "flicker" pattern where a flag-controlled UI flashes before the eval completes.
+
+## Editable flags
+
+When `cfg.editable === true`, the manifest fragment adds a `FeatureFlag` entity + `setFlag` / `deleteFlag` admin mutations. The runtime caches the catalog in-process and invalidates on mutation. Use this for kill switches ops needs to flip without a redeploy.

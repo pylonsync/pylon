@@ -1,0 +1,110 @@
+---
+title: "@pylonsync/webhooks"
+description: "Outbound webhook delivery — Svix-compatible HMAC signatures, exponential-backoff retries, secret rotation overlap."
+---
+
+For SaaS apps that want to fire webhooks at their CUSTOMERS' endpoints when domain events happen ("invoice.paid" → customer's URL). Svix-style HMAC-SHA256 signatures so receivers using Svix's reference verifier work unchanged.
+
+## Install
+
+```bash
+bun add @pylonsync/webhooks
+```
+
+## Config
+
+```ts
+import { webhooks, dispatch } from "@pylonsync/webhooks";
+
+export const hooks = webhooks({
+  retrySchedule: [5, 300, 1800, 7200, 18000, 36000, 50400], // default
+  replayToleranceSecs: 300,
+});
+
+export default app({
+  entities: [...hooks.manifest.entities],
+  policies: [...hooks.manifest.policies],
+});
+```
+
+## Dispatch an event
+
+```ts
+import { dispatch } from "@pylonsync/webhooks";
+import { hooks } from "../webhook-config";
+
+export default action({
+  args: { invoiceId: v.id("Invoice") },
+  async handler(ctx, args) {
+    const invoice = await ctx.db.get("Invoice", args.invoiceId);
+    await dispatch(ctx, hooks.config, {
+      type: "invoice.paid",
+      data: invoice,
+      // optional — auto-resolves to ctx.auth.tenantId
+      applicationId: invoice.orgId,
+    });
+  },
+});
+```
+
+The plugin enqueues delivery jobs to every matching endpoint via Pylon's `ctx.scheduler.runAfter`. Failed deliveries retry on the configured schedule (default: 5s → 5m → 30m → 2h → 5h → 10h → 14h → dead).
+
+## Receiver verification
+
+Receivers verify with the same algorithm Svix's reference verifier uses:
+
+```ts
+import { verifyWebhook } from "@pylonsync/webhooks";
+
+const result = await verifyWebhook(
+  endpoint.secret,
+  {
+    id: request.headers["webhook-id"],
+    timestamp: request.headers["webhook-timestamp"],
+    signature: request.headers["webhook-signature"],
+  },
+  request.rawBody,
+);
+if (result !== true) {
+  throw new Error(`bad signature: ${result}`);
+}
+```
+
+## Endpoints
+
+Customers register webhook URLs by inserting into the `WebhookEndpoint` entity:
+
+| Field | |
+| --- | --- |
+| `applicationId` | Tenant scope (usually the customer's org id). |
+| `url` | Their endpoint URL. |
+| `secret` | HMAC secret (use `whsec_<base64>` format for Svix compatibility). |
+| `eventTypes` | JSON array of subscribed event types. Empty = all. |
+| `headers` | Optional extra headers to attach on each delivery. |
+| `disabled` | Skip delivery without deleting. |
+
+Tenant-scoped policy: `auth.tenantId == data.applicationId or auth.is_admin`. Apps that want a stricter ACL (e.g. only owner role) override this in their manifest.
+
+## Delivery audit
+
+Every attempt writes a `WebhookAttempt` row:
+
+| Status | When |
+| --- | --- |
+| `pending` | Scheduled, not yet delivered. |
+| `succeeded` | HTTP 2xx response. |
+| `failed` | HTTP 4xx/5xx or network error. Retry scheduled. |
+| `dead` | All retries exhausted. Manual reprocess required. |
+
+Read-only entity — customers can view their endpoint's delivery history but can't mutate it.
+
+## Secret rotation
+
+```ts
+await signWebhook({
+  id, timestamp, body,
+  secrets: [oldSecret, newSecret], // both signed
+});
+```
+
+Both signatures appear in the `webhook-signature` header (`v1,<sig-old> v1,<sig-new>`). Receivers accept either — gives customers a window to rotate their stored secret without dropping deliveries.

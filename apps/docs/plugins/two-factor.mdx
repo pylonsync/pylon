@@ -1,0 +1,94 @@
+---
+title: "@pylonsync/two-factor"
+description: "TOTP + backup codes + trusted-device cookies for Pylon apps."
+---
+
+RFC 6238 TOTP (SHA-1, 6 digits, 30s window — matches every authenticator app), 10 single-use backup codes per user, replay protection via `lastAcceptedCounter`.
+
+## Install
+
+```bash
+bun add @pylonsync/two-factor
+```
+
+## Primitives
+
+```ts
+import {
+  generateSecret,
+  otpAuthUri,
+  verifyTotp,
+  generateBackupCodes,
+  hashBackupCode,
+  verifyBackupCode,
+  generateTrustedDeviceToken,
+  hashTrustedDeviceToken,
+} from "@pylonsync/two-factor";
+```
+
+## Enrollment flow
+
+```ts
+// functions/enable2FA.ts
+import { generateSecret, otpAuthUri, generateBackupCodes, hashBackupCode } from "@pylonsync/two-factor";
+
+export default action({
+  args: { issuer: v.string(), accountName: v.string() },
+  async handler(ctx, args) {
+    const secret = generateSecret();
+    const uri = otpAuthUri({
+      issuer: args.issuer,
+      accountName: args.accountName,
+      secret,
+    });
+    const backupCodes = generateBackupCodes();
+    const hashedCodes = await Promise.all(backupCodes.map(hashBackupCode));
+
+    await ctx.runMutation("storeTwoFactor", {
+      userId: ctx.auth.userId!,
+      secret,                      // encrypt at rest with your master key
+      backupCodes: hashedCodes,    // already hashed
+    });
+
+    // Show `uri` as a QR code + `backupCodes` to the user ONCE.
+    return { uri, backupCodes };
+  },
+});
+```
+
+## Verify flow
+
+```ts
+import { verifyTotp } from "@pylonsync/two-factor";
+
+const counter = await verifyTotp(secret, submittedCode, {
+  lastAcceptedCounter: storedCounter,
+});
+if (counter === null) {
+  throw ctx.error("INVALID_CODE", "wrong or expired code");
+}
+// Persist the accepted counter to defeat replay within the same window.
+await ctx.runMutation("storeTwoFactorCounter", {
+  userId,
+  lastAcceptedCounter: counter,
+});
+```
+
+## Schema (declared on app side)
+
+```ts
+entity("TwoFactor", {
+  userId: field.id("User").unique(),
+  secret: field.string(),          // encrypted at rest
+  backupCodes: field.string(),     // JSON array of hashed codes
+  lastAcceptedCounter: field.number().optional(),
+  createdAt: field.string(),
+})
+```
+
+## Security
+
+- **TOTP secrets ARE NOT auto-encrypted** by this package. Apps wrap secret storage with their own at-rest encryption (KMS, Pylon's `crypto/secrets`, master key — your choice). Storing plaintext = breach risk if the DB leaks.
+- **Replay protection** via `lastAcceptedCounter`. Without this, a code observed by an attacker (shoulder-surf, log leak) was usable for the full 30-second window.
+- **Backup codes** are single-use: hash + insert on use, then delete from the user's list.
+- **Trusted-device cookies** are 30-day rotating tokens. Hash on storage; never compare raw values.

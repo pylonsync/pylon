@@ -1,0 +1,79 @@
+---
+title: "@pylonsync/api-keys"
+description: "Per-user / per-org API keys with scoped permissions and token-bucket rate limiting."
+---
+
+`pk_live_*` / `pk_test_*` bearer tokens, hashed at rest, per-key permissions, token-bucket rate limit with linear refill.
+
+## Install
+
+```bash
+bun add @pylonsync/api-keys
+```
+
+## Mint a key
+
+```ts
+import { mintKey } from "@pylonsync/api-keys";
+
+const { row, rawKey } = await mintKey(
+  { env: "live", defaultRateLimit: { max: 100, windowSecs: 60 } },
+  { name: "Production sync", orgId, permissions: ["data.read", "data.write"] },
+);
+// Store `row` via your ApiKey entity (hash + prefix + everything else).
+// Show `rawKey` to the user EXACTLY ONCE — it's not retrievable later.
+await ctx.runMutation("insertApiKey", row);
+return { id: row.prefix, key: rawKey };
+```
+
+## Verify on the request path
+
+```ts
+import { parseAndAuthorize } from "@pylonsync/api-keys";
+
+const authorized = await parseAndAuthorize(
+  bearerToken,
+  async (prefix) => ctx.db.query("ApiKey", { prefix }),
+  async (id, bucket) =>
+    ctx.db.update("ApiKey", id, {
+      refillTokens: bucket.refillTokens,
+      refillUpdatedAt: bucket.refillUpdatedAt,
+    }),
+);
+if (!authorized) throw ctx.error("UNAUTHORIZED", "bad key");
+if (!authorized.permissions.includes("data.read"))
+  throw ctx.error("FORBIDDEN", "key lacks data.read");
+```
+
+## Token-bucket rate limit
+
+The limiter holds up to `max` tokens. Each request consumes one. Tokens refill linearly at `max / windowSecs` (so `100/60` = ~1.67 tokens/sec). Friendlier than fixed-window rate limiting because spikes spend accumulated tokens instead of hitting a cliff at window boundaries.
+
+Bucket state lives on the `ApiKey` row (`refillTokens` + `refillUpdatedAt`). The plugin is stateless — it consumes + returns the new state; you persist it. Use a compare-and-swap update if you need cross-process consistency.
+
+## Schema
+
+```ts
+entity("ApiKey", {
+  name: field.string(),
+  prefix: field.string(),         // first 12 chars — displayable in UI
+  hash: field.string(),           // SHA-256 of raw + per-key salt
+  userId: field.string().optional(),
+  orgId: field.string().optional(),
+  permissions: field.string(),    // JSON array
+  rateLimitMax: field.number().optional(),
+  rateLimitWindowSecs: field.number().optional(),
+  refillTokens: field.number().optional(),
+  refillUpdatedAt: field.string().optional(),
+  lastUsedAt: field.string().optional(),
+  expiresAt: field.string().optional(),
+  createdAt: field.string(),
+})
+```
+
+## Security
+
+- **Plaintext returned only once** at creation. The DB stores only the hash + a public prefix (for human-displayable id).
+- **Per-key salt** baked into the hash — defeats rainbow-table lookups if the DB is exfiltrated.
+- **Constant-time hash compare** in `parseAndAuthorize`.
+- **Expired keys are rejected** based on the `expiresAt` column. `cfg.expiresInDays` auto-sets this on mint; or pass `expiresAt` explicitly.

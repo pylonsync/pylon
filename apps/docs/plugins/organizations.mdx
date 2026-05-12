@@ -1,0 +1,100 @@
+---
+title: "@pylonsync/organizations"
+description: "Permission system + teams on top of Pylon's entity-based org primitives (v0.3.74+)."
+---
+
+The framework already gives you `Org` / `OrgMember` / `OrgInvite` as manifest entities, the `/api/auth/orgs/*` routes, and `ctx.auth.tenantId`. This package adds the two layers most apps build by hand:
+
+- **Permission system** — declarative permission → roles map, replacing verbose `exists(OrgMember where role = 'owner' or role = 'admin')` policy expressions.
+- **Team support** — optional `Team` + `TeamMember` entities for sub-groups within an org.
+
+## Install
+
+```bash
+bun add @pylonsync/organizations
+```
+
+## Config
+
+```ts
+import { organizations, requirePermission } from "@pylonsync/organizations";
+
+export const orgs = organizations({
+  permissions: {
+    "projects.create":      ["owner", "admin"],
+    "projects.delete":      ["owner"],
+    "members.invite":       ["owner", "admin"],
+    "billing.manage":       ["owner"],
+    "teams.create":         ["owner", "admin"],
+    "teams.members.manage": ["owner", "admin"],
+  },
+  teams: { enabled: true, maximumTeamsPerOrg: 50 },
+});
+
+export default app({
+  name: "myapp",
+  entities: [Org, OrgMember, OrgInvite, ...orgs.manifest.entities],
+  policies: [...orgs.manifest.policies],
+  queries:  [...orgs.manifest.queries],
+  actions:  [...orgs.manifest.actions],
+});
+```
+
+## Authorize at action boundaries
+
+```ts
+// functions/deleteProject.ts
+import { mutation, v } from "@pylonsync/functions";
+import { requirePermission } from "@pylonsync/organizations";
+import { orgs } from "../org-config";
+
+export default mutation({
+  args: { projectId: v.id("Project") },
+  async handler(ctx, args) {
+    await requirePermission(ctx, orgs.config, "projects.delete");
+    await ctx.db.delete("Project", args.projectId);
+  },
+});
+```
+
+`requirePermission` throws `FORBIDDEN` with a descriptive message when the caller's role can't perform the action. Admins (`ctx.auth.isAdmin`) bypass every check.
+
+## Client-side checks
+
+The plugin exposes three queries:
+
+| Query | Returns |
+| --- | --- |
+| `orgPermissions` | Flat list of permission names the caller's role grants in the active tenant. |
+| `orgRoleOf` | Caller's role string in the (optionally specified) org. `null` for non-members. |
+| `orgHasPermission` | Server-authoritative single-permission check. |
+
+Use `orgPermissions` for conditional rendering, `orgHasPermission` defensively before costly server actions.
+
+## Teams
+
+When `teams.enabled === true`, the manifest gains `Team` + `TeamMember` entities and these actions:
+
+- `createTeam({ name, slug?, description? })`
+- `deleteTeam({ teamId })`
+- `addTeamMember({ teamId, userId, role? })`
+- `removeTeamMember({ teamId, userId })`
+
+Teams are tenant-scoped via `orgId`; the policy enforces that all reads/writes happen within the active tenant.
+
+## Hooks
+
+```ts
+organizations({
+  hooks: {
+    onMemberAdd:    async (ctx, { orgId, userId, role }) => {/* audit */},
+    onMemberRemove: async (ctx, { orgId, userId }) => {},
+    onRoleChange:   async (ctx, { orgId, userId, oldRole, newRole }) => {},
+    onInviteCreate: async (ctx, { orgId, email, role, inviteId }) => {/* send email */},
+    onInviteAccept: async (ctx, { orgId, userId, role }) => {},
+    onTeamCreate:   async (ctx, { orgId, teamId, name }) => {},
+  },
+});
+```
+
+Wire these into `@pylonsync/audit-log` to get a compliance trail for every membership change.
