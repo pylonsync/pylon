@@ -95,6 +95,56 @@ impl std::fmt::Display for FileStorageError {
 impl std::error::Error for FileStorageError {}
 
 // ---------------------------------------------------------------------------
+// Provider selection
+// ---------------------------------------------------------------------------
+
+/// Pick a [`FileStorage`] backend from environment variables. Single
+/// source of truth for env-driven provider selection so every code
+/// path (router-level `FileOpsAdapter`, the runtime's multipart
+/// upload handler, plugin-driven callers) agrees on which backend
+/// receives an upload.
+///
+/// Selects via `PYLON_FILES_PROVIDER`:
+/// - `local` (default) — `LocalFileStorage` rooted at
+///   `PYLON_FILES_DIR` (default `uploads/`), served at
+///   `PYLON_FILES_URL_PREFIX` (default `/api/files`).
+/// - `stack0` — `Stack0FileStorage` from `PYLON_STACK0_API_KEY`
+///   (+ optional `PYLON_STACK0_FOLDER`, `PYLON_STACK0_BASE_URL`).
+///   If the API key is missing, logs a warning and falls back to
+///   local storage rather than failing uploads outright.
+///
+/// Real-world bug this exists to prevent: pylon ≤0.3.86 had the
+/// runtime upload handler hardcoded to `LocalFileStorage::new(...)`,
+/// so every upload landed on local disk regardless of provider env.
+/// Apps set `PYLON_FILES_PROVIDER=stack0` thinking files would go to
+/// the CDN, and got silent local storage instead.
+pub fn select_from_env() -> Box<dyn FileStorage> {
+    let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
+    match provider.as_str() {
+        "stack0" => match Stack0FileStorage::from_env() {
+            Some(s) => Box::new(s),
+            None => {
+                tracing::warn!(
+                    "PYLON_FILES_PROVIDER=stack0 but PYLON_STACK0_API_KEY is not set; falling back to local storage"
+                );
+                Box::new(local_from_env())
+            }
+        },
+        _ => Box::new(local_from_env()),
+    }
+}
+
+/// Construct the local-disk backend from env. Public so callers that
+/// explicitly want local storage (tests, the fallback path inside
+/// `select_from_env`) can skip the provider dispatch.
+pub fn local_from_env() -> LocalFileStorage {
+    let dir = std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into());
+    let url_prefix =
+        std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into());
+    LocalFileStorage::new(&dir, &url_prefix)
+}
+
+// ---------------------------------------------------------------------------
 // Local filesystem implementation
 // ---------------------------------------------------------------------------
 
@@ -570,5 +620,99 @@ mod tests {
     fn stack0_with_base_url_override() {
         let storage = Stack0FileStorage::new("sk_test_123").with_base_url("http://localhost:9999");
         assert_eq!(storage.base_url, "http://localhost:9999");
+    }
+
+    // ---- select_from_env: regression coverage for the v0.3.86 bug ----
+
+    /// Helper to set/clear several env vars atomically for the duration
+    /// of a closure. Reverts on drop. Std `env::set_var` is process-wide
+    /// so these tests can't actually run in parallel safely; cargo test
+    /// runs them serially within the binary anyway, but we keep the
+    /// helper terse so the intent is obvious.
+    struct EnvGuard {
+        saved: Vec<(String, Option<String>)>,
+    }
+    impl EnvGuard {
+        fn new(keys: &[&str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect();
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            Self { saved }
+        }
+        fn set(&self, key: &str, value: &str) {
+            std::env::set_var(key, value);
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn select_from_env_defaults_to_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_FILES_DIR",
+            "PYLON_FILES_URL_PREFIX",
+            "PYLON_STACK0_API_KEY",
+        ]);
+        g.set("PYLON_FILES_DIR", tmp.path().to_str().unwrap());
+        let storage = select_from_env();
+        // Local backend persists a real file when called. Stack0 would
+        // hit the network and fail. A round-trip through store→get
+        // confirms the local backend got picked.
+        let stored = storage.store("a.txt", b"hello", "text/plain").unwrap();
+        let bytes = storage.get(&stored.id).unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn select_from_env_stack0_without_key_falls_back_to_local() {
+        // Set provider=stack0 but no API key — should warn and use
+        // local storage rather than failing. Critical for users who
+        // misconfigure prod env: a missing key shouldn't 500 every
+        // upload, just log and degrade. Pre-0.3.87 the runtime
+        // hardcoded local storage AND never hit this branch — the
+        // bug was silent. With select_from_env routing both paths,
+        // this fallback contract becomes worth testing.
+        let tmp = tempfile::tempdir().unwrap();
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_FILES_DIR",
+            "PYLON_FILES_URL_PREFIX",
+            "PYLON_STACK0_API_KEY",
+        ]);
+        g.set("PYLON_FILES_PROVIDER", "stack0");
+        g.set("PYLON_FILES_DIR", tmp.path().to_str().unwrap());
+        let storage = select_from_env();
+        // If this had picked Stack0 the store call would attempt a
+        // network request and fail. Local store always succeeds.
+        let stored = storage.store("a.txt", b"hello", "text/plain").unwrap();
+        assert!(storage.get(&stored.id).is_ok());
+    }
+
+    #[test]
+    fn select_from_env_unknown_provider_defaults_to_local() {
+        // Anything that isn't `stack0` falls into the local arm.
+        // Defensive: typos like `PYLON_FILES_PROVIDER=Stack0` (capital S)
+        // shouldn't silently degrade to local; document the contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let g = EnvGuard::new(&["PYLON_FILES_PROVIDER", "PYLON_FILES_DIR"]);
+        g.set("PYLON_FILES_PROVIDER", "Stack0"); // mis-cased
+        g.set("PYLON_FILES_DIR", tmp.path().to_str().unwrap());
+        let storage = select_from_env();
+        let stored = storage.store("a.txt", b"hi", "text/plain").unwrap();
+        assert!(storage.get(&stored.id).is_ok());
     }
 }

@@ -1914,13 +1914,17 @@ fn start_server(
                 (filename, content_type, bytes)
             };
 
-            let storage = pylon_storage::files::LocalFileStorage::new(
-                &std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into()),
-                &std::env::var("PYLON_FILES_URL_PREFIX").unwrap_or_else(|_| "/api/files".into()),
-            );
+            // Provider-aware storage selection via `PYLON_FILES_PROVIDER`.
+            // Pre-0.3.87 this was hardcoded to `LocalFileStorage::new(...)`
+            // and ignored the env var, so every upload landed on local
+            // disk regardless of `PYLON_FILES_PROVIDER=stack0`. Now the
+            // multipart upload handler resolves to the same backend the
+            // router-level FileOpsAdapter does, via the shared helper.
+            let storage = pylon_storage::files::select_from_env();
+            let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
 
             let (status, body) =
-                match pylon_storage::files::FileStorage::store(&storage, &name, &payload, &ct) {
+                match pylon_storage::files::FileStorage::store(storage, &name, &payload, &ct) {
                     Ok(stored) => {
                         // Stamp ownership BEFORE returning success so a logged-in
                         // caller cannot enumerate other users' uploads later via
@@ -1932,7 +1936,7 @@ fn start_server(
                                 tenant_id: auth_ctx.tenant_id.clone(),
                             };
                             if let Err(e) = pylon_storage::files::FileStorage::record_owner(
-                                &storage, &stored.id, &owner,
+                                storage, &stored.id, &owner,
                             ) {
                                 // Owner record is critical — without it the file
                                 // becomes readable by any other authenticated
@@ -1943,7 +1947,7 @@ fn start_server(
                                     "Failed to record file owner; rolling back upload"
                                 );
                                 let _ =
-                                    pylon_storage::files::FileStorage::delete(&storage, &stored.id);
+                                    pylon_storage::files::FileStorage::delete(storage, &stored.id);
                                 let err = json_error("OWNERSHIP_RECORD_FAILED", &e.message);
                                 let response = with_security_headers(
                                     Response::from_string(&err)
