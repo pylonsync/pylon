@@ -623,6 +623,15 @@ fn start_server(
     if cors_allowlist.is_empty() {
         return Err("CORS gate parsed an empty allowlist from PYLON_CORS_ORIGIN".into());
     }
+
+    // File-storage env validation. Fail fast at boot if PYLON_FILES_PROVIDER
+    // names a backend without its required companion vars — see
+    // pylon_storage::files::validate_provider_env for the full contract.
+    // Catching this here keeps deploys from booting with file uploads
+    // that will silently 400 on every request.
+    if let Err(msg) = pylon_storage::files::validate_provider_env() {
+        return Err(msg);
+    }
     // Validate each entry is a valid HTTP header value so per-request
     // header construction never panics on bad bytes.
     for origin in &cors_allowlist {

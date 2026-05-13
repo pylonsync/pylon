@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.89](https://github.com/pylonsync/pylon/compare/v0.3.88...v0.3.89) (2026-05-13)
+
+
+### Bug Fixes
+
+* **storage/stack0:** Stack0's `/v1/cdn/upload` requires a `projectSlug` field on the request body — pylon omitted it, so every upload was rejected with `400 Bad Request` (no useful error from Stack0 about what was missing). Adds `PYLON_STACK0_PROJECT_SLUG` env var, includes the value in the upload-init body, and validates the var at server boot.
+* **storage/stack0:** Boot-time validation: `PYLON_FILES_PROVIDER=stack0` now refuses to start the server when `PYLON_STACK0_API_KEY` or `PYLON_STACK0_PROJECT_SLUG` is missing. The earlier silent fallback to local storage masked the misconfiguration until end users hit upload failures.
+
+
+### Migration
+
+Apps already on Stack0 must add `PYLON_STACK0_PROJECT_SLUG=<your-slug>` to their environment alongside the existing `PYLON_STACK0_API_KEY`. Pylon will refuse to boot otherwise.
+
+Third in the v0.3.87 → 0.3.88 → 0.3.89 Stack0-rollout sequence. v0.3.87 routed uploads through the provider, v0.3.88 fixed the missing `/v1` prefix, v0.3.89 adds the required `projectSlug`. Voice clone / avatar uploads work end-to-end from this release.
+
 ## [0.3.81](https://github.com/pylonsync/pylon/compare/v0.3.80...v0.3.81) (2026-05-12)
 
 

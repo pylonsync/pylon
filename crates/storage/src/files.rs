@@ -124,14 +124,56 @@ pub fn select_from_env() -> Box<dyn FileStorage> {
         "stack0" => match Stack0FileStorage::from_env() {
             Some(s) => Box::new(s),
             None => {
+                // Post-boot guarantee: server startup calls
+                // `validate_provider_env()` and refuses to start when
+                // stack0 vars are missing, so reaching this branch
+                // post-startup means the env was mutated mid-run
+                // (rare; container restart usually re-reads). Keep
+                // the warn + fallback so the server doesn't crash on
+                // every upload after that, but the user-visible
+                // failure already fired at boot.
                 tracing::warn!(
-                    "PYLON_FILES_PROVIDER=stack0 but PYLON_STACK0_API_KEY is not set; falling back to local storage"
+                    "PYLON_FILES_PROVIDER=stack0 but PYLON_STACK0_API_KEY / PYLON_STACK0_PROJECT_SLUG is not set; falling back to local storage"
                 );
                 Box::new(local_from_env())
             }
         },
         _ => Box::new(local_from_env()),
     }
+}
+
+/// Boot-time validation. Returns `Err(message)` when the file-storage
+/// env vars are internally inconsistent — e.g. `PYLON_FILES_PROVIDER=stack0`
+/// without `PYLON_STACK0_API_KEY` + `PYLON_STACK0_PROJECT_SLUG`. The
+/// server's `start()` calls this before opening the listener, so a
+/// misconfigured deploy fails loud at boot instead of producing
+/// confusing per-upload 400s.
+///
+/// This exists because of the yapless rollout: v0.3.87 routed uploads
+/// to Stack0 successfully but Stack0's `/v1/cdn/upload` requires
+/// `projectSlug`, which pylon didn't pass; every upload 400'd. The
+/// upstream symptom ("upload failed") gave no hint that the operator
+/// had to set a new env var. Now they get
+/// `PYLON_FILES_PROVIDER=stack0 requires PYLON_STACK0_PROJECT_SLUG`
+/// at boot, before any user ever tries to upload.
+pub fn validate_provider_env() -> Result<(), String> {
+    let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
+    if provider == "stack0" {
+        let missing: Vec<&str> = ["PYLON_STACK0_API_KEY", "PYLON_STACK0_PROJECT_SLUG"]
+            .into_iter()
+            .filter(|k| std::env::var(k).map(|v| v.is_empty()).unwrap_or(true))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "PYLON_FILES_PROVIDER=stack0 requires {} to be set. \
+                 Configure {} alongside PYLON_FILES_PROVIDER, or remove \
+                 PYLON_FILES_PROVIDER (defaults to local disk).",
+                missing.join(" + "),
+                missing.join(" + "),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Construct the local-disk backend from env. Public so callers that
@@ -326,6 +368,11 @@ impl S3Config {
 /// without round-tripping through pylon.
 pub struct Stack0FileStorage {
     api_key: String,
+    /// Stack0 project slug — every `/cdn/upload` call must name the
+    /// project the asset belongs to. Stack0's API rejects bodies
+    /// without it with `400 Bad Request`. Read from
+    /// `PYLON_STACK0_PROJECT_SLUG` at boot.
+    project_slug: String,
     /// Base API URL — typically `https://api.stack0.dev/v1`. Configurable
     /// so tests can point at a local mock server, and so ops can hotfix
     /// via `PYLON_STACK0_BASE_URL` if Stack0 ever changes its API
@@ -343,9 +390,10 @@ pub struct Stack0FileStorage {
 }
 
 impl Stack0FileStorage {
-    pub fn new(api_key: impl Into<String>) -> Self {
+    pub fn new(api_key: impl Into<String>, project_slug: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
+            project_slug: project_slug.into(),
             base_url: "https://api.stack0.dev/v1".into(),
             folder: None,
         }
@@ -363,11 +411,17 @@ impl Stack0FileStorage {
     }
 
     /// Construct from environment variables.
-    /// Reads: PYLON_STACK0_API_KEY (required), PYLON_STACK0_FOLDER (optional),
-    /// PYLON_STACK0_BASE_URL (optional override).
+    ///
+    /// Required: `PYLON_STACK0_API_KEY`, `PYLON_STACK0_PROJECT_SLUG`.
+    /// Optional: `PYLON_STACK0_FOLDER`, `PYLON_STACK0_BASE_URL`.
+    ///
+    /// Returns `None` if any required var is missing — callers fail-fast
+    /// rather than silently degrading to local storage, since the wrong
+    /// backend means surprise 400s downstream.
     pub fn from_env() -> Option<Self> {
         let api_key = std::env::var("PYLON_STACK0_API_KEY").ok()?;
-        let mut s = Self::new(api_key);
+        let project_slug = std::env::var("PYLON_STACK0_PROJECT_SLUG").ok()?;
+        let mut s = Self::new(api_key, project_slug);
         if let Ok(folder) = std::env::var("PYLON_STACK0_FOLDER") {
             s = s.with_folder(folder);
         }
@@ -379,6 +433,11 @@ impl Stack0FileStorage {
 
     /// JSON body for the `/cdn/upload` init call. Pulled out so tests can
     /// pin the wire shape without exercising the network.
+    ///
+    /// `projectSlug` is REQUIRED by Stack0's API — emitting a body
+    /// without it produces a `400 Bad Request` with no explanation
+    /// from the upload URL minting step. Pre-0.3.89 pylon omitted
+    /// it; every Stack0 upload silently 400'd.
     pub fn build_upload_init_body(
         &self,
         filename: &str,
@@ -386,6 +445,7 @@ impl Stack0FileStorage {
         size: usize,
     ) -> serde_json::Value {
         let mut body = serde_json::json!({
+            "projectSlug": self.project_slug,
             "filename": filename,
             "mimeType": content_type,
             "size": size,
@@ -604,8 +664,9 @@ mod tests {
 
     #[test]
     fn stack0_upload_init_body_shape() {
-        let storage = Stack0FileStorage::new("sk_test_123");
+        let storage = Stack0FileStorage::new("sk_test_123", "yapless");
         let body = storage.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
+        assert_eq!(body["projectSlug"], "yapless");
         assert_eq!(body["filename"], "photo.jpg");
         assert_eq!(body["mimeType"], "image/jpeg");
         assert_eq!(body["size"], 4096);
@@ -613,15 +674,34 @@ mod tests {
     }
 
     #[test]
+    fn stack0_upload_init_body_always_includes_project_slug() {
+        // Regression: pre-0.3.89 the wire shape omitted projectSlug,
+        // which Stack0's API requires. Every upload 400'd. Lock the
+        // field into the body so a future edit can't silently drop it.
+        let storage = Stack0FileStorage::new("sk_test_123", "yapless");
+        let body = storage.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
+        assert_eq!(
+            body["projectSlug"], "yapless",
+            "Stack0 /cdn/upload requires projectSlug; pre-0.3.89 pylon omitted it"
+        );
+        // Same assertion with a folder set — folder must not displace
+        // projectSlug.
+        let with_folder = Stack0FileStorage::new("sk_test_123", "yapless").with_folder("avatars");
+        let body = with_folder.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
+        assert_eq!(body["projectSlug"], "yapless");
+        assert_eq!(body["folder"], "avatars");
+    }
+
+    #[test]
     fn stack0_upload_init_body_includes_folder() {
-        let storage = Stack0FileStorage::new("sk_test_123").with_folder("avatars");
+        let storage = Stack0FileStorage::new("sk_test_123", "yapless").with_folder("avatars");
         let body = storage.build_upload_init_body("photo.jpg", "image/jpeg", 4096);
         assert_eq!(body["folder"], "avatars");
     }
 
     #[test]
     fn stack0_default_base_url() {
-        let storage = Stack0FileStorage::new("sk_test_123");
+        let storage = Stack0FileStorage::new("sk_test_123", "yapless");
         assert_eq!(storage.base_url, "https://api.stack0.dev/v1");
     }
 
@@ -632,7 +712,7 @@ mod tests {
         // locks the prefix in so an accidental edit can't drift back.
         // Both the bare default AND any `from_env` path that doesn't
         // override PYLON_STACK0_BASE_URL must end up under `/v1`.
-        let s = Stack0FileStorage::new("sk_test");
+        let s = Stack0FileStorage::new("sk_test", "yapless");
         assert!(
             s.base_url.ends_with("/v1"),
             "default Stack0 base URL must end with `/v1` (was {:?})",
@@ -642,7 +722,8 @@ mod tests {
 
     #[test]
     fn stack0_with_base_url_override() {
-        let storage = Stack0FileStorage::new("sk_test_123").with_base_url("http://localhost:9999");
+        let storage =
+            Stack0FileStorage::new("sk_test_123", "yapless").with_base_url("http://localhost:9999");
         assert_eq!(storage.base_url, "http://localhost:9999");
     }
 
@@ -738,5 +819,70 @@ mod tests {
         let storage = select_from_env();
         let stored = storage.store("a.txt", b"hi", "text/plain").unwrap();
         assert!(storage.get(&stored.id).is_ok());
+    }
+
+    // ---- validate_provider_env: boot-time validation (v0.3.89) ----
+
+    #[test]
+    fn validate_provider_env_local_default_ok() {
+        let _g = EnvGuard::new(&["PYLON_FILES_PROVIDER", "PYLON_STACK0_API_KEY"]);
+        assert!(validate_provider_env().is_ok());
+    }
+
+    #[test]
+    fn validate_provider_env_stack0_missing_api_key_errs() {
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_STACK0_API_KEY",
+            "PYLON_STACK0_PROJECT_SLUG",
+        ]);
+        g.set("PYLON_FILES_PROVIDER", "stack0");
+        g.set("PYLON_STACK0_PROJECT_SLUG", "yapless");
+        let err = validate_provider_env().unwrap_err();
+        assert!(err.contains("PYLON_STACK0_API_KEY"), "got: {err}");
+        assert!(!err.contains("PYLON_STACK0_PROJECT_SLUG"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_provider_env_stack0_missing_project_slug_errs() {
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_STACK0_API_KEY",
+            "PYLON_STACK0_PROJECT_SLUG",
+        ]);
+        g.set("PYLON_FILES_PROVIDER", "stack0");
+        g.set("PYLON_STACK0_API_KEY", "sk_test_123");
+        let err = validate_provider_env().unwrap_err();
+        assert!(err.contains("PYLON_STACK0_PROJECT_SLUG"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_provider_env_stack0_both_set_ok() {
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_STACK0_API_KEY",
+            "PYLON_STACK0_PROJECT_SLUG",
+        ]);
+        g.set("PYLON_FILES_PROVIDER", "stack0");
+        g.set("PYLON_STACK0_API_KEY", "sk_test_123");
+        g.set("PYLON_STACK0_PROJECT_SLUG", "yapless");
+        assert!(validate_provider_env().is_ok());
+    }
+
+    #[test]
+    fn validate_provider_env_stack0_empty_string_treated_as_missing() {
+        // Setting a var to "" is the same as not setting it for our
+        // purposes — a literal empty string in env is operator error,
+        // and validate must catch it the same as omission.
+        let g = EnvGuard::new(&[
+            "PYLON_FILES_PROVIDER",
+            "PYLON_STACK0_API_KEY",
+            "PYLON_STACK0_PROJECT_SLUG",
+        ]);
+        g.set("PYLON_FILES_PROVIDER", "stack0");
+        g.set("PYLON_STACK0_API_KEY", "sk_test_123");
+        g.set("PYLON_STACK0_PROJECT_SLUG", "");
+        let err = validate_provider_env().unwrap_err();
+        assert!(err.contains("PYLON_STACK0_PROJECT_SLUG"), "got: {err}");
     }
 }
