@@ -245,6 +245,28 @@ if command -v bun >/dev/null 2>&1; then
 	}
 fi
 
+# Refresh the locally-installed pylon binary so downstream projects
+# (yapless, internal tooling) that invoke `pylon` from ~/.cargo/bin
+# pick up the just-bumped version without waiting for the CI publish
+# to upload tarballs and `bun install` to pull the new prebuilt.
+#
+# Why this matters: we hit this on v0.3.87 (provider-routing fix) and
+# v0.3.88 (Stack0 /v1 path fix) — yapless was running the binary
+# straight from ~/.cargo/bin (an older cargo-installed copy) instead
+# of going through node_modules/.bin/pylon, so my "shipped" fixes
+# were invisible to the dev environment until I manually rebuilt.
+# Embedding this here means a future me can't forget.
+#
+# Skip if cargo isn't on PATH (CI runners don't need a local
+# binary). `--offline` keeps the install fast — workspace deps
+# are already vendored, no need to refetch.
+if command -v cargo >/dev/null 2>&1; then
+	echo "Installing pylon $target to ~/.cargo/bin…"
+	cargo install --path crates/cli --offline --quiet || {
+		echo "::warning::cargo install failed — ~/.cargo/bin/pylon may be stale." >&2
+	}
+fi
+
 if ! $tag; then
 	cat <<EOF
 
