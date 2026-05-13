@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.3.85",
+  "version": "0.3.86",
   "type": "module",
   "description": "Next.js helpers for Pylon — cookie-based auth gate, server-side session helpers, and reusable client hooks.",
   "exports": {
@@ -16,6 +16,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pylonsync/sdk": "workspace:*",
+    "@pylonsync/react": "workspace:*"
   },
   "peerDependencies": {
     "next": ">=16.0.0",

@@ -15,8 +15,10 @@ Works with App Router (Next.js 13.4+); Pages Router users can still use `@pylons
 ## Install
 
 ```bash
-bun add @pylonsync/sdk @pylonsync/react @pylonsync/next
+bun add @pylonsync/next
 ```
+
+`@pylonsync/sdk` and `@pylonsync/react` install transitively — `@pylonsync/next` depends on them, so a single dep is all your `package.json` needs.
 
 ## Configure
 

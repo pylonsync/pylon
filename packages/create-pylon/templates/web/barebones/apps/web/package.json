@@ -11,8 +11,6 @@
   },
   "dependencies": {
     "@__APP_NAME_KEBAB__/ui": "__WORKSPACE_DEP__",
-    "@pylonsync/sdk": "^__PYLON_VERSION__",
-    "@pylonsync/react": "^__PYLON_VERSION__",
     "@pylonsync/next": "^__PYLON_VERSION__",
     "next": "^16.0.0",
     "react": "^19.0.0",

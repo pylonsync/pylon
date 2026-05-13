@@ -21,10 +21,10 @@ Pylon's wire format is plain HTTP + WebSocket + JSON. You can talk to it with `f
 
 | App type | Use |
 | --- | --- |
-| Web SPA (React) | `@pylonsync/sdk` + `@pylonsync/react` |
-| Server-rendered web (Next.js) | `@pylonsync/sdk` + `@pylonsync/react` + `@pylonsync/next` |
+| Web SPA (React) | `@pylonsync/react` (pulls sdk + sync transitively) |
+| Server-rendered web (Next.js) | `@pylonsync/next` (pulls sdk + react transitively) |
 | iOS / macOS native | Swift SDK |
-| iOS + Android (cross-platform) | `@pylonsync/sdk` + `@pylonsync/react-native` |
+| iOS + Android (cross-platform) | `@pylonsync/react-native` (pulls sdk + react + sync transitively) |
 | Vite SPA, Vue, Svelte, Solid | `@pylonsync/sdk` + `@pylonsync/sync` (call directly, no React) |
 | CLI / server-to-server | `@pylonsync/sdk` (HTTP only) |
 | Real-time multiplayer | Same as above + `@pylonsync/react`'s `useShard` (or `PylonRealtime` on Swift) |
