@@ -326,8 +326,17 @@ impl S3Config {
 /// without round-tripping through pylon.
 pub struct Stack0FileStorage {
     api_key: String,
-    /// Base API URL — typically `https://api.stack0.dev`. Configurable so
-    /// tests can point at a local mock server.
+    /// Base API URL — typically `https://api.stack0.dev/v1`. Configurable
+    /// so tests can point at a local mock server, and so ops can hotfix
+    /// via `PYLON_STACK0_BASE_URL` if Stack0 ever changes its API
+    /// version prefix without forcing a pylon republish.
+    ///
+    /// The `/v1` suffix is part of the base because every Stack0
+    /// endpoint pylon hits (`/cdn/upload`, `/cdn/upload/<id>/confirm`,
+    /// `/cdn/assets/<id>`) sits under it. Without `/v1` every request
+    /// 404s — caught by yapless when voice-clone uploads started
+    /// 500'ing post-v0.3.87 (which was the release that finally
+    /// wired Stack0 into the upload path at all).
     base_url: String,
     /// Optional folder/prefix for organizing uploads.
     folder: Option<String>,
@@ -337,7 +346,7 @@ impl Stack0FileStorage {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: "https://api.stack0.dev".into(),
+            base_url: "https://api.stack0.dev/v1".into(),
             folder: None,
         }
     }
@@ -613,7 +622,22 @@ mod tests {
     #[test]
     fn stack0_default_base_url() {
         let storage = Stack0FileStorage::new("sk_test_123");
-        assert_eq!(storage.base_url, "https://api.stack0.dev");
+        assert_eq!(storage.base_url, "https://api.stack0.dev/v1");
+    }
+
+    #[test]
+    fn stack0_base_url_includes_v1_prefix() {
+        // Regression: pre-0.3.88 the base_url was `https://api.stack0.dev`
+        // without `/v1`, so every `/cdn/*` request 404'd. This test
+        // locks the prefix in so an accidental edit can't drift back.
+        // Both the bare default AND any `from_env` path that doesn't
+        // override PYLON_STACK0_BASE_URL must end up under `/v1`.
+        let s = Stack0FileStorage::new("sk_test");
+        assert!(
+            s.base_url.ends_with("/v1"),
+            "default Stack0 base URL must end with `/v1` (was {:?})",
+            s.base_url
+        );
     }
 
     #[test]
