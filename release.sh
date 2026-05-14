@@ -245,6 +245,24 @@ if command -v bun >/dev/null 2>&1; then
 	}
 fi
 
+# Refresh Cargo.lock so the workspace lockfile matches the just-bumped
+# crate versions. Without this, CI's `cargo build --locked` rejects the
+# release with "cannot update the lock file because --locked was
+# passed" and the binary build (which feeds @pylonsync/cli) fails
+# silently while the npm packages still ship. v0.3.91 hit this: 10/11
+# packages shipped, the CLI dispatcher stayed at the previous version.
+#
+# `cargo update -p pylon-cli --workspace` walks the whole intra-
+# workspace dependency graph from the CLI crate, so every pylon-*
+# entry in Cargo.lock gets bumped to $target in one pass. Faster
+# than `cargo build` and doesn't require a successful compile.
+if command -v cargo >/dev/null 2>&1; then
+	echo "Refreshing Cargo.lock…"
+	cargo update -p pylon-cli --workspace --quiet || {
+		echo "::warning::cargo update failed — Cargo.lock may be out of date and the CI binary build will fail." >&2
+	}
+fi
+
 # Refresh the locally-installed pylon binary so downstream projects
 # (yapless, internal tooling) that invoke `pylon` from ~/.cargo/bin
 # pick up the just-bumped version without waiting for the CI publish

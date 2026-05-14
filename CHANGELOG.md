@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.92](https://github.com/pylonsync/pylon/compare/v0.3.91...v0.3.92) (2026-05-14)
+
+
+### Fixes
+
+* **release:** v0.3.91's CI binary build failed with "cannot update the lock file because --locked was passed" — `release.sh` refreshed `bun.lock` but not `Cargo.lock`. Result: 10 of 11 npm packages shipped at 0.3.91, but `@pylonsync/cli` stayed at 0.3.90 because the prebuilt binary upload step was skipped. v0.3.92 re-runs the full release path with a fresh Cargo.lock so the CLI dispatcher catches up.
+* **release.sh:** auto-refresh `Cargo.lock` via `cargo update -p pylon-cli --workspace` after the version bump, alongside the existing `bun.lock` refresh. Catches the exact failure mode that produced v0.3.91's missing CLI binary.
+
 ## [0.3.91](https://github.com/pylonsync/pylon/compare/v0.3.90...v0.3.91) (2026-05-13)
 
 
