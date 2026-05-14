@@ -24,8 +24,41 @@ pub struct FileOwner {
 // ---------------------------------------------------------------------------
 
 /// Pluggable file storage backend.
+///
+/// As of v0.3.91 the canonical upload flow is the 3-step
+/// `init_upload` → client PUTs to returned `upload_url` → `confirm_upload`
+/// dance. Bytes never go through pylon's HTTP server for backends that
+/// support direct-to-storage uploads (Stack0 returns S3 presigned URLs).
+/// `store()` is still useful for server-side internal callers (jobs,
+/// codegen, fixtures) that want to upload bytes they already have in
+/// memory — implementations typically express it as init + bytes + confirm.
 pub trait FileStorage: Send + Sync {
-    /// Store file content, returning a file ID and public URL.
+    /// Step 1: prepare an upload slot. Returns the URL the client will
+    /// PUT the raw bytes to, plus the backend-native `asset_id` the
+    /// client passes to `confirm_upload` once the PUT completes.
+    ///
+    /// For Stack0 this is an S3 presigned URL — pylon never sees the
+    /// bytes. For LocalFileStorage this is a pylon-served PUT endpoint
+    /// like `/api/files/local-put/<id>` that writes to the local disk.
+    fn init_upload(
+        &self,
+        name: &str,
+        content_type: &str,
+        size: usize,
+    ) -> Result<UploadInit, FileStorageError>;
+
+    /// Step 3: confirm the upload completed. Returns the canonical
+    /// `StoredFile` (id + public/CDN URL + size). The router records
+    /// ownership at this point — the caller's user_id becomes the
+    /// asset's owner.
+    fn confirm_upload(&self, asset_id: &str) -> Result<StoredFile, FileStorageError>;
+
+    /// One-shot server-side upload. Convenience for callers that have
+    /// the bytes in memory already (server-internal jobs, tests,
+    /// pre-staged fixtures). Default impl does init → write → confirm
+    /// against `self`, so backends only have to implement init/confirm
+    /// + a private "write" path. Stack0 overrides this to do its
+    /// 3-step S3 dance internally.
     fn store(
         &self,
         name: &str,
@@ -33,27 +66,38 @@ pub trait FileStorage: Send + Sync {
         content_type: &str,
     ) -> Result<StoredFile, FileStorageError>;
 
-    /// Retrieve file content by ID.
+    /// Retrieve file content by ID. Only used by local backend; Stack0
+    /// (and other CDN-fronted backends) prefers serving via
+    /// `direct_url`. The HTTP layer's `GET /api/files/<id>` checks
+    /// `direct_url` first and 302-redirects when available, falling
+    /// back to `get()` for backends without a CDN URL.
     fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError>;
 
-    /// Delete a file by ID.
+    /// Delete a file by ID. Returns `Ok(true)` when the file existed
+    /// and was removed, `Ok(false)` when it was already absent.
     fn delete(&self, id: &str) -> Result<bool, FileStorageError>;
 
-    /// Generate a presigned upload URL (for direct client uploads).
-    /// Not all backends support this — returns None if unsupported.
-    fn presigned_upload_url(
-        &self,
-        _name: &str,
-        _content_type: &str,
-        _expires_secs: u64,
-    ) -> Result<Option<String>, FileStorageError> {
+    /// Public URL where bytes can be served from directly, bypassing
+    /// pylon. For Stack0 this is the asset's `cdnUrl`. For
+    /// LocalFileStorage this returns `None` because there's no public
+    /// CDN — bytes are proxied through pylon's `GET /api/files/<id>`.
+    ///
+    /// The HTTP layer uses this to 302-redirect retrievals straight
+    /// to the CDN for backends that have one, so large files never
+    /// transit pylon's process. Pre-0.3.91 pylon's `get()` did a
+    /// 2-step lookup that read bytes from the CDN and re-served them
+    /// — a 30MB recording would balloon pylon's RSS twice (once for
+    /// the upload proxy, once for the read).
+    fn direct_url(&self, _id: &str) -> Result<Option<String>, FileStorageError> {
         Ok(None)
     }
 
-    /// Record the owner of a stored file. Called by the upload path
-    /// immediately after `store()` so ownership is persisted next to the bytes.
-    /// Default impl is a noop for backends that delegate auth elsewhere
-    /// (e.g., Stack0, where access is mediated by a CDN-level API key).
+    /// Record the owner of a stored file. Called by the confirm path
+    /// immediately after `confirm_upload()` so ownership is persisted
+    /// next to the bytes. Default impl is a noop for backends that
+    /// delegate auth elsewhere (e.g., Stack0, where access is mediated
+    /// by a CDN-level API key + the URL is opaque enough to not
+    /// enumerate).
     fn record_owner(&self, _id: &str, _owner: &FileOwner) -> Result<(), FileStorageError> {
         Ok(())
     }
@@ -71,6 +115,36 @@ pub trait FileStorage: Send + Sync {
     fn requires_owner_check(&self) -> bool {
         false
     }
+}
+
+/// Result of `FileStorage::init_upload`.
+///
+/// Wire shape mirrors what the HTTP layer returns from
+/// `POST /api/files/init`: the client PUTs bytes to `upload_url`,
+/// then POSTs `{ asset_id }` to `/api/files/confirm`.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadInit {
+    /// Backend-native asset ID. Opaque to the client; pass back to
+    /// `confirm_upload` and `delete` unchanged.
+    #[serde(rename = "assetId")]
+    pub asset_id: String,
+    /// Where to PUT the raw bytes. For Stack0 this is an S3
+    /// presigned URL; for local it's a pylon endpoint.
+    #[serde(rename = "uploadUrl")]
+    pub upload_url: String,
+    /// Best-effort prediction of where the asset will be served from
+    /// after confirm. Stack0 returns this from its init call;
+    /// LocalFileStorage returns the same value `confirm_upload`
+    /// will later produce. Apps can stash this URL in a row before
+    /// the upload finishes (the row will 404 until confirm, but the
+    /// URL itself is stable).
+    #[serde(rename = "cdnUrl")]
+    pub cdn_url: String,
+    /// Unix seconds after which the upload URL is no longer valid.
+    /// For Stack0 this matches the S3 presign expiry; local backends
+    /// can pick any short-but-finite window (default 1 hour).
+    #[serde(rename = "expiresAt")]
+    pub expires_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +286,23 @@ impl LocalFileStorage {
         // accepts external input, so no traversal segments can leak in.
         self.dir.join(".ownership").join(format!("{id}.json"))
     }
+
+    /// Receive raw bytes from a client PUT against the `upload_url`
+    /// minted by `init_upload`. Called by the HTTP layer's
+    /// `PUT /api/files/local-put/<id>` handler after it has validated
+    /// auth + the ID against the pending init record.
+    ///
+    /// Writes to `<dir>/<id>` without going through `store()` because
+    /// the ID is already known (was returned from init_upload) and
+    /// the bytes are already on the wire — no need to re-mint.
+    pub fn write_bytes(&self, id: &str, content: &[u8]) -> Result<(), FileStorageError> {
+        validate_local_id(id)?;
+        let path = self.dir.join(id);
+        std::fs::write(&path, content).map_err(|e| FileStorageError {
+            code: "WRITE_FAILED".into(),
+            message: format!("Failed to write file: {e}"),
+        })
+    }
 }
 
 /// Reject IDs that try to escape the storage dir or the ownership sidecar dir.
@@ -225,27 +316,82 @@ fn validate_local_id(id: &str) -> Result<(), FileStorageError> {
     Ok(())
 }
 
+/// Mint a fresh asset ID for the local backend. Uses high-resolution
+/// timestamp + sanitised filename so concurrent uploads don't collide
+/// AND IDs sort by upload time (useful when manually inspecting the
+/// uploads dir).
+fn local_mint_id(name: &str) -> String {
+    format!(
+        "file_{}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        name.replace(['/', '\\', '.'], "_")
+    )
+}
+
 impl FileStorage for LocalFileStorage {
+    fn init_upload(
+        &self,
+        name: &str,
+        _content_type: &str,
+        _size: usize,
+    ) -> Result<UploadInit, FileStorageError> {
+        // Local backend doesn't pre-allocate disk space — the PUT
+        // handler `/api/files/local-put/<id>` validates auth, writes
+        // bytes to `<dir>/<id>`, then the client calls confirm_upload
+        // to verify + record ownership. We return the ID + the PUT URL.
+        //
+        // 1-hour expiry is generous — the PUT URL only works for a
+        // logged-in user anyway, so this is mostly to bound how long
+        // a partially-finished upload sits in pending state.
+        let id = local_mint_id(name);
+        let upload_url = format!("{}/local-put/{}", self.url_prefix, id);
+        let cdn_url = format!("{}/{}", self.url_prefix, id);
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + 3600;
+        Ok(UploadInit {
+            asset_id: id,
+            upload_url,
+            cdn_url,
+            expires_at,
+        })
+    }
+
+    fn confirm_upload(&self, asset_id: &str) -> Result<StoredFile, FileStorageError> {
+        validate_local_id(asset_id)?;
+        let path = self.dir.join(asset_id);
+        let meta = std::fs::metadata(&path).map_err(|_| FileStorageError {
+            code: "NOT_FOUND".into(),
+            message: "Upload did not complete — no bytes at the expected path".into(),
+        })?;
+        Ok(StoredFile {
+            id: asset_id.to_string(),
+            url: format!("{}/{}", self.url_prefix, asset_id),
+            size: meta.len() as usize,
+        })
+    }
+
     fn store(
         &self,
         name: &str,
         content: &[u8],
         _content_type: &str,
     ) -> Result<StoredFile, FileStorageError> {
-        let id = format!(
-            "file_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-            name.replace(['/', '\\', '.'], "_")
-        );
+        // Server-side internal path: mint an ID, write bytes, return
+        // the same shape `confirm_upload` would have. No PUT-URL
+        // indirection because the caller already has the bytes in
+        // memory.
+        let id = local_mint_id(name);
         let path = self.dir.join(&id);
         std::fs::write(&path, content).map_err(|e| FileStorageError {
             code: "WRITE_FAILED".into(),
             message: format!("Failed to write file: {e}"),
         })?;
-
         Ok(StoredFile {
             url: format!("{}/{}", self.url_prefix, id),
             size: content.len(),
@@ -474,16 +620,19 @@ fn stack0_err(code: &str, e: impl std::fmt::Display) -> FileStorageError {
 }
 
 impl FileStorage for Stack0FileStorage {
-    fn store(
+    fn init_upload(
         &self,
         name: &str,
-        content: &[u8],
         content_type: &str,
-    ) -> Result<StoredFile, FileStorageError> {
+        size: usize,
+    ) -> Result<UploadInit, FileStorageError> {
+        // Step 1 of the canonical 3-step flow. Returns the S3
+        // presigned URL the client PUTs bytes to directly — pylon's
+        // process never touches the body. Pre-0.3.91 pylon proxied
+        // every byte through a multipart handler, which OOM'd on
+        // 30MB uploads.
         let agent = stack0_agent();
-        let init_body = self.build_upload_init_body(name, content_type, content.len());
-
-        // 1. Mint presigned upload URL.
+        let init_body = self.build_upload_init_body(name, content_type, size);
         let init_resp: serde_json::Value = agent
             .post(&format!("{}/cdn/upload", self.base_url))
             .set("Authorization", &format!("Bearer {}", self.api_key))
@@ -495,7 +644,8 @@ impl FileStorage for Stack0FileStorage {
 
         let upload_url = init_resp["uploadUrl"]
             .as_str()
-            .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing uploadUrl"))?;
+            .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing uploadUrl"))?
+            .to_string();
         let asset_id = init_resp["assetId"]
             .as_str()
             .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing assetId"))?
@@ -504,43 +654,95 @@ impl FileStorage for Stack0FileStorage {
             .as_str()
             .ok_or_else(|| stack0_err("STACK0_UPLOAD_INIT_BAD_RESPONSE", "missing cdnUrl"))?
             .to_string();
+        let expires_at = init_resp["expiresAt"].as_i64().unwrap_or_else(|| {
+            // Fall back to 1 hour if Stack0 doesn't return one —
+            // matches the S3 presign default.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                + 3600
+        });
 
-        // 2. PUT bytes to presigned URL. The presigned URL carries its own
-        // signature, so we don't reattach the API key here.
-        agent
-            .put(upload_url)
-            .set("Content-Type", content_type)
-            .send_bytes(content)
-            .map_err(|e| stack0_err("STACK0_UPLOAD_PUT_FAILED", e))?;
+        Ok(UploadInit {
+            asset_id,
+            upload_url,
+            cdn_url,
+            expires_at,
+        })
+    }
 
-        // 3. Confirm upload so Stack0 marks the asset as ready.
+    fn confirm_upload(&self, asset_id: &str) -> Result<StoredFile, FileStorageError> {
+        // Step 3 of the canonical flow. Stack0 marks the asset as
+        // ready and returns the final metadata (size, cdnUrl). The
+        // client has already PUT bytes to the presigned URL between
+        // init and this call.
         //
-        // `send_json({})` matters: Stack0 requires `Content-Type:
-        // application/json` on the confirm POST and 415s otherwise.
-        // ureq's `.call()` sends no body and no Content-Type. Pre-0.3.90
-        // pylon used `.call()` here, so the upload bytes landed on the
-        // CDN but the asset stayed in a half-confirmed state and the
-        // store() call returned an error to the caller.
-        agent
+        // `send_json({})` matters: Stack0 requires
+        // `Content-Type: application/json` on the confirm POST and
+        // 415s otherwise. ureq's `.call()` sends no body and no
+        // Content-Type. Pre-0.3.90 pylon used `.call()` here, so the
+        // upload bytes landed on the CDN but the asset stayed in a
+        // half-confirmed state and the store() call returned an
+        // error to the caller.
+        let agent = stack0_agent();
+        let resp: serde_json::Value = agent
             .post(&format!(
                 "{}/cdn/upload/{}/confirm",
                 self.base_url, asset_id
             ))
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .send_json(serde_json::json!({}))
-            .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_FAILED", e))?;
+            .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_FAILED", e))?
+            .into_json()
+            .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_PARSE", e))?;
+
+        let cdn_url = resp["cdnUrl"]
+            .as_str()
+            .ok_or_else(|| stack0_err("STACK0_CONFIRM_BAD_RESPONSE", "missing cdnUrl"))?
+            .to_string();
+        let size = resp["size"].as_u64().unwrap_or(0) as usize;
 
         Ok(StoredFile {
-            id: asset_id,
+            id: asset_id.to_string(),
             url: cdn_url,
-            size: content.len(),
+            size,
         })
     }
 
+    fn store(
+        &self,
+        name: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<StoredFile, FileStorageError> {
+        // Server-side internal upload path. Bytes are already in
+        // memory, so do the full 3-step dance here instead of
+        // forcing the caller to orchestrate it. Used by jobs /
+        // fixtures / codegen — NOT by the HTTP layer, which routes
+        // through init_upload + confirm_upload with the bytes
+        // going direct to S3.
+        let init = self.init_upload(name, content_type, content.len())?;
+        let agent = stack0_agent();
+        agent
+            .put(&init.upload_url)
+            .set("Content-Type", content_type)
+            .send_bytes(content)
+            .map_err(|e| stack0_err("STACK0_UPLOAD_PUT_FAILED", e))?;
+        let mut stored = self.confirm_upload(&init.asset_id)?;
+        // confirm response may not echo size; fall back to caller's known size.
+        if stored.size == 0 {
+            stored.size = content.len();
+        }
+        Ok(stored)
+    }
+
     fn get(&self, id: &str) -> Result<Vec<u8>, FileStorageError> {
-        // Two-step recovery path: look up the asset's cdnUrl, then fetch bytes.
-        // Most callers should embed the cdnUrl returned from `store()` directly
-        // and never hit this method.
+        // Server-side retrieval path. The HTTP layer prefers
+        // `direct_url()` → 302 redirect so bytes go direct from
+        // the CDN to the client. This method only runs when an
+        // internal caller (e.g. a background job rehashing the
+        // file) needs the actual bytes.
         let agent = stack0_agent();
         let meta: serde_json::Value = agent
             .get(&format!("{}/cdn/assets/{}", self.base_url, id))
@@ -579,6 +781,26 @@ impl FileStorage for Stack0FileStorage {
             Err(ureq::Error::Status(404, _)) => Ok(false),
             Err(e) => Err(stack0_err("STACK0_DELETE_FAILED", e)),
         }
+    }
+
+    fn direct_url(&self, id: &str) -> Result<Option<String>, FileStorageError> {
+        // Look up the asset's cdnUrl so the HTTP layer can 302 to
+        // it. One round-trip to Stack0 — apps that store the cdnUrl
+        // in their DB at confirm time should reference that URL
+        // directly and skip pylon's `GET /api/files/<id>` entirely.
+        let agent = stack0_agent();
+        let meta: serde_json::Value = match agent
+            .get(&format!("{}/cdn/assets/{}", self.base_url, id))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .call()
+        {
+            Ok(r) => r
+                .into_json()
+                .map_err(|e| stack0_err("STACK0_GET_PARSE", e))?,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(e) => return Err(stack0_err("STACK0_GET_FAILED", e)),
+        };
+        Ok(meta["cdnUrl"].as_str().map(|s| s.to_string()))
     }
 }
 

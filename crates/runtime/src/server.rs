@@ -1778,56 +1778,29 @@ fn start_server(
             continue;
         }
 
-        // --- File upload fast path: handle binary body before string conversion ---
-        // Uploads come in two shapes:
-        //   1. Direct binary body with X-Filename / Content-Type headers
-        //   2. multipart/form-data with a file part
+        // --- File upload: 3-step flow (init → client PUT → confirm) ---
         //
-        // Require an authenticated user. Uploads write to the files backend
-        // (and into the plugin audit log for soft-delete etc.), so
-        // unauthenticated callers cannot use this route.
-        if url == "/api/files/upload" && method == Method::Post {
-            // Default 200 MiB. Override with PYLON_MAX_UPLOAD_BYTES (raw
-            // bytes) for video-heavy apps. The 10 MiB original was right
-            // for thumbnail / avatar use cases but 1080p screen recordings
-            // routinely exceed it.
-            let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(200 * 1024 * 1024);
-            #[allow(non_snake_case)]
-            let UPLOAD_MAX = upload_max;
-            // Enforce size BEFORE reading the body so a 10 GiB stream can't
-            // buffer into memory. Content-Length pre-check, then bounded read.
-            if let Some(declared) = request.body_length() {
-                if declared > UPLOAD_MAX {
-                    let err = json_error(
-                        "PAYLOAD_TOO_LARGE",
-                        &format!("Content-Length {declared} exceeds upload max of {UPLOAD_MAX}"),
-                    );
-                    let response = with_security_headers(
-                        Response::from_string(&err)
-                            .with_status_code(413u16)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            )
-                            .with_header(
-                                Header::from_bytes(
-                                    "Access-Control-Allow-Origin",
-                                    cors_origin.as_bytes().to_vec(),
-                                )
-                                .unwrap(),
-                            ),
-                    );
-                    let _ = request.respond(response);
-                    mt.record_request("POST", 413);
-                    continue;
-                }
-            }
+        // Pre-0.3.91 pylon proxied multipart uploads through its own
+        // process: `POST /api/files/upload` parsed the body in memory
+        // then forwarded bytes to Stack0/local. 30MB+ uploads OOM'd
+        // the multipart parser. v0.3.91 switched to a direct-to-S3
+        // flow:
+        //
+        //   1. POST /api/files/init  →  {uploadUrl, assetId, cdnUrl}
+        //   2. client PUTs raw bytes to uploadUrl (S3 for Stack0,
+        //      pylon's `/api/files/local-put/<id>` for local)
+        //   3. POST /api/files/confirm {assetId}  →  {id, url, size}
+        //
+        // Bytes never transit pylon's process for Stack0. Local backend
+        // still receives bytes via PUT, but as a single binary stream
+        // (no multipart parsing overhead).
+
+        // POST /api/files/init — step 1.
+        if url == "/api/files/init" && method == Method::Post {
             if auth_ctx.user_id.is_none() {
                 let err = json_error(
                     "AUTH_REQUIRED",
-                    "/api/files/upload requires an authenticated session",
+                    "/api/files/init requires an authenticated session",
                 );
                 let response = with_security_headers(
                     Response::from_string(&err)
@@ -1847,19 +1820,53 @@ fn start_server(
                 mt.record_request("POST", 401);
                 continue;
             }
-            // Read up to UPLOAD_MAX + 1 bytes. If we read the full +1 we know
-            // the client lied about Content-Length (or used chunked encoding
-            // and overran). Reject in that case instead of continuing with a
-            // truncated file.
             use std::io::Read;
-            let mut bytes: Vec<u8> = Vec::with_capacity(8192);
-            let mut limited = request.as_reader().take((UPLOAD_MAX as u64) + 1);
-            let _ = limited.read_to_end(&mut bytes);
+            let mut body_bytes = Vec::new();
+            let _ = request
+                .as_reader()
+                .take(64 * 1024)
+                .read_to_end(&mut body_bytes);
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            let v: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = json_error("INVALID_JSON", &e.to_string());
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    continue;
+                }
+            };
+            let filename = v["filename"].as_str().unwrap_or("upload");
+            let mime_type = v["mimeType"].as_str().unwrap_or("application/octet-stream");
+            let size = v["size"].as_u64().unwrap_or(0) as usize;
 
-            if bytes.len() > UPLOAD_MAX {
+            // Enforce upload-max BEFORE handing out the URL — otherwise
+            // a client could PUT 10GB to S3 and pylon would have no
+            // mechanism to stop it. Stack0 enforces its own limits
+            // server-side, but checking here gives operators one knob
+            // (`PYLON_MAX_UPLOAD_BYTES`) regardless of backend.
+            let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(200 * 1024 * 1024);
+            if size > upload_max {
                 let err = json_error(
                     "PAYLOAD_TOO_LARGE",
-                    &format!("File exceeds upload max of {UPLOAD_MAX} bytes"),
+                    &format!("size {size} exceeds upload max of {upload_max}"),
                 );
                 let response = with_security_headers(
                     Response::from_string(&err)
@@ -1880,112 +1887,14 @@ fn start_server(
                 continue;
             }
 
-            // Headers.
-            let content_type = request
-                .headers()
-                .iter()
-                .find(|h| h.field.as_str() == "Content-Type" || h.field.as_str() == "content-type")
-                .map(|h| h.value.as_str().to_string())
-                .unwrap_or_else(|| "application/octet-stream".into());
-            let filename = request
-                .headers()
-                .iter()
-                .find(|h| h.field.as_str() == "X-Filename" || h.field.as_str() == "x-filename")
-                .map(|h| h.value.as_str().to_string())
-                .unwrap_or_else(|| "upload".into());
-
-            // If multipart, extract the first file part. Otherwise use bytes directly.
-            let (name, ct, payload) = if content_type.starts_with("multipart/form-data") {
-                match parse_multipart_first_file(&bytes, &content_type) {
-                    Some(p) => p,
-                    None => {
-                        let err = json_error("INVALID_MULTIPART", "Could not parse multipart body");
-                        let response = with_security_headers(
-                            Response::from_string(&err)
-                                .with_status_code(400u16)
-                                .with_header(
-                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
-                                )
-                                .with_header(
-                                    Header::from_bytes(
-                                        "Access-Control-Allow-Origin",
-                                        cors_origin.as_bytes().to_vec(),
-                                    )
-                                    .unwrap(),
-                                ),
-                        );
-                        let _ = request.respond(response);
-                        mt.record_request("POST", 400);
-                        continue;
-                    }
-                }
-            } else {
-                (filename, content_type, bytes)
-            };
-
-            // Provider-aware storage selection via `PYLON_FILES_PROVIDER`.
-            // Pre-0.3.87 this was hardcoded to `LocalFileStorage::new(...)`
-            // and ignored the env var, so every upload landed on local
-            // disk regardless of `PYLON_FILES_PROVIDER=stack0`. Now the
-            // multipart upload handler resolves to the same backend the
-            // router-level FileOpsAdapter does, via the shared helper.
             let storage = pylon_storage::files::select_from_env();
-            let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
-
-            let (status, body) =
-                match pylon_storage::files::FileStorage::store(storage, &name, &payload, &ct) {
-                    Ok(stored) => {
-                        // Stamp ownership BEFORE returning success so a logged-in
-                        // caller cannot enumerate other users' uploads later via
-                        // /api/files/<id>. We unwrapped auth_ctx.user_id above
-                        // (the upload endpoint requires an authenticated identity).
-                        if let Some(uid) = auth_ctx.user_id.as_ref() {
-                            let owner = pylon_storage::files::FileOwner {
-                                user_id: uid.clone(),
-                                tenant_id: auth_ctx.tenant_id.clone(),
-                            };
-                            if let Err(e) = pylon_storage::files::FileStorage::record_owner(
-                                storage, &stored.id, &owner,
-                            ) {
-                                // Owner record is critical — without it the file
-                                // becomes readable by any other authenticated
-                                // caller. Bail out hard rather than half-shipping.
-                                tracing::error!(
-                                    file_id = %stored.id,
-                                    error = %e.message,
-                                    "Failed to record file owner; rolling back upload"
-                                );
-                                let _ =
-                                    pylon_storage::files::FileStorage::delete(storage, &stored.id);
-                                let err = json_error("OWNERSHIP_RECORD_FAILED", &e.message);
-                                let response = with_security_headers(
-                                    Response::from_string(&err)
-                                        .with_status_code(500u16)
-                                        .with_header(
-                                            Header::from_bytes("Content-Type", "application/json")
-                                                .unwrap(),
-                                        )
-                                        .with_header(
-                                            Header::from_bytes(
-                                                "Access-Control-Allow-Origin",
-                                                cors_origin.as_bytes().to_vec(),
-                                            )
-                                            .unwrap(),
-                                        ),
-                                );
-                                let _ = request.respond(response);
-                                mt.record_request("POST", 500);
-                                continue;
-                            }
-                        }
-                        (
-                            201u16,
-                            serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
-                        )
-                    }
-                    Err(e) => (500u16, json_error(&e.code, &e.message)),
-                };
-
+            let (status, body) = match storage.init_upload(filename, mime_type, size) {
+                Ok(init) => (
+                    200u16,
+                    serde_json::to_string(&init).unwrap_or_else(|_| "{}".into()),
+                ),
+                Err(e) => (500u16, json_error(&e.code, &e.message)),
+            };
             let response = with_security_headers(
                 Response::from_string(&body)
                     .with_status_code(status)
@@ -2000,6 +1909,533 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
+            continue;
+        }
+
+        // POST /api/files/confirm — step 3. Owner gets recorded here.
+        if url == "/api/files/confirm" && method == Method::Post {
+            if auth_ctx.user_id.is_none() {
+                let err = json_error(
+                    "AUTH_REQUIRED",
+                    "/api/files/confirm requires an authenticated session",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&err)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 401);
+                continue;
+            }
+            use std::io::Read;
+            let mut body_bytes = Vec::new();
+            let _ = request
+                .as_reader()
+                .take(64 * 1024)
+                .read_to_end(&mut body_bytes);
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            let v: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = json_error("INVALID_JSON", &e.to_string());
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    continue;
+                }
+            };
+            let asset_id = match v["assetId"].as_str() {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => {
+                    let err = json_error("MISSING_ASSET_ID", "Body must include `assetId`");
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    continue;
+                }
+            };
+
+            let storage = pylon_storage::files::select_from_env();
+            let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
+            let (status, body) = match storage.confirm_upload(&asset_id) {
+                Ok(stored) => {
+                    if let Some(uid) = auth_ctx.user_id.as_ref() {
+                        let owner = pylon_storage::files::FileOwner {
+                            user_id: uid.clone(),
+                            tenant_id: auth_ctx.tenant_id.clone(),
+                        };
+                        if let Err(e) = storage.record_owner(&stored.id, &owner) {
+                            tracing::error!(
+                                file_id = %stored.id,
+                                error = %e.message,
+                                "Failed to record file owner on confirm"
+                            );
+                            let _ = storage.delete(&stored.id);
+                            (500u16, json_error("OWNERSHIP_RECORD_FAILED", &e.message))
+                        } else {
+                            (
+                                200u16,
+                                serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
+                            )
+                        }
+                    } else {
+                        // Unreachable — we already 401'd above when user_id is None.
+                        (500u16, json_error("INTERNAL", "auth lost between checks"))
+                    }
+                }
+                Err(e) => (500u16, json_error(&e.code, &e.message)),
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", status);
+            continue;
+        }
+
+        // PUT /api/files/local-put/<id> — local backend's byte
+        // receiver. Stack0 callers PUT to S3 directly so this path
+        // only fires for the local backend. Auth required so an
+        // unauth'd attacker can't spam disk writes.
+        if method == Method::Put {
+            if let Some(rest) = url.strip_prefix("/api/files/local-put/") {
+                let asset_id = rest.split('?').next().unwrap_or(rest);
+                if auth_ctx.user_id.is_none() {
+                    let err = json_error(
+                        "AUTH_REQUIRED",
+                        "PUT /api/files/local-put requires an authenticated session",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(401u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("PUT", 401);
+                    continue;
+                }
+                let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(200 * 1024 * 1024);
+                if let Some(declared) = request.body_length() {
+                    if declared > upload_max {
+                        let err = json_error(
+                            "PAYLOAD_TOO_LARGE",
+                            &format!(
+                                "Content-Length {declared} exceeds upload max of {upload_max}"
+                            ),
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(413u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("PUT", 413);
+                        continue;
+                    }
+                }
+                use std::io::Read;
+                let mut bytes: Vec<u8> = Vec::with_capacity(8192);
+                let mut limited = request.as_reader().take((upload_max as u64) + 1);
+                let _ = limited.read_to_end(&mut bytes);
+                if bytes.len() > upload_max {
+                    let err = json_error(
+                        "PAYLOAD_TOO_LARGE",
+                        &format!("Body exceeds upload max of {upload_max} bytes"),
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(413u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("PUT", 413);
+                    continue;
+                }
+                let local = pylon_storage::files::local_from_env();
+                let (status, body) = match local.write_bytes(asset_id, &bytes) {
+                    Ok(()) => (204u16, String::new()),
+                    Err(e) => (500u16, json_error(&e.code, &e.message)),
+                };
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(status)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("PUT", status);
+                continue;
+            }
+        }
+
+        // DELETE /api/files/<assetId> — owner-gated delete that
+        // routes through the active backend.
+        if method == Method::Delete {
+            if let Some(rest) = url.strip_prefix("/api/files/") {
+                let asset_id = rest.split('?').next().unwrap_or(rest);
+                if auth_ctx.user_id.is_none() {
+                    let err = json_error(
+                        "AUTH_REQUIRED",
+                        "DELETE /api/files requires an authenticated session",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(401u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("DELETE", 401);
+                    continue;
+                }
+                let storage = pylon_storage::files::select_from_env();
+                let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
+                // Owner check: backends that record ownership (local) must
+                // match the requester. Stack0 returns None and we fall
+                // through — its API-key gate covers access.
+                if storage.requires_owner_check() {
+                    match storage.owner_of(asset_id) {
+                        Ok(Some(owner)) => {
+                            if !auth_ctx.is_admin
+                                && Some(&owner.user_id) != auth_ctx.user_id.as_ref()
+                            {
+                                let err = json_error("NOT_FOUND", "File not found");
+                                let response = with_security_headers(
+                                    Response::from_string(&err)
+                                        .with_status_code(404u16)
+                                        .with_header(
+                                            Header::from_bytes("Content-Type", "application/json")
+                                                .unwrap(),
+                                        )
+                                        .with_header(
+                                            Header::from_bytes(
+                                                "Access-Control-Allow-Origin",
+                                                cors_origin.as_bytes().to_vec(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                );
+                                let _ = request.respond(response);
+                                mt.record_request("DELETE", 404);
+                                continue;
+                            }
+                        }
+                        Ok(None) => {
+                            // No owner record — for local backend this means
+                            // the file doesn't exist OR predates ownership
+                            // tracking. Either way: 404 to avoid leaking
+                            // existence.
+                            let err = json_error("NOT_FOUND", "File not found");
+                            let response = with_security_headers(
+                                Response::from_string(&err)
+                                    .with_status_code(404u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("DELETE", 404);
+                            continue;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                let (status, body) = match storage.delete(asset_id) {
+                    Ok(true) => (204u16, String::new()),
+                    Ok(false) => (404u16, json_error("NOT_FOUND", "File not found")),
+                    Err(e) => (500u16, json_error(&e.code, &e.message)),
+                };
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(status)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("DELETE", status);
+                continue;
+            }
+        }
+
+        // GET /api/files/<id> — retrieve a file. For backends with a
+        // CDN URL (Stack0), 302-redirect to it so bytes go direct
+        // from the CDN to the client. For local backend, stream the
+        // bytes from disk through pylon. Owner check enforced for
+        // backends that require it.
+        if method == Method::Get {
+            if let Some(rest) = url.strip_prefix("/api/files/") {
+                let asset_id = rest.split('?').next().unwrap_or(rest);
+                // Skip the reserved sub-paths handled separately above
+                // (e.g. /api/files/init, /api/files/confirm,
+                // /api/files/local-put/...).
+                let is_reserved = asset_id == "init"
+                    || asset_id == "confirm"
+                    || asset_id.starts_with("local-put/");
+                if !asset_id.is_empty() && !is_reserved {
+                    if auth_ctx.user_id.is_none() {
+                        let err = json_error(
+                            "AUTH_REQUIRED",
+                            "GET /api/files requires an authenticated session",
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(401u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("GET", 401);
+                        continue;
+                    }
+                    let storage = pylon_storage::files::select_from_env();
+                    let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
+                    // Owner check for backends that track ownership.
+                    if storage.requires_owner_check() && !auth_ctx.is_admin {
+                        if let Ok(Some(owner)) = storage.owner_of(asset_id) {
+                            if Some(&owner.user_id) != auth_ctx.user_id.as_ref() {
+                                let err = json_error("NOT_FOUND", "File not found");
+                                let response = with_security_headers(
+                                    Response::from_string(&err)
+                                        .with_status_code(404u16)
+                                        .with_header(
+                                            Header::from_bytes("Content-Type", "application/json")
+                                                .unwrap(),
+                                        )
+                                        .with_header(
+                                            Header::from_bytes(
+                                                "Access-Control-Allow-Origin",
+                                                cors_origin.as_bytes().to_vec(),
+                                            )
+                                            .unwrap(),
+                                        ),
+                                );
+                                let _ = request.respond(response);
+                                mt.record_request("GET", 404);
+                                continue;
+                            }
+                        }
+                    }
+                    // CDN-backed backends: 302 redirect to direct_url so
+                    // bytes never transit pylon. Pre-0.3.91 pylon's
+                    // get() proxied bytes through the process — a
+                    // 30MB asset doubled memory pressure for no reason.
+                    match storage.direct_url(asset_id) {
+                        Ok(Some(target)) => {
+                            let response = with_security_headers(
+                                Response::from_string("")
+                                    .with_status_code(302u16)
+                                    .with_header(
+                                        Header::from_bytes("Location", target.as_bytes().to_vec())
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", 302);
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let err = json_error(&e.code, &e.message);
+                            let response = with_security_headers(
+                                Response::from_string(&err)
+                                    .with_status_code(500u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", 500);
+                            continue;
+                        }
+                    }
+                    // No direct URL — local backend. Stream the bytes.
+                    let (status, body, ct) = match storage.get(asset_id) {
+                        Ok(content) => (200u16, content, "application/octet-stream".to_string()),
+                        Err(e) if e.code == "NOT_FOUND" => (
+                            404u16,
+                            json_error("NOT_FOUND", "File not found").into_bytes(),
+                            "application/json".to_string(),
+                        ),
+                        Err(e) => (
+                            500u16,
+                            json_error(&e.code, &e.message).into_bytes(),
+                            "application/json".to_string(),
+                        ),
+                    };
+                    let response = with_security_headers(
+                        Response::from_data(body)
+                            .with_status_code(status)
+                            .with_header(Header::from_bytes("Content-Type", ct.as_bytes()).unwrap())
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", status);
+                    continue;
+                }
+            }
+        }
+
+        // Legacy multipart upload — removed in v0.3.91. The 3-endpoint
+        // flow above replaces it. Returns a clear migration hint so
+        // upgraders don't silently regress (and so any old client
+        // sees a useful error instead of a 404).
+        if url == "/api/files/upload" && method == Method::Post {
+            let err = json_error(
+                "UPLOAD_DEPRECATED",
+                "POST /api/files/upload was removed in pylon 0.3.91 — the multipart proxy OOM'd on large uploads. \
+                 Use the new 3-step flow: POST /api/files/init → client PUTs bytes to the returned uploadUrl → POST /api/files/confirm. \
+                 See https://pylonsync.com/docs/concepts/files.",
+            );
+            let response = with_security_headers(
+                Response::from_string(&err)
+                    .with_status_code(410u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", 410);
             continue;
         }
 
@@ -3727,138 +4163,7 @@ fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
     }
 }
 
-/// Parse a `multipart/form-data` body and return the first file part found.
-///
-/// Returns `(filename, content_type, bytes)` on success, `None` if the body
-/// can't be parsed or no file part exists.
-///
-/// Handles the common RFC 7578 subset used by browsers and curl:
-/// - `--boundary` part separators
-/// - `Content-Disposition: form-data; name=...; filename=...`
-/// - `Content-Type: ...`
-/// - blank line, then raw bytes, then `\r\n--boundary` terminator
-fn parse_multipart_first_file(
-    body: &[u8],
-    content_type_header: &str,
-) -> Option<(String, String, Vec<u8>)> {
-    // Extract the boundary parameter.
-    let boundary_param = content_type_header
-        .split(';')
-        .find_map(|p| p.trim().strip_prefix("boundary="))?;
-    let boundary = boundary_param.trim_matches('"');
-    let delimiter = format!("--{boundary}");
-    let delimiter_bytes = delimiter.as_bytes();
-
-    // Find each part between delimiters.
-    let mut pos = 0usize;
-    while pos < body.len() {
-        // Find the next delimiter.
-        let next = find_subslice(&body[pos..], delimiter_bytes)?;
-        let part_start = pos + next + delimiter_bytes.len();
-        // Skip CRLF or -- (terminator) after the delimiter.
-        if part_start + 2 > body.len() {
-            return None;
-        }
-        if &body[part_start..part_start + 2] == b"--" {
-            return None; // end of parts, no file found
-        }
-        let header_start = part_start + skip_crlf(&body[part_start..]);
-
-        // Find end-of-headers (blank line).
-        let header_end_offset = find_subslice(&body[header_start..], b"\r\n\r\n")?;
-        let headers = &body[header_start..header_start + header_end_offset];
-        let data_start = header_start + header_end_offset + 4;
-
-        // Find the next delimiter — that's where this part's data ends.
-        let next_delim_offset = find_subslice(&body[data_start..], delimiter_bytes)?;
-        // Strip the trailing CRLF before the delimiter.
-        let mut data_end = data_start + next_delim_offset;
-        if data_end >= 2 && &body[data_end - 2..data_end] == b"\r\n" {
-            data_end -= 2;
-        }
-
-        // Parse headers we care about.
-        let headers_str = std::str::from_utf8(headers).ok()?;
-        let mut filename: Option<String> = None;
-        let mut part_ct = String::from("application/octet-stream");
-        let mut has_file = false;
-        for line in headers_str.split("\r\n") {
-            let lower = line.to_ascii_lowercase();
-            if let Some(rest) = lower.strip_prefix("content-disposition:") {
-                if rest.contains("filename=") {
-                    has_file = true;
-                    // Extract filename="xxx"
-                    if let Some(start) = line.find("filename=\"") {
-                        let from = start + 10;
-                        if let Some(end_offset) = line[from..].find('"') {
-                            filename = Some(line[from..from + end_offset].to_string());
-                        }
-                    }
-                }
-            } else if let Some(rest) = lower.strip_prefix("content-type:") {
-                part_ct = rest.trim().to_string();
-            }
-        }
-
-        if has_file {
-            let name = filename.unwrap_or_else(|| "upload".into());
-            return Some((name, part_ct, body[data_start..data_end].to_vec()));
-        }
-
-        pos = data_end;
-    }
-    None
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn skip_crlf(buf: &[u8]) -> usize {
-    if buf.len() >= 2 && &buf[0..2] == b"\r\n" {
-        2
-    } else if !buf.is_empty() && buf[0] == b'\n' {
-        1
-    } else {
-        0
-    }
-}
-
-#[cfg(test)]
-mod multipart_tests {
-    use super::*;
-
-    #[test]
-    fn parses_single_file() {
-        let body = b"--bnd\r\n\
-Content-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n\
-Content-Type: text/plain\r\n\
-\r\n\
-Hello world\r\n\
---bnd--\r\n";
-        let ct = "multipart/form-data; boundary=bnd";
-        let (name, content_type, bytes) = parse_multipart_first_file(body, ct).unwrap();
-        assert_eq!(name, "hello.txt");
-        assert_eq!(content_type, "text/plain");
-        assert_eq!(bytes, b"Hello world");
-    }
-
-    #[test]
-    fn returns_none_without_file_part() {
-        let body = b"--bnd\r\n\
-Content-Disposition: form-data; name=\"field\"\r\n\
-\r\n\
-just text\r\n\
---bnd--\r\n";
-        let ct = "multipart/form-data; boundary=bnd";
-        assert!(parse_multipart_first_file(body, ct).is_none());
-    }
-
-    #[test]
-    fn returns_none_when_no_boundary() {
-        assert!(parse_multipart_first_file(b"anything", "application/json").is_none());
-    }
-}
+// Multipart parser + its tests removed in v0.3.91 along with the
+// legacy `POST /api/files/upload` endpoint. The new 3-step flow
+// (init → client PUT → confirm) never goes through a multipart body,
+// so the parser had no remaining caller.

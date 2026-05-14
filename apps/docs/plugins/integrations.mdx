@@ -37,7 +37,51 @@ PYLON_STACK0_FOLDER=uploads           # optional prefix
 
 The plugin is the right choice when you need backend-specific config that doesn't map cleanly to env vars; the env path is the right choice for typical cases.
 
-Once configured, `POST /api/files/upload` stores to the chosen backend and returns the public URL. The path is the same regardless of backend — your client code doesn't change.
+Once configured, uploads use the 3-step direct-to-storage flow:
+
+```ts
+// 1. Ask pylon for an upload slot
+const init = await fetch("/api/files/init", {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    filename: file.name,
+    mimeType: file.type,
+    size: file.size,
+  }),
+}).then((r) => r.json());
+
+// 2. PUT the bytes DIRECTLY to the returned URL (S3 for Stack0,
+//    pylon's local-put endpoint for the local backend). Pylon's
+//    process is bypassed — large uploads no longer transit the
+//    server's memory.
+await fetch(init.uploadUrl, {
+  method: "PUT",
+  body: file,
+  headers: { "Content-Type": file.type },
+});
+
+// 3. Confirm so pylon records ownership and returns the canonical URL
+const stored = await fetch("/api/files/confirm", {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ assetId: init.assetId }),
+}).then((r) => r.json());
+
+// stored = { id, url, size }
+//   - Stack0: url is the CDN URL (https://cdn.stack0.dev/...)
+//   - local: url is /api/files/<id> (served by pylon)
+```
+
+The shape is the same regardless of backend — clients don't have to special-case Stack0 vs local. Persist both `stored.url` (for display) and `stored.id` (so you can call `DELETE /api/files/<id>` later).
+
+`DELETE /api/files/<assetId>` removes the asset. Owner-gated: the caller must be the user who confirmed the upload (or an admin).
+
+`GET /api/files/<id>` serves the bytes. For CDN-backed backends (Stack0) pylon 302-redirects to the CDN URL so bytes go direct from S3 to the browser; for local it streams from disk.
+
+**Migration from pre-0.3.91:** the multipart `POST /api/files/upload` was removed — apps must switch to the 3-step flow. The old endpoint now returns `410 Gone` with a migration hint.
 
 ## `cache`
 

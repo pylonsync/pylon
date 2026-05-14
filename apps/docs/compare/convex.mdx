@@ -102,7 +102,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 | `useQuery(api.tasks.list)` | `useQuery("Task")` |
 | `ctx.db.insert("tasks", {...})` | `ctx.db.insert("Task", {...})` |
 | Convex auth | Magic codes / password / OAuth |
-| Convex file storage | `/api/files/upload` + Stack0/S3 backends |
+| Convex file storage | `/api/files/init` → direct PUT → `/api/files/confirm` (Stack0 / S3 / local) |
 | Convex scheduled functions | `crates/runtime` scheduler + `actions` |
 | Convex search index | Per-entity `search` config |
 

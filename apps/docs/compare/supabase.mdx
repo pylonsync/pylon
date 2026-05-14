@@ -85,7 +85,7 @@ If you're moving an existing Supabase app:
 | SQL schema + RLS | `pylon.manifest.json` entities + policies |
 | `supabase.from('todos').select()` | `useQuery("Todo")` |
 | `supabase.auth.signInWithOtp()` | `startMagicCode(email)` + `verifyMagicCode(...)` |
-| Storage buckets | `/api/files/upload` + S3/Stack0 backend plugin |
+| Storage buckets | `/api/files/init` → direct PUT → `/api/files/confirm` (Stack0 / S3 / local) |
 | Edge Functions | `mutation`/`action` in `functions/*.ts` |
 | Realtime subscriptions | `useQuery` (server-authoritative) or `subscribeCrdt` (collaborative) |
 | `pg_net` outbound HTTP | `fetch` inside an action (with `net_guard` plugin for SSRF defense) |

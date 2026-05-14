@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.91](https://github.com/pylonsync/pylon/compare/v0.3.90...v0.3.91) (2026-05-13)
+
+
+### Breaking
+
+* **storage:** `POST /api/files/upload` (multipart proxy) **removed**. The old endpoint parsed the entire upload body in memory before forwarding to the storage backend — 30MB+ uploads OOM'd the multipart parser. Replaced with a 3-step direct-to-storage flow:
+
+  1. `POST /api/files/init` → `{ uploadUrl, assetId, cdnUrl, expiresAt }`
+  2. Client PUTs raw bytes to `uploadUrl` (S3 for Stack0, pylon's `/api/files/local-put/<id>` for local). Bytes never transit pylon for CDN-backed backends.
+  3. `POST /api/files/confirm` with `{ assetId }` → `{ id, url, size }` and records ownership.
+
+  The legacy endpoint returns `410 Gone` with a migration hint so old clients see a useful error instead of a 404.
+
+* **storage:** `GET /api/files/<id>` now 302-redirects to the CDN URL for backends that have one (Stack0). Previously it proxied bytes through pylon's process even when a CDN URL was available — a 2x memory hit on every download. Local backend still streams from disk.
+
+* **storage:** new `DELETE /api/files/<assetId>` endpoint. Owner-gated. Routes to the active backend's delete (Stack0's `DELETE /v1/cdn/assets/<id>` or local fs unlink). Pre-0.3.91 there was no way to delete a Stack0 asset from the framework.
+
+
+### Migration
+
+```ts
+// Pre-0.3.91 (multipart proxy, removed):
+const form = new FormData();
+form.append("file", file);
+await fetch("/api/files/upload", { method: "POST", body: form });
+
+// 0.3.91+ (3-step direct-to-storage):
+const init = await fetch("/api/files/init", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ filename: file.name, mimeType: file.type, size: file.size }),
+}).then((r) => r.json());
+await fetch(init.uploadUrl, { method: "PUT", body: file, headers: { "Content-Type": file.type } });
+const stored = await fetch("/api/files/confirm", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ assetId: init.assetId }),
+}).then((r) => r.json());
+```
+
+Persist both `stored.url` (display) and `stored.id` (so you can `DELETE /api/files/<id>` later).
+
+
+### Closes the Stack0 rollout
+
+Final entry in the v0.3.87 → 0.3.91 Stack0-rollout sequence. v0.3.87 wired the provider, v0.3.88 added `/v1`, v0.3.89 added `projectSlug`, v0.3.90 fixed the confirm Content-Type, v0.3.91 reshapes the API so bytes never proxy through pylon. Yapless's 10MB+ Mac recording uploads now succeed end-to-end without touching pylon's memory.
+
 ## [0.3.90](https://github.com/pylonsync/pylon/compare/v0.3.89...v0.3.90) (2026-05-13)
 
 
