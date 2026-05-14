@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.90](https://github.com/pylonsync/pylon/compare/v0.3.89...v0.3.90) (2026-05-13)
+
+
+### Bug Fixes
+
+* **storage/stack0:** the upload confirm step (`POST /v1/cdn/upload/<id>/confirm`) used `ureq::Request::call()` which sends no body and no `Content-Type`. Stack0 requires `Content-Type: application/json` on the confirm endpoint and returns `415 Unsupported Media Type` otherwise — uploads got their bytes onto the CDN but the asset stayed half-confirmed and `store()` returned an error to the caller. Fixed by switching to `send_json(serde_json::json!({}))`, matching Stack0's SDK behaviour.
+
+
+### Closes the Stack0 rollout
+
+Fourth and last fix in the Stack0-rollout sequence: v0.3.87 routed uploads through the provider, v0.3.88 added `/v1` to the base URL, v0.3.89 added `projectSlug` to the init body, v0.3.90 sets `Content-Type` on the confirm step. End-to-end Stack0 uploads now succeed: response includes `"url": "https://cdn.stack0.dev/..."`.
+
 ## [0.3.89](https://github.com/pylonsync/pylon/compare/v0.3.88...v0.3.89) (2026-05-13)
 
 

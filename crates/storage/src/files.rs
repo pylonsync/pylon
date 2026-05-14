@@ -514,13 +514,20 @@ impl FileStorage for Stack0FileStorage {
             .map_err(|e| stack0_err("STACK0_UPLOAD_PUT_FAILED", e))?;
 
         // 3. Confirm upload so Stack0 marks the asset as ready.
+        //
+        // `send_json({})` matters: Stack0 requires `Content-Type:
+        // application/json` on the confirm POST and 415s otherwise.
+        // ureq's `.call()` sends no body and no Content-Type. Pre-0.3.90
+        // pylon used `.call()` here, so the upload bytes landed on the
+        // CDN but the asset stayed in a half-confirmed state and the
+        // store() call returned an error to the caller.
         agent
             .post(&format!(
                 "{}/cdn/upload/{}/confirm",
                 self.base_url, asset_id
             ))
             .set("Authorization", &format!("Bearer {}", self.api_key))
-            .call()
+            .send_json(serde_json::json!({}))
             .map_err(|e| stack0_err("STACK0_UPLOAD_CONFIRM_FAILED", e))?;
 
         Ok(StoredFile {
