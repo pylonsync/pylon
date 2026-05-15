@@ -288,7 +288,21 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 // visible as the pylon-cloud `uniq_hobby_owner` regression
                 // (the index outlived its schema entry and broke org
                 // creation in prod even after the schema change shipped).
+                //
+                // Emit BOTH a DROP CONSTRAINT (for constraint-backed
+                // indexes — PG refuses `DROP INDEX` on those with
+                // `ERROR: cannot drop index because constraint requires
+                // it`) and a fallback `DROP INDEX IF EXISTS` (for
+                // standalone indexes). Both are idempotent with IF
+                // EXISTS guards. v0.3.95 also filters constraint-backed
+                // indexes out of the snapshot so this path should never
+                // see them — this is defense-in-depth.
                 let full = format!("{}_{}", entity, name);
+                statements.push(format!(
+                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {} CASCADE",
+                    quote_ident(entity),
+                    quote_ident(&full)
+                ));
                 statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(&full)));
             }
             SchemaOperation::CreateSearchIndex { entity, config } => {
@@ -376,6 +390,20 @@ pub const INTROSPECT_COLUMNS_SQL: &str = "\
 /// rendered through pg_get_expr so it comes back in canonical form
 /// (`(plan = 'hobby'::text)`) — the planner normalises that against
 /// the manifest's raw form before deciding the index has drifted.
+///
+/// Constraint-backed indexes (the auto-generated `<table>_<col>_key`
+/// PG creates to back a column-level `UNIQUE` declaration) are
+/// EXCLUDED. They aren't standalone indexes from Pylon's perspective —
+/// they're a side effect of field-level `unique: true` in the manifest.
+/// Pre-0.3.95 the snapshot pulled them in alongside real indexes; the
+/// diff then saw them in the live schema but not in the manifest's
+/// (empty) index list and emitted `DROP INDEX User_email_key`, which
+/// PG refuses because the index backs a constraint. Result: every
+/// migration after the first failed silently on that statement and
+/// every subsequent ADD COLUMN / CREATE INDEX in the same plan was
+/// skipped. The LEFT JOIN on pg_constraint catches both UNIQUE
+/// constraint indexes (contype='u') and primary-key indexes (already
+/// filtered via `indisprimary`, but redundant guard is cheap).
 pub const INTROSPECT_INDEXES_SQL: &str = "\
     SELECT i.relname as index_name, \
            ix.indisunique as is_unique, \
@@ -386,9 +414,11 @@ pub const INTROSPECT_INDEXES_SQL: &str = "\
     JOIN pg_class i ON i.oid = ix.indexrelid \
     JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) \
     JOIN pg_namespace n ON n.oid = t.relnamespace \
+    LEFT JOIN pg_constraint pc ON pc.conindid = ix.indexrelid AND pc.contype IN ('u', 'p') \
     WHERE n.nspname = 'public' \
       AND t.relname = $1 \
       AND NOT ix.indisprimary \
+      AND pc.oid IS NULL \
     GROUP BY i.relname, ix.indisunique, ix.indpred, ix.indrelid \
     ORDER BY i.relname";
 
@@ -1048,10 +1078,42 @@ pub mod live {
 
     impl LivePostgresAdapter {
         /// Apply a schema plan to the live database.
+        ///
+        /// Statements run sequentially WITHOUT a wrapping transaction.
+        /// On failure of a single statement, we now log + continue to
+        /// the next instead of bailing out — pre-0.3.95 a single bad
+        /// statement (e.g. `DROP INDEX` on a constraint-backed index
+        /// PG refuses) aborted the entire plan and every subsequent
+        /// `ADD COLUMN` / `CREATE INDEX` got silently skipped, leading
+        /// to "migration succeeded according to logs but the column
+        /// doesn't exist" failure modes that surface days later.
+        ///
+        /// Continuing is safe because pylon's schema ops are designed
+        /// to be expand-compatible (no destructive writes that would
+        /// corrupt data on partial completion). The worst case after a
+        /// partial apply is an inconsistent schema vs manifest, which
+        /// the NEXT boot's plan_from_live picks up and re-attempts.
+        /// First error in the batch IS returned so the caller's logs
+        /// surface a failure signal — even when the rest succeeds.
         pub fn apply_plan(&mut self, plan: &SchemaPlan) -> Result<(), StorageError> {
             let statements = plan_to_sql(plan)?;
+            let mut first_err: Option<StorageError> = None;
             for sql in &statements {
-                self.client.execute(sql.as_str(), &[]).map_err(pg_err)?;
+                if let Err(e) = self.client.execute(sql.as_str(), &[]) {
+                    let err = pg_err(e);
+                    tracing::error!(
+                        sql = %sql,
+                        code = %err.code,
+                        message = %err.message,
+                        "[pg-migrate] statement failed; continuing with remaining statements",
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
             }
             Ok(())
         }

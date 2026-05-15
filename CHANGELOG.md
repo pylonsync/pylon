@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.95](https://github.com/pylonsync/pylon/compare/v0.3.94...v0.3.95) (2026-05-15)
+
+
+### Bug Fixes
+
+* **storage/postgres:** auto-migrate at boot was silently failing on Postgres deploys with field-level `unique: true` columns. The introspection query (`INTROSPECT_INDEXES_SQL`) returned constraint-backed indexes (the auto-generated `<table>_<col>_key` PG creates to back a `UNIQUE` column) alongside real indexes. The diff then saw them in the live schema but not in the manifest's (empty) index list and emitted `DROP INDEX User_email_key`, which PG refuses with `cannot drop index "User_email_key" because constraint User_email_key on table "User" requires it`. The error aborted the rest of the plan, so every subsequent `ADD COLUMN` / `CREATE INDEX` in the same migration silently skipped — looked like a successful boot, schema didn't actually update.
+
+  Three-part fix:
+  - `INTROSPECT_INDEXES_SQL` now joins `pg_constraint` and filters out indexes that back UNIQUE or PRIMARY KEY constraints. The diff stops seeing the auto-generated backing indexes entirely.
+  - `RemoveIndex` emit emits `ALTER TABLE ... DROP CONSTRAINT IF EXISTS ... CASCADE` before `DROP INDEX IF EXISTS ...`. Defense-in-depth: if a constraint-backed index ever leaks past the new snapshot filter, the drop succeeds either way.
+  - `apply_plan` no longer bails on the first statement failure. Logs an error per failing statement via `tracing::error!` and continues to the next; the first error is still returned so the caller's logs surface a failure signal, but subsequent statements get their chance to apply. Partial-apply is safe because Pylon's schema ops are expand-compatible — next boot's plan_from_live picks up whatever didn't land and retries.
+
+  Real-world failure: pylon-cloud's control plane had been silently failing every migration since the User entity was created. The corsOriginOverride column addition surfaced it because that was the first new field anyone tried to use right after a deploy. Every prior migration that touched a Postgres deploy with a unique field was silently no-op'ing.
+
 ## [0.3.94](https://github.com/pylonsync/pylon/compare/v0.3.93...v0.3.94) (2026-05-15)
 
 

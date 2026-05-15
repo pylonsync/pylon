@@ -1,0 +1,454 @@
+{
+  "manifest_version": 1,
+  "name": "auction-house",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "User",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "passwordHash",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "balanceCents",
+          "type": "int",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_email",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        }
+      ],
+      "crdt": true
+    },
+    {
+      "name": "Auction",
+      "fields": [
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "creatorId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "startsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "endsAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "currentLotId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "bannerColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "dedupTag",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_status",
+          "fields": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_starts_at",
+          "fields": [
+            "startsAt"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_creator",
+          "fields": [
+            "creatorId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_dedup_tag",
+          "fields": [
+            "dedupTag"
+          ],
+          "unique": false
+        }
+      ],
+      "search": {
+        "text": [
+          "title",
+          "description"
+        ],
+        "facets": [
+          "status",
+          "kind"
+        ],
+        "sortable": [
+          "startsAt",
+          "endsAt",
+          "createdAt"
+        ],
+        "language": null
+      },
+      "crdt": true
+    },
+    {
+      "name": "Lot",
+      "fields": [
+        {
+          "name": "auctionId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "position",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "imageColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "startingCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "currentCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "minIncrementCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidCount",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "endsAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "winningBidId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "winnerId",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "soldAt",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_auction",
+          "fields": [
+            "auctionId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_status",
+          "fields": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_ends_at",
+          "fields": [
+            "endsAt"
+          ],
+          "unique": false
+        }
+      ],
+      "crdt": true
+    },
+    {
+      "name": "Bid",
+      "fields": [
+        {
+          "name": "auctionId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lotId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidderId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "bidderName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "amountCents",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_lot",
+          "fields": [
+            "lotId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_bidder",
+          "fields": [
+            "bidderId"
+          ],
+          "unique": false
+        }
+      ],
+      "crdt": true
+    },
+    {
+      "name": "Watch",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "lotId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "addedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_lot",
+          "fields": [
+            "lotId"
+          ],
+          "unique": false
+        }
+      ],
+      "crdt": true
+    }
+  ],
+  "routes": [],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "user_self",
+      "entity": "User",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false"
+    },
+    {
+      "name": "auction_public",
+      "entity": "Auction",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false"
+    },
+    {
+      "name": "lot_public",
+      "entity": "Lot",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false"
+    },
+    {
+      "name": "bid_public",
+      "entity": "Bid",
+      "allowRead": "true",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false"
+    },
+    {
+      "name": "watch_owner",
+      "entity": "Watch",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId == data.userId",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId != null"
+    }
+  ],
+  "auth": {
+    "user": {
+      "entity": "User"
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    }
+  }
+}

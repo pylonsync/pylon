@@ -1,0 +1,11 @@
+{
+  "actions": 0,
+  "entities": 5,
+  "manifest_version": 1,
+  "name": "auction-house",
+  "policies": 5,
+  "queries": 0,
+  "routes": 0,
+  "static_pages": 0,
+  "version": "0.1.0"
+}
