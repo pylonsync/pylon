@@ -1299,7 +1299,17 @@ export class SyncEngine {
     const headers: Record<string, string> = {};
     const token = this.currentToken();
     if (token) headers["Authorization"] = `Bearer ${token}`;
-    return fetch(`${this.config.baseUrl}${path}`, { headers });
+    // `credentials: "include"` so cookie-auth apps (Yapless and
+    // anyone else relying on the `<app>_session` cookie pylon sets
+    // at login) actually authenticate on /api/auth/me. Without it
+    // `refreshResolvedSession` returns 401 → tenantNow stays the
+    // same → `resetReplica` never fires on /api/auth/select-org
+    // → the local store keeps every previous tenant's rows in
+    // cache and `db.useQuery` returns stale data after a switch.
+    return fetch(`${this.config.baseUrl}${path}`, {
+      headers,
+      credentials: "include",
+    });
   }
 
   /**

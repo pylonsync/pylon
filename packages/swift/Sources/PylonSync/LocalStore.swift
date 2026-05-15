@@ -181,8 +181,27 @@ public final class LocalStore: @unchecked Sendable {
         // until the authoritative event refreshes the tombstone.
         recordTombstoneLocked(entity: entity, id: id, seq: .max)
         let listeners = Array(self.listeners.values)
+        let persist = persistFn
         lock.unlock()
         for l in listeners { l() }
+        // Mirror applyChange's persistence path so the delete survives
+        // an app restart. Without this, the row sits in memory as
+        // deleted but the on-disk replica still has it — relaunching
+        // restores LocalStore from disk and the row reappears. Use
+        // Int64.max for seq to match the tombstone above; any future
+        // server replay that arrives with a real seq won't resurrect
+        // the row because the persisted tombstone outranks it.
+        if let persist {
+            let change = ChangeEvent(
+                seq: .max,
+                entity: entity,
+                row_id: id,
+                kind: .delete,
+                data: nil,
+                timestamp: ""
+            )
+            Task.detached { await persist(change) }
+        }
     }
 
     // MARK: - Listeners
