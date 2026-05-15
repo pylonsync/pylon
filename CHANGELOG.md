@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.96](https://github.com/pylonsync/pylon/compare/v0.3.95...v0.3.96) (2026-05-15)
+
+
+### Bug Fixes
+
+* **next/proxy:** `createPylonProxy({ matcher })` was load-bearing in name only — the matcher option was used to populate the returned `config.matcher` (which Next 16 extracts at build time) but the runtime function ignored it. Consumers who composed Pylon's proxy under a broader outer `config.matcher` (e.g. to also handle `/login` in their own logic) hit `ERR_TOO_MANY_REDIRECTS` when an anonymous user landed on `/login`: Pylon redirected `/login` → `/login?next=/login`, browser followed, same proxy ran, infinite loop.
+
+  Fix has two parts:
+  - **Self-loop guard:** Pylon's proxy never redirects to a path equal to its own `loginUrl`. Catches the immediate crash even when the matcher option is unused.
+  - **Runtime matcher gate:** the `matcher` option is now consulted at request time. Requests whose path doesn't match the option fall through with `NextResponse.next()`, leaving them for the consumer's outer proxy logic. A minimal Next-style pattern compiler handles `:path*`, `:rest+`, single-segment `:slug`, and exact paths — the patterns Pylon's docs actually show. Anything more exotic falls through to the matcher's regex anchor and is treated as a literal.
+
+  Surfaced by yapless's composed proxy that wanted to handle "signed-in user hits /login" itself.
+
 ## [0.3.95](https://github.com/pylonsync/pylon/compare/v0.3.94...v0.3.95) (2026-05-15)
 
 
