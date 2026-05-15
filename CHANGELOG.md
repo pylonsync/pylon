@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.93](https://github.com/pylonsync/pylon/compare/v0.3.92...v0.3.93) (2026-05-15)
+
+
+### Bug Fixes
+
+* **runtime/auth:** the runtime previously fell back to in-process in-memory auth stores when a configured persistent backend (Postgres via `DATABASE_URL`, SQLite via `PYLON_SESSION_DB`) failed to connect at boot. The fallback logged a `warn!` and continued serving — but every auth flow on the server now lived in a per-process map that gets wiped on restart. On Pylon Cloud (single-machine, `auto_stop_machines=stop`), this produced a consistent `OAUTH_INVALID_STATE` failure: a user clicks "Sign in with Google", the machine stops while they auth at Google, the callback wakes a fresh machine with no state, the state token validates as missing.
+
+  Fix: any explicitly-configured backend that fails to open now returns a boot error and pylon refuses to start. The previous fallback would silently degrade prod deploys; we'd rather crashloop with a clear message than serve auth requests against ephemeral state. Affects sessions, magic codes, OAuth state, account links, API keys, verification, audit, trusted devices, org SSO, SAML.
+
+  Operator-visible: if you ever saw `[pylon] PG <thing> backend unavailable` warn lines in your logs, those connections were never working — pylon is now telling you immediately at boot rather than burying it in a warn nobody reads. Investigate the connection error before redeploying.
+
+### Migration
+
+If your pylon-cloud / self-hosted deploy was depending on the silent fallback (very rare; would only matter if Postgres / SQLite was unreachable and you didn't notice), pylon will now fail to boot. Fix the connection or remove `DATABASE_URL` / `PYLON_SESSION_DB` to opt into in-memory explicitly.
+
 ## [0.3.92](https://github.com/pylonsync/pylon/compare/v0.3.91...v0.3.92) (2026-05-14)
 
 

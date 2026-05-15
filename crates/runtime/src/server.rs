@@ -310,7 +310,7 @@ fn start_server(
             panic!("PYLON_SECRET is set but invalid: {msg}");
         }
     }
-    let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime);
+    let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime)?;
     let session_store = auth_stores.session_store;
     let magic_codes = auth_stores.magic_codes;
     let oauth_state = auth_stores.oauth_state;
@@ -3883,7 +3883,10 @@ fn jwt_issuer() -> Option<&'static String> {
     .as_ref()
 }
 
-fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthStores {
+fn build_auth_stores(
+    app_db_path: Option<&str>,
+    session_lifetime: u64,
+) -> Result<AuthStores, String> {
     // Forced in-memory escape hatch — used by integration tests that
     // never want to touch disk.
     let force_in_memory = std::env::var("PYLON_SESSION_IN_MEMORY")
@@ -3900,7 +3903,7 @@ fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthSt
         if force_in_memory {
             // Tests that explicitly opt out of persistence shouldn't be
             // overridden by an ambient DATABASE_URL in CI.
-            return in_memory_auth_stores(session_lifetime);
+            return Ok(in_memory_auth_stores(session_lifetime));
         }
         return build_pg_auth_stores(&url, session_lifetime);
     }
@@ -3910,7 +3913,7 @@ fn build_auth_stores(app_db_path: Option<&str>, session_lifetime: u64) -> AuthSt
         .or_else(|| app_db_path.map(|p| format!("{p}.sessions.db")));
 
     match (force_in_memory, sqlite_path) {
-        (true, _) | (_, None) => in_memory_auth_stores(session_lifetime),
+        (true, _) | (_, None) => Ok(in_memory_auth_stores(session_lifetime)),
         (false, Some(path)) => build_sqlite_auth_stores(&path, session_lifetime),
     }
 }
@@ -3933,84 +3936,56 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
     }
 }
 
-fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
-    let session_store = match crate::session_backend::SqliteSessionBackend::open(path) {
-        Ok(b) => {
-            tracing::info!("[pylon] Auth state (SQLite): {path}");
-            SessionStore::with_backend(Box::new(b)).with_lifetime(session_lifetime)
-        }
-        Err(e) => {
-            tracing::warn!("[pylon] could not open session DB {path}: {e}. In-memory fallback.");
-            SessionStore::new().with_lifetime(session_lifetime)
-        }
-    };
-    let magic_codes = match crate::magic_code_backend::SqliteMagicCodeBackend::open(path) {
-        Ok(b) => pylon_auth::MagicCodeStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] magic-code SQLite backend unavailable: {e}");
-            pylon_auth::MagicCodeStore::new()
-        }
-    };
-    let oauth_state = match crate::oauth_backend::SqliteOAuthBackend::open(path) {
-        Ok(b) => pylon_auth::OAuthStateStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] OAuth state SQLite backend unavailable: {e}");
-            pylon_auth::OAuthStateStore::new()
-        }
-    };
-    let account_store = match crate::account_backend::SqliteAccountBackend::open(path) {
-        Ok(b) => pylon_auth::AccountStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] account-link SQLite backend unavailable: {e}");
-            pylon_auth::AccountStore::new()
-        }
-    };
-    let api_keys = match crate::api_key_backend::SqliteApiKeyBackend::open(path) {
-        Ok(b) => pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] api-key SQLite backend unavailable: {e}");
-            pylon_auth::api_key::ApiKeyStore::new()
-        }
-    };
-    let verification = match crate::verification_backend::SqliteVerificationBackend::open(path) {
-        Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] verification SQLite backend unavailable: {e}");
-            pylon_auth::verification::VerificationStore::new()
-        }
-    };
-    let audit = match crate::audit_backend::SqliteAuditBackend::open(path) {
-        Ok(b) => pylon_auth::audit::AuditStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] audit SQLite backend unavailable: {e}");
-            pylon_auth::audit::AuditStore::new()
-        }
-    };
-    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> =
-        match crate::trusted_device_backend::SqliteTrustedDeviceBackend::open(path) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] trusted-device SQLite backend unavailable: {e}");
-                Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
-            }
-        };
-    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> =
-        match crate::org_sso_backend::SqliteOrgSsoBackend::open(path) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] org-SSO SQLite backend unavailable: {e}");
-                Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
-            }
-        };
-    let saml: Arc<dyn pylon_auth::saml::SamlStore> =
-        match crate::saml_backend::SqliteSamlBackend::open(path) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] SAML SQLite backend unavailable: {e}");
-                Arc::new(pylon_auth::saml::InMemorySamlStore::new())
-            }
-        };
-    AuthStores {
+/// Open every SQLite-backed auth store at `path`. Fails fast at boot
+/// if any one can't be opened — pre-0.3.93 we silently fell back to
+/// in-memory, which produced cross-process state loss that surfaced
+/// later as `OAUTH_INVALID_STATE` (state minted on one process,
+/// validated on a different one after a machine restart). No more
+/// silent degradation.
+fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthStores, String> {
+    let map_err = |what: &str, e: String| format!("[pylon] {what} SQLite backend at {path}: {e}");
+
+    let session_store = SessionStore::with_backend(Box::new(
+        crate::session_backend::SqliteSessionBackend::open(path)
+            .map_err(|e| map_err("session", e))?,
+    ))
+    .with_lifetime(session_lifetime);
+    tracing::info!("[pylon] Auth state (SQLite): {path}");
+    let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
+        crate::magic_code_backend::SqliteMagicCodeBackend::open(path)
+            .map_err(|e| map_err("magic-code", e))?,
+    ));
+    let oauth_state = pylon_auth::OAuthStateStore::with_backend(Box::new(
+        crate::oauth_backend::SqliteOAuthBackend::open(path)
+            .map_err(|e| map_err("OAuth state", e))?,
+    ));
+    let account_store = pylon_auth::AccountStore::with_backend(Box::new(
+        crate::account_backend::SqliteAccountBackend::open(path)
+            .map_err(|e| map_err("account-link", e))?,
+    ));
+    let api_keys = pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(
+        crate::api_key_backend::SqliteApiKeyBackend::open(path)
+            .map_err(|e| map_err("api-key", e))?,
+    ));
+    let verification = pylon_auth::verification::VerificationStore::with_backend(Box::new(
+        crate::verification_backend::SqliteVerificationBackend::open(path)
+            .map_err(|e| map_err("verification", e))?,
+    ));
+    let audit = pylon_auth::audit::AuditStore::with_backend(Box::new(
+        crate::audit_backend::SqliteAuditBackend::open(path).map_err(|e| map_err("audit", e))?,
+    ));
+    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> = Arc::new(
+        crate::trusted_device_backend::SqliteTrustedDeviceBackend::open(path)
+            .map_err(|e| map_err("trusted-device", e))?,
+    );
+    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> = Arc::new(
+        crate::org_sso_backend::SqliteOrgSsoBackend::open(path)
+            .map_err(|e| map_err("org-SSO", e))?,
+    );
+    let saml: Arc<dyn pylon_auth::saml::SamlStore> = Arc::new(
+        crate::saml_backend::SqliteSamlBackend::open(path).map_err(|e| map_err("SAML", e))?,
+    );
+    Ok(AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
@@ -4024,92 +3999,73 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> AuthStores {
         trusted_devices,
         org_sso,
         saml,
-    }
+    })
 }
 
-fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
-    // Each backend opens its own connection. Sessions/oauth-state/magic-codes/
-    // accounts are low-frequency relative to entity CRUD — keeping them on
-    // separate connections avoids a "oauth lookup blocks an entity write"
-    // false-sharing scenario at the cost of a few idle PG connections.
-    let session_store = match crate::session_backend::PostgresSessionBackend::connect(url) {
-        Ok(b) => {
-            tracing::info!("[pylon] Auth state (Postgres): {url}");
-            SessionStore::with_backend(Box::new(b)).with_lifetime(session_lifetime)
-        }
-        Err(e) => {
-            tracing::warn!("[pylon] PG session backend unavailable: {e}. In-memory fallback.");
-            SessionStore::new().with_lifetime(session_lifetime)
-        }
+/// Connect every Postgres-backed auth store. Fail-fast at boot if
+/// any connection fails — pre-0.3.93 we silently fell back to
+/// in-memory backends per-store, which is exactly the OAUTH_INVALID_STATE
+/// failure pylon-cloud hit: PG connection error at boot → state lives
+/// in-process → machine auto-stop + cold boot wipes state → every
+/// OAuth callback fails with "Invalid, expired, or already-consumed
+/// state" and the operator has no signal that PG was never reachable.
+///
+/// Each backend opens its own connection. Sessions/oauth-state/magic-codes/
+/// accounts are low-frequency relative to entity CRUD — keeping them on
+/// separate connections avoids a "oauth lookup blocks an entity write"
+/// false-sharing scenario at the cost of a few idle PG connections.
+fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> Result<AuthStores, String> {
+    let map_err = |what: &str, e: String| {
+        format!(
+            "[pylon] {what} Postgres backend at {url}: {e}. \
+             DATABASE_URL is set but the connection failed — pylon refuses \
+             to boot rather than silently fall back to in-memory state \
+             that would lose every OAuth flow on restart."
+        )
     };
-    let magic_codes = match crate::magic_code_backend::PostgresMagicCodeBackend::connect(url) {
-        Ok(b) => pylon_auth::MagicCodeStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG magic-code backend unavailable: {e}");
-            pylon_auth::MagicCodeStore::new()
-        }
-    };
-    let oauth_state = match crate::oauth_backend::PostgresOAuthBackend::connect(url) {
-        Ok(b) => pylon_auth::OAuthStateStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG OAuth state backend unavailable: {e}");
-            pylon_auth::OAuthStateStore::new()
-        }
-    };
-    let account_store = match crate::account_backend::PostgresAccountBackend::connect(url) {
-        Ok(b) => pylon_auth::AccountStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG account-link backend unavailable: {e}");
-            pylon_auth::AccountStore::new()
-        }
-    };
-    let api_keys = match crate::api_key_backend::PostgresApiKeyBackend::connect(url) {
-        Ok(b) => pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG api-key backend unavailable: {e}");
-            pylon_auth::api_key::ApiKeyStore::new()
-        }
-    };
-    let verification = match crate::verification_backend::PostgresVerificationBackend::connect(url)
-    {
-        Ok(b) => pylon_auth::verification::VerificationStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG verification backend unavailable: {e}");
-            pylon_auth::verification::VerificationStore::new()
-        }
-    };
-    let audit = match crate::audit_backend::PostgresAuditBackend::connect(url) {
-        Ok(b) => pylon_auth::audit::AuditStore::with_backend(Box::new(b)),
-        Err(e) => {
-            tracing::warn!("[pylon] PG audit backend unavailable: {e}");
-            pylon_auth::audit::AuditStore::new()
-        }
-    };
-    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> =
-        match crate::trusted_device_backend::PostgresTrustedDeviceBackend::connect(url) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] PG trusted-device backend unavailable: {e}");
-                Arc::new(pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new())
-            }
-        };
-    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> =
-        match crate::org_sso_backend::PostgresOrgSsoBackend::connect(url) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] PG org-SSO backend unavailable: {e}");
-                Arc::new(pylon_auth::org_sso::InMemoryOrgSsoStore::new())
-            }
-        };
-    let saml: Arc<dyn pylon_auth::saml::SamlStore> =
-        match crate::saml_backend::PostgresSamlBackend::connect(url) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!("[pylon] PG SAML backend unavailable: {e}");
-                Arc::new(pylon_auth::saml::InMemorySamlStore::new())
-            }
-        };
-    AuthStores {
+
+    let session_store = SessionStore::with_backend(Box::new(
+        crate::session_backend::PostgresSessionBackend::connect(url)
+            .map_err(|e| map_err("session", e))?,
+    ))
+    .with_lifetime(session_lifetime);
+    tracing::info!("[pylon] Auth state (Postgres): {url}");
+    let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
+        crate::magic_code_backend::PostgresMagicCodeBackend::connect(url)
+            .map_err(|e| map_err("magic-code", e))?,
+    ));
+    let oauth_state = pylon_auth::OAuthStateStore::with_backend(Box::new(
+        crate::oauth_backend::PostgresOAuthBackend::connect(url)
+            .map_err(|e| map_err("OAuth state", e))?,
+    ));
+    let account_store = pylon_auth::AccountStore::with_backend(Box::new(
+        crate::account_backend::PostgresAccountBackend::connect(url)
+            .map_err(|e| map_err("account-link", e))?,
+    ));
+    let api_keys = pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(
+        crate::api_key_backend::PostgresApiKeyBackend::connect(url)
+            .map_err(|e| map_err("api-key", e))?,
+    ));
+    let verification = pylon_auth::verification::VerificationStore::with_backend(Box::new(
+        crate::verification_backend::PostgresVerificationBackend::connect(url)
+            .map_err(|e| map_err("verification", e))?,
+    ));
+    let audit = pylon_auth::audit::AuditStore::with_backend(Box::new(
+        crate::audit_backend::PostgresAuditBackend::connect(url)
+            .map_err(|e| map_err("audit", e))?,
+    ));
+    let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> = Arc::new(
+        crate::trusted_device_backend::PostgresTrustedDeviceBackend::connect(url)
+            .map_err(|e| map_err("trusted-device", e))?,
+    );
+    let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> = Arc::new(
+        crate::org_sso_backend::PostgresOrgSsoBackend::connect(url)
+            .map_err(|e| map_err("org-SSO", e))?,
+    );
+    let saml: Arc<dyn pylon_auth::saml::SamlStore> = Arc::new(
+        crate::saml_backend::PostgresSamlBackend::connect(url).map_err(|e| map_err("SAML", e))?,
+    );
+    Ok(AuthStores {
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
@@ -4123,7 +4079,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> AuthStores {
         trusted_devices,
         org_sso,
         saml,
-    }
+    })
 }
 
 /// Build the session store. Persists by default for file-backed runtimes —

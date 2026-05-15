@@ -376,10 +376,29 @@ public actor PylonClient {
     }
 
     nonisolated func makeHttpError(status: Int, data: Data) -> PylonError {
-        // Try to parse `{ code, message }` from the body.
-        struct ErrorBody: Decodable { let code: String?; let message: String? }
-        if let body = try? JSONDecoder().decode(ErrorBody.self, from: data) {
-            return .http(status: status, code: body.code, message: body.message)
+        // Pylon's router wraps errors as `{"error":{"code","message"}}`
+        // (see `json_error` in `crates/router/src/lib.rs`). The previous
+        // implementation only decoded `{code, message}` at the top level
+        // — Decodable happily ignored the unknown `error` key and
+        // returned nil for both, surfacing every 4xx as a bare
+        // `PylonError.http(<status>)` with no diagnostic info. Decode
+        // the wrapped shape FIRST, then fall back to the top-level
+        // shape (some internal endpoints use it), then raw text.
+        struct Wrapped: Decodable {
+            struct Inner: Decodable { let code: String?; let message: String? }
+            let error: Inner?
+        }
+        struct Flat: Decodable { let code: String?; let message: String? }
+        if let wrapped = try? JSONDecoder().decode(Wrapped.self, from: data),
+           let inner = wrapped.error,
+           inner.code != nil || inner.message != nil
+        {
+            return .http(status: status, code: inner.code, message: inner.message)
+        }
+        if let flat = try? JSONDecoder().decode(Flat.self, from: data),
+           flat.code != nil || flat.message != nil
+        {
+            return .http(status: status, code: flat.code, message: flat.message)
         }
         let text = String(data: data, encoding: .utf8)
         return .http(status: status, code: nil, message: text)
