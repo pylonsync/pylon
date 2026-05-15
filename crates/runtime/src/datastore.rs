@@ -2076,7 +2076,127 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
-        self.inner.transact(ops)
+        // Fire plugin chain per op before delegating to the inner
+        // store's atomic batch. Without this, a non-admin caller
+        // using `ctx.db.transact([{op:"insert", entity:"Doc",
+        // data:{tenantId:"other"}}])` would skip TenantScopePlugin
+        // and plant rows into another tenant's space — same class
+        // of bypass codex pass-2 caught for the single-op
+        // `ctx.db.insert` path in 2026-05-10, just via the batch
+        // shape. Hook ordering: before_* runs per op (may mutate
+        // each op's `data`), then the (possibly modified) ops are
+        // handed to the inner atomic batch, then after_* fires per
+        // successful op result.
+        //
+        // Rejected hooks (e.g. TenantScopePlugin denying a
+        // cross-tenant insert) bubble as a `DataError` — the batch
+        // never reaches the inner store, so no partial writes
+        // happen.
+        let mut prepared: Vec<serde_json::Value> = Vec::with_capacity(ops.len());
+        for op in ops {
+            let mut op = op.clone();
+            let op_type = op
+                .get("op")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let entity = op
+                .get("entity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match op_type.as_str() {
+                "insert" => {
+                    // Normalize missing `data` to `{}` so the plugin
+                    // chain still fires — without this, a malformed
+                    // op like `{op:"insert", entity:"Doc"}` (no data)
+                    // would silently bypass TenantScopePlugin and
+                    // land an unstamped row in the inner store
+                    // (which defaults missing data to `{}` anyway).
+                    // Codex caught: keeping the hook conditional on
+                    // data-presence is the same class of bypass codex
+                    // pass-2 flagged for single ops back in May.
+                    if op.get("data").is_none() {
+                        op.as_object_mut()
+                            .ok_or_else(|| DataError {
+                                code: "INVALID_OP".into(),
+                                message: "transact op must be a JSON object".into(),
+                            })?
+                            .insert("data".into(), serde_json::json!({}));
+                    }
+                    let data = op.get_mut("data").expect("just inserted");
+                    self.plugins
+                        .run_before_insert(&entity, data, &self.auth)
+                        .map_err(|e| DataError {
+                            code: e.code,
+                            message: e.message,
+                        })?;
+                }
+                "update" => {
+                    let id = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if op.get("data").is_none() {
+                        op.as_object_mut()
+                            .ok_or_else(|| DataError {
+                                code: "INVALID_OP".into(),
+                                message: "transact op must be a JSON object".into(),
+                            })?
+                            .insert("data".into(), serde_json::json!({}));
+                    }
+                    let data = op.get_mut("data").expect("just inserted");
+                    self.plugins
+                        .run_before_update(&entity, &id, data, &self.auth)
+                        .map_err(|e| DataError {
+                            code: e.code,
+                            message: e.message,
+                        })?;
+                }
+                "delete" => {
+                    let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    self.plugins
+                        .run_before_delete(&entity, id, &self.auth)
+                        .map_err(|e| DataError {
+                            code: e.code,
+                            message: e.message,
+                        })?;
+                }
+                _ => {}
+            }
+            prepared.push(op);
+        }
+        let (committed, results) = self.inner.transact(&prepared)?;
+        if committed {
+            for (op, result) in prepared.iter().zip(results.iter()) {
+                if result.get("error").is_some() {
+                    continue;
+                }
+                let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                match op_type {
+                    "insert" => {
+                        let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let empty = serde_json::json!({});
+                        let data = op.get("data").unwrap_or(&empty);
+                        self.plugins.run_after_insert(entity, id, data, &self.auth);
+                    }
+                    "update" => {
+                        let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let empty = serde_json::json!({});
+                        let data = op.get("data").unwrap_or(&empty);
+                        self.plugins.run_after_update(entity, id, data, &self.auth);
+                    }
+                    "delete" => {
+                        let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        self.plugins.run_after_delete(entity, id, &self.auth);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok((committed, results))
     }
 
     fn search(
@@ -2592,11 +2712,80 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
-        // Delegate. Note: `transact` is a single-atomic-batch path used
-        // by the entity-API; actions don't normally call it directly,
-        // but if they do, the inner DataStore's broadcast (which the
-        // entity-API path already wires) handles each op.
-        self.inner.transact(ops)
+        // Run the atomic batch through the inner store (preserves
+        // all-or-nothing semantics). Then, if the batch committed,
+        // emit one change event per successful op. Without this,
+        // `ctx.db.transact([...])` from inside an action handler
+        // would silently bypass sync — the inner Runtime::transact
+        // never touches ChangeLog or the WS notifier.
+        //
+        // The broadcast doesn't need to be inside the atomic boundary
+        // — emitting after commit (durable) means a rollback drops
+        // every event because we never reach this branch. On
+        // commit-failure the inner returns `committed = false` and
+        // we skip the fanout entirely.
+        let (committed, results) = self.inner.transact(ops)?;
+        if !committed {
+            return Ok((committed, results));
+        }
+        for (op, result) in ops.iter().zip(results.iter()) {
+            // Inner transact reports per-op success via the `{op, id,
+            // error?}` shape that the storage layer emits — skip ops
+            // that errored even when the batch overall committed
+            // (mixed-result transacts shouldn't broadcast phantom
+            // events for the failed entries).
+            if result.get("error").is_some() {
+                continue;
+            }
+            let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+            if entity.is_empty() {
+                continue;
+            }
+            match op_type {
+                "insert" | "update" => {
+                    let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let kind = if op_type == "insert" {
+                        pylon_sync::ChangeKind::Insert
+                    } else {
+                        pylon_sync::ChangeKind::Update
+                    };
+                    // Re-read for full-row broadcast; skip on
+                    // `Ok(None)` (row concurrently deleted) so we
+                    // don't resurrect it client-side.
+                    match self.inner.get_by_id(entity, id) {
+                        Ok(Some(full)) => {
+                            self.emit(entity, id, kind, Some(&full));
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                "[AutoBroadcastStore] post-transact re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[AutoBroadcastStore] post-transact re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                e.message
+                            );
+                            let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
+                            self.emit(entity, id, kind, Some(&data));
+                        }
+                    }
+                }
+                "delete" => {
+                    let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() {
+                        continue;
+                    }
+                    self.emit(entity, id, pylon_sync::ChangeKind::Delete, None);
+                }
+                _ => {}
+            }
+        }
+        Ok((committed, results))
     }
 
     fn search(
@@ -3682,9 +3871,24 @@ mod hook_enforcing_tests {
         }
         fn transact(
             &self,
-            _ops: &[serde_json::Value],
+            ops: &[serde_json::Value],
         ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
-            Ok((true, vec![]))
+            // Iterate so the transact_fires_plugin_hooks_per_op test
+            // can assert on landed inserts.
+            let mut results = Vec::new();
+            for op in ops {
+                let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                match op_type {
+                    "insert" => {
+                        let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
+                        let id = self.insert(entity, &data)?;
+                        results.push(serde_json::json!({"op": "insert", "id": id}));
+                    }
+                    _ => results.push(serde_json::json!({"op": op_type, "error": "unsupported"})),
+                }
+            }
+            Ok((true, results))
         }
     }
 
@@ -3780,6 +3984,96 @@ mod hook_enforcing_tests {
             .expect("admin can override tenant id");
         let landed = inner.inserts();
         assert_eq!(landed[0].1["tenantId"], "tB");
+    }
+
+    /// Regression: TenantScopePlugin must fire on EACH op of a
+    /// batched `ctx.db.transact([...])` call, not just on single
+    /// `ctx.db.insert/update/delete`. Pre-fix, a non-admin caller
+    /// could smuggle a cross-tenant insert through transact because
+    /// HookEnforcingDataStore::transact just delegated to the inner
+    /// store. This test feeds a same-tenant insert and asserts the
+    /// plugin's stamp_insert ran (tenantId stamped from auth).
+    #[test]
+    fn transact_fires_plugin_hooks_per_op() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        // Same-tenant transact — caller doesn't supply tenantId, the
+        // plugin should stamp it from auth.
+        let (committed, _results) = hooked
+            .transact(&[serde_json::json!({
+                "op": "insert",
+                "entity": "Doc",
+                "data": {"title": "x"},
+            })])
+            .expect("transact succeeds");
+        assert!(committed);
+        let landed = inner.inserts();
+        assert_eq!(landed.len(), 1);
+        assert_eq!(
+            landed[0].1["tenantId"], "tA",
+            "TenantScopePlugin must stamp tenantId on transact ops"
+        );
+    }
+
+    /// Even a transact op WITHOUT a `data` field must trigger the
+    /// plugin chain. The inner Runtime::transact defaults missing
+    /// data to `{}`, so a malformed `{op:"insert", entity:"Doc"}`
+    /// would silently bypass TenantScopePlugin and plant an
+    /// unstamped row if hooks were gated on data-presence. This
+    /// regression locks in the normalization (`data` defaulted to
+    /// `{}` before the hook runs).
+    #[test]
+    fn transact_fires_hooks_on_dataless_op() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        let (committed, _) = hooked
+            .transact(&[serde_json::json!({"op": "insert", "entity": "Doc"})])
+            .expect("transact succeeds");
+        assert!(committed);
+        let landed = inner.inserts();
+        assert_eq!(landed.len(), 1, "data-less op must still land");
+        assert_eq!(
+            landed[0].1["tenantId"], "tA",
+            "TenantScopePlugin must stamp tenantId even when caller omitted data field"
+        );
+    }
+
+    /// And the cross-tenant rejection still fires: transact with a
+    /// non-admin caller trying to insert into another tenant must
+    /// fail before the inner store sees anything.
+    #[test]
+    fn transact_rejects_cross_tenant_insert() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        let result = hooked.transact(&[serde_json::json!({
+            "op": "insert",
+            "entity": "Doc",
+            "data": {"tenantId": "tB", "title": "stolen"},
+        })]);
+        let err = result.expect_err("cross-tenant transact must reject");
+        assert!(
+            err.code.contains("TENANT") || err.code.contains("CROSS_TENANT"),
+            "expected tenant error, got {}: {}",
+            err.code,
+            err.message
+        );
+        assert_eq!(
+            inner.inserts().len(),
+            0,
+            "rejected transact must not reach the inner store"
+        );
     }
 }
 
@@ -4243,6 +4537,155 @@ mod auto_broadcast_tests {
             0,
             "no event must be broadcast when the row no longer exists"
         );
+    }
+
+    /// In-memory store that implements `transact` end-to-end so the
+    /// AutoBroadcastStore wrapper has something to drive. Mirrors
+    /// the storage layer's per-op result shape `{op, id, error?}`.
+    struct TransactStore {
+        manifest: AppManifest,
+        rows: Mutex<std::collections::HashMap<(String, String), serde_json::Value>>,
+    }
+    impl DataStore for TransactStore {
+        fn manifest(&self) -> &AppManifest {
+            &self.manifest
+        }
+        fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+            let id = data
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{entity}_new"));
+            let mut row = data.clone();
+            row["id"] = serde_json::Value::String(id.clone());
+            self.rows
+                .lock()
+                .unwrap()
+                .insert((entity.into(), id.clone()), row);
+            Ok(id)
+        }
+        fn get_by_id(
+            &self,
+            entity: &str,
+            id: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(entity.into(), id.into()))
+                .cloned())
+        }
+        fn list(&self, _entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn list_after(
+            &self,
+            _entity: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn update(
+            &self,
+            _entity: &str,
+            _id: &str,
+            _data: &serde_json::Value,
+        ) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn delete(&self, _entity: &str, _id: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn lookup(
+            &self,
+            _entity: &str,
+            _field: &str,
+            _value: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn link(
+            &self,
+            _entity: &str,
+            _id: &str,
+            _relation: &str,
+            _target_id: &str,
+        ) -> Result<bool, DataError> {
+            Ok(false)
+        }
+        fn unlink(&self, _entity: &str, _id: &str, _relation: &str) -> Result<bool, DataError> {
+            Ok(false)
+        }
+        fn query_filtered(
+            &self,
+            _entity: &str,
+            _filter: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn query_graph(&self, _query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn transact(
+            &self,
+            ops: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+            // Apply each op; emit `{op, id}` per inner-store shape.
+            let mut results = Vec::new();
+            for op in ops {
+                let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                match op_type {
+                    "insert" => {
+                        let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
+                        let id = self.insert(entity, &data)?;
+                        results.push(serde_json::json!({"op": "insert", "id": id}));
+                    }
+                    _ => results.push(serde_json::json!({"op": op_type, "error": "unsupported"})),
+                }
+            }
+            Ok((true, results))
+        }
+    }
+
+    /// Regression for the ctx.db.transact gap codex flagged: action
+    /// handlers calling `ctx.db.transact([{op:"insert", entity:...,
+    /// data:...}])` must broadcast one event per successful op. Pre-
+    /// fix the wrapper delegated to inner.transact and emitted
+    /// nothing — the batch was durable but invisible to subscribers.
+    #[test]
+    fn auto_broadcast_transact_broadcasts_per_op() {
+        let manifest = minimal_manifest();
+        let inner = TransactStore {
+            manifest,
+            rows: Mutex::new(std::collections::HashMap::new()),
+        };
+        let (cap, notifier) = capturing_pair();
+        let change_log = Arc::new(pylon_sync::ChangeLog::new());
+        let store = AutoBroadcastStore::new(&inner, &change_log, &notifier);
+
+        let ops = vec![
+            serde_json::json!({"op": "insert", "entity": "Render", "data": {"status": "queued"}}),
+            serde_json::json!({"op": "insert", "entity": "Render", "data": {"status": "voicing"}}),
+        ];
+        let (committed, results) = store.transact(&ops).expect("transact succeeds");
+        assert!(committed);
+        assert_eq!(results.len(), 2);
+
+        let events = cap.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one event per successful op");
+        assert!(events
+            .iter()
+            .all(|e| matches!(e.kind, pylon_sync::ChangeKind::Insert)));
+        assert!(events.iter().all(|e| e.entity == "Render"));
+        // Full-row broadcast: each event carries `id` (because the
+        // re-read returned the stored row that has id stamped).
+        for ev in events.iter() {
+            let data = ev.data.as_ref().expect("data");
+            assert!(data["id"].is_string(), "broadcast must carry id");
+        }
     }
 }
 

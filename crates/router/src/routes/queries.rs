@@ -2,8 +2,12 @@
 //! aggregate, graph query. All non-admin paths apply read-policy
 //! gates (entity-level + per-row).
 
-use crate::{json_error, json_error_safe, parse_json, require_admin, RouterContext};
+use crate::{
+    broadcast_change_with_crdt, json_error, json_error_safe, parse_json, require_admin,
+    RouterContext,
+};
 use pylon_http::HttpMethod;
+use pylon_sync::ChangeKind;
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -31,14 +35,131 @@ pub(crate) fn handle(
             }
         };
         return Some(match ctx.store.transact(&ops) {
-            Ok((committed, results)) => (
-                if committed { 200 } else { 400 },
-                serde_json::json!({
-                    "committed": committed,
-                    "results": results,
-                })
-                .to_string(),
-            ),
+            Ok((committed, results)) => {
+                // Broadcast per-op change events after the atomic
+                // commit lands. Without this, /api/transact writes
+                // were invisible to WS / SSE subscribers — Runtime::
+                // transact (both SQLite and PG paths) writes through
+                // the storage layer without touching change_log /
+                // notifier. The atomic-batch guarantee from the
+                // inner transact() is preserved (we only broadcast
+                // after the commit succeeded); on a rollback
+                // `committed` is false and we skip the per-op fanout.
+                //
+                // Re-read each op's row so the broadcast carries the
+                // full materialized row, matching every other write
+                // path's wire shape. `Ok(None)` on re-read = the row
+                // was concurrently deleted; skip that op's broadcast.
+                if committed {
+                    for (op, result) in ops.iter().zip(results.iter()) {
+                        let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                        if entity.is_empty() {
+                            continue;
+                        }
+                        // Inner transact reports per-op success via
+                        // `{op, id, error?}` shape — skip on error.
+                        if result.get("error").is_some() {
+                            continue;
+                        }
+                        let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        if id.is_empty() && op_type != "delete" {
+                            continue;
+                        }
+                        match op_type {
+                            "insert" | "update" => {
+                                let kind = if op_type == "insert" {
+                                    ChangeKind::Insert
+                                } else {
+                                    ChangeKind::Update
+                                };
+                                match ctx.store.get_by_id(entity, id) {
+                                    Ok(Some(full)) => {
+                                        let seq = ctx.change_log.append(
+                                            entity,
+                                            id,
+                                            kind.clone(),
+                                            Some(full.clone()),
+                                        );
+                                        broadcast_change_with_crdt(
+                                            ctx.notifier,
+                                            ctx.store,
+                                            seq,
+                                            entity,
+                                            id,
+                                            kind,
+                                            Some(&full),
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        tracing::warn!(
+                                            "[/api/transact] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "[/api/transact] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                            e.message
+                                        );
+                                        let data = op
+                                            .get("data")
+                                            .cloned()
+                                            .unwrap_or(serde_json::json!({}));
+                                        let seq = ctx.change_log.append(
+                                            entity,
+                                            id,
+                                            kind.clone(),
+                                            Some(data.clone()),
+                                        );
+                                        broadcast_change_with_crdt(
+                                            ctx.notifier,
+                                            ctx.store,
+                                            seq,
+                                            entity,
+                                            id,
+                                            kind,
+                                            Some(&data),
+                                        );
+                                    }
+                                }
+                            }
+                            "delete" => {
+                                // For delete the inner transact returns
+                                // `{op: "delete", id}`. We already have
+                                // the id from the request op.
+                                let delete_id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                if delete_id.is_empty() {
+                                    continue;
+                                }
+                                let seq = ctx.change_log.append(
+                                    entity,
+                                    delete_id,
+                                    ChangeKind::Delete,
+                                    None,
+                                );
+                                broadcast_change_with_crdt(
+                                    ctx.notifier,
+                                    ctx.store,
+                                    seq,
+                                    entity,
+                                    delete_id,
+                                    ChangeKind::Delete,
+                                    None,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                (
+                    if committed { 200 } else { 400 },
+                    serde_json::json!({
+                        "committed": committed,
+                        "results": results,
+                    })
+                    .to_string(),
+                )
+            }
             Err(e) => (500, json_error(&e.code, &e.message)),
         });
     }
