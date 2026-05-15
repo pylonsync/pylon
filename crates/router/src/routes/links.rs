@@ -2,8 +2,9 @@
 //! on a row. Treated as a write (calls `check_entity_write` against
 //! the source entity).
 
-use crate::{json_error, json_error_safe, RouterContext};
+use crate::{broadcast_change_with_crdt, json_error, json_error_safe, RouterContext};
 use pylon_http::HttpMethod;
+use pylon_sync::ChangeKind;
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -46,7 +47,61 @@ pub(crate) fn handle(
         }
 
         return Some(match ctx.store.link(entity, id, relation, target_id) {
-            Ok(true) => (200, serde_json::json!({"linked": true}).to_string()),
+            Ok(true) => {
+                // Broadcast the link as a row update so sync subscribers
+                // see the FK change in real time. Without this, link
+                // mutations were invisible to WS / SSE clients until
+                // their next poll (the pre-2026-05-15 framework gap
+                // codex audit pass-3 flagged). `Ok(None)` on re-read
+                // = concurrent delete; skip the broadcast.
+                match ctx.store.get_by_id(entity, id) {
+                    Ok(Some(full)) => {
+                        let seq = ctx.change_log.append(
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(full.clone()),
+                        );
+                        broadcast_change_with_crdt(
+                            ctx.notifier,
+                            ctx.store,
+                            seq,
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(&full),
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "[link] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[link] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                            e.message
+                        );
+                        let payload = serde_json::json!({ relation: target_id });
+                        let seq = ctx.change_log.append(
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(payload.clone()),
+                        );
+                        broadcast_change_with_crdt(
+                            ctx.notifier,
+                            ctx.store,
+                            seq,
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(&payload),
+                        );
+                    }
+                }
+                (200, serde_json::json!({"linked": true}).to_string())
+            }
             Ok(false) => (404, json_error("NOT_FOUND", "Source entity not found")),
             Err(e) => (400, json_error(&e.code, &e.message)),
         });
@@ -83,7 +138,56 @@ pub(crate) fn handle(
         }
 
         return Some(match ctx.store.unlink(entity, id, relation) {
-            Ok(true) => (200, serde_json::json!({"unlinked": true}).to_string()),
+            Ok(true) => {
+                // Same `Ok(None)` skip as the link path above.
+                match ctx.store.get_by_id(entity, id) {
+                    Ok(Some(full)) => {
+                        let seq = ctx.change_log.append(
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(full.clone()),
+                        );
+                        broadcast_change_with_crdt(
+                            ctx.notifier,
+                            ctx.store,
+                            seq,
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(&full),
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "[unlink] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[unlink] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                            e.message
+                        );
+                        let payload = serde_json::json!({ relation: serde_json::Value::Null });
+                        let seq = ctx.change_log.append(
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(payload.clone()),
+                        );
+                        broadcast_change_with_crdt(
+                            ctx.notifier,
+                            ctx.store,
+                            seq,
+                            entity,
+                            id,
+                            ChangeKind::Update,
+                            Some(&payload),
+                        );
+                    }
+                }
+                (200, serde_json::json!({"unlinked": true}).to_string())
+            }
             Ok(false) => (404, json_error("NOT_FOUND", "Source entity not found")),
             Err(e) => (400, json_error(&e.code, &e.message)),
         });

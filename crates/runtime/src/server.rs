@@ -550,6 +550,7 @@ fn start_server(
         Arc::new(crate::datastore::WsSseNotifier {
             ws: Arc::clone(&ws_hub),
             sse: Arc::clone(&sse_hub),
+            auth_user: runtime.manifest().auth.user.clone(),
         });
     // Single EmailAdapter for the whole runtime: the function runner's
     // ctx.email.send hook + the per-request route handlers below both
@@ -770,8 +771,23 @@ fn start_server(
     let snapshot_fetcher: crate::ws::SnapshotFetcher = {
         let runtime_for_fetcher = Arc::clone(&runtime);
         let pe_for_fetcher = Arc::clone(&policy_engine);
+        let auth_user_for_fetcher = runtime.manifest().auth.user.clone();
         Arc::new(move |auth_ctx, entity, row_id| {
             use pylon_http::DataStore;
+            // P0 leak guard: never ship raw CRDT snapshots for the
+            // User entity, even on the initial `crdt-subscribe`
+            // bootstrap. The snapshot is a Loro doc carrying every
+            // non-id field on the row — `passwordHash`,
+            // `_secret`-prefixed columns, anything the JSON broadcast
+            // path's User projection strips. `WsSseNotifier::notify_crdt`
+            // applies the same guard for live updates; this is the
+            // matching guard for the initial subscribe payload. A
+            // denied subscribe returns None → the WS handler doesn't
+            // register the subscription, so subsequent writes also
+            // never leak.
+            if entity == auth_user_for_fetcher.entity {
+                return None;
+            }
             // Fetch the row first so the policy engine can evaluate
             // row-level predicates (`data.authorId == auth.userId`
             // etc). Missing row → deny silently; the client just
@@ -3503,6 +3519,7 @@ fn start_server(
                 let notifier = WsSseNotifier {
                     ws: Arc::clone(&wh),
                     sse: Arc::clone(&sh),
+                    auth_user: rt.manifest().auth.user.clone(),
                 };
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),

@@ -11,13 +11,13 @@ categories.workspace = true
 version.workspace = true
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.96" }
-pylon-http = { path = "../http", version = "0.3.96" }
-pylon-auth = { path = "../auth", version = "0.3.96" }
-pylon-policy = { path = "../policy", version = "0.3.96" }
-pylon-sync = { path = "../sync", version = "0.3.96" }
-pylon-functions = { path = "../functions", version = "0.3.96" }
-pylon-realtime = { path = "../realtime", version = "0.3.96" }
+pylon-kernel = { path = "../core", version = "0.3.97" }
+pylon-http = { path = "../http", version = "0.3.97" }
+pylon-auth = { path = "../auth", version = "0.3.97" }
+pylon-policy = { path = "../policy", version = "0.3.97" }
+pylon-sync = { path = "../sync", version = "0.3.97" }
+pylon-functions = { path = "../functions", version = "0.3.97" }
+pylon-realtime = { path = "../realtime", version = "0.3.97" }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

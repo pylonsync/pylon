@@ -146,21 +146,55 @@ pub(crate) fn handle(
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
                     match ctx.store.insert(entity, &data) {
                         Ok(id) => {
-                            let seq = ctx.change_log.append(
-                                entity,
-                                &id,
-                                ChangeKind::Insert,
-                                Some(data.clone()),
-                            );
-                            broadcast_change_with_crdt(
-                                ctx.notifier,
-                                ctx.store,
-                                seq,
-                                entity,
-                                &id,
-                                ChangeKind::Insert,
-                                Some(&data),
-                            );
+                            // Re-read for full-row broadcast — see
+                            // handle_insert in router/src/lib.rs.
+                            // `Ok(None)` = concurrent delete; skip
+                            // the broadcast to avoid resurrecting.
+                            match ctx.store.get_by_id(entity, &id) {
+                                Ok(Some(full)) => {
+                                    let seq = ctx.change_log.append(
+                                        entity,
+                                        &id,
+                                        ChangeKind::Insert,
+                                        Some(full.clone()),
+                                    );
+                                    broadcast_change_with_crdt(
+                                        ctx.notifier,
+                                        ctx.store,
+                                        seq,
+                                        entity,
+                                        &id,
+                                        ChangeKind::Insert,
+                                        Some(&full),
+                                    );
+                                }
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "[batch insert] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[batch insert] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                        e.message
+                                    );
+                                    let seq = ctx.change_log.append(
+                                        entity,
+                                        &id,
+                                        ChangeKind::Insert,
+                                        Some(data.clone()),
+                                    );
+                                    broadcast_change_with_crdt(
+                                        ctx.notifier,
+                                        ctx.store,
+                                        seq,
+                                        entity,
+                                        &id,
+                                        ChangeKind::Insert,
+                                        Some(&data),
+                                    );
+                                }
+                            }
                             results.push(serde_json::json!({"op": "insert", "id": id, "ok": true}));
                             succeeded += 1;
                         }
@@ -178,21 +212,54 @@ pub(crate) fn handle(
                     match ctx.store.update(entity, id, &data) {
                         Ok(updated) => {
                             if updated {
-                                let seq = ctx.change_log.append(
-                                    entity,
-                                    id,
-                                    ChangeKind::Update,
-                                    Some(data.clone()),
-                                );
-                                broadcast_change_with_crdt(
-                                    ctx.notifier,
-                                    ctx.store,
-                                    seq,
-                                    entity,
-                                    id,
-                                    ChangeKind::Update,
-                                    Some(&data),
-                                );
+                                // Re-read post-update so subscribers
+                                // get the full row state. Skip on
+                                // `Ok(None)` (concurrent delete).
+                                match ctx.store.get_by_id(entity, id) {
+                                    Ok(Some(full)) => {
+                                        let seq = ctx.change_log.append(
+                                            entity,
+                                            id,
+                                            ChangeKind::Update,
+                                            Some(full.clone()),
+                                        );
+                                        broadcast_change_with_crdt(
+                                            ctx.notifier,
+                                            ctx.store,
+                                            seq,
+                                            entity,
+                                            id,
+                                            ChangeKind::Update,
+                                            Some(&full),
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        tracing::warn!(
+                                            "[batch update] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "[batch update] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                            e.message
+                                        );
+                                        let seq = ctx.change_log.append(
+                                            entity,
+                                            id,
+                                            ChangeKind::Update,
+                                            Some(data.clone()),
+                                        );
+                                        broadcast_change_with_crdt(
+                                            ctx.notifier,
+                                            ctx.store,
+                                            seq,
+                                            entity,
+                                            id,
+                                            ChangeKind::Update,
+                                            Some(&data),
+                                        );
+                                    }
+                                }
                             }
                             results.push(serde_json::json!({"op": "update", "id": id, "ok": true}));
                             succeeded += 1;

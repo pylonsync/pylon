@@ -1404,18 +1404,58 @@ pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u
     }
     match ctx.store.insert(entity, &data) {
         Ok(id) => {
-            let seq = ctx
-                .change_log
-                .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
-            broadcast_change_with_crdt(
-                ctx.notifier,
-                ctx.store,
-                seq,
-                entity,
-                &id,
-                ChangeKind::Insert,
-                Some(&data),
-            );
+            // Re-read so the broadcast event carries the full
+            // materialized row (server-stamped defaults, plugin-added
+            // fields like tenantId, SQL DEFAULTs). Partial broadcasts
+            // trip the per-client policy filter on the WS shard
+            // worker — `auth.tenantId == row.tenantId` evaluates
+            // false against a row that's missing tenantId. See the
+            // same fix on TxStore::insert.
+            //
+            // `Ok(None)` = concurrent delete (or a trigger removed
+            // the row mid-write). Skip the broadcast; the delete
+            // will fire its own event and emitting an Insert here
+            // would resurrect a row the server already considers
+            // gone.
+            match ctx.store.get_by_id(entity, &id) {
+                Ok(Some(full)) => {
+                    let seq =
+                        ctx.change_log
+                            .append(entity, &id, ChangeKind::Insert, Some(full.clone()));
+                    broadcast_change_with_crdt(
+                        ctx.notifier,
+                        ctx.store,
+                        seq,
+                        entity,
+                        &id,
+                        ChangeKind::Insert,
+                        Some(&full),
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "[handle_insert] post-write re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[handle_insert] post-write re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        e.message
+                    );
+                    let seq =
+                        ctx.change_log
+                            .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
+                    broadcast_change_with_crdt(
+                        ctx.notifier,
+                        ctx.store,
+                        seq,
+                        entity,
+                        &id,
+                        ChangeKind::Insert,
+                        Some(&data),
+                    );
+                }
+            }
             ctx.plugin_hooks
                 .after_insert(entity, &id, &data, ctx.auth_ctx);
             (201, serde_json::json!({"id": id}).to_string())
@@ -1451,18 +1491,50 @@ pub(crate) fn handle_update(
     }
     match ctx.store.update(entity, id, &data) {
         Ok(true) => {
-            let seq = ctx
-                .change_log
-                .append(entity, id, ChangeKind::Update, Some(data.clone()));
-            broadcast_change_with_crdt(
-                ctx.notifier,
-                ctx.store,
-                seq,
-                entity,
-                id,
-                ChangeKind::Update,
-                Some(&data),
-            );
+            // Re-read post-update so the broadcast carries the full
+            // current row state, not just the partial patch. See the
+            // commentary on handle_insert above — `Ok(None)` = the
+            // row was concurrently deleted; skip the broadcast to
+            // avoid resurrecting it in client replicas.
+            match ctx.store.get_by_id(entity, id) {
+                Ok(Some(full)) => {
+                    let seq =
+                        ctx.change_log
+                            .append(entity, id, ChangeKind::Update, Some(full.clone()));
+                    broadcast_change_with_crdt(
+                        ctx.notifier,
+                        ctx.store,
+                        seq,
+                        entity,
+                        id,
+                        ChangeKind::Update,
+                        Some(&full),
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "[handle_update] post-write re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[handle_update] post-write re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        e.message
+                    );
+                    let seq =
+                        ctx.change_log
+                            .append(entity, id, ChangeKind::Update, Some(data.clone()));
+                    broadcast_change_with_crdt(
+                        ctx.notifier,
+                        ctx.store,
+                        seq,
+                        entity,
+                        id,
+                        ChangeKind::Update,
+                        Some(&data),
+                    );
+                }
+            }
             ctx.plugin_hooks
                 .after_update(entity, id, &data, ctx.auth_ctx);
             (200, serde_json::json!({"updated": true}).to_string())
@@ -1719,7 +1791,7 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
 ///
 /// Non-User entities pass through unchanged; the projection only
 /// fires when `entity == auth_user.entity`.
-pub(crate) fn maybe_project_user_row(
+pub fn maybe_project_user_row(
     entity: &str,
     row: serde_json::Value,
     auth_user: &pylon_kernel::ManifestAuthUserConfig,
