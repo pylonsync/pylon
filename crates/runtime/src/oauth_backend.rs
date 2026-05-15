@@ -79,26 +79,46 @@ impl SqliteOAuthBackend {
 
 impl OAuthStateBackend for SqliteOAuthBackend {
     fn put(&self, token: &str, state: &OAuthState) {
-        if let Ok(guard) = self.conn.lock() {
-            let _ = guard.execute(
-                &format!(
-                    "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(token) DO UPDATE SET
-                       provider = excluded.provider,
-                       callback_url = excluded.callback_url,
-                       error_callback_url = excluded.error_callback_url,
-                       pkce_verifier = excluded.pkce_verifier,
-                       expires_at = excluded.expires_at"
-                ),
-                rusqlite::params![
-                    token,
-                    state.provider,
-                    state.callback_url,
-                    state.error_callback_url,
-                    state.pkce_verifier,
-                    state.expires_at as i64,
-                ],
+        // Log failures loudly — silent state-write failure is the root
+        // of an unsolvable OAUTH_INVALID_STATE on the callback, because
+        // the callback's `take` finds nothing and the operator has no
+        // breadcrumb of why. Pre-0.3.93 the result was `let _ =`'d
+        // away entirely.
+        let guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!(
+                    token_prefix = &token[..token.len().min(8)],
+                    error = %e,
+                    "[oauth-state] SQLite mutex poisoned on put — state will not be stored, callback will 403"
+                );
+                return;
+            }
+        };
+        if let Err(e) = guard.execute(
+            &format!(
+                "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(token) DO UPDATE SET
+                   provider = excluded.provider,
+                   callback_url = excluded.callback_url,
+                   error_callback_url = excluded.error_callback_url,
+                   pkce_verifier = excluded.pkce_verifier,
+                   expires_at = excluded.expires_at"
+            ),
+            rusqlite::params![
+                token,
+                state.provider,
+                state.callback_url,
+                state.error_callback_url,
+                state.pkce_verifier,
+                state.expires_at as i64,
+            ],
+        ) {
+            tracing::error!(
+                token_prefix = &token[..token.len().min(8)],
+                error = %e,
+                "[oauth-state] SQLite put failed — state will not be stored, callback will 403 with OAUTH_INVALID_STATE"
             );
         }
     }
@@ -181,6 +201,30 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
                 .map_err(|e| format!("PG init schema: {e}"))?;
+
+            // Roundtrip probe: write a sentinel row, read it back, delete
+            // it. Catches the failure mode where `connect_pg` succeeds and
+            // schema creation succeeds but the connection then closes
+            // before the first real put — happened on pylon-cloud where
+            // INSERT silently failed and OAuth callbacks all 403'd. If
+            // this probe fails, fail boot rather than serve broken auth.
+            let probe_token = "_pylon_probe_oauth_backend";
+            client
+                .execute(
+                    &format!(
+                        "INSERT INTO {PG_TABLE} (token, provider, expires_at) VALUES ($1, '_probe', 0)
+                         ON CONFLICT (token) DO UPDATE SET expires_at = 0"
+                    ),
+                    &[&probe_token],
+                )
+                .map_err(|e| format!("PG OAuth backend probe insert: {e}"))?;
+            client
+                .execute(
+                    &format!("DELETE FROM {PG_TABLE} WHERE token = $1"),
+                    &[&probe_token],
+                )
+                .map_err(|e| format!("PG OAuth backend probe cleanup: {e}"))?;
+
             Ok(Self {
                 client: Mutex::new(client),
             })
@@ -189,26 +233,49 @@ mod pg {
 
     impl OAuthStateBackend for PostgresOAuthBackend {
         fn put(&self, token: &str, state: &OAuthState) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
-                    &format!(
-                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
-                         VALUES ($1, $2, $3, $4, $5, $6)
-                         ON CONFLICT (token) DO UPDATE SET
-                           provider = EXCLUDED.provider,
-                           callback_url = EXCLUDED.callback_url,
-                           error_callback_url = EXCLUDED.error_callback_url,
-                           pkce_verifier = EXCLUDED.pkce_verifier,
-                           expires_at = EXCLUDED.expires_at"
-                    ),
-                    &[
-                        &token,
-                        &state.provider,
-                        &state.callback_url,
-                        &state.error_callback_url,
-                        &state.pkce_verifier,
-                        &(state.expires_at as i64),
-                    ],
+            // Log failures loudly. Pre-0.3.93 this was `let _ = c.execute(...)`
+            // which threw away every error: connection dropped (Mutex<Client>
+            // holds a single PG conn with no reconnect), schema drift, network
+            // blip, anything. The state silently wasn't written; the callback
+            // then 403'd with OAUTH_INVALID_STATE and the operator had no log
+            // of the put failing. This is exactly the failure pylon-cloud hit
+            // — same machine, 5 seconds apart, callback couldn't find state
+            // that was "stored" 5 seconds earlier.
+            let mut c = match self.client.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(
+                        token_prefix = &token[..token.len().min(8)],
+                        error = %e,
+                        "[oauth-state] PG mutex poisoned on put — state will not be stored, callback will 403"
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = c.execute(
+                &format!(
+                    "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (token) DO UPDATE SET
+                       provider = EXCLUDED.provider,
+                       callback_url = EXCLUDED.callback_url,
+                       error_callback_url = EXCLUDED.error_callback_url,
+                       pkce_verifier = EXCLUDED.pkce_verifier,
+                       expires_at = EXCLUDED.expires_at"
+                ),
+                &[
+                    &token,
+                    &state.provider,
+                    &state.callback_url,
+                    &state.error_callback_url,
+                    &state.pkce_verifier,
+                    &(state.expires_at as i64),
+                ],
+            ) {
+                tracing::error!(
+                    token_prefix = &token[..token.len().min(8)],
+                    error = %e,
+                    "[oauth-state] PG put failed — state will not be stored, callback will 403 with OAUTH_INVALID_STATE"
                 );
             }
         }
@@ -219,16 +286,47 @@ mod pg {
             // and we filter the returned state by expires_at after.
             // Concurrent callbacks for the same token can't both succeed
             // because only one DELETE will return a row.
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
-                    &format!(
-                        "DELETE FROM {PG_TABLE} WHERE token = $1
-                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, expires_at"
-                    ),
-                    &[&token],
-                )
-                .ok()??;
+            let mut c = match self.client.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(
+                        token_prefix = &token[..token.len().min(8)],
+                        error = %e,
+                        "[oauth-state] PG mutex poisoned on take — callback will 403"
+                    );
+                    return None;
+                }
+            };
+            let row = match c.query_opt(
+                &format!(
+                    "DELETE FROM {PG_TABLE} WHERE token = $1
+                     RETURNING provider, callback_url, error_callback_url, pkce_verifier, expires_at"
+                ),
+                &[&token],
+            ) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    // Row genuinely missing: either the token expired and was
+                    // GC'd, was already consumed (replay), was never stored
+                    // (put failed earlier — should have logged then), or the
+                    // browser is presenting an attacker-crafted token.
+                    // Logged at warn level so the operator sees the pattern
+                    // when these stack up.
+                    tracing::warn!(
+                        token_prefix = &token[..token.len().min(8)],
+                        "[oauth-state] PG take: no row for token (expired / consumed / never stored)"
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        token_prefix = &token[..token.len().min(8)],
+                        error = %e,
+                        "[oauth-state] PG take query failed — callback will 403"
+                    );
+                    return None;
+                }
+            };
             let provider: String = row.get(0);
             let callback_url: String = row.get(1);
             let error_callback_url: String = row.get(2);

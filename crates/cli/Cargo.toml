@@ -15,13 +15,13 @@ name = "pylon"
 path = "src/main.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.93" }
-pylon-plugin = { path = "../plugin", version = "0.3.93" }
-pylon-schema = { path = "../schema", version = "0.3.93" }
-pylon-storage = { path = "../storage", version = "0.3.93", features = ["postgres-live"] }
-pylon-runtime = { path = "../runtime", version = "0.3.93" }
-pylon-staticgen = { path = "../staticgen", version = "0.3.93" }
-pylon-migrate = { path = "../migrate", version = "0.3.93" }
+pylon-kernel = { path = "../core", version = "0.3.94" }
+pylon-plugin = { path = "../plugin", version = "0.3.94" }
+pylon-schema = { path = "../schema", version = "0.3.94" }
+pylon-storage = { path = "../storage", version = "0.3.94", features = ["postgres-live"] }
+pylon-runtime = { path = "../runtime", version = "0.3.94" }
+pylon-staticgen = { path = "../staticgen", version = "0.3.94" }
+pylon-migrate = { path = "../migrate", version = "0.3.94" }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

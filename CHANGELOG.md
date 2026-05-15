@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.94](https://github.com/pylonsync/pylon/compare/v0.3.93...v0.3.94) (2026-05-15)
+
+
+### Bug Fixes
+
+* **runtime/oauth-state:** the Postgres and SQLite OAuth-state backends discarded errors on every `put` (the call was `let _ = c.execute(...)`). If the connection dropped, schema drifted, or a constraint failed, the state silently wasn't stored, the operator saw nothing in the logs, and every OAuth callback then 403'd with `OAUTH_INVALID_STATE`. Surfaced by pylon-cloud: 302 on `/login/google`, 403 on `/callback/google` 5 seconds later, same machine — state "stored" between the two never actually hit the DB.
+
+  Fix:
+  - Every `put` failure now logs `tracing::error!("[oauth-state] PG put failed — state will not be stored, callback will 403 with OAUTH_INVALID_STATE")` with the token prefix (8 chars, enough to correlate without leaking the full token) and the underlying error.
+  - Every `take` failure path is similarly logged. `Ok(None)` (genuinely missing row) logs at warn.
+  - `PostgresOAuthBackend::connect` now does a roundtrip probe (insert + delete a sentinel row) so a broken-but-not-yet-failed connection fails at boot, not on the next user's sign-in attempt.
+
+  Same `let _ =` pattern existed across other backends; this release fixes OAuth state specifically because that's the one pylon-cloud hit. Other backends will follow as we audit them.
+
 ## [0.3.93](https://github.com/pylonsync/pylon/compare/v0.3.92...v0.3.93) (2026-05-15)
 
 
