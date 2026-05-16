@@ -48,6 +48,26 @@ export async function dispatch(
 		}>
 	>("_pylonWebhookListEndpoints", { applicationId });
 
+	// `_pylonWebhookDeliver` is internal:true. Pylon framework's
+	// scheduler refuses public-action → internal-target enqueues to
+	// stop public actions becoming a router-bypass into internal
+	// helpers. Dispatch is by design called from public app actions
+	// (when an HTTP-triggered mutation wants to emit an event), so
+	// we need to grant the call admin authority before scheduling.
+	//
+	// On framework v0.3.118+ ctx.auth.elevate() exists; on older
+	// runtimes it doesn't. Guard the call so apps pinned to old
+	// pylon versions still type-check + run (they'd just get the
+	// SCHEDULE_FAILED error at the runAfter call, which is what they
+	// got before this fix landed — net no regression).
+	if (typeof ctx.auth.elevate === "function") {
+		await ctx.auth.elevate({
+			admin: true,
+			reason:
+				"webhooks plugin: scheduling _pylonWebhookDeliver (internal:true) — caller authority is the app's own dispatch trust boundary, the worker validates endpoint+tenant",
+		});
+	}
+
 	let scheduled = 0;
 	for (const ep of endpoints) {
 		if (ep.disabled) continue;

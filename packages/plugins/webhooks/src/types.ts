@@ -74,7 +74,19 @@ export interface WebhookConfig {
 
 export interface WebhookCtx {
 	env: Record<string, string | undefined>;
-	auth: { userId?: string | null; tenantId?: string | null };
+	auth: {
+		userId?: string | null;
+		tenantId?: string | null;
+		/**
+		 * Optional — only present on Pylon framework v0.3.118+. The
+		 * dispatch path uses it (when available) to elevate the
+		 * caller to admin before scheduling the internal:true
+		 * `_pylonWebhookDeliver` worker. Without elevation the
+		 * scheduler's public-to-internal gate refuses the enqueue
+		 * and no webhooks deliver — see dispatch.ts comment.
+		 */
+		elevate?: (options: { admin: boolean; reason: string }) => Promise<void>;
+	};
 	runQuery: <T>(name: string, args: Record<string, unknown>) => Promise<T>;
 	runMutation: <T = unknown>(
 		name: string,
