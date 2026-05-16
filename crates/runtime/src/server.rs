@@ -1020,7 +1020,10 @@ fn start_server(
         // this matches what the rest of the server sees.
         let request_peer_ip = resolve_client_ip(&request, trust_proxy_hops);
         let request_started_at = std::time::Instant::now();
-        let is_noisy = url == "/health" || url == "/metrics" || url.starts_with("/admin/logs/tail");
+        let is_noisy = url == "/health"
+            || url == "/health/deep"
+            || url == "/metrics"
+            || url.starts_with("/admin/logs/tail");
         if !is_noisy {
             tracing::info!("→ {} {} from {}", method.as_str(), url, request_peer_ip);
             // Stash for the response log (`record_request` reads this
@@ -1075,6 +1078,56 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 400);
+            continue;
+        }
+
+        // --- Deep health: shallow /health + a 500ms responsive-
+        // ness probe on the bun function runtime. Distinct route so
+        // operators can choose: /health for "is the listener up?"
+        // (Fly's default — fast, never blocks on app state), or
+        // /health/deep for "is the runtime responsive enough to
+        // serve real requests?". Today's incident showed why both
+        // matter: /health stayed green while every function call
+        // got killed at the 30s timeout, taking 150 functions
+        // offline during respawn — flipping Fly's probe to
+        // /health/deep makes the proxy see the thrash and route
+        // around the machine until it recovers.
+        if url == "/health/deep" && method == Method::Get {
+            let uptime = start_time.elapsed().as_secs();
+            let probe = match fn_ops_ref.as_deref() {
+                Some(ops) => ops
+                    .runner
+                    .health_probe(std::time::Duration::from_millis(500)),
+                None => Ok(()), // no runtime configured = nothing to probe
+            };
+            let (status, runtime_status, reason) = match probe {
+                Ok(()) => (200u16, "ok", String::new()),
+                Err(msg) => (503u16, "degraded", msg),
+            };
+            let body = serde_json::json!({
+                "status": runtime_status,
+                "version": "0.1.0",
+                "uptime_secs": uptime,
+                "runtime": {
+                    "alive": runtime_status == "ok",
+                    "reason": reason,
+                },
+            })
+            .to_string();
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", status);
             continue;
         }
 

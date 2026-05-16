@@ -276,6 +276,49 @@ impl FnRunner {
         }
     }
 
+    /// Deeper "is the runtime responsive?" probe — distinct from
+    /// `is_alive` which only checks the OS process. This tries to
+    /// acquire the io_lock (held for the duration of every active
+    /// function call) within `timeout`. If we can grab it, no
+    /// function is stuck holding it and the runtime is processing
+    /// requests at the expected rate. If we can't, either the
+    /// runtime is under sustained load OR a single function call is
+    /// wedged — both are interesting signals for an external health
+    /// probe.
+    ///
+    /// Used by /health/deep so Fly's health check fails when the bun
+    /// runtime is thrashing, even though the HTTP listener itself is
+    /// still up and answering /health 200. This is the failure mode
+    /// that caused the runtime-kill cycle during today's incident:
+    /// /health stayed green while every function call took 30s + got
+    /// killed, taking all 150 functions offline during respawn.
+    ///
+    /// Returns Ok(()) when the runtime is responsive within timeout,
+    /// Err(reason) when it isn't.
+    pub fn health_probe(&self, timeout: Duration) -> Result<(), String> {
+        if !self.is_alive() {
+            return Err("runtime process not alive".into());
+        }
+        let deadline = Instant::now() + timeout;
+        // Small busy-wait on try_lock. The std Mutex has no
+        // try_lock_for so we poll every 10ms. The deadline bounds the
+        // total cost at ~timeout — no risk of spinning forever.
+        loop {
+            if self.io_lock.try_lock().is_ok() {
+                // Got it; runtime isn't holding the lock right now.
+                // Lock immediately released as the guard drops.
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "io_lock contended for >{}ms — runtime may be wedged on a slow call",
+                    timeout.as_millis()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Restart the underlying process using the command/args from the original
     /// `start()` call. The supervisor uses this; callers should not need it.
     /// Returns the freshly-handshaked function definitions. On any failure
