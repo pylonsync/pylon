@@ -10,6 +10,7 @@ pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
 pub mod log;
+pub mod log_ring;
 pub mod loro_store;
 pub mod magic_code_backend;
 pub mod metrics;

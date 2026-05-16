@@ -247,6 +247,13 @@ fn start_server(
     // app ships request rows to the central workspace.
     crate::metrics::init_tinybird_logger();
 
+    // In-process request-log ring buffer. Backs the
+    // /admin/logs/tail endpoint, which the Pylon Cloud dashboard
+    // polls for live log tail instead of hitting Tinybird on every
+    // refresh. Always-on (memory cost is ~200 KB), gated only by
+    // the route's admin-auth check.
+    crate::log_ring::init_log_ring();
+
     // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by
     // default) IPv4-mapped connections to the same socket. Without
     // this, a v4-only `0.0.0.0:port` bind silently breaks Fly.io —
@@ -999,10 +1006,13 @@ fn start_server(
 
         // Per-request access log — visibility into what's hitting the
         // server, mirroring Next.js's `GET /login 200 in 27ms` style.
-        // Suppress for noisy paths (/health, /metrics) so dev-mode logs
-        // don't drown in proxy/scrape traffic. Status + duration get
-        // logged separately by `metrics.record_request` so we don't
-        // need to thread them through every response branch.
+        // Suppress for noisy paths (/health, /metrics, the log-tail
+        // endpoint) so dev-mode logs don't drown in proxy/scrape/
+        // dashboard-poll traffic. The log-tail endpoint specifically
+        // would echo itself into the very ring it serves, doubling
+        // every entry. Status + duration get logged separately by
+        // `metrics.record_request` so we don't need to thread them
+        // through every response branch.
         //
         // Per-request peer IP keeps it useful for debugging
         // multi-origin setups (CSRF rejections, rate-limit hits) —
@@ -1010,7 +1020,8 @@ fn start_server(
         // this matches what the rest of the server sees.
         let request_peer_ip = resolve_client_ip(&request, trust_proxy_hops);
         let request_started_at = std::time::Instant::now();
-        if url != "/health" && url != "/metrics" {
+        let is_noisy = url == "/health" || url == "/metrics" || url.starts_with("/admin/logs/tail");
+        if !is_noisy {
             tracing::info!("→ {} {} from {}", method.as_str(), url, request_peer_ip);
             // Stash for the response log (`record_request` reads this
             // thread-local to emit method/url/status/duration in one
@@ -1098,142 +1109,38 @@ fn start_server(
         // names, request volumes, and error rates to the public internet.
         // Dev mode stays open so local Prometheus scrapers just work.
         if url == "/metrics" && method == Method::Get {
-            if !is_dev {
-                // /metrics accepts THREE auth paths:
-                //   1. PYLON_ADMIN_TOKEN bearer  — operator / Prometheus
-                //   2. PYLON_METRICS_TOKEN bearer — Pylon Cloud's
-                //      per-project read-only path
-                //   3. Session cookie resolving to a user with
-                //      auth.user.adminField = true — lets cookie-authed
-                //      Studio admins poll /metrics from the dashboard
-                //      without holding the bare admin token.
-                let admin_bytes = admin_token.as_deref().unwrap_or("").as_bytes();
-                let metrics_token_owned = std::env::var("PYLON_METRICS_TOKEN")
-                    .ok()
-                    .unwrap_or_default();
-                let metrics_bytes = metrics_token_owned.as_bytes();
-                let bearer_ok = request.headers().iter().any(|h| {
-                    let name = h.field.as_str().as_str();
-                    if !name.eq_ignore_ascii_case("Authorization") {
-                        return false;
-                    }
-                    let token = match h.value.as_str().strip_prefix("Bearer ") {
-                        Some(t) => t,
-                        None => return false,
-                    };
-                    let admin_match = !admin_bytes.is_empty()
-                        && pylon_auth::constant_time_eq(token.as_bytes(), admin_bytes);
-                    let metrics_match = !metrics_bytes.is_empty()
-                        && pylon_auth::constant_time_eq(token.as_bytes(), metrics_bytes);
-                    admin_match || metrics_match
-                });
-                let cookie_admin_ok = if bearer_ok {
-                    false
-                } else {
-                    // Session-cookie resolution. Mirrors the auth dispatcher
-                    // path (line ~1192) but inline so we can gate /metrics
-                    // before the full request handler runs. Reads the
-                    // session token from the configured cookie name,
-                    // looks up the session, then checks the User row's
-                    // adminField (per manifest's auth.user.adminField).
-                    let cookie_token = request
-                        .headers()
-                        .iter()
-                        .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-                        .and_then(|h| {
-                            pylon_auth::extract_session_cookie(
-                                h.value.as_str(),
-                                &cookie_config.name,
-                            )
-                        });
-                    let session_user_id = cookie_token
-                        .as_deref()
-                        .and_then(|t| session_store.get(t))
-                        .map(|s| s.user_id);
-                    // Try admin_field first (cheap field read), then fall
-                    // back to PYLON_ADMIN_EMAILS so cookie-authed admins
-                    // listed there also get past /metrics. Both paths
-                    // resolve to the same boolean — this gate just needs
-                    // "is the cookie-authed user an admin?".
-                    if let Some(uid) = session_user_id.as_deref() {
-                        let user_entity = runtime.manifest().auth.user.entity.as_str();
-                        use pylon_http::DataStore as _;
-                        let row = runtime.get_by_id(user_entity, uid).ok().flatten();
-                        let admin_field = runtime
-                            .manifest()
-                            .auth
-                            .user
-                            .admin_field
-                            .as_deref()
-                            .filter(|f| !f.is_empty());
-                        let field_ok = match (admin_field, row.as_ref()) {
-                            (Some(field), Some(row)) => match row.get(field) {
-                                Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
-                                Some(v) if v.is_string() => {
-                                    let s = v.as_str().unwrap_or("").to_ascii_lowercase();
-                                    s == "true" || s == "1" || s == "admin"
-                                }
-                                _ => false,
-                            },
-                            _ => false,
-                        };
-                        if field_ok {
-                            true
-                        } else {
-                            // PYLON_ADMIN_EMAILS allowlist on verified
-                            // email. Same rules as the main dispatcher
-                            // path below: case-insensitive, requires
-                            // emailVerified, no demote on env-removal
-                            // (the dispatcher persists admin_field=true).
-                            let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
-                                .unwrap_or_default()
-                                .split(',')
-                                .map(|s| s.trim().to_ascii_lowercase())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            if allow.is_empty() {
-                                false
-                            } else if let Some(row) = row {
-                                let email = row
-                                    .get("email")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.trim().to_ascii_lowercase())
-                                    .filter(|s| !s.is_empty());
-                                let verified = row
-                                    .get("emailVerified")
-                                    .or_else(|| row.get("email_verified"))
-                                    .map(|v| match v {
-                                        serde_json::Value::Bool(b) => *b,
-                                        serde_json::Value::String(s) => {
-                                            !s.is_empty() && !s.eq_ignore_ascii_case("false")
-                                        }
-                                        _ => false,
-                                    })
-                                    .unwrap_or(false);
-                                verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
-                            } else {
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    }
-                };
-                if !bearer_ok && !cookie_admin_ok {
-                    let body = json_error(
-                        "UNAUTHORIZED",
-                        "/metrics requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",
-                    );
-                    let response = with_security_headers(
-                        Response::from_string(&body)
-                            .with_status_code(401u16)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            ),
-                    );
-                    let _ = request.respond(response);
-                    continue;
-                }
+            // /metrics accepts THREE auth paths (see
+            // `verify_admin_or_metrics_auth`):
+            //   1. PYLON_ADMIN_TOKEN bearer  — operator / Prometheus
+            //   2. PYLON_METRICS_TOKEN bearer — Pylon Cloud's
+            //      per-project read-only path
+            //   3. Session cookie → admin user — lets Studio admins
+            //      poll /metrics from the dashboard without holding
+            //      the bare admin token.
+            // Dev-mode keeps the endpoint open so local Prometheus
+            // scrapers just work.
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/metrics requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                continue;
             }
             let prefers_prometheus = request.headers().iter().any(|h| {
                 (h.field.as_str() == "Accept" || h.field.as_str() == "accept")
@@ -1310,6 +1217,91 @@ fn start_server(
                 Response::from_string(&body)
                     .with_status_code(200u16)
                     .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+
+        // --- /admin/logs/tail: live request-log tail backed by the
+        // in-process ring buffer (see `log_ring.rs`). Same auth as
+        // /metrics: admin/metrics bearer or cookie-admin. Returns
+        // entries strictly newer than `?since=<iso-8601>` (or all
+        // available when omitted), newest-first.
+        //
+        // Replaces the Pylon Cloud dashboard's pre-existing pattern of
+        // hitting Tinybird on every 2s refresh — that pattern burns
+        // ~64k Tinybird queries/day per actively-tailed project. The
+        // ring serves the same shape directly from process memory.
+        if url.starts_with("/admin/logs/tail") && method == Method::Get {
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/logs/tail requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            // Parse `since=<iso-8601>` from the query string. Anything
+            // else in the query string is ignored — `since` is the
+            // only knob the dashboard sends and treating unknown
+            // params as errors would break casual curl debugging.
+            let since: Option<String> = url.split_once('?').map(|(_, q)| q).and_then(|q| {
+                q.split('&').find_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    if k == "since" {
+                        Some(percent_decode_str(v))
+                    } else {
+                        None
+                    }
+                })
+            });
+            let entries = crate::log_ring::log_ring()
+                .map(|r| r.tail_since(since.as_deref()))
+                .unwrap_or_default();
+            // Cursor = the newest timestamp we just shipped, or echo
+            // the caller's `since` back when the tail was empty so a
+            // subsequent poll doesn't rewind. Mirrors the Tinybird-
+            // backed listProjectLogs response shape so the dashboard
+            // cursor logic is backend-agnostic.
+            let cursor: serde_json::Value = entries
+                .first()
+                .map(|e| serde_json::Value::String(e.timestamp.clone()))
+                .or_else(|| since.clone().map(serde_json::Value::String))
+                .unwrap_or(serde_json::Value::Null);
+            let body = serde_json::json!({
+                "rows": entries,
+                "cursor": cursor,
+                "configured": true,
+            })
+            .to_string();
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(200u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
                     .with_header(
                         Header::from_bytes(
                             "Access-Control-Allow-Origin",
@@ -3721,6 +3713,122 @@ fn start_server(
 
 fn json_error(code: &str, message: &str) -> String {
     pylon_router::json_error(code, message)
+}
+
+/// Verify a request carries one of: PYLON_ADMIN_TOKEN bearer,
+/// PYLON_METRICS_TOKEN bearer, or a session cookie resolving to an
+/// admin user (per `auth.user.adminField` OR PYLON_ADMIN_EMAILS
+/// allowlist + emailVerified).
+///
+/// Returns `true` if authorized. The three paths are the same set
+/// `/metrics` accepts: this helper exists so other read-only admin
+/// surfaces (e.g. `/admin/logs/tail`) can opt into the same set
+/// without re-implementing the auth shape and drifting from it.
+///
+/// Dev-mode bypass is the caller's responsibility — this helper
+/// always enforces, so test harnesses that want open access in dev
+/// must check `is_dev` before calling.
+fn verify_admin_or_metrics_auth(
+    request: &tiny_http::Request,
+    admin_token: Option<&str>,
+    cookie_config: &pylon_auth::CookieConfig,
+    session_store: &pylon_auth::SessionStore,
+    runtime: &Runtime,
+) -> bool {
+    let admin_bytes = admin_token.unwrap_or("").as_bytes();
+    let metrics_token_owned = std::env::var("PYLON_METRICS_TOKEN")
+        .ok()
+        .unwrap_or_default();
+    let metrics_bytes = metrics_token_owned.as_bytes();
+    let bearer_ok = request.headers().iter().any(|h| {
+        let name = h.field.as_str().as_str();
+        if !name.eq_ignore_ascii_case("Authorization") {
+            return false;
+        }
+        let token = match h.value.as_str().strip_prefix("Bearer ") {
+            Some(t) => t,
+            None => return false,
+        };
+        let admin_match =
+            !admin_bytes.is_empty() && pylon_auth::constant_time_eq(token.as_bytes(), admin_bytes);
+        let metrics_match = !metrics_bytes.is_empty()
+            && pylon_auth::constant_time_eq(token.as_bytes(), metrics_bytes);
+        admin_match || metrics_match
+    });
+    if bearer_ok {
+        return true;
+    }
+    // Session-cookie path. Resolves the configured cookie name to a
+    // session, looks up the User row, and checks the manifest's
+    // `auth.user.adminField` OR the PYLON_ADMIN_EMAILS allowlist
+    // (the same two paths the main dispatcher uses for
+    // `ctx.is_admin`).
+    let cookie_token = request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+        .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name));
+    let session_user_id = cookie_token
+        .as_deref()
+        .and_then(|t| session_store.get(t))
+        .map(|s| s.user_id);
+    let Some(uid) = session_user_id.as_deref() else {
+        return false;
+    };
+    let user_entity = runtime.manifest().auth.user.entity.as_str();
+    use pylon_http::DataStore as _;
+    let row = runtime.get_by_id(user_entity, uid).ok().flatten();
+    let admin_field = runtime
+        .manifest()
+        .auth
+        .user
+        .admin_field
+        .as_deref()
+        .filter(|f| !f.is_empty());
+    let field_ok = match (admin_field, row.as_ref()) {
+        (Some(field), Some(row)) => match row.get(field) {
+            Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+            Some(v) if v.is_string() => {
+                let s = v.as_str().unwrap_or("").to_ascii_lowercase();
+                s == "true" || s == "1" || s == "admin"
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if field_ok {
+        return true;
+    }
+    // PYLON_ADMIN_EMAILS allowlist (case-insensitive, emailVerified
+    // required). Matches the dispatcher's promotion rules — same
+    // user set "is admin" via either path.
+    let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allow.is_empty() {
+        return false;
+    }
+    let Some(row) = row else {
+        return false;
+    };
+    let email = row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let verified = row
+        .get("emailVerified")
+        .or_else(|| row.get("email_verified"))
+        .map(|v| match v {
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::String(s) => !s.is_empty() && !s.eq_ignore_ascii_case("false"),
+            _ => false,
+        })
+        .unwrap_or(false);
+    verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
 }
 
 /// Render the Studio login HTML form. Plain HTML (no framework) so it

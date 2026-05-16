@@ -286,8 +286,12 @@ fn flush_batch(
 }
 
 /// Cheap ISO-8601 timestamp with millisecond precision. Tinybird's
-/// `DateTime64(3)` parser accepts this format directly.
-fn iso_now_ms() -> String {
+/// `DateTime64(3)` parser accepts this format directly. Also reused
+/// by the in-process log ring (`log_ring.rs`) so the timestamp
+/// format on disk and over the wire is identical between the two
+/// log surfaces — the dashboard's cursor logic doesn't care which
+/// backend served the response.
+pub(crate) fn iso_now_ms() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)

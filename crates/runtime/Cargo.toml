@@ -14,20 +14,20 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.112" }
-pylon-http = { path = "../http", version = "0.3.112" }
-pylon-router = { path = "../router", version = "0.3.112" }
-pylon-auth = { path = "../auth", version = "0.3.112" }
-pylon-policy = { path = "../policy", version = "0.3.112" }
-pylon-plugin = { path = "../plugin", version = "0.3.112" }
-pylon-sync = { path = "../sync", version = "0.3.112" }
-pylon-studio-api = { path = "../studio_api", version = "0.3.112" }
-pylon-storage = { path = "../storage", version = "0.3.112", features = ["postgres-live"] }
-pylon-crdt = { path = "../crdt", version = "0.3.112" }
-pylon-functions = { path = "../functions", version = "0.3.112" }
-pylon-migrate = { path = "../migrate", version = "0.3.112" }
-pylon-observability = { path = "../observability", version = "0.3.112" }
-pylon-realtime = { path = "../realtime", version = "0.3.112" }
+pylon-kernel = { path = "../core", version = "0.3.113" }
+pylon-http = { path = "../http", version = "0.3.113" }
+pylon-router = { path = "../router", version = "0.3.113" }
+pylon-auth = { path = "../auth", version = "0.3.113" }
+pylon-policy = { path = "../policy", version = "0.3.113" }
+pylon-plugin = { path = "../plugin", version = "0.3.113" }
+pylon-sync = { path = "../sync", version = "0.3.113" }
+pylon-studio-api = { path = "../studio_api", version = "0.3.113" }
+pylon-storage = { path = "../storage", version = "0.3.113", features = ["postgres-live"] }
+pylon-crdt = { path = "../crdt", version = "0.3.113" }
+pylon-functions = { path = "../functions", version = "0.3.113" }
+pylon-migrate = { path = "../migrate", version = "0.3.113" }
+pylon-observability = { path = "../observability", version = "0.3.113" }
+pylon-realtime = { path = "../realtime", version = "0.3.113" }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

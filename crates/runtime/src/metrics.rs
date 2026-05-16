@@ -2,7 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::tinybird_logger::TinybirdLogger;
+use crate::log_ring::{log_ring, RingEntry};
+use crate::tinybird_logger::{iso_now_ms, TinybirdLogger};
 
 /// Rolling per-minute buckets for the request count + error count.
 /// Sized for the Studio Overview's "last 60 minutes" sparkline. Cheap
@@ -210,10 +211,23 @@ impl Metrics {
                 // the background channel. `record()` returns immediately
                 // even on backpressure (drops the event), so the cost
                 // on the request hot path is one channel try_send.
+                let path = c.url.split('?').next().unwrap_or(&c.url);
+                let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
                 if let Some(logger) = tinybird_logger() {
-                    let path = c.url.split('?').next().unwrap_or(&c.url);
-                    let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
                     logger.record(method, path, status, cpu_ms, 0, 0, "");
+                }
+                // In-process ring buffer for the /admin/logs/tail
+                // endpoint. Tinybird is the long-term store; this is
+                // what the dashboard tail polls so we don't burn the
+                // Tinybird quota on every 2s refresh.
+                if let Some(ring) = log_ring() {
+                    ring.push(RingEntry {
+                        timestamp: iso_now_ms(),
+                        method: method.to_string(),
+                        path: path.to_string(),
+                        status,
+                        cpu_ms,
+                    });
                 }
             }
             None => {
