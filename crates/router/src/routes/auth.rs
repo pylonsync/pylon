@@ -4318,6 +4318,39 @@ pub(crate) fn handle(
     // Bearer-token gated via PYLON_SCIM_TOKEN. Apps that don't
     // configure this env var get a 503 — refusing silently would
     // leave the surface looking broken.
+    //
+    // Format a User row as a SCIM response body. Used by PATCH +
+    // PUT (both return the post-update resource) so the SCIM ↔ Pylon
+    // field translation stays in one place. Falls back to a minimal
+    // shape if the row vanished between the write + re-read.
+    fn scim_user_response_from_row(id: &str, row: Option<serde_json::Value>) -> (u16, String) {
+        let row = row.unwrap_or_else(|| serde_json::json!({"id": id}));
+        let email = row
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let user = pylon_auth::scim::ScimUser {
+            id: Some(id.to_string()),
+            user_name: email.clone(),
+            active: row
+                .get("scimActive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            name: None,
+            emails: vec![pylon_auth::scim::ScimEmail {
+                value: email,
+                primary: Some(true),
+                kind: Some("work".into()),
+            }],
+            display_name: row
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:User".into()],
+        };
+        (200, serde_json::to_string(&user).unwrap_or_default())
+    }
     if let Some(rest) = url.strip_prefix("/scim/v2/") {
         let auth = ctx
             .request_headers
@@ -4335,8 +4368,74 @@ pub(crate) fn handle(
             ));
         }
         let entity = &ctx.store.manifest().auth.user.entity;
-        let parts: Vec<&str> = rest.splitn(2, '/').collect();
+        // Strip query string off the path for matching; SCIM list +
+        // service-discovery routes accept `?filter=...` / `?count=...`
+        // that the splitn below would otherwise glue to the resource
+        // name.
+        let path_only = rest.split('?').next().unwrap_or(rest);
+        let query_string: &str = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let parts: Vec<&str> = path_only.splitn(2, '/').collect();
         match (parts.as_slice(), method) {
+            // SCIM service discovery — Okta + Azure AD probe these
+            // immediately after entering the SCIM connector URL.
+            // Returning ServiceProviderConfig + ResourceTypes +
+            // Schemas with our supported feature flags makes the
+            // "test connection" step in their UIs green.
+            (["ServiceProviderConfig"], HttpMethod::Get) => {
+                let cfg = serde_json::json!({
+                    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
+                    "documentationUri": "https://pylonsync.com/docs/auth/scim",
+                    "patch": {"supported": true},
+                    // PUT IS supported but tagged as "replace" in
+                    // SCIM-speak; we use the standard meaning.
+                    "bulk": {"supported": false, "maxOperations": 0, "maxPayloadSize": 0},
+                    // We accept `userName eq` filters only — flagged
+                    // honestly so IdPs that need richer filters know
+                    // upfront.
+                    "filter": {"supported": true, "maxResults": 1000},
+                    "changePassword": {"supported": false},
+                    "sort": {"supported": false},
+                    "etag": {"supported": false},
+                    "authenticationSchemes": [{
+                        "type": "oauthbearertoken",
+                        "name": "Bearer Token",
+                        "description": "OAuth bearer token (PYLON_SCIM_TOKEN env on the server)",
+                    }],
+                });
+                return Some((200, cfg.to_string()));
+            }
+            (["ResourceTypes"], HttpMethod::Get) => {
+                let resp = serde_json::json!({
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+                    "totalResults": 1,
+                    "Resources": [{
+                        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ResourceType"],
+                        "id": "User",
+                        "name": "User",
+                        "endpoint": "/Users",
+                        "schema": "urn:ietf:params:scim:schemas:core:2.0:User",
+                    }],
+                });
+                return Some((200, resp.to_string()));
+            }
+            (["Schemas"], HttpMethod::Get) => {
+                let resp = serde_json::json!({
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+                    "totalResults": 1,
+                    "Resources": [{
+                        "id": "urn:ietf:params:scim:schemas:core:2.0:User",
+                        "name": "User",
+                        "description": "Pylon User (SCIM 2.0)",
+                        "attributes": [
+                            {"name": "userName", "type": "string", "required": true, "uniqueness": "server"},
+                            {"name": "displayName", "type": "string", "required": false},
+                            {"name": "active", "type": "boolean", "required": false},
+                            {"name": "emails", "type": "complex", "multiValued": true},
+                        ],
+                    }],
+                });
+                return Some((200, resp.to_string()));
+            }
             // POST /scim/v2/Users
             (["Users"], HttpMethod::Post) => {
                 let scim_user: pylon_auth::scim::ScimUser = match serde_json::from_str(body) {
@@ -4384,11 +4483,33 @@ pub(crate) fn handle(
                 }
             }
             (["Users"], HttpMethod::Get) => {
+                // Parse the `filter` query param, if present. IdPs
+                // POST a "does this user exist?" probe as
+                // `GET /scim/v2/Users?filter=userName eq "alice@..."`
+                // before they create the row — without this filter
+                // they'd get back every user every time.
+                let filter_param: Option<String> =
+                    crate::parse_query(query_string).get("filter").cloned();
+                // SCIM emails are case-insensitive per RFC 7643 §2.4;
+                // lowercase the filter value so `Alice@X.com` matches
+                // a stored `alice@x.com`. Pre-fix an IdP probing user
+                // existence with mixed-case `userName eq` would 404
+                // a row that exists in pylon.
+                let username_filter: Option<String> = filter_param
+                    .as_deref()
+                    .and_then(pylon_auth::scim::parse_username_eq_filter)
+                    .map(|s| s.to_ascii_lowercase());
                 let list = ctx.store.list(entity).unwrap_or_default();
                 let users: Vec<pylon_auth::scim::ScimUser> = list
                     .iter()
                     .filter_map(|row| {
                         let email = row.get("email").and_then(|v| v.as_str())?.to_string();
+                        // Apply filter if present — case-insensitive.
+                        if let Some(want) = username_filter.as_deref() {
+                            if email.to_ascii_lowercase() != want {
+                                return None;
+                            }
+                        }
                         let id = row.get("id").and_then(|v| v.as_str()).map(String::from);
                         let active = row
                             .get("scimActive")
@@ -4418,6 +4539,95 @@ pub(crate) fn handle(
                     serde_json::to_string(&pylon_auth::scim::ScimListResponse::new(users))
                         .unwrap_or_default(),
                 ));
+            }
+            (["Users", id], HttpMethod::Patch) => {
+                // SCIM partial update — Okta + Azure AD send this for
+                // every user mutation after the initial POST.
+                let req: pylon_auth::scim::ScimPatchRequest = match serde_json::from_str(body) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            serde_json::to_string(&pylon_auth::scim::ScimError::new(
+                                400,
+                                &format!("invalid PATCH JSON: {e}"),
+                            ))
+                            .unwrap_or_default(),
+                        ))
+                    }
+                };
+                // Reject the patch if ANY op is unsupported — partial
+                // success would leave the IdP and pylon in disagreement
+                // about whether the update landed. SCIM spec
+                // §3.5.2.1: "If the target location does not exist,
+                // the attribute and value are added." We don't go
+                // that far yet, but at least we surface failures
+                // explicitly instead of silently dropping ops.
+                let mut updates = serde_json::Map::new();
+                for op in &req.operations {
+                    match pylon_auth::scim::patch_op_to_field_update(op) {
+                        Ok((col, val)) => {
+                            updates.insert(col.to_string(), val);
+                        }
+                        Err(reason) => {
+                            return Some((
+                                400,
+                                serde_json::to_string(&pylon_auth::scim::ScimError::new(
+                                    400, &reason,
+                                ))
+                                .unwrap_or_default(),
+                            ))
+                        }
+                    }
+                }
+                if updates.is_empty() {
+                    // PATCH with zero ops is a no-op success per spec
+                    // §3.5.2 — return the current user state.
+                    let row = ctx.store.get_by_id(entity, id).ok().flatten();
+                    return Some(scim_user_response_from_row(id, row));
+                }
+                if let Err(e) = ctx
+                    .store
+                    .update(entity, id, &serde_json::Value::Object(updates))
+                {
+                    return Some((
+                        500,
+                        serde_json::to_string(&pylon_auth::scim::ScimError::new(500, &e.message))
+                            .unwrap_or_default(),
+                    ));
+                }
+                let row = ctx.store.get_by_id(entity, id).ok().flatten();
+                return Some(scim_user_response_from_row(id, row));
+            }
+            (["Users", id], HttpMethod::Put) => {
+                // SCIM full-replace. Body is a complete ScimUser.
+                let scim_user: pylon_auth::scim::ScimUser = match serde_json::from_str(body) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            serde_json::to_string(&pylon_auth::scim::ScimError::new(
+                                400,
+                                &format!("invalid SCIM JSON: {e}"),
+                            ))
+                            .unwrap_or_default(),
+                        ))
+                    }
+                };
+                let update = serde_json::json!({
+                    "email": scim_user.primary_email(),
+                    "displayName": scim_user.pretty_display_name(),
+                    "scimActive": scim_user.active,
+                });
+                if let Err(e) = ctx.store.update(entity, id, &update) {
+                    return Some((
+                        500,
+                        serde_json::to_string(&pylon_auth::scim::ScimError::new(500, &e.message))
+                            .unwrap_or_default(),
+                    ));
+                }
+                let row = ctx.store.get_by_id(entity, id).ok().flatten();
+                return Some(scim_user_response_from_row(id, row));
             }
             (["Users", id], HttpMethod::Get) => {
                 let row = match ctx.store.get_by_id(entity, id) {

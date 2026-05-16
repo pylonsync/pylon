@@ -6,11 +6,15 @@
 //! to read, PATCHes to update, DELETEs to deactivate. Same shape
 //! for `/scim/v2/Groups`.
 //!
-//! **Status: library only — HTTP endpoints not yet wired.**
-//! ScimUser / ScimError / check_bearer ship today as primitives so
-//! apps that want to roll their own SCIM endpoints can compose
-//! them. The pylon-shipped `/scim/v2/*` routes (POST/GET/PATCH/
-//! DELETE Users + Groups) are queued for the next wave.
+//! **Status: library + HTTP endpoints (Users only).** Pylon ships
+//! `POST /scim/v2/Users`, `GET /scim/v2/Users` (with `userName eq`
+//! filter support), `GET /scim/v2/Users/{id}`, `PATCH /scim/v2/Users/{id}`,
+//! `PUT /scim/v2/Users/{id}`, `DELETE /scim/v2/Users/{id}` (soft),
+//! plus the SCIM service-discovery trio at
+//! `/scim/v2/{ServiceProviderConfig, Schemas, ResourceTypes}` that
+//! Okta + Azure AD probe on connect. Groups + array-path PATCH
+//! filters (`emails[primary eq true].value`) deferred — most IdPs
+//! work without those.
 //!
 //! Auth: SCIM endpoints accept a static bearer token configured via
 //! `PYLON_SCIM_TOKEN`. IdPs configure this once when they connect.
@@ -50,7 +54,15 @@ pub struct ScimUser {
     /// First email is treated as primary if `primary` flag missing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emails: Vec<ScimEmail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // `displayName` (not `display_name`) on the wire — SCIM spec
+    // names every attribute in camelCase. Pre-fix the response
+    // sent `display_name`, which Okta + Azure AD silently ignored
+    // because the SCIM schema doesn't define that attribute.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "displayName"
+    )]
     pub display_name: Option<String>,
     /// SCIM schemas array — must include at least
     /// `urn:ietf:params:scim:schemas:core:2.0:User`.
@@ -165,6 +177,110 @@ impl<T> ScimListResponse<T> {
     }
 }
 
+/// SCIM PATCH request body (RFC 7644 §3.5.2). IdPs use this to
+/// partially-update a User instead of replacing the whole resource.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScimPatchRequest {
+    #[serde(default)]
+    pub schemas: Vec<String>,
+    #[serde(rename = "Operations")]
+    pub operations: Vec<ScimPatchOp>,
+}
+
+/// One operation inside a SCIM PATCH. The `op` field is one of
+/// "add" / "replace" / "remove" (case-insensitive per RFC 7644). The
+/// `path` field is a SCIM attribute name with optional dot-nested
+/// sub-attribute (`name.formatted`). For "remove" `value` is absent.
+/// Pylon doesn't yet model array-filter paths (`emails[primary eq
+/// true].value`); patches that use them get an OperationNotSupported
+/// SCIM error from the route handler.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScimPatchOp {
+    pub op: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
+/// Map a PATCH operation onto Pylon's User row fields. Returns the
+/// `(column, value)` pair to feed into a `DataStore::update` call,
+/// or `Err` for unsupported paths so the route can surface a
+/// SCIM-shaped error instead of silently dropping the op.
+///
+/// Supported paths (case-insensitive on the SCIM side, lowercased
+/// for the column lookup):
+///   - `userName`              → `email`
+///   - `displayName`           → `displayName`
+///   - `name.formatted`        → `displayName` (most IdPs send this
+///                               instead of the top-level field)
+///   - `active`                → `scimActive` (bool)
+///   - `externalId`            → `scimExternalId`
+///
+/// Anything else returns Err with the offending path so the caller
+/// can build a 400 ScimError.
+pub fn patch_op_to_field_update(
+    op: &ScimPatchOp,
+) -> Result<(&'static str, serde_json::Value), String> {
+    let raw_path = op.path.as_deref().unwrap_or_default();
+    // Reject path-filter syntax (`emails[primary eq true].value`)
+    // outright — the route surfaces this to the IdP as a typed
+    // SCIM error. Implementing it properly needs a full filter
+    // parser; deferring keeps the MVP shape predictable.
+    if raw_path.contains('[') {
+        return Err(format!(
+            "array-filter PATCH paths not supported: {raw_path}"
+        ));
+    }
+    let column = match raw_path.to_ascii_lowercase().as_str() {
+        "username" => "email",
+        "displayname" | "name.formatted" => "displayName",
+        "active" => "scimActive",
+        "externalid" => "scimExternalId",
+        other => {
+            return Err(format!("unsupported PATCH path: {other}"));
+        }
+    };
+    let kind = op.op.to_ascii_lowercase();
+    let value = match kind.as_str() {
+        "remove" => serde_json::Value::Null,
+        "add" | "replace" => op
+            .value
+            .clone()
+            .ok_or_else(|| format!("PATCH {kind} requires a value"))?,
+        other => return Err(format!("unknown PATCH op: {other}")),
+    };
+    Ok((column, value))
+}
+
+/// Parse a SCIM filter string into the subset Pylon supports.
+///
+/// Real SCIM filters (RFC 7644 §3.4.2.2) are an expression grammar
+/// with `and`/`or`/`not`, comparators (`eq`/`ne`/`co`/`sw`/`ew`/`gt`/
+/// `lt`/`pr`), and parenthesization. Implementing the full grammar
+/// is a multi-day project; instead pylon recognizes the ONE shape
+/// IdPs actually emit during day-to-day provisioning:
+///
+///   `userName eq "<value>"`     — user-existence probe before POST
+///
+/// Everything else returns None so the route falls through to an
+/// unfiltered list. Operators who need full filter support can
+/// open an issue; the 90% case (Okta, Azure AD, Workday all check
+/// userName equality first) is handled.
+pub fn parse_username_eq_filter(filter: &str) -> Option<String> {
+    let trimmed = filter.trim();
+    // Case-insensitive prefix match on `userName eq`. SCIM
+    // attribute names are case-insensitive per RFC 7643.
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = lower.strip_prefix("username eq ")?;
+    // Find the same offset in the original (preserves case of the
+    // quoted value, though for emails it doesn't matter).
+    let value_part = &trimmed[trimmed.len() - rest.len()..];
+    // Value must be quoted with double-quotes.
+    let value = value_part.strip_prefix('"')?.strip_suffix('"')?;
+    Some(value.to_string())
+}
+
 /// Validate a bearer token against `PYLON_SCIM_TOKEN`. Returns
 /// `true` only if the env var is set + the bearer matches via
 /// constant-time compare.
@@ -268,6 +384,112 @@ mod tests {
         let json = serde_json::to_string(&list).unwrap();
         assert!(json.contains("\"totalResults\":1"));
         assert!(json.contains("\"Resources\""));
+    }
+
+    #[test]
+    fn patch_op_replace_username_maps_to_email() {
+        let op = ScimPatchOp {
+            op: "replace".into(),
+            path: Some("userName".into()),
+            value: Some(serde_json::json!("new@example.com")),
+        };
+        let (col, val) = patch_op_to_field_update(&op).unwrap();
+        assert_eq!(col, "email");
+        assert_eq!(val, serde_json::json!("new@example.com"));
+    }
+
+    #[test]
+    fn patch_op_replace_name_formatted_maps_to_displayName() {
+        // Okta + Azure AD both send name.formatted instead of the
+        // top-level `displayName` field.
+        let op = ScimPatchOp {
+            op: "Replace".into(),
+            path: Some("name.formatted".into()),
+            value: Some(serde_json::json!("Alice Liddell")),
+        };
+        let (col, val) = patch_op_to_field_update(&op).unwrap();
+        assert_eq!(col, "displayName");
+        assert_eq!(val, serde_json::json!("Alice Liddell"));
+    }
+
+    #[test]
+    fn patch_op_replace_active_handles_bool() {
+        // IdPs use `active=false` for the deactivate flow.
+        let op = ScimPatchOp {
+            op: "replace".into(),
+            path: Some("active".into()),
+            value: Some(serde_json::json!(false)),
+        };
+        let (col, val) = patch_op_to_field_update(&op).unwrap();
+        assert_eq!(col, "scimActive");
+        assert_eq!(val, serde_json::json!(false));
+    }
+
+    #[test]
+    fn patch_op_remove_emits_null() {
+        let op = ScimPatchOp {
+            op: "remove".into(),
+            path: Some("displayName".into()),
+            value: None,
+        };
+        let (col, val) = patch_op_to_field_update(&op).unwrap();
+        assert_eq!(col, "displayName");
+        assert!(val.is_null());
+    }
+
+    #[test]
+    fn patch_op_unsupported_path_errors() {
+        let op = ScimPatchOp {
+            op: "replace".into(),
+            path: Some("addresses".into()),
+            value: Some(serde_json::json!([])),
+        };
+        let err = patch_op_to_field_update(&op).unwrap_err();
+        assert!(err.contains("unsupported"));
+    }
+
+    #[test]
+    fn patch_op_array_filter_path_rejected() {
+        let op = ScimPatchOp {
+            op: "replace".into(),
+            path: Some(r#"emails[primary eq true].value"#.into()),
+            value: Some(serde_json::json!("new@example.com")),
+        };
+        let err = patch_op_to_field_update(&op).unwrap_err();
+        assert!(err.contains("array-filter"));
+    }
+
+    #[test]
+    fn parse_username_eq_filter_extracts_value() {
+        // The exact shape Okta + Azure AD probe with.
+        assert_eq!(
+            parse_username_eq_filter(r#"userName eq "alice@example.com""#),
+            Some("alice@example.com".to_string())
+        );
+        // Case-insensitive attribute name per RFC 7643.
+        assert_eq!(
+            parse_username_eq_filter(r#"USERNAME EQ "bob@example.com""#),
+            Some("bob@example.com".to_string())
+        );
+        // Anything else returns None — caller falls through to
+        // unfiltered list.
+        assert_eq!(parse_username_eq_filter("active eq true"), None);
+        assert_eq!(parse_username_eq_filter(r#"userName co "alice""#), None);
+    }
+
+    #[test]
+    fn scim_patch_request_deserializes_okta_shape() {
+        let raw = r#"{
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [
+                {"op": "Replace", "path": "active", "value": false},
+                {"op": "Replace", "path": "name.formatted", "value": "Alice Liddell"}
+            ]
+        }"#;
+        let req: ScimPatchRequest = serde_json::from_str(raw).expect("parse");
+        assert_eq!(req.operations.len(), 2);
+        assert_eq!(req.operations[0].path.as_deref(), Some("active"));
+        assert_eq!(req.operations[1].path.as_deref(), Some("name.formatted"));
     }
 
     #[test]
