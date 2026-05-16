@@ -1095,9 +1095,7 @@ fn start_server(
         if url == "/health/deep" && method == Method::Get {
             let uptime = start_time.elapsed().as_secs();
             let probe = match fn_ops_ref.as_deref() {
-                Some(ops) => ops
-                    .runner
-                    .health_probe(std::time::Duration::from_millis(500)),
+                Some(ops) => ops.pool.health_probe(std::time::Duration::from_millis(500)),
                 None => Ok(()), // no runtime configured = nothing to probe
             };
             let (status, runtime_status, reason) = match probe {

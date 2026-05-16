@@ -2914,7 +2914,13 @@ use pylon_functions::trace::FnTrace;
 /// Holds an `Arc<Runtime>` so function handlers get a [`DataStore`] to
 /// operate against.
 pub struct FnOpsImpl {
-    pub runner: Arc<FnRunner>,
+    /// Pool of bun runtime processes. Top-level calls round-robin
+    /// across the pool; nested calls (action → query/mutation)
+    /// pin to the parent's runner via per-runner nested-call hooks
+    /// registered in `try_spawn_functions`. Defaults to size 1
+    /// (single-runner behaviour preserved); operators opt into
+    /// concurrency via PYLON_FN_POOL_SIZE.
+    pub pool: Arc<pylon_functions::pool::FnRunnerPool>,
     pub registry: Arc<FnRegistry>,
     pub runtime: Arc<Runtime>,
     /// Per-function rate limiter, keyed on `"<fn_name>::<identity>"`.
@@ -3007,6 +3013,17 @@ impl pylon_router::FnOps for FnOpsImpl {
             message: format!("Function \"{fn_name}\" is not registered"),
         })?;
 
+        // Pick ONE runner for this top-level call. Pinning the choice
+        // means any nested ctx.runQuery/runMutation/runAction stays
+        // on the same bun process — protocol message correlation
+        // (call_id ↔ stdio) is per-process, so a nested call routed
+        // to a different runner would deadlock the parent waiting on
+        // a response that's coming back via the wrong pipe. The
+        // nested-call hooks registered on each runner in
+        // try_spawn_functions capture that runner's Arc directly, so
+        // pinning here propagates through automatically.
+        let runner = self.pool.pick();
+
         match def.fn_type {
             FnType::Mutation => {
                 // Postgres backend: route through PostgresDataStore::with_transaction
@@ -3027,7 +3044,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     // callback so we can move it inside). Capture
                     // `request`/`auth`/`args` by move; they aren't needed
                     // again outside the closure.
-                    let runner = self.runner.clone();
+                    let runner = runner.clone();
                     let fn_type = def.fn_type;
                     let caller_internal = def.internal;
                     let fn_name_owned = fn_name.to_string();
@@ -3141,7 +3158,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                 let hook_auth = auth_info_to_context(&auth);
                 let hooked =
                     HookEnforcingDataStore::new(&tx_store, Arc::clone(&self.plugins), hook_auth);
-                let result = self.runner.call_with_caller_internal(
+                let result = runner.call_with_caller_internal(
                     &hooked,
                     fn_name,
                     def.fn_type,
@@ -3248,7 +3265,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                 let hook_auth = auth_info_to_context(&auth);
                 let hooked =
                     HookEnforcingDataStore::new(&auto, Arc::clone(&self.plugins), hook_auth);
-                self.runner.call_with_caller_internal(
+                runner.call_with_caller_internal(
                     &hooked,
                     fn_name,
                     def.fn_type,
@@ -3263,7 +3280,7 @@ impl pylon_router::FnOps for FnOpsImpl {
     }
 
     fn recent_traces(&self, limit: usize) -> Vec<FnTrace> {
-        self.runner.trace_log.recent(limit)
+        self.pool.recent_traces(limit)
     }
 
     fn check_rate_limit(&self, fn_name: &str, identity: &str) -> Result<(), u64> {
@@ -3357,12 +3374,17 @@ pub fn try_spawn_functions(
         }
     };
 
-    let runner = Arc::new(FnRunner::new(1000));
+    // Pool size from PYLON_FN_POOL_SIZE env. Default 1 preserves
+    // pre-pool behaviour so an upgrade doesn't surprise anyone with
+    // 4× memory baseline. "auto" picks cpus/2. See FnRunnerPool
+    // module docs for the design.
+    let pool_size = pylon_functions::pool::FnRunnerPool::size_from_env(1);
 
-    // start() now performs the handshake itself and returns the function
-    // definitions, so there's no separate handshake step. On any failure the
-    // child has already been killed.
-    let defs = match runner.start("bun", &["run", &runtime_script, &fn_dir]) {
+    // Spawn the first runner separately so we can capture its function
+    // defs for the registry — all runners load the same fn_dir and
+    // produce identical defs, so we only need one handshake's worth.
+    let first_runner = Arc::new(FnRunner::new(1000));
+    let defs = match first_runner.start("bun", &["run", &runtime_script, &fn_dir]) {
         Ok(defs) => defs,
         Err(e) => {
             tracing::warn!("[functions] Failed to start Bun runtime: {e}");
@@ -3372,6 +3394,29 @@ pub fn try_spawn_functions(
             return None;
         }
     };
+
+    // Spawn the remaining N-1 runners. A failure on any of these is
+    // not fatal — fall back to the runners we did get and log the
+    // shortfall. Better to run with a smaller pool than to refuse to
+    // serve at all.
+    let mut runners: Vec<Arc<FnRunner>> = Vec::with_capacity(pool_size);
+    runners.push(first_runner);
+    for i in 1..pool_size {
+        let r = Arc::new(FnRunner::new(1000));
+        match r.start("bun", &["run", &runtime_script, &fn_dir]) {
+            Ok(_) => runners.push(r),
+            Err(e) => tracing::warn!(
+                "[functions] Failed to start pool runner [{i}/{pool_size}]: {e} — continuing with {} runner(s)",
+                runners.len()
+            ),
+        }
+    }
+    if runners.len() > 1 {
+        tracing::warn!(
+            "[functions] Bun runtime pool: {} runners (PYLON_FN_POOL_SIZE)",
+            runners.len()
+        );
+    }
 
     // Hold a separate handle on the job queue for registering function
     // job handlers below, since the schedule-hook closure consumes its
@@ -3395,7 +3440,52 @@ pub fn try_spawn_functions(
     let count = defs.len();
     registry.replace_all(defs);
     tracing::warn!("[functions] Loaded {count} function(s) from {fn_dir}");
-    let registry_for_schedule = Arc::clone(&registry);
+    // Register schedule + email hooks on EVERY runner in the pool.
+    // Logic is identical across runners (calls the same downstream
+    // adapters); only the closure-captured Arcs differ per
+    // registration. Without a hook on a given runner, calls
+    // dispatched to that runner would fail at the first
+    // ctx.scheduler.runAfter or ctx.email.send with "no schedule
+    // hook installed" — the protocol expects each runner to be
+    // self-sufficient.
+    for runner in &runners {
+        install_schedule_hook(runner, &registry, Arc::clone(&job_queue));
+        install_email_hook(runner, Arc::clone(&email_adapter));
+    }
+
+    let pool = Arc::new(pylon_functions::pool::FnRunnerPool::new(runners));
+
+    let ops = Arc::new(FnOpsImpl {
+        pool: Arc::clone(&pool),
+        registry,
+        runtime,
+        fn_rate_limiter,
+        change_log,
+        notifier,
+        job_queue: Arc::clone(&job_queue_for_handlers),
+        plugins,
+    });
+
+    // Per-runner nested-call hooks. Has to be done AFTER
+    // FnOpsImpl is built because the closures upgrade a Weak<ops>
+    // to reach the runtime/notifier/plugins.
+    for runner in ops.pool.runners() {
+        install_nested_call_hook(&ops, runner);
+    }
+    register_function_job_handlers(&ops, &job_queue_for_handlers);
+    spawn_runtime_supervisor(Arc::clone(&ops));
+    Some(ops)
+}
+
+/// Register the schedule hook on a single runner. Same logic for
+/// every runner in the pool — only the closure-captured Arcs vary
+/// per registration.
+fn install_schedule_hook(
+    runner: &Arc<FnRunner>,
+    registry: &Arc<FnRegistry>,
+    job_queue: Arc<crate::jobs::JobQueue>,
+) {
+    let registry_for_schedule = Arc::clone(registry);
     runner.set_schedule_hook(Box::new(
         move |fn_name, args, delay_ms, run_at, caller| {
             // Pass-3 audit P1: refuse a non-admin public action's
@@ -3478,37 +3568,21 @@ pub fn try_spawn_functions(
             )
         },
     ));
+}
 
-    // Wire ctx.email.send → runtime's EmailAdapter. Without this hook,
-    // any function that calls ctx.email.send() gets EMAIL_SEND_FAILED
-    // with "no email transport configured" — explicit gap surface
-    // instead of a silent no-op. Apps that don't set PYLON_EMAIL_PROVIDER
-    // see the failure and know to wire one up.
-    {
-        let email = Arc::clone(&email_adapter);
-        runner.set_email_hook(Box::new(
-            move |to: &str, subject: &str, body: &str| -> Result<(), String> {
-                use pylon_router::EmailSender as _;
-                email.send(to, subject, body)
-            },
-        ));
-    }
-
-    let ops = Arc::new(FnOpsImpl {
-        runner,
-        registry,
-        runtime,
-        fn_rate_limiter,
-        change_log,
-        notifier,
-        job_queue: Arc::clone(&job_queue_for_handlers),
-        plugins,
-    });
-
-    install_nested_call_hook(&ops);
-    register_function_job_handlers(&ops, &job_queue_for_handlers);
-    spawn_runtime_supervisor(Arc::clone(&ops));
-    Some(ops)
+/// Wire `ctx.email.send` → runtime's EmailAdapter on a single
+/// runner. Without a hook on a given runner, calls dispatched to
+/// that runner that hit `ctx.email.send` get EMAIL_SEND_FAILED
+/// with "no email transport configured" — surfaces the gap
+/// explicitly instead of silent no-op. Apps that haven't set
+/// PYLON_EMAIL_PROVIDER see the failure and know to wire one up.
+fn install_email_hook(runner: &Arc<FnRunner>, email_adapter: Arc<EmailAdapter>) {
+    runner.set_email_hook(Box::new(
+        move |to: &str, subject: &str, body: &str| -> Result<(), String> {
+            use pylon_router::EmailSender as _;
+            email_adapter.send(to, subject, body)
+        },
+    ));
 }
 
 /// Bridge scheduled function calls (via `ctx.scheduler.runAfter` or
@@ -3575,11 +3649,24 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
 /// Uses a `Weak<FnOpsImpl>` to avoid keeping the ops struct alive forever
 /// through a cycle (hook stored on FnRunner ← held by FnOpsImpl). When the
 /// ops struct is dropped the hook becomes a no-op error.
-fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
+/// Register the nested-call hook on a SINGLE runner. Each runner
+/// in the pool needs its own hook because nested calls (action →
+/// query / runMutation / runAction) must stay on the parent
+/// runner — the protocol's call_id correlation is per-process
+/// stdio, so routing a nested call to a different runner would
+/// hang the parent waiting on a response via the wrong pipe.
+///
+/// The closure captures `Arc<FnRunner>` of THIS runner so every
+/// nested call originating from a parent on this runner stays
+/// here. The schedule hook + email hook can be the same closure
+/// shape on every runner (they call into shared adapters); only
+/// the nested-call hook needs the runner-specific capture.
+fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
     use pylon_functions::protocol::{AuthInfo, FnType};
 
     let weak = Arc::downgrade(ops);
-    ops.runner.set_nested_call_hook(Box::new(
+    let runner_for_hook = Arc::clone(runner);
+    runner.set_nested_call_hook(Box::new(
         move |fn_name: &str,
               fn_type: FnType,
               args: serde_json::Value,
@@ -3631,7 +3718,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                             )
                         })?;
                         let pg = &pg_backend.store;
-                        let runner = ops.runner.clone();
+                        let runner = Arc::clone(&runner_for_hook);
                         let fn_name_owned = fn_name.to_string();
                         let sched_guard = ScheduleBufferGuard::enter();
                         let _depth_guard = MutationDepthGuard::enter();
@@ -3717,11 +3804,21 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                     );
                     // Re-enter protocol without acquiring io_lock — we're
                     // already inside the outer call_inner which holds it.
-                    // Nested calls never get HTTP request metadata — that's
-                    // only meaningful for the top-level webhook invocation.
-                    let result = ops
-                        .runner
-                        .call_inner(&hooked, fn_name, fn_type, args, auth, None, None);
+                    // Use `runner_for_hook` (this runner) so the nested
+                    // call stays on the SAME bun process as the parent;
+                    // routing to a sibling would hang on call_id
+                    // correlation. Nested calls never get HTTP request
+                    // metadata — that's only meaningful for the top-level
+                    // webhook invocation.
+                    let result = runner_for_hook.call_inner(
+                        &hooked,
+                        fn_name,
+                        fn_type,
+                        args,
+                        auth,
+                        None,
+                        None,
+                    );
                     match result {
                         Ok((value, _trace)) => {
                             if let Err(e) = conn_guard.execute("COMMIT", []) {
@@ -3776,7 +3873,9 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
                         Arc::clone(&ops.plugins),
                         hook_auth,
                     );
-                    let result = ops.runner.call_inner(
+                    // Nested action/query path — same runner pinning as
+                    // the mutation branch above.
+                    let result = runner_for_hook.call_inner(
                         &hooked,
                         fn_name,
                         fn_type,
@@ -3800,25 +3899,48 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>) {
 /// trying with the capped delay. The operator sees repeated WARN logs and
 /// can investigate. Better than silently leaving functions disabled forever.
 fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
+    // Spawn one supervisor thread per runner in the pool. Each one
+    // watches its own bun child independently — a crash in one
+    // runner doesn't block respawns of the others (the pre-pool
+    // design only had one runner so one supervisor sufficed).
+    for (idx, runner) in ops.pool.runners().iter().enumerate() {
+        let ops_for_thread = Arc::clone(&ops);
+        let runner_for_thread = Arc::clone(runner);
+        let pool_size = ops.pool.size();
+        spawn_runner_supervisor(ops_for_thread, runner_for_thread, idx, pool_size);
+    }
+}
+
+fn spawn_runner_supervisor(
+    ops: Arc<FnOpsImpl>,
+    runner: Arc<FnRunner>,
+    idx: usize,
+    pool_size: usize,
+) {
     use std::time::Duration;
 
+    let name = if pool_size == 1 {
+        "pylon-fn-supervisor".to_string()
+    } else {
+        format!("pylon-fn-supervisor-{idx}")
+    };
     std::thread::Builder::new()
-        .name("pylon-fn-supervisor".into())
+        .name(name)
         .spawn(move || {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
             loop {
                 std::thread::sleep(Duration::from_secs(2));
-                if ops.runner.is_alive() {
+                if runner.is_alive() {
                     backoff = Duration::from_secs(1);
                     continue;
                 }
                 tracing::warn!(
-                    "[functions] Bun runtime is not alive — respawning after {:?}",
+                    "[functions] Bun runtime [{idx}/{pool_size}] not alive — respawning after {:?}",
                     backoff
                 );
                 std::thread::sleep(backoff);
-                match ops.runner.respawn() {
+                match runner.respawn() {
                     Ok(defs) => {
                         let count = defs.len();
                         // Replace, not merge — deleted functions must stop
