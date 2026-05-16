@@ -599,6 +599,77 @@ impl DataStore for Runtime {
         Ok(Some(snap))
     }
 
+    /// Current Loro VV for a row. Used by the WS broadcast path to
+    /// remember "what version did all subscribers last receive" so the
+    /// next write ships only an incremental delta. Postgres path
+    /// deferred — falls back to snapshot broadcasts there.
+    fn crdt_vv(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
+        if self.is_postgres() {
+            return Ok(None);
+        }
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        if !ent.crdt {
+            return Ok(None);
+        }
+        let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        self.crdt_store()
+            .current_vv_bytes(&conn, entity, row_id)
+            .map_err(|e| DataError {
+                code: "CRDT_VV_FAILED".into(),
+                message: format!("vv {entity}/{row_id}: {e}"),
+            })
+    }
+
+    /// Incremental update from `since` to the row's current state.
+    /// Returns Ok(None) on Postgres (deferred), entity-not-CRDT, or
+    /// when `since` doesn't decode as a Loro VV.
+    fn crdt_update_since(
+        &self,
+        entity: &str,
+        row_id: &str,
+        since: &[u8],
+    ) -> Result<Option<Vec<u8>>, DataError> {
+        if self.is_postgres() {
+            return Ok(None);
+        }
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        if !ent.crdt {
+            return Ok(None);
+        }
+        let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        match self
+            .crdt_store()
+            .update_since_bytes(&conn, entity, row_id, since)
+        {
+            Ok(bytes) => Ok(bytes),
+            Err(e) => {
+                // Bad VV bytes or a per-row decode failure: log + fall
+                // through to None so the caller emits a snapshot
+                // instead of crashing the write path.
+                tracing::warn!(
+                    "[crdt] update_since_bytes failed for {entity}/{row_id}: {e} — caller falls back to snapshot"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Client-pushed Loro update. Imports into the row's LoroDoc,
     /// re-projects the doc state into the materialized SQLite columns
     /// (so subsequent reads see the merged content), and returns the

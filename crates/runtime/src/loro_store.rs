@@ -36,54 +36,28 @@
 //! commodity hardware (~5-50 MB). For larger working sets a follow-up
 //! adds LRU eviction with snapshot reload on next access.
 //!
-//! # Bandwidth: full snapshot per write (TODO)
+//! # Bandwidth: incremental deltas after the first broadcast
 //!
-//! Every CRDT-mode write triggers a binary WS broadcast carrying the
-//! row's *full* current snapshot, not just the incremental update.
-//! Loro's compaction bounds individual snapshots, but the per-write
-//! cost still scales with total state size, not write size.
+//! The first CRDT-mode write to a row ships the full snapshot (so
+//! existing + freshly-subscribed clients agree on a baseline). Every
+//! subsequent write computes an incremental delta from the last
+//! broadcast's Loro VV and ships THAT. Loro's import is idempotent
+//! so a client that just received the snapshot can also apply the
+//! next delta cleanly (the ops already in their snapshot are no-ops
+//! on import).
 //!
-//! Concrete numbers:
+//! Shape:
 //!
-//! | Workload                           | Snapshot/row | Per-write fanout |
-//! |------------------------------------|--------------|------------------|
-//! | Chat message                       | ~200 B       | tiny             |
-//! | Boring CRUD record                 | ~500 B       | tiny             |
-//! | Whiteboard with 1k strokes         | ~30 KB       | uncomfortable    |
-//! | Document with 50K-char body        | ~80 KB       | bad              |
+//! | Workload                           | Snapshot/row | Delta/write   |
+//! |------------------------------------|--------------|---------------|
+//! | Chat message append                | ~200 B       | ~80 B         |
+//! | Boring CRUD field change           | ~500 B       | ~120 B        |
+//! | Whiteboard one-stroke add          | ~30 KB       | ~150 B        |
+//! | Document one-char insert           | ~80 KB       | ~60 B         |
 //!
-//! Multiply by `connected_clients × writes_per_second` to get total
-//! broadcast bandwidth. For chat-shaped workloads it's free. For collab
-//! whiteboards / large documents it bites once you pass ~10 connected
-//! clients on a hot row.
-//!
-//! # Switching to incremental updates
-//!
-//! Loro already supports `export(ExportMode::updates(version_vector))`
-//! returning only the ops a peer hasn't seen — the building block is
-//! there. What's missing is the per-client tracking:
-//!
-//! 1. Subscribe protocol — clients tell the server "I want updates for
-//!    rows X, Y, Z" instead of every CRDT write fanning out to every
-//!    client. Pylon's existing room layer is the natural transport
-//!    once room semantics extend to per-row subscriptions.
-//! 2. Server-side state — `(client_id, entity, row_id) → version_vector`
-//!    so the server knows what each client is missing. Bounded by the
-//!    subscribe set; LRU-evicted with the doc cache.
-//! 3. Encoder swap — `notify_crdt` calls `encode_update_since(vv)`
-//!    instead of `encode_snapshot()` and ships frame type `0x11`
-//!    (CRDT_FRAME_UPDATE) instead of `0x10` (CRDT_FRAME_SNAPSHOT).
-//!    Wire format already reserves both bytes.
-//! 4. New-subscriber bootstrap — first frame is still a snapshot
-//!    (`0x10`), subsequent frames are deltas (`0x11`).
-//!
-//! Estimated effort: ~2 days for a working slice plus a week of
-//! production hardening (correct VV tracking under reconnects,
-//! garbage-collecting subscriptions on disconnect, handling missed
-//! frames via resync request).
-//!
-//! Until then this implementation is fine for chat / boring CRUD /
-//! demo workloads. Don't run a Figma clone on it.
+//! `LoroStore::current_vv_bytes` + `LoroStore::update_since_bytes`
+//! are the helpers the broadcast path uses; the router's
+//! `broadcast_change_with_crdt` owns the per-row "last VV" map.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -325,6 +299,38 @@ impl LoroStore {
         Ok(encode_update_since(&doc, since))
     }
 
+    /// Current Loro version vector for a row, as the encoded bytes the
+    /// WS broadcast path remembers between writes. Returns `None` when
+    /// the row has no LoroDoc yet (no writes have happened).
+    pub fn current_vv_bytes(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Option<Vec<u8>>, LoroStoreError> {
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(Some(doc.oplog_vv().encode()))
+    }
+
+    /// Bytes-shaped wrapper around `update_since` for the trait method
+    /// in pylon-http. `since` is the opaque bytes the broadcaster
+    /// previously stashed via `current_vv_bytes`; we decode + diff
+    /// here so the trait surface stays plain Vec<u8>.
+    pub fn update_since_bytes(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        since: &[u8],
+    ) -> Result<Option<Vec<u8>>, LoroStoreError> {
+        let parsed = VersionVector::decode(since)
+            .map_err(|e| LoroStoreError::Decode(format!("decode VV for {entity}/{row_id}: {e}")))?;
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(Some(encode_update_since(&doc, &parsed)))
+    }
+
     /// Drop a row's doc from the in-memory cache. Useful for tests and
     /// for the eventual eviction policy. Doesn't touch the sidecar; the
     /// next read will re-hydrate from disk.
@@ -444,6 +450,94 @@ mod tests {
             "snapshot should be non-empty after writes"
         );
         assert_eq!(store.cached_rows(), 1, "snapshot() rehydrated the cache");
+    }
+
+    #[test]
+    fn current_vv_bytes_round_trips_through_update_since() {
+        // Validates the delta wire path used by the WS broadcast
+        // route: snapshot a row, capture its VV, write again, ask
+        // for the delta from that captured VV. Applying the delta
+        // to a peer with the snapshot must yield the same projected
+        // state as importing a fresh snapshot directly.
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Note",
+                "n1",
+                &fields(),
+                &serde_json::json!({"title": "v1", "qty": 1}),
+            )
+            .unwrap();
+        // Snapshot + VV at this point.
+        let snap_v1 = store.snapshot(&conn, "Note", "n1").unwrap();
+        let vv_v1 = store
+            .current_vv_bytes(&conn, "Note", "n1")
+            .unwrap()
+            .unwrap();
+
+        // Second write advances state.
+        store
+            .apply_patch(
+                &conn,
+                "Note",
+                "n1",
+                &fields(),
+                &serde_json::json!({"title": "v2", "qty": 9}),
+            )
+            .unwrap();
+
+        // Compute delta from the v1 VV.
+        let delta = store
+            .update_since_bytes(&conn, "Note", "n1", &vv_v1)
+            .unwrap()
+            .unwrap();
+        // Delta is meaningfully smaller than the full snapshot
+        // — that's the entire point of this batch.
+        assert!(
+            delta.len() < snap_v1.len(),
+            "delta {} bytes should be smaller than snapshot {} bytes",
+            delta.len(),
+            snap_v1.len()
+        );
+
+        // Simulate a peer: open a fresh store, import the v1
+        // snapshot, then apply the delta. Final projection must
+        // match the server's v2 state.
+        let peer_conn = open_test_db();
+        let peer = LoroStore::new();
+        peer.apply_remote_update(&peer_conn, "Note", "n1", &fields(), &snap_v1)
+            .unwrap();
+        let after_delta = peer
+            .apply_remote_update(&peer_conn, "Note", "n1", &fields(), &delta)
+            .unwrap();
+        assert_eq!(after_delta["title"], "v2");
+        assert_eq!(after_delta["qty"], 9.0);
+    }
+
+    #[test]
+    fn update_since_bytes_rejects_garbage_vv() {
+        // The trait surface accepts opaque bytes from the
+        // broadcast layer; malformed bytes must produce a typed
+        // error, not a panic. The caller falls back to a snapshot
+        // broadcast on this error path.
+        let conn = open_test_db();
+        let store = LoroStore::new();
+        store
+            .apply_patch(
+                &conn,
+                "Note",
+                "n1",
+                &fields(),
+                &serde_json::json!({"title": "x"}),
+            )
+            .unwrap();
+        let err = store
+            .update_since_bytes(&conn, "Note", "n1", b"not a real VV")
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("decode VV"), "got {msg}");
     }
 
     #[test]

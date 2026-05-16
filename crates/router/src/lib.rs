@@ -1611,8 +1611,66 @@ pub fn broadcast_change_with_crdt(
     if matches!(kind, ChangeKind::Delete) {
         return;
     }
-    if let Ok(Some(snapshot)) = store.crdt_snapshot(entity, row_id) {
-        notifier.notify_crdt(entity, row_id, &snapshot);
+    // Per-row "last VV broadcast" map. Pre-fix every CRDT write
+    // sent the full snapshot (~200-500 bytes after compaction).
+    // After: first broadcast for a row still ships the snapshot
+    // (so new + existing subscribers all agree on a baseline),
+    // but every subsequent write ships an incremental delta from
+    // the last broadcast's VV — typically 50-150 bytes for a
+    // single field change. Loro's import is idempotent so a new
+    // subscriber that just received the snapshot can also apply
+    // the next delta (the ops already in their snapshot are no-
+    // ops on import).
+    //
+    // The map is process-wide because the notifier surface
+    // doesn't carry per-row state, but the data is small (key =
+    // ~40 bytes for entity+row id, value = ~10s of bytes for a
+    // postcard-encoded VV) so a long-running pylon with tens of
+    // thousands of CRDT rows holds < 1MB here.
+    use std::sync::Mutex;
+    static LAST_VV: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<(String, String), Vec<u8>>>,
+    > = std::sync::OnceLock::new();
+    let table = LAST_VV.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let key = (entity.to_string(), row_id.to_string());
+    let prev_vv: Option<Vec<u8>> = table.lock().ok().and_then(|m| m.get(&key).cloned());
+
+    let (frame_payload, fell_back_to_snapshot) = match prev_vv {
+        Some(since) => match store.crdt_update_since(entity, row_id, &since) {
+            Ok(Some(delta)) => (Some(delta), false),
+            // Backend doesn't support deltas (PG today) OR no
+            // bytes returned — fall back to snapshot.
+            _ => match store.crdt_snapshot(entity, row_id) {
+                Ok(Some(snap)) => (Some(snap), true),
+                _ => (None, true),
+            },
+        },
+        None => match store.crdt_snapshot(entity, row_id) {
+            Ok(Some(snap)) => (Some(snap), true),
+            _ => (None, true),
+        },
+    };
+
+    if let Some(payload) = frame_payload {
+        // notify_crdt takes (entity, row_id, snapshot|delta) — the
+        // wire framing is owned by the notifier, but it always
+        // ships frame type 0x10 (snapshot) today. Pylon's
+        // client-side Loro import treats 0x10 and 0x11 the same
+        // (both go through `doc.import(bytes)` which is shape-
+        // tolerant), so the wire-frame type byte is informational
+        // for now — a future binary protocol revision can switch
+        // on it. We pass the bytes through unchanged; the
+        // delta-vs-snapshot decision was made here.
+        let _ = fell_back_to_snapshot; // intentionally unused — see note above
+        notifier.notify_crdt(entity, row_id, &payload);
+        // Stash the post-write VV so the NEXT write's delta is
+        // computed against this point. Skip the update on
+        // backends that don't support VV tracking (returns None).
+        if let Ok(Some(new_vv)) = store.crdt_vv(entity, row_id) {
+            if let Ok(mut m) = table.lock() {
+                m.insert(key, new_vv);
+            }
+        }
     }
 }
 

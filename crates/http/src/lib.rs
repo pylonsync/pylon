@@ -247,6 +247,41 @@ pub trait DataStore: Send + Sync {
         Ok(None)
     }
 
+    /// Return the row's current Loro version vector as opaque bytes
+    /// (Loro's own `VersionVector::encode` format). Pylon's WS broadcast
+    /// path uses this to remember "what state did all subscribers last
+    /// receive?" so the next write can ship an incremental delta
+    /// against that vector instead of a full snapshot.
+    ///
+    /// Default impl returns Ok(None) — the WS broadcast falls back to
+    /// the snapshot path. Backends with real LoroDoc access override.
+    fn crdt_vv(&self, _entity: &str, _row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
+        Ok(None)
+    }
+
+    /// Return the incremental Loro update bytes that advance a peer
+    /// at version `since` to the row's current state. `since` is bytes
+    /// previously returned from `crdt_vv` (or from a peer's own
+    /// `oplog_vv().encode()`).
+    ///
+    /// Returns Ok(None) when:
+    ///   - the entity isn't CRDT
+    ///   - the row doesn't exist
+    ///   - the backend doesn't support deltas (override required)
+    ///
+    /// The bytes are suitable for direct `LoroDoc::import(...)` on the
+    /// receiving side and are typically MUCH smaller than a snapshot
+    /// for incremental edits (a single-field update is ~50-150 bytes
+    /// vs ~200-500 bytes for the compacted snapshot).
+    fn crdt_update_since(
+        &self,
+        _entity: &str,
+        _row_id: &str,
+        _since: &[u8],
+    ) -> Result<Option<Vec<u8>>, DataError> {
+        Ok(None)
+    }
+
     /// Apply a binary CRDT update from a client to the row's LoroDoc,
     /// project the new state into the SQLite materialized view, and
     /// return the post-merge snapshot bytes (so the caller can
