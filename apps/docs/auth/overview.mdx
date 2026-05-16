@@ -27,8 +27,8 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Stripe billing | Hosted Checkout sessions + signed webhook verification. Set `PYLON_STRIPE_API_KEY` + `PYLON_STRIPE_WEBHOOK_SECRET` |
 | Phone / SMS sign-in | E.164-normalized magic codes via Twilio (or any SmsSender). Endpoints under `/api/auth/phone/...` |
 | SIWE (Sign-In With Ethereum) | EIP-4361 + k256 ECDSA recovery + Keccak-256. Endpoints: `GET /api/auth/siwe/nonce`, `POST /api/auth/siwe/verify`. |
-| OIDC Provider | Discovery doc + JWKS endpoints (`/.well-known/openid-configuration`, `/oidc/jwks`) — `PYLON_OIDC_JWKS_RSA_N/_E` to publish RSA public key. |
-| SCIM 2.0 | `/scim/v2/Users` (POST/GET/DELETE) — bearer auth via `PYLON_SCIM_TOKEN`. SCIM `active=false` → soft delete. |
+| OIDC Provider | Full auth-code + PKCE flow: `/.well-known/openid-configuration`, `/oidc/jwks`, `/oidc/authorize`, `/oidc/token`, `/oidc/userinfo`. RS256 id_tokens signed with an auto-generated, disk-persisted RSA-2048 key. Clients registered via `PYLON_OIDC_CLIENTS` JSON env. |
+| SCIM 2.0 | `/scim/v2/Users` POST/GET/PATCH/PUT/DELETE with `userName eq "..."` filter support + `/scim/v2/{ServiceProviderConfig, Schemas, ResourceTypes}` discovery — bearer auth via `PYLON_SCIM_TOKEN`. SCIM `active=false` → soft delete. |
 | TOTP / 2FA | Via the `totp` plugin |
 | JWT validation | Via the `jwt` plugin (for accepting tokens minted elsewhere) |
 | Guest sessions | Stable anonymous IDs for cart/preference state pre-login |

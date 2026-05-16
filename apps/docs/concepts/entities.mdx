@@ -74,10 +74,16 @@ Current field behavior:
 | `int`, `float`, `bool` | LWW scalar register |
 | `richtext` | `LoroText` |
 | `.crdt("text")` on `string` / `richtext` | `LoroText` |
+| `.crdt("counter")` on `int` / `float` | `LoroCounter` — patch value is the DELTA to apply; concurrent increments add up (`+1` from two peers → `+2`, not LWW-stomp) |
+| `.crdt("list")` | `LoroList` — patch is the target array; first write ships snapshot, subsequent ship deltas |
+| `.crdt("movable-list")` | `LoroMovableList` — same wire shape as `list`; move-op API for true reordering is a future iteration |
+| `.crdt("tree")` | `LoroTree` — patch is `[{id, parent, ...meta}]`; reconcile maps user-supplied id → TreeID so concurrent moves merge |
 | `.crdt("lww")` | Explicit LWW |
 
-`counter`, `list`, `movable-list`, and `tree` annotations are reserved for
-future Loro containers but are not implemented yet.
+All five CRDT kinds (`text`, `counter`, `list`, `movable-list`, `tree`) are
+implemented end-to-end as of v0.3.100 — broadcasts ship the full Loro snapshot
+on first write per row, then incremental deltas (v0.3.105 SQLite, v0.3.107
+Postgres) keyed off the last-broadcast version vector.
 
 ## Indexes
 

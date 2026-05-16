@@ -7,16 +7,23 @@ SCIM 2.0 is the standard "your IdP creates and deactivates users in your app aut
 
 ## What's implemented
 
-Scope is **deliberately narrow**: User provisioning only. Not Groups, not Bulk, not the full SCIM filter grammar. Enough to plug into Okta's "Provisioning" tab and have new hires automatically appear, departed employees automatically deactivate.
+Scope is **deliberately narrow**: User provisioning only. Not Groups, not Bulk, not the full SCIM filter grammar (one shape supported — `userName eq "..."`, the one IdPs actually probe with). Enough to plug into Okta's or Azure AD's "Provisioning" tab and have new hires automatically appear, departed employees automatically deactivate.
 
 | Endpoint | Method | Behavior |
 | --- | --- | --- |
+| `/scim/v2/ServiceProviderConfig` | GET | Capabilities (patch supported, filter supported, no bulk, no etag, etc.) |
+| `/scim/v2/ResourceTypes` | GET | Lists the single supported resource type (`User`) |
+| `/scim/v2/Schemas` | GET | The User schema |
 | `/scim/v2/Users` | POST | Create a User from the SCIM-shaped payload |
-| `/scim/v2/Users` | GET | List all users (returns `ScimListResponse`) |
+| `/scim/v2/Users` | GET | List all users, optionally filtered by `?filter=userName eq "..."` (case-insensitive per RFC 7643) |
 | `/scim/v2/Users/:id` | GET | Get a User by id |
+| `/scim/v2/Users/:id` | PATCH | Partial update; supports paths `userName`, `displayName`, `name.formatted`, `active`, `externalId`. Atomic — any unsupported op fails the whole request (no silent partial application) |
+| `/scim/v2/Users/:id` | PUT | Full-replace |
 | `/scim/v2/Users/:id` | DELETE | Soft-delete (sets `scimActive: false`); returns 204 |
 
 Note these are mounted at the **root path** `/scim/v2/...`, NOT under `/api/auth/`. Most IdPs expect SCIM at a top-level path.
+
+Array-filter PATCH paths (`emails[primary eq true].value`) are explicitly rejected — IdPs that need them should fall back to the equivalent PUT request.
 
 ## Schema
 

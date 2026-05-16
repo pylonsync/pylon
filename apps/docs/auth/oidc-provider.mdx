@@ -1,80 +1,126 @@
 ---
 title: OIDC provider
-description: "Pylon as an OIDC IdP for other systems — discovery doc + JWKS endpoints, optional RSA key publication."
+description: "Pylon as a full OpenID Connect identity provider — auth-code flow with PKCE, RS256 id_tokens, JWKS, userinfo."
 ---
 
-Pylon can be the **identity provider** other systems sign into through. Apps that ship with their own internal tools, microservices, or third-party SaaS that accepts "any OIDC IdP" point at Pylon's discovery doc and treat your Pylon-issued JWTs as the identity layer.
+Pylon can be the **identity provider** other systems sign into through. Apps that ship with their own internal tools, microservices, or third-party SaaS that accepts "any OIDC IdP" point at Pylon's discovery doc and treat the id_tokens Pylon issues as the identity layer.
 
 ## What ships
 
-- **`/.well-known/openid-configuration`** — standard OIDC discovery doc, root-mounted (no `/api/` prefix) so third-party clients find it without configuration tweaks.
-- **`/oidc/jwks`** — JWKS endpoint that publishes the RSA public key when configured.
-
-The token issuance side reuses the existing JWT mint at [`/api/auth/jwt`](/auth/jwt). HS256 is the default; for downstream verification by third parties, switch to RSA and publish the public key via JWKS.
-
-## Endpoints
+The full auth-code + PKCE flow:
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
 | `/.well-known/openid-configuration` | GET | none | OIDC discovery document |
-| `/oidc/jwks` | GET | none | Public-key JWKS (empty when only HS256 is configured) |
+| `/oidc/jwks` | GET | none | RS256 public key (auto-generated, persisted) |
+| `/oidc/authorize` | GET | session cookie | Initiate auth-code flow |
+| `/oidc/token` | POST | client_id + secret + PKCE | Exchange code → id_token + access_token |
+| `/oidc/userinfo` | GET | Bearer access_token | Standard OIDC user claims |
 
-## Discovery document
+## Security stance
 
-```bash
-curl https://your-app/.well-known/openid-configuration
-```
-
-Pylon emits the standard OIDC discovery doc with `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, supported scopes, response types, signing algorithms. The issuer is sourced in priority order:
-
-1. `PYLON_OIDC_ISSUER` env var (e.g. `https://auth.your-app.com`)
-2. Request's `Host` header → `https://<host>`
-3. `http://localhost:4321` (dev fallback)
-
-In production, **set `PYLON_OIDC_ISSUER` explicitly**. Relying on `Host` works fine until you front Pylon with a reverse proxy that doesn't forward it the way you expect.
-
-## JWKS endpoint
-
-```bash
-curl https://your-app/oidc/jwks
-```
-
-Returns:
-
-- **`{ "keys": [] }`** when Pylon is configured with HS256 only (the default). HS256 is symmetric — there's no public key to publish. This is a correct OIDC response, not a misconfiguration; it means "no asymmetric verification keys are published." Downstream services that need to validate Pylon-issued JWTs must share the HS256 secret out-of-band.
-
-- **`{ "keys": [...] }`** with a single RSA key when `PYLON_OIDC_JWKS_RSA_N` is set. The exponent defaults to `AQAB` (65537), the key id defaults to `pylon-default`.
-
-To publish an RSA public key:
-
-```bash
-PYLON_OIDC_JWKS_RSA_N=<base64url-encoded RSA modulus>
-PYLON_OIDC_JWKS_RSA_E=AQAB              # optional; defaults to standard 65537
-PYLON_OIDC_JWKS_KID=pylon-2026-01       # optional key id; defaults to "pylon-default"
-```
-
-Note: setting these env vars only publishes the public key. It does **not** flip JWT signing from HS256 to RS256 — Pylon still mints HS256 by default. The intent is for apps that handle their own RS256 minting externally (e.g. via a sidecar signer) to publish the matching public key through Pylon's JWKS endpoint so consumers verify against a stable URL.
+- **PKCE S256 is REQUIRED** for every authorize request — `plain` is rejected per OAuth 2.1, no-PKCE is rejected outright.
+- **redirect_uri** must match the client's registered list by **exact string compare** (no path coercion, suffix matching, or scheme upgrades — the textbook OIDC open-redirect footgun).
+- **client_id + client_secret** are constant-time compared. Public clients (no secret in registration) authenticate via PKCE alone.
+- **id_token claims**: `iss`, `sub`, `aud`, `exp` (10 min), `iat`, `nonce` (when supplied at /authorize), `email`, `email_verified`, `name` (subject to requested scopes).
+- **access_token** is opaque random (32-byte base64url), TTL 1 hour.
+- **refresh_token is NOT issued.** Clients re-do the auth code flow when the access_token expires — keeps the surface small and drops a class of long-lived bearer leak.
 
 ## Configuration
 
 ```bash
-PYLON_OIDC_ISSUER=https://auth.your-app.com    # advertised in discovery doc
-PYLON_OIDC_JWKS_RSA_N=<base64url modulus>      # optional — publishes RSA public key
-PYLON_OIDC_JWKS_RSA_E=AQAB                     # optional
-PYLON_OIDC_JWKS_KID=pylon-default              # optional
+PYLON_OIDC_ISSUER=https://auth.your-app.com
+PYLON_OIDC_CLIENTS='[{"client_id":"docs-portal","client_secret":"shh-1234","redirect_uris":["https://docs.example.com/oauth/callback"]}]'
+
+# Optional — defaults to <data_dir>/oidc-signing-key.pem with 0600 perms
+PYLON_OIDC_KEY_PATH=/var/lib/pylon/oidc-signing-key.pem
+
+# Optional — defaults to /login, the dashboard's own login page
+PYLON_LOGIN_URL=/login
 ```
 
-## Scope
+`PYLON_OIDC_CLIENTS` is a JSON array of `{client_id, client_secret?, redirect_uris[]}`. `client_secret` is optional — omit it for SPAs / native apps that authenticate via PKCE only.
 
-Pylon's OIDC provider surface is **discovery + JWKS only** today. Authorization-code flow, dynamic client registration, and token endpoint are not implemented. The recommended pattern is:
+## Signing key
 
-1. Users sign in to your Pylon-backed app via any built-in method (magic code, password, OAuth, passkey, etc.).
-2. Your app calls [`/api/auth/jwt`](/auth/jwt) to mint a JWT for the user.
-3. The JWT is passed to downstream services that verify it against your shared HS256 secret OR a published RSA public key via this JWKS endpoint.
+On first start (with `PYLON_OIDC_ISSUER` set), Pylon generates a 2048-bit RSA key, persists it as PKCS#8 PEM at `PYLON_OIDC_KEY_PATH`, and chmods the file to **0600** so it isn't world-readable. Same key reused across restarts so issued id_tokens stay verifiable.
 
-If you need the full `/authorize` + `/token` flow with Pylon-issued auth codes, that's not currently supported — use [per-org SSO](/auth/sso) in reverse (Pylon → external IdP) or contribute the implementation upstream.
+The JWKS endpoint publishes the matching public key with:
+- `kid` = first 16 hex chars of SHA-256(modulus) — stable across restarts, changes on rotation
+- `kty: "RSA"`, `alg: "RS256"`, `use: "sig"`
+- `n` + `e` = base64url-no-pad-encoded big-endian integers
+
+```bash
+curl https://auth.your-app.com/.well-known/openid-configuration
+curl https://auth.your-app.com/oidc/jwks
+```
+
+## Auth-code flow
+
+A typical end-to-end exchange:
+
+```
+# 1. Client redirects user's browser to /authorize.
+https://auth.your-app.com/oidc/authorize?
+  response_type=code
+  &client_id=docs-portal
+  &redirect_uri=https://docs.example.com/oauth/callback
+  &scope=openid+email+profile
+  &state=<csrf-token>
+  &nonce=<id-token-binding>
+  &code_challenge=<S256(verifier)>
+  &code_challenge_method=S256
+
+# 2. User logs in (Pylon's /login handles whichever method they use).
+#    Pylon redirects browser back to redirect_uri with ?code=...&state=...
+
+# 3. Client exchanges code at /token.
+POST /oidc/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=<auth-code>
+&redirect_uri=https://docs.example.com/oauth/callback
+&client_id=docs-portal
+&client_secret=shh-1234
+&code_verifier=<original-PKCE-verifier>
+
+# 200 OK
+{
+  "access_token": "...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "id_token": "<RS256-signed JWT>",
+  "scope": "openid email profile"
+}
+
+# 4. Client calls /userinfo with the access_token.
+GET /oidc/userinfo
+Authorization: Bearer <access_token>
+
+# 200 OK
+{
+  "sub": "user_abc123",
+  "email": "alice@example.com",
+  "email_verified": true,
+  "name": "Alice Liddell"
+}
+```
+
+## Userinfo claim projection
+
+`/oidc/userinfo` projects the User row through the same `auth.user.expose` / `auth.user.hide` config that protects `/api/auth/session` from leaking secrets. `passwordHash` and underscore-prefixed fields never reach a downstream service through userinfo.
+
+Claims returned per scope:
+
+| Scope     | Claims          |
+| --------- | --------------- |
+| `openid`  | `sub`           |
+| `email`   | `email`, `email_verified` |
+| `profile` | `name` (from `displayName` or `name`) |
 
 ## Where to go next
 
-- **[JWT sessions](/auth/jwt)** — minting the tokens downstream services verify
+- **[JWT sessions](/auth/jwt)** — minting the tokens app-internal services verify
 - **[SSO](/auth/sso)** — the other direction (external IdPs signing INTO Pylon)
+- **[Sessions](/auth/sessions)** — the cookie that gates `/oidc/authorize`
