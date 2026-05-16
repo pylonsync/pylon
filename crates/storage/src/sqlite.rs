@@ -73,19 +73,60 @@ pub fn create_table_sql(entity_name: &str, fields: &[FieldSpec]) -> String {
 }
 
 /// Generate an ALTER TABLE ADD COLUMN statement.
+///
+/// SQLite parity with Postgres ADD COLUMN: required scalar fields
+/// get `NOT NULL DEFAULT <typed-zero-value>` so the migration runs
+/// on a non-empty table (SQLite refuses NOT NULL without a default
+/// when there are existing rows). Reference types (`id(X)`) can't
+/// have a sensible default — for those required fields we emit a
+/// nullable column and log a warning so the operator writes a
+/// real backfill.
+///
+/// Mirrors the Postgres handler at crates/storage/src/postgres.rs —
+/// see the longer commentary there.
 pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     let col_type = sqlite_column_type(&field.field_type);
-    // SQLite ALTER TABLE ADD COLUMN does not support NOT NULL without a default for existing rows.
-    // For optional fields, omit NOT NULL. For required fields, we still omit NOT NULL here
-    // because SQLite requires a default value for ADD COLUMN NOT NULL.
     let unique = if field.unique { " UNIQUE" } else { "" };
+    let null_default = sqlite_add_column_null_default(field);
     format!(
-        "ALTER TABLE {} ADD COLUMN {} {}{}",
+        "ALTER TABLE {} ADD COLUMN {} {}{}{}",
         quote_ident(entity_name),
         quote_ident(&field.name),
         col_type,
+        null_default,
         unique,
     )
+}
+
+/// SQLite parity with the Postgres equivalent at
+/// crates/storage/src/postgres.rs::pg_add_column_null_default.
+/// Defaults:
+///   - string / richtext / datetime → ''
+///   - int / bool                   → 0 (bool stored as INTEGER)
+///   - float                        → 0
+///   - id(X) when required          → NULLABLE + warning
+fn sqlite_add_column_null_default(field: &FieldSpec) -> String {
+    if field.optional {
+        return String::new();
+    }
+    let default_expr: Option<&'static str> = match field.field_type.as_str() {
+        "string" | "richtext" | "datetime" => Some("''"),
+        "int" | "bool" => Some("0"),
+        "float" => Some("0"),
+        ref t if t.starts_with("id(") => None,
+        _ => Some("''"),
+    };
+    match default_expr {
+        Some(expr) => format!(" NOT NULL DEFAULT {expr}"),
+        None => {
+            tracing::warn!(
+                "[sqlite-migrate] field {} is required + reference-typed ({}); ADD COLUMN emitted as NULLABLE — write a backfill before relying on NOT NULL enforcement on existing rows",
+                field.name,
+                field.field_type
+            );
+            String::new()
+        }
+    }
 }
 
 /// Generate a CREATE INDEX statement. When `where_clause` is `Some`,
@@ -957,6 +998,71 @@ mod tests {
         };
         let sql = add_column_sql("User", &field);
         assert_eq!(sql, "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT");
+    }
+
+    #[test]
+    fn add_column_required_string_gets_not_null_default() {
+        // Parity with the Postgres add_column path. Required fields
+        // added via migration now enforce NOT NULL on the new column
+        // AND default existing rows to '' so the ADD COLUMN doesn't
+        // fail on a non-empty table.
+        let field = FieldSpec {
+            name: "status".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"status\" TEXT NOT NULL DEFAULT ''"
+        );
+    }
+
+    #[test]
+    fn add_column_required_int_defaults_zero() {
+        let field = FieldSpec {
+            name: "count".into(),
+            field_type: "int".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"count\" INTEGER NOT NULL DEFAULT 0"
+        );
+    }
+
+    #[test]
+    fn add_column_required_bool_defaults_zero() {
+        // SQLite stores bool as INTEGER; 0 = false. Postgres uses
+        // BOOLEAN + FALSE; both end up at the same logical default.
+        let field = FieldSpec {
+            name: "active".into(),
+            field_type: "bool".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"active\" INTEGER NOT NULL DEFAULT 0"
+        );
+    }
+
+    #[test]
+    fn add_column_required_reference_stays_nullable() {
+        let field = FieldSpec {
+            name: "orgId".into(),
+            field_type: "id(Organization)".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Project", &field);
+        // Reference types can't default to a sensible foreign id —
+        // we leave the column nullable + log a warning. Matches PG.
+        assert_eq!(sql, "ALTER TABLE \"Project\" ADD COLUMN \"orgId\" TEXT");
     }
 
     #[test]

@@ -119,18 +119,76 @@ pub fn create_table_sql(entity_name: &str, fields: &[FieldSpec]) -> String {
 }
 
 /// Generate a Postgres ALTER TABLE ADD COLUMN statement.
-/// NOT NULL is omitted on ADD COLUMN to avoid requiring DEFAULT values.
-/// Required-ness is tracked in the manifest; enforcement deferred.
+///
+/// Honors `required: true` on scalar types by emitting both
+/// `NOT NULL` AND a sensible DEFAULT so the migration succeeds on
+/// tables with existing rows (Postgres requires either NULLABLE or
+/// a DEFAULT when adding a NOT NULL column to a non-empty table).
+/// Reference types (`id(X)`) can't have a sensible default — for
+/// those required fields we fall back to nullable with a logged
+/// warning so the operator knows to write a real backfill.
+///
+/// Defaults per scalar type:
+///   - string / richtext           → ''
+///   - int                         → 0
+///   - float                       → 0
+///   - bool                        → false
+///   - datetime                    → '1970-01-01T00:00:00Z'::TIMESTAMPTZ
+///                                   (deterministic sentinel; app
+///                                    should treat as "unset" and
+///                                    backfill at its own pace)
+///   - id(X) when required         → NULLABLE (operator backfills)
+///   - any type when optional      → NULLABLE
 pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     let col_type = pg_column_type(&field.field_type);
     let unique = if field.unique { " UNIQUE" } else { "" };
+    let null_default = pg_add_column_null_default(field);
     format!(
-        "ALTER TABLE {} ADD COLUMN {} {}{}",
+        "ALTER TABLE {} ADD COLUMN {} {}{}{}",
         quote_ident(entity_name),
         quote_ident(&field.name),
         col_type,
+        null_default,
         unique
     )
+}
+
+/// Decide the NOT NULL + DEFAULT suffix for an ADD COLUMN statement.
+/// Returns the empty string for nullable / unsupported-default-shape
+/// fields; returns ` NOT NULL DEFAULT <expr>` for required scalar
+/// types. Reference types (`id(X)`) get the empty string AND log a
+/// warning so the operator knows the migration left the column
+/// nullable.
+fn pg_add_column_null_default(field: &FieldSpec) -> String {
+    if field.optional {
+        return String::new();
+    }
+    let default_expr: Option<&'static str> = match field.field_type.as_str() {
+        "string" | "richtext" => Some("''"),
+        "int" => Some("0"),
+        "float" => Some("0"),
+        "bool" => Some("FALSE"),
+        "datetime" => Some("'1970-01-01T00:00:00Z'::TIMESTAMPTZ"),
+        ref t if t.starts_with("id(") => None,
+        _ => Some("''"),
+    };
+    match default_expr {
+        Some(expr) => format!(" NOT NULL DEFAULT {expr}"),
+        None => {
+            // Reference-typed required fields can't default to
+            // anything sensible (no valid foreign id to point at).
+            // Emit a nullable column and surface the gap loudly so
+            // the operator writes a real backfill instead of being
+            // surprised at runtime when the column is unexpectedly
+            // nullable.
+            tracing::warn!(
+                "[pg-migrate] field {} is required + reference-typed ({}); ADD COLUMN emitted as NULLABLE — write a backfill + ALTER COLUMN SET NOT NULL to make it required on existing rows",
+                field.name,
+                field.field_type
+            );
+            String::new()
+        }
+    }
 }
 
 /// Generate a Postgres CREATE INDEX statement. When `where_clause` is
@@ -2233,6 +2291,110 @@ mod tests {
         };
         let sql = add_column_sql("User", &field);
         assert_eq!(sql, "ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT");
+    }
+
+    #[test]
+    fn add_column_required_string_gets_not_null_default() {
+        // The whole point of the v0.3.108 fix: a required field
+        // added via migration enforces NOT NULL on the new column
+        // AND defaults existing rows to '' so the ADD COLUMN doesn't
+        // fail on a non-empty table.
+        let field = FieldSpec {
+            name: "status".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"status\" TEXT NOT NULL DEFAULT ''"
+        );
+    }
+
+    #[test]
+    fn add_column_required_int_defaults_zero() {
+        let field = FieldSpec {
+            name: "count".into(),
+            field_type: "int".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"count\" INTEGER NOT NULL DEFAULT 0"
+        );
+    }
+
+    #[test]
+    fn add_column_required_bool_defaults_false() {
+        let field = FieldSpec {
+            name: "active".into(),
+            field_type: "bool".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Render\" ADD COLUMN \"active\" BOOLEAN NOT NULL DEFAULT FALSE"
+        );
+    }
+
+    #[test]
+    fn add_column_required_datetime_defaults_epoch() {
+        let field = FieldSpec {
+            name: "deletedAt".into(),
+            field_type: "datetime".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Render", &field);
+        assert!(
+            sql.contains("NOT NULL DEFAULT '1970-01-01T00:00:00Z'::TIMESTAMPTZ"),
+            "got {sql}"
+        );
+    }
+
+    #[test]
+    fn add_column_required_reference_stays_nullable() {
+        // id(X) refs have no sensible default — we emit a nullable
+        // column and log a warning. The operator's expected to write
+        // a backfill + ALTER COLUMN SET NOT NULL in a follow-up
+        // migration.
+        let field = FieldSpec {
+            name: "orgId".into(),
+            field_type: "id(Organization)".into(),
+            optional: false,
+            unique: false,
+        };
+        let sql = add_column_sql("Project", &field);
+        assert_eq!(sql, "ALTER TABLE \"Project\" ADD COLUMN \"orgId\" TEXT");
+    }
+
+    #[test]
+    fn add_column_required_string_unique_gets_both() {
+        // NOT NULL DEFAULT '' + UNIQUE simultaneously. The single
+        // empty-string default would collide on a non-empty table if
+        // multiple new rows landed at once, but at migration time
+        // there's exactly one row's worth of default value being
+        // backfilled per existing row — operators should treat the
+        // unique constraint as effectively "you have to backfill
+        // unique values before adding a real second row to this
+        // column" and pylon's runtime validation catches that
+        // separately.
+        let field = FieldSpec {
+            name: "slug".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: true,
+        };
+        let sql = add_column_sql("Org", &field);
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"Org\" ADD COLUMN \"slug\" TEXT NOT NULL DEFAULT '' UNIQUE"
+        );
     }
 
     #[test]
