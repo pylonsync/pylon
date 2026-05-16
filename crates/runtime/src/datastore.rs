@@ -601,12 +601,10 @@ impl DataStore for Runtime {
 
     /// Current Loro VV for a row. Used by the WS broadcast path to
     /// remember "what version did all subscribers last receive" so the
-    /// next write ships only an incremental delta. Postgres path
-    /// deferred — falls back to snapshot broadcasts there.
+    /// next write ships only an incremental delta. SQLite + Postgres
+    /// paths both supported; both call into their respective
+    /// `current_vv_bytes` helpers on the in-memory LoroDoc cache.
     fn crdt_vv(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
-        if self.is_postgres() {
-            return Ok(None);
-        }
         let ent = self
             .manifest()
             .entities
@@ -618,6 +616,16 @@ impl DataStore for Runtime {
             })?;
         if !ent.crdt {
             return Ok(None);
+        }
+        if let Some(pg) = self.pg_backend() {
+            return pg.store.with_client(|client| {
+                pg.crdt
+                    .current_vv_bytes(client, entity, row_id)
+                    .map_err(|e| DataError {
+                        code: "CRDT_VV_FAILED".into(),
+                        message: format!("vv {entity}/{row_id}: {e}"),
+                    })
+            });
         }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         self.crdt_store()
@@ -629,17 +637,15 @@ impl DataStore for Runtime {
     }
 
     /// Incremental update from `since` to the row's current state.
-    /// Returns Ok(None) on Postgres (deferred), entity-not-CRDT, or
-    /// when `since` doesn't decode as a Loro VV.
+    /// Returns Ok(None) when entity-not-CRDT or when `since` doesn't
+    /// decode as a Loro VV — the broadcast layer falls back to a
+    /// snapshot in both cases.
     fn crdt_update_since(
         &self,
         entity: &str,
         row_id: &str,
         since: &[u8],
     ) -> Result<Option<Vec<u8>>, DataError> {
-        if self.is_postgres() {
-            return Ok(None);
-        }
         let ent = self
             .manifest()
             .entities
@@ -651,6 +657,24 @@ impl DataStore for Runtime {
             })?;
         if !ent.crdt {
             return Ok(None);
+        }
+        if let Some(pg) = self.pg_backend() {
+            // Closure returns `Ok(Option<Vec<u8>>)`; a per-row
+            // update_since_bytes decode error gets logged + folded
+            // into Ok(None) so the caller falls back to snapshot
+            // (same shape as the SQLite path). The outer `?` only
+            // propagates connection-level errors from with_client.
+            return pg.store.with_client(|client| {
+                Ok(match pg.crdt.update_since_bytes(client, entity, row_id, since) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[crdt-pg] update_since_bytes failed for {entity}/{row_id}: {e} — caller falls back to snapshot"
+                        );
+                        None
+                    }
+                })
+            });
         }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         match self

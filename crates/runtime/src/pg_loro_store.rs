@@ -262,6 +262,41 @@ impl PgLoroStore {
         Ok(encode_update_since(&doc, since))
     }
 
+    /// Current Loro VV for a row, as the encoded bytes the WS
+    /// broadcast path remembers between writes. SQLite-path parity
+    /// — the broadcast layer doesn't care which backend it came
+    /// from, it just stashes the bytes and feeds them back to
+    /// `update_since_bytes` on the next write.
+    pub fn current_vv_bytes<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Option<Vec<u8>>, LoroStoreError> {
+        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(Some(doc.oplog_vv().encode()))
+    }
+
+    /// Bytes-shaped wrapper around `update_since` — decodes the
+    /// supplied VV bytes, delegates to the in-memory doc, returns
+    /// the delta. Malformed VV bytes return a typed Decode error;
+    /// the broadcast layer falls back to a snapshot rather than
+    /// crashing the write path.
+    pub fn update_since_bytes<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        since: &[u8],
+    ) -> Result<Option<Vec<u8>>, LoroStoreError> {
+        let parsed = VersionVector::decode(since)
+            .map_err(|e| LoroStoreError::Decode(format!("decode VV for {entity}/{row_id}: {e}")))?;
+        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(Some(encode_update_since(&doc, &parsed)))
+    }
+
     /// Read the snapshot bytes directly through the supplied
     /// connection, bypassing the in-memory cache. Used by the
     /// crdt_apply_update path: the cache may hold stale bytes from a
