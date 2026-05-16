@@ -14,7 +14,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.98" }
-pylon-auth = { path = "../auth", version = "0.3.98" }
+pylon-kernel = { path = "../core", version = "0.3.99" }
+pylon-auth = { path = "../auth", version = "0.3.99" }
 serde_json = { workspace = true }
 

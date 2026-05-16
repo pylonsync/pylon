@@ -774,19 +774,55 @@ pub mod live {
     /// (sessions, OAuth state, magic codes, accounts, API keys, orgs)
     /// so they all behave identically to the entity store on managed
     /// providers (Fly Postgres, PlanetScale, Neon, Supabase).
+    ///
+    /// `sslrootcert=<path>` is honored: the PEM file at that path is
+    /// loaded and used as the (only) trust root for this connection.
+    /// Common case: self-hosted Postgres with a private CA where the
+    /// public OS trust store wouldn't have the cert. `sslrootcert=system`
+    /// (or absent) still uses the OS trust store via rustls-native-certs.
     pub fn connect_pg(url: &str) -> Result<postgres::Client, String> {
         let (cleaned, ssl) = parse_pg_url_ssl(url);
         if ssl.use_tls {
             let mut roots = rustls::RootCertStore::empty();
-            let native_certs = rustls_native_certs::load_native_certs();
-            for cert in native_certs.certs {
-                let _ = roots.add(cert);
-            }
-            if !native_certs.errors.is_empty() {
-                tracing::warn!(
-                    "[pg] rustls native cert load reported {} non-fatal errors",
-                    native_certs.errors.len()
+            if let Some(path) = ssl.ca_path.as_deref() {
+                // Explicit CA file — replace native roots with this
+                // PEM bundle so the chain only verifies against the
+                // operator's chosen trust anchor. Anything else is a
+                // genuine cert error.
+                let pem_bytes = std::fs::read(path)
+                    .map_err(|e| format!("PG connect: failed to read sslrootcert {path}: {e}"))?;
+                let mut cursor = std::io::Cursor::new(pem_bytes);
+                let mut added = 0usize;
+                for cert in rustls_pemfile::certs(&mut cursor) {
+                    let cert =
+                        cert.map_err(|e| format!("PG connect: bad PEM cert in {path}: {e}"))?;
+                    roots.add(cert).map_err(|e| {
+                        format!("PG connect: rustls rejected cert from {path}: {e}")
+                    })?;
+                    added += 1;
+                }
+                if added == 0 {
+                    return Err(format!(
+                        "PG connect: sslrootcert {path} contained no PEM certificates"
+                    ));
+                }
+                tracing::info!(
+                    "[pg] sslrootcert={path} loaded ({added} cert{}); native roots ignored",
+                    if added == 1 { "" } else { "s" }
                 );
+            } else {
+                // No custom CA — use the OS trust store. Matches what
+                // libpq does when `sslrootcert` is unset or `=system`.
+                let native_certs = rustls_native_certs::load_native_certs();
+                for cert in native_certs.certs {
+                    let _ = roots.add(cert);
+                }
+                if !native_certs.errors.is_empty() {
+                    tracing::warn!(
+                        "[pg] rustls native cert load reported {} non-fatal errors",
+                        native_certs.errors.len()
+                    );
+                }
             }
             let config = rustls::ClientConfig::builder()
                 .with_root_certificates(roots)
@@ -799,12 +835,13 @@ pub mod live {
         }
     }
 
-    /// SSL parsing result for `parse_pg_url_ssl`. We need both the
-    /// cleaned-up URL (libpq-only params stripped) and the boolean
-    /// "should we use TLS for this connection" so the connect path
-    /// can pick between `NoTls` and `MakeTlsConnector`.
+    /// SSL parsing result for `parse_pg_url_ssl`. Carries:
+    ///   - `use_tls`: should TLS be enabled for this connection
+    ///   - `ca_path`: optional path to a PEM bundle to use as the
+    ///     trust root instead of the OS CA store (`sslrootcert=<path>`)
     pub struct PgUrlSsl {
         pub use_tls: bool,
+        pub ca_path: Option<String>,
     }
 
     /// Pre-process a Postgres URL: strip libpq-specific query params
@@ -814,21 +851,30 @@ pub mod live {
     /// Recognizes:
     ///   - sslmode=disable / prefer / allow → no TLS
     ///   - sslmode=require / verify-ca / verify-full → TLS
-    ///   - sslrootcert=system → TLS, use OS CA store (handled by
-    ///     `native-tls` automatically; we just record the intent)
-    ///   - sslrootcert=<path> → TLS, but the path is currently
-    ///     ignored — `native-tls` reads system roots only. Logged
-    ///     as a one-time warning so operators see the gap.
+    ///   - sslrootcert=system → TLS, use OS CA store
+    ///   - sslrootcert=<path> → TLS, load the PEM bundle at <path>
+    ///     and use it as the only trust root for the connection.
+    ///     The path is captured in `PgUrlSsl::ca_path`; `connect_pg`
+    ///     reads + parses it at connect time.
     ///
     /// Anything we don't understand is dropped from the URL silently
     /// (defense against future libpq additions confusing the parser).
     pub fn parse_pg_url_ssl(url: &str) -> (String, PgUrlSsl) {
         let (base, query) = match url.find('?') {
             Some(idx) => (&url[..idx], &url[idx + 1..]),
-            None => return (url.to_string(), PgUrlSsl { use_tls: false }),
+            None => {
+                return (
+                    url.to_string(),
+                    PgUrlSsl {
+                        use_tls: false,
+                        ca_path: None,
+                    },
+                )
+            }
         };
 
         let mut use_tls = false;
+        let mut ca_path: Option<String> = None;
         let mut kept: Vec<String> = Vec::new();
         for pair in query.split('&') {
             if pair.is_empty() {
@@ -866,14 +912,18 @@ pub mod live {
                     }
                 },
                 "sslrootcert" => {
-                    // Either "system" (use OS roots — that's what
-                    // native-tls does anyway) or a path (which we
-                    // can't honor without bringing in openssl). Log
-                    // and drop in both cases; TLS still happens.
-                    if v != "system" && !v.is_empty() {
-                        tracing::warn!(
-                            "[pg] sslrootcert={v} ignored — native-tls uses system roots"
-                        );
+                    if v.is_empty() || v == "system" {
+                        // Use the OS trust store. Matches libpq when
+                        // `sslrootcert` is unset.
+                    } else {
+                        // Explicit CA file — captured here, loaded
+                        // by connect_pg at connect time. Decoding
+                        // the URL would be over-engineered (the
+                        // path is filesystem-local, not URL-encoded
+                        // in practice). Strip from the cleaned URL
+                        // because the postgres crate would error on
+                        // it.
+                        ca_path = Some(v.to_string());
                     }
                     use_tls = true;
                 }
@@ -891,7 +941,7 @@ pub mod live {
         } else {
             format!("{}?{}", base, kept.join("&"))
         };
-        (cleaned, PgUrlSsl { use_tls })
+        (cleaned, PgUrlSsl { use_tls, ca_path })
     }
 
     #[cfg(test)]
@@ -938,6 +988,21 @@ pub mod live {
             // No sslmode synthesized — the postgres crate defaults
             // to `prefer` which happily upgrades to our TLS connector.
             assert_eq!(cleaned, "postgres://h/db");
+            assert!(ssl.ca_path.is_none(), "system roots → no ca_path");
+        }
+
+        #[test]
+        fn sslrootcert_path_captured() {
+            // Explicit CA file. The path must end up in `ca_path` so
+            // connect_pg can load + use it as the trust root. The
+            // libpq query param is stripped from the cleaned URL
+            // (the postgres crate would otherwise reject it).
+            let (cleaned, ssl) = parse_pg_url_ssl(
+                "postgres://h/db?sslmode=verify-full&sslrootcert=/etc/pylon/ca.pem",
+            );
+            assert!(ssl.use_tls);
+            assert_eq!(ssl.ca_path.as_deref(), Some("/etc/pylon/ca.pem"));
+            assert_eq!(cleaned, "postgres://h/db?sslmode=require");
         }
     }
 
