@@ -24,7 +24,13 @@ fn main() {
 /// - `json` → one JSON object per line (Datadog/Axiom/Sentry ingestible)
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Default to info, but quiet down chatty third-party crates that
+    // emit per-event INFO (Loro's `export: Diagnosing EncodedBlock`
+    // fires on every CRDT broadcast and drowns the access-log signal
+    // in pylon-cloud's Fly stream). Operators can still re-enable
+    // for debugging via RUST_LOG="loro_internal=info,pylon=debug,info".
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,loro_internal=warn"));
     let format = std::env::var("PYLON_LOG_FORMAT").unwrap_or_default();
     let builder = fmt()
         .with_env_filter(filter)
