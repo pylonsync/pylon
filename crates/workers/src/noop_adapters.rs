@@ -8,15 +8,25 @@
 //! - **SchedulerOps**: lists cron tasks declared in the manifest's
 //!   `routes` (cron-triggered routes). Workers cron handlers fire
 //!   these via the `scheduled` event — see handler.rs.
-//! - **CacheOps / FileOps / RoomOps / PubSubOps / JobOps /
-//!   WorkflowOps**: still 503 stubs. CacheOps + FileOps want a KV /
-//!   R2 binding wrapper (next batch — bindings need to flow from
-//!   the fetch handler's `Env`); the other four want Durable Objects
-//!   / Queues / Workflows bindings.
+//! - **CacheOps**: real KV-backed impl available as `KvCache` (see
+//!   `crates/workers/src/kv_cache.rs`) — handler.rs picks it up
+//!   from `env.kv("PYLON_CACHE")` when the binding exists. The
+//!   noop in this file is the fallback when no binding's wired,
+//!   returning typed `KV_BINDING_REQUIRED` 503s so operators can
+//!   wrangler.toml-debug from the error.
+//! - **FileOps**: real R2-backed impl available as `R2Files` (see
+//!   `crates/workers/src/r2_files.rs`) — handler.rs picks it up
+//!   from `env.bucket("PYLON_FILES")` when the binding exists. The
+//!   noop is the fallback (typed `R2_BINDING_REQUIRED` 503s).
+//! - **RoomOps / PubSubOps / JobOps / WorkflowOps**: still 503
+//!   stubs. These want Durable Objects / Queues / Workflows
+//!   bindings — heavier integration than KV / R2 because the
+//!   stateful adapters need a DO class to host the state.
 //!
 //! The error codes are typed (KV_BINDING_REQUIRED, R2_BINDING_REQUIRED,
-//! etc.) so operators can `wrangler.toml`-debug from the error alone
-//! instead of guessing what's missing.
+//! DO_BINDING_REQUIRED, WORKFLOWS_BINDING_REQUIRED) so operators
+//! can wrangler.toml-debug from the error alone instead of guessing
+//! what's missing.
 
 use pylon_http::DataError;
 use pylon_router::{

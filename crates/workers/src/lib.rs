@@ -30,3 +30,17 @@ pub use noop_adapters::NoopAll;
 
 #[cfg(feature = "workers")]
 pub mod handler;
+
+// KV-backed Cache + R2-backed Files adapters. Only compiled with
+// the `workers` feature because they depend on the `worker` crate's
+// WASM-only types. Non-WASM builds get the NoopAll stub Cache + Files
+// which return typed 503 errors.
+#[cfg(feature = "workers")]
+pub mod kv_cache;
+#[cfg(feature = "workers")]
+pub mod r2_files;
+
+#[cfg(feature = "workers")]
+pub use kv_cache::KvCache;
+#[cfg(feature = "workers")]
+pub use r2_files::R2Files;

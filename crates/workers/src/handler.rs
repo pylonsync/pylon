@@ -108,6 +108,22 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let auth_ctx = session_store.resolve(auth_token.as_deref());
     let noop = NoopAll::new(&manifest);
     let email = NoopEmailSender;
+
+    // Optional real bindings — if the operator declared them in
+    // wrangler.toml, plug in the KV / R2 adapters; otherwise fall
+    // back to NoopAll's typed-503 stubs so missing bindings
+    // surface as KV_BINDING_REQUIRED / R2_BINDING_REQUIRED rather
+    // than mysteriously failing.
+    let kv_cache_opt = env.kv("PYLON_CACHE").ok().map(crate::KvCache::new);
+    let r2_files_opt = env.bucket("PYLON_FILES").ok().map(crate::R2Files::new);
+    let cache_ref: &dyn pylon_router::CacheOps = match kv_cache_opt.as_ref() {
+        Some(c) => c,
+        None => &noop,
+    };
+    let files_ref: &dyn pylon_router::FileOps = match r2_files_opt.as_ref() {
+        Some(f) => f,
+        None => &noop,
+    };
     let cookie_config = pylon_auth::CookieConfig::from_env(
         &pylon_auth::CookieConfig::default_name_for(&manifest.name),
     );
@@ -121,12 +137,12 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         change_log: &change_log,
         notifier: &pylon_router::NoopNotifier,
         rooms: &noop,
-        cache: &noop,
+        cache: cache_ref,
         pubsub: &noop,
         jobs: &noop,
         scheduler: &noop,
         workflows: &noop,
-        files: &noop,
+        files: files_ref,
         openapi: &noop,
         functions: None,
         email: &email,
