@@ -2,12 +2,14 @@
 //! sign-in working with the platforms users actually use (iOS,
 //! macOS, Android, Windows Hello, 1Password, hardware keys).
 //!
-//! **Status: library only — HTTP endpoints not yet wired.**
-//! `verify_assertion` + `PasskeyStore` are production-quality and
-//! exposed for apps that want to roll their own register/login
-//! handlers. Pylon-shipped `/api/auth/passkey/*` routes are queued
-//! for the next wave; until then, treat this module as primitives
-//! to compose into your own routes.
+//! **Status: library + HTTP endpoints.** `verify_assertion` +
+//! `verify_registration` + `PasskeyStore` are production-quality;
+//! the pylon-shipped `/api/auth/passkey/{register,login}/{begin,
+//! finish}` + `/api/auth/passkey/keys` routes wire them up
+//! end-to-end. `PYLON_WEBAUTHN_RP_ID` and `PYLON_WEBAUTHN_ORIGIN`
+//! must be set in production (the route handlers refuse to run
+//! the registration / assertion finish steps with the localhost
+//! defaults unless `PYLON_DEV_MODE=true`).
 //!
 //! This implementation supports:
 //!   - Registration with `none` attestation (passkeys generally use
@@ -251,6 +253,17 @@ pub enum WebauthnError {
     SignatureMismatch,
     UnsupportedAlg,
     CounterRegression,
+    /// Registration only: attestationObject was malformed or used
+    /// an unsupported attestation format. We accept `none` (the
+    /// passkey default) — `packed`, `tpm`, `android-key`, etc. are
+    /// rejected because verifying them needs a trust-store of
+    /// authenticator root CAs we don't ship.
+    AttestationFormatUnsupported,
+    /// Registration only: the authData byte stream didn't carry the
+    /// "attested credential data" flag, or the flagged region
+    /// couldn't be parsed (truncated AAGUID / credId length / COSE
+    /// public key).
+    AttestedCredentialDataMalformed,
 }
 
 impl std::fmt::Display for WebauthnError {
@@ -267,6 +280,10 @@ impl std::fmt::Display for WebauthnError {
             Self::SignatureMismatch => "signature verification failed",
             Self::UnsupportedAlg => "credential alg not supported (need ES256 or Ed25519)",
             Self::CounterRegression => "sign counter regressed — possible cloned credential",
+            Self::AttestationFormatUnsupported => {
+                "attestation format unsupported (pylon accepts only `none`)"
+            }
+            Self::AttestedCredentialDataMalformed => "attested credential data malformed",
         })
     }
 }
@@ -394,6 +411,171 @@ pub fn verify_assertion(
 }
 
 // ---------------------------------------------------------------------------
+// Registration verification
+// ---------------------------------------------------------------------------
+
+/// What `verify_registration` returns to the caller. The route
+/// handler turns this into a stored `Passkey`. We hand back the
+/// raw COSE public key bytes (not just the algorithm) so the same
+/// `verify_assertion` code path that does login can re-parse them
+/// without a second round-trip to the database.
+#[derive(Debug, Clone)]
+pub struct RegistrationOutcome {
+    /// Base64url-encoded credentialId from the authenticator.
+    pub credential_id: String,
+    /// COSE_Key bytes ready to stamp into `Passkey.public_key`.
+    pub public_key_cose: Vec<u8>,
+    /// Initial sign counter — almost always 0 for passkeys (Touch ID
+    /// / Face ID don't implement counters; FIDO2 hardware keys do).
+    pub sign_count: u32,
+}
+
+/// Verify a `navigator.credentials.create()` response and extract
+/// the credentialId + public key the caller should store in a
+/// `Passkey` row.
+///
+/// Inputs:
+///   - `attestation_object`: the raw CBOR bytes returned from the
+///     browser (base64url-decoded by the caller).
+///   - `client_data_json`: the raw JSON bytes (base64url-decoded by
+///     the caller).
+///   - `expected_origin`: e.g. `https://app.example.com`. Must
+///     match `clientDataJSON.origin` exactly — no scheme/port
+///     coercion — to keep the origin gate as strict as the browser's
+///     own enforcement.
+///   - `expected_rp_id`: the relying-party identifier (e.g.
+///     `app.example.com`). Used to verify the SHA-256 hash inside
+///     authData and to scope the credential.
+///
+/// Side effect: consumes the matching Registration challenge from
+/// the store (single-use). Returns `Err(ChallengeMismatch)` if no
+/// stored challenge matches.
+///
+/// What we DON'T verify: the attestation signature. Pylon only
+/// accepts `fmt = "none"` (the passkey default — Touch ID, Face ID,
+/// Windows Hello, 1Password all use it) and refuses any other
+/// attestation format. Real attestation verification needs a
+/// trust-store of authenticator root CAs (FIDO Metadata Service)
+/// that we don't ship today; advertising support for it without
+/// the CA store would let an attacker forge an attestation chain.
+pub fn verify_registration(
+    store: &PasskeyStore,
+    client_data_json: &[u8],
+    attestation_object: &[u8],
+    expected_origin: &str,
+    expected_rp_id: &str,
+) -> Result<RegistrationOutcome, WebauthnError> {
+    // 1. Parse + validate clientDataJSON.
+    let client_data: serde_json::Value =
+        serde_json::from_slice(client_data_json).map_err(|_| WebauthnError::BadClientData)?;
+    if client_data.get("type").and_then(|v| v.as_str()) != Some("webauthn.create") {
+        return Err(WebauthnError::WrongType);
+    }
+    let origin = client_data
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if origin != expected_origin {
+        return Err(WebauthnError::OriginMismatch);
+    }
+    let challenge_b64 = client_data
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let _ = store
+        .take_challenge(challenge_b64, ChallengeKind::Registration)
+        .ok_or(WebauthnError::ChallengeMismatch)?;
+
+    // 2. Parse attestationObject as a CBOR map.
+    let att_map =
+        parse_cbor_map(attestation_object).ok_or(WebauthnError::AttestationFormatUnsupported)?;
+    let fmt = match att_map.get(&CborKey::S("fmt".into())) {
+        Some(CborVal::Text(s)) => s.as_str(),
+        _ => return Err(WebauthnError::AttestationFormatUnsupported),
+    };
+    if fmt != "none" {
+        return Err(WebauthnError::AttestationFormatUnsupported);
+    }
+    let auth_data = match att_map.get(&CborKey::S("authData".into())) {
+        Some(CborVal::Bytes(b)) => b.as_slice(),
+        _ => return Err(WebauthnError::AttestedCredentialDataMalformed),
+    };
+
+    // 3. Validate authData layout.
+    if auth_data.len() < 37 {
+        return Err(WebauthnError::AuthenticatorDataTooShort);
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(expected_rp_id.as_bytes());
+    let expected_rp_hash = hasher.finalize();
+    if auth_data[..32] != expected_rp_hash[..] {
+        return Err(WebauthnError::RpIdMismatch);
+    }
+    let flags = auth_data[32];
+    // Bit 0 — User Present. Required for every WebAuthn ceremony.
+    if flags & 0x01 == 0 {
+        return Err(WebauthnError::UserNotPresent);
+    }
+    // Bit 6 — Attested Credential Data included. The whole point of
+    // registration; without it there's no public key to extract.
+    if flags & 0x40 == 0 {
+        return Err(WebauthnError::AttestedCredentialDataMalformed);
+    }
+    let sign_count =
+        u32::from_be_bytes([auth_data[33], auth_data[34], auth_data[35], auth_data[36]]);
+
+    // 4. Parse attested credential data:
+    //    bytes[37..53]  = AAGUID (16 bytes, ignored)
+    //    bytes[53..55]  = credentialIdLength (u16 BE)
+    //    bytes[55..55+L] = credentialId
+    //    bytes[55+L..]  = CBOR-encoded COSE_Key (public key)
+    if auth_data.len() < 55 {
+        return Err(WebauthnError::AttestedCredentialDataMalformed);
+    }
+    let cred_id_len = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
+    // 32KB cap matches the WebAuthn-3 spec's MAX_CREDENTIAL_ID_LENGTH
+    // and avoids honoring an attacker-supplied giant length that
+    // would slice past the buffer in a less paranoid impl.
+    if cred_id_len == 0 || cred_id_len > 1023 {
+        return Err(WebauthnError::AttestedCredentialDataMalformed);
+    }
+    let cred_id_end = 55 + cred_id_len;
+    if auth_data.len() < cred_id_end {
+        return Err(WebauthnError::AttestedCredentialDataMalformed);
+    }
+    let credential_id_bytes = &auth_data[55..cred_id_end];
+    let cose_pubkey = &auth_data[cred_id_end..];
+
+    // 5. Sanity check the COSE key advertises an algorithm we can
+    //    later verify with. Cheaper to reject here than to let a
+    //    registration succeed and then watch every subsequent
+    //    assertion fail with UnsupportedAlg.
+    let alg = cose_key_alg(cose_pubkey).ok_or(WebauthnError::UnsupportedAlg)?;
+    if alg != -7 && alg != -8 {
+        return Err(WebauthnError::UnsupportedAlg);
+    }
+    // And the coordinate extraction must round-trip. Catches a
+    // truncated / structurally-wrong COSE map that has the right
+    // `alg` field but a missing `x` / `y`.
+    match alg {
+        -7 => {
+            cose_es256_xy(cose_pubkey).ok_or(WebauthnError::UnsupportedAlg)?;
+        }
+        -8 => {
+            cose_eddsa_x(cose_pubkey).ok_or(WebauthnError::UnsupportedAlg)?;
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(RegistrationOutcome {
+        credential_id: base64_url(credential_id_bytes),
+        public_key_cose: cose_pubkey.to_vec(),
+        sign_count,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // COSE_Key helpers (RFC 8152) — minimal CBOR
 // ---------------------------------------------------------------------------
 
@@ -477,12 +659,20 @@ impl<'a> CborParser<'a> {
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
     }
+    /// Take the next `n` bytes. Uses `checked_add` against the
+    /// current cursor so a CBOR-declared length near `usize::MAX`
+    /// can't wrap around past `bytes.len()` — pre-fix an
+    /// attacker-supplied 8-byte length close to u64::MAX would
+    /// overflow `self.pos + n` and pass the bounds check on
+    /// 64-bit hosts. Returns None on overflow OR on insufficient
+    /// remaining bytes.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        if self.pos + n > self.bytes.len() {
+        let end = self.pos.checked_add(n)?;
+        if end > self.bytes.len() {
             return None;
         }
-        let s = &self.bytes[self.pos..self.pos + n];
-        self.pos += n;
+        let s = &self.bytes[self.pos..end];
+        self.pos = end;
         Some(s)
     }
     fn read_u8(&mut self) -> Option<u8> {
@@ -516,6 +706,23 @@ impl<'a> CborParser<'a> {
         }
     }
 
+    /// Decode a declared CBOR length and prove the parser has at
+    /// least that many bytes remaining BEFORE we allocate against
+    /// it. The container-prealloc bug codex flagged: a CBOR map
+    /// declaring 2^60 elements would otherwise call
+    /// `HashMap::with_capacity(2^60)` on attacker input and OOM
+    /// before we ever read a single key. Cap effective prealloc
+    /// at `remaining_bytes` since each element needs at least one
+    /// byte of header — anything more is a lie.
+    fn read_container_len(&mut self, additional: u8) -> Option<usize> {
+        let declared = self.read_arg(additional)? as usize;
+        let remaining = self.bytes.len().saturating_sub(self.pos);
+        if declared > remaining {
+            return None;
+        }
+        Some(declared)
+    }
+
     fn read_value(&mut self) -> Option<CborVal> {
         let head = self.read_u8()?;
         let major = head >> 5;
@@ -538,7 +745,8 @@ impl<'a> CborParser<'a> {
                 Some(CborVal::Text(std::str::from_utf8(s).ok()?.to_string()))
             }
             4 => {
-                let len = self.read_arg(additional)? as usize;
+                // Bounded prealloc — see `read_container_len`.
+                let len = self.read_container_len(additional)?;
                 let mut arr = Vec::with_capacity(len);
                 for _ in 0..len {
                     arr.push(self.read_value()?);
@@ -548,7 +756,7 @@ impl<'a> CborParser<'a> {
                 Some(CborVal::Other)
             }
             5 => {
-                let len = self.read_arg(additional)? as usize;
+                let len = self.read_container_len(additional)?;
                 let mut map = HashMap::with_capacity(len);
                 for _ in 0..len {
                     let key_val = self.read_value()?;
@@ -678,6 +886,288 @@ mod tests {
         };
         let err = verify_assertion(&store, &input, "https://app", "app", None).unwrap_err();
         assert_eq!(err, WebauthnError::UnknownCredential);
+    }
+
+    /// Build a minimal-but-valid attestationObject CBOR map with
+    /// `fmt = "none"` and the given authData. Used by the
+    /// registration tests to exercise verify_registration without
+    /// needing a real browser/authenticator round-trip.
+    fn make_attestation_object(auth_data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // CBOR map of 3 entries: fmt, attStmt, authData.
+        buf.push(0xa3);
+        // "fmt" → "none". Both are text strings.
+        buf.push(0x63); // text(3)
+        buf.extend_from_slice(b"fmt");
+        buf.push(0x64); // text(4)
+        buf.extend_from_slice(b"none");
+        // "attStmt" → {} (empty map).
+        buf.push(0x67); // text(7)
+        buf.extend_from_slice(b"attStmt");
+        buf.push(0xa0); // map(0)
+                        // "authData" → bytes(...).
+        buf.push(0x68); // text(8)
+        buf.extend_from_slice(b"authData");
+        // bytes header.
+        let len = auth_data.len();
+        if len < 24 {
+            buf.push(0x40 | (len as u8));
+        } else if len < 256 {
+            buf.push(0x58);
+            buf.push(len as u8);
+        } else if len < 65536 {
+            buf.push(0x59);
+            buf.extend_from_slice(&(len as u16).to_be_bytes());
+        } else {
+            unimplemented!("authData length doesn't fit u16 in the test helper");
+        }
+        buf.extend_from_slice(auth_data);
+        buf
+    }
+
+    /// Build authData for an ES256 passkey registration. Layout:
+    /// rpIdHash(32) | flags(1) | signCount(4) | aaguid(16) |
+    /// credIdLen(2) | credId | cose_public_key
+    fn make_es256_auth_data(rp_id: &str, cred_id: &[u8], flags: u8) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(rp_id.as_bytes());
+        let rp_hash = hasher.finalize();
+        let mut auth_data = Vec::new();
+        auth_data.extend_from_slice(&rp_hash);
+        auth_data.push(flags);
+        auth_data.extend_from_slice(&0u32.to_be_bytes()); // sign count
+        auth_data.extend_from_slice(&[0u8; 16]); // aaguid
+        auth_data.extend_from_slice(&(cred_id.len() as u16).to_be_bytes());
+        auth_data.extend_from_slice(cred_id);
+        // COSE_Key for ES256: kty=2, alg=-7, crv=1, x, y.
+        let mut cose = Vec::new();
+        cose.push(0xa5); // map(5)
+        cose.extend_from_slice(&[0x01, 0x02]); // kty=2 (EC2)
+        cose.extend_from_slice(&[0x03, 0x26]); // alg=-7 (ES256)
+        cose.extend_from_slice(&[0x20, 0x01]); // crv=1 (P-256)
+        cose.extend_from_slice(&[0x21, 0x58, 0x20]); // x: bytes(32)
+        cose.extend_from_slice(&[0x11u8; 32]);
+        cose.extend_from_slice(&[0x22, 0x58, 0x20]); // y: bytes(32)
+        cose.extend_from_slice(&[0x22u8; 32]);
+        auth_data.extend_from_slice(&cose);
+        auth_data
+    }
+
+    fn make_client_data(challenge: &str, origin: &str, kind: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "type": kind,
+            "challenge": challenge,
+            "origin": origin,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_round_trips_es256_passkey() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        let auth_data = make_es256_auth_data("app.example.com", b"my-credential-id", 0x01 | 0x40);
+        let att = make_attestation_object(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        let outcome = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .expect("registration succeeds");
+        assert!(!outcome.credential_id.is_empty());
+        // Challenge is consumed — re-using it must fail.
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::ChallengeMismatch);
+    }
+
+    #[test]
+    fn registration_rejects_origin_mismatch() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        let auth_data = make_es256_auth_data("app.example.com", b"cid", 0x01 | 0x40);
+        let att = make_attestation_object(&auth_data);
+        // clientDataJSON says we're on a phishing site.
+        let client_data = make_client_data(&challenge, "https://attacker.com", "webauthn.create");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::OriginMismatch);
+    }
+
+    #[test]
+    fn registration_rejects_wrong_rp_id_hash() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        // authData was generated for `other.example.com`.
+        let auth_data = make_es256_auth_data("other.example.com", b"cid", 0x01 | 0x40);
+        let att = make_attestation_object(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::RpIdMismatch);
+    }
+
+    #[test]
+    fn registration_rejects_missing_user_present_flag() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        // Flags = 0x40 (AT) only — no user-present bit.
+        let auth_data = make_es256_auth_data("app.example.com", b"cid", 0x40);
+        let att = make_attestation_object(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::UserNotPresent);
+    }
+
+    #[test]
+    fn registration_rejects_missing_attested_credential_data_flag() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        // Only UP flag, no AT flag — authenticator says there's
+        // user-presence but no attested credential data attached.
+        let auth_data = make_es256_auth_data("app.example.com", b"cid", 0x01);
+        let att = make_attestation_object(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::AttestedCredentialDataMalformed);
+    }
+
+    #[test]
+    fn registration_rejects_non_none_attestation_fmt() {
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        let auth_data = make_es256_auth_data("app.example.com", b"cid", 0x01 | 0x40);
+        // Hand-roll an attestationObject with fmt="packed" (would
+        // require a real attestation chain to verify; we refuse).
+        let mut att = Vec::new();
+        att.push(0xa3); // map(3)
+        att.extend_from_slice(&[0x63]); // text(3)
+        att.extend_from_slice(b"fmt");
+        att.extend_from_slice(&[0x66]); // text(6)
+        att.extend_from_slice(b"packed");
+        att.extend_from_slice(&[0x67]); // text(7)
+        att.extend_from_slice(b"attStmt");
+        att.push(0xa0); // map(0)
+        att.extend_from_slice(&[0x68]); // text(8)
+        att.extend_from_slice(b"authData");
+        att.push(0x59); // bytes, 2-byte length
+        att.extend_from_slice(&(auth_data.len() as u16).to_be_bytes());
+        att.extend_from_slice(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::AttestationFormatUnsupported);
+    }
+
+    #[test]
+    fn cbor_huge_declared_length_does_not_oom_or_panic() {
+        // attacker-supplied CBOR map declaring 2^60 entries.
+        // Pre-fix `Vec::with_capacity(2^60)` would OOM or panic on
+        // 64-bit hosts. Bounded prealloc + remaining-byte check
+        // makes the parser refuse the input cleanly.
+        //
+        // Encoding: byte 0xBB is "map with 8-byte length", then
+        // eight bytes of 0xFF for ~u64::MAX entries. No further
+        // data — the parser must reject without trying to allocate.
+        let mut buf = Vec::new();
+        buf.push(0xBB);
+        buf.extend_from_slice(&[0xFFu8; 8]);
+        // Should return None instead of allocating gigabytes.
+        assert!(parse_cbor_map(&buf).is_none());
+    }
+
+    #[test]
+    fn cbor_take_does_not_overflow_pos() {
+        // CBOR bytes-major-type-2 with 8-byte length close to
+        // usize::MAX. Pre-fix `self.pos + n` would wrap and the
+        // resulting end < bytes.len() would let the slice succeed
+        // on a poisoned range. After `checked_add`, the take()
+        // returns None and read_value bubbles None up.
+        let mut buf = Vec::new();
+        buf.push(0x5B); // bytes, 8-byte length
+        buf.extend_from_slice(&[0xFFu8; 8]); // declared len ~u64::MAX
+                                             // No actual byte payload.
+        let mut p = CborParser {
+            bytes: &buf,
+            pos: 0,
+        };
+        assert!(p.read_value().is_none());
+    }
+
+    #[test]
+    fn registration_consumed_challenge_cannot_replay() {
+        // Same challenge used twice — second attempt must fail
+        // because mint_challenge → take_challenge is single-use.
+        let store = PasskeyStore::new();
+        let challenge = store.mint_challenge("u-1".into(), ChallengeKind::Registration);
+        let auth_data = make_es256_auth_data("app.example.com", b"cid", 0x01 | 0x40);
+        let att = make_attestation_object(&auth_data);
+        let client_data =
+            make_client_data(&challenge, "https://app.example.com", "webauthn.create");
+        verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .expect("first use ok");
+        let err = verify_registration(
+            &store,
+            &client_data,
+            &att,
+            "https://app.example.com",
+            "app.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err, WebauthnError::ChallengeMismatch);
     }
 
     /// P3-5 (codex Wave-3 review): credential bound to user A

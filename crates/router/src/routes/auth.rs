@@ -4037,6 +4037,42 @@ pub(crate) fn handle(
     }
 
     // ─── WebAuthn / passkeys ──────────────────────────────────────────
+    // Helper for the WebAuthn handlers below: resolve the rp_id +
+    // origin from env, refusing to fall back to localhost when the
+    // process isn't running in dev mode. A production deploy that
+    // accidentally hits the localhost defaults would let an attacker
+    // host a malicious origin under the same name and pass the
+    // origin-equality check on register/login finish — surface the
+    // misconfiguration loudly instead of silently allowing it.
+    //
+    // This local fn is defined inside the same module-level handler
+    // so it lives next to its only callers; alternative would be to
+    // promote it to a shared util, but every other route in this
+    // file inlines its env-derived constants the same way.
+    fn webauthn_rp_id_and_origin() -> Result<(String, String), String> {
+        let rp_id_env = std::env::var("PYLON_WEBAUTHN_RP_ID");
+        let origin_env = std::env::var("PYLON_WEBAUTHN_ORIGIN");
+        // FAIL-CLOSED on unset PYLON_DEV_MODE. Pre-fix the default
+        // was `true` (dev mode), which meant a production deploy
+        // that forgot to set RP_ID/ORIGIN AND forgot to set
+        // PYLON_DEV_MODE=false silently fell back to `localhost` /
+        // `https://localhost` — letting an attacker who hosted a
+        // malicious origin pass the origin-equality check during
+        // finish steps. The only way to land at the localhost path
+        // now is an explicit `PYLON_DEV_MODE=true`.
+        let dev = std::env::var("PYLON_DEV_MODE")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        match (rp_id_env, origin_env, dev) {
+            (Ok(rp), Ok(o), _) => Ok((rp, o)),
+            (_, _, true) => Ok(("localhost".to_string(), "https://localhost".to_string())),
+            _ => Err(
+                "PYLON_WEBAUTHN_RP_ID and PYLON_WEBAUTHN_ORIGIN must both be set in production"
+                    .into(),
+            ),
+        }
+    }
+
     if url == "/api/auth/passkey/register/begin" && method == HttpMethod::Post {
         let user_id = match ctx.auth_ctx.user_id.as_deref() {
             Some(u) => u.to_string(),
@@ -4053,11 +4089,14 @@ pub(crate) fn handle(
             .and_then(|v| v.as_str())
             .unwrap_or(&user_id)
             .to_string();
+        let (rp_id, _) = match webauthn_rp_id_and_origin() {
+            Ok(p) => p,
+            Err(reason) => return Some((500, json_error("WEBAUTHN_NOT_CONFIGURED", &reason))),
+        };
         let challenge = ctx.passkeys.mint_challenge(
             user_id.clone(),
             pylon_auth::webauthn::ChallengeKind::Registration,
         );
-        let rp_id = std::env::var("PYLON_WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into());
         return Some((
             200,
             serde_json::json!({
@@ -4080,52 +4119,78 @@ pub(crate) fn handle(
                 ))
             }
         };
-        let challenge = data.get("challenge").and_then(|v| v.as_str()).unwrap_or("");
-        let cred_id = data
-            .get("credentialId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let public_key_b64 = data.get("publicKey").and_then(|v| v.as_str()).unwrap_or("");
         let name = data
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("passkey")
             .to_string();
-        if cred_id.is_empty() || public_key_b64.is_empty() {
-            return Some((
-                400,
-                json_error("MISSING_FIELD", "credentialId + publicKey required"),
-            ));
-        }
-        if ctx
-            .passkeys
-            .take_challenge(challenge, pylon_auth::webauthn::ChallengeKind::Registration)
-            .is_none()
-        {
-            return Some((
-                401,
-                json_error("BAD_CHALLENGE", "Challenge missing or expired"),
-            ));
-        }
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        let public_key = match URL_SAFE_NO_PAD.decode(public_key_b64) {
-            Ok(b) => b,
-            Err(e) => {
+        let client_data = match data
+            .get("clientDataJSON")
+            .and_then(|v| v.as_str())
+            .map(|s| URL_SAFE_NO_PAD.decode(s))
+        {
+            Some(Ok(b)) => b,
+            _ => {
                 return Some((
                     400,
-                    json_error("BAD_PUBKEY", &format!("not base64url: {e}")),
+                    json_error("MISSING_FIELD", "clientDataJSON (base64url) is required"),
                 ))
             }
+        };
+        let attestation_object = match data
+            .get("attestationObject")
+            .and_then(|v| v.as_str())
+            .map(|s| URL_SAFE_NO_PAD.decode(s))
+        {
+            Some(Ok(b)) => b,
+            _ => {
+                return Some((
+                    400,
+                    json_error("MISSING_FIELD", "attestationObject (base64url) is required"),
+                ))
+            }
+        };
+        let (rp_id, origin) = match webauthn_rp_id_and_origin() {
+            Ok(p) => p,
+            Err(reason) => return Some((500, json_error("WEBAUTHN_NOT_CONFIGURED", &reason))),
+        };
+        // verify_registration:
+        //   - parses + validates clientDataJSON (type, origin)
+        //   - consumes the matching Registration challenge
+        //     (single-use, 5-min expiry)
+        //   - parses attestationObject CBOR (only fmt=none accepted)
+        //   - validates authData RP-ID hash + UP/AT flags
+        //   - extracts credentialId + COSE public key from the
+        //     attested credential data
+        //   - verifies the COSE key uses ES256 or Ed25519
+        //
+        // Pre-fix the route accepted the client's `publicKey` string
+        // directly, trusting it to match the authenticator's actual
+        // key. A malicious client could register an attacker-
+        // controlled key alongside a stolen credentialId, then later
+        // forge assertions against it. The attestation parsing here
+        // is what makes WebAuthn registration actually secure.
+        let outcome = match pylon_auth::webauthn::verify_registration(
+            ctx.passkeys,
+            &client_data,
+            &attestation_object,
+            &origin,
+            &rp_id,
+        ) {
+            Ok(o) => o,
+            Err(e) => return Some((401, json_error("PASSKEY_REGISTER_FAILED", &e.to_string()))),
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let cred_id = outcome.credential_id.clone();
         ctx.passkeys.store_passkey(pylon_auth::webauthn::Passkey {
-            id: cred_id.to_string(),
+            id: outcome.credential_id,
             user_id,
-            public_key,
-            sign_count: 0,
+            public_key: outcome.public_key_cose,
+            sign_count: outcome.sign_count,
             name,
             created_at: now,
             last_used_at: None,
@@ -4136,11 +4201,14 @@ pub(crate) fn handle(
         ));
     }
     if url == "/api/auth/passkey/login/begin" && method == HttpMethod::Post {
+        let (rp_id, _) = match webauthn_rp_id_and_origin() {
+            Ok(p) => p,
+            Err(reason) => return Some((500, json_error("WEBAUTHN_NOT_CONFIGURED", &reason))),
+        };
         let challenge = ctx.passkeys.mint_challenge(
             String::new(),
             pylon_auth::webauthn::ChallengeKind::Assertion,
         );
-        let rp_id = std::env::var("PYLON_WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into());
         return Some((
             200,
             serde_json::json!({"challenge": challenge, "rpId": rp_id}).to_string(),
@@ -4178,10 +4246,10 @@ pub(crate) fn handle(
         let sig = URL_SAFE_NO_PAD
             .decode(data.get("signature").and_then(|v| v.as_str()).unwrap_or(""))
             .unwrap_or_default();
-        let expected_origin =
-            std::env::var("PYLON_WEBAUTHN_ORIGIN").unwrap_or_else(|_| "https://localhost".into());
-        let expected_rp_id =
-            std::env::var("PYLON_WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into());
+        let (expected_rp_id, expected_origin) = match webauthn_rp_id_and_origin() {
+            Ok(p) => p,
+            Err(reason) => return Some((500, json_error("WEBAUTHN_NOT_CONFIGURED", &reason))),
+        };
         let input = pylon_auth::webauthn::AssertionInput {
             credential_id: cred_id,
             authenticator_data: &auth_data,

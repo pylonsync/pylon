@@ -57,20 +57,24 @@ const credential = await navigator.credentials.create({
   },
 });
 
-// 3. Send the credential back to Pylon.
+// 3. Send the credential back to Pylon. Pylon parses the
+//    attestationObject server-side (CBOR), extracts the
+//    credentialId + COSE public key from the attested credential
+//    data, and verifies the rpId hash + flags. Don't pre-decode
+//    on the client — the route trusts only the raw bytes the
+//    authenticator emitted.
 await fetch("/api/auth/passkey/register/finish", {
   method: "POST",
   headers: { Authorization: `Bearer ${session}`, "Content-Type": "application/json" },
   body: JSON.stringify({
-    challenge,
-    credentialId: base64url(credential.rawId),
-    publicKey:    base64url(extractPublicKey(credential.response)),  // COSE_Key
+    clientDataJSON:    base64url(credential.response.clientDataJSON),
+    attestationObject: base64url(credential.response.attestationObject),
     name: "MacBook Pro Touch ID",  // optional, for the user's "your passkeys" list
   }),
 });
 ```
 
-The `challenge` is single-use — it's consumed inside `/finish` regardless of success or failure, so a replay attempt gets `401 BAD_CHALLENGE`. Without the right challenge cookie, the call to `/finish` fails fast.
+The `challenge` is single-use — `verify_registration` consumes the matching record from the PasskeyStore on every call (success or failure), so a replay attempt gets `401 PASSKEY_REGISTER_FAILED`. Pylon only accepts `fmt = "none"` attestation (the passkey default — Touch ID, Face ID, Windows Hello, 1Password all use it); `packed` / `tpm` / `android-key` are rejected because verifying them needs a FIDO MDS trust store that's not shipped.
 
 ## Signing in with a passkey
 
