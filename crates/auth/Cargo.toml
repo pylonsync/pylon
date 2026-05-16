@@ -14,8 +14,8 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.102" }
-pylon-http = { path = "../http", version = "0.3.102" }
+pylon-kernel = { path = "../core", version = "0.3.103" }
+pylon-http = { path = "../http", version = "0.3.103" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
@@ -44,6 +44,10 @@ sha3 = { workspace = true }
 flate2 = { workspace = true }
 # SAML 2.0 + XMLDSig signature verification.
 samael = { workspace = true }
+# OIDC provider RS256 signing key (RSA-2048 PKCS#8 PEM disk
+# persistence + RSA-PKCS1-v1_5/SHA-256 signing). ring doesn't ship
+# RSA generation, so this is the natural fit.
+rsa = { workspace = true }
 # Force vendored OpenSSL for samael's transitive openssl-sys dep.
 # Without this, cross-compiling the macOS x86_64 binary from arm64
 # CI runners fails because pkg-config can't find a cross OpenSSL,

@@ -27,7 +27,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-version = "0.3.102"  # x-release-please-version
+version = "0.3.103"  # x-release-please-version
 description = "Pylon — realtime backend as a single Rust binary. Schema, policies, server functions, live queries, auth — one process."
 homepage = "https://pylonsync.com"
 repository = "https://github.com/pylonsync/pylon"
@@ -49,6 +49,10 @@ tokio-postgres-rustls = { version = "0.13" }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
+# OIDC provider RS256 id_token signing. `pem` feature for PKCS#8
+# disk persistence of the workspace's signing key; `sha2` feature
+# for the RSA-PKCS1-v1_5 + SHA-256 (= RS256) signing algorithm.
+rsa = { version = "0.9", features = ["sha2", "pem"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tungstenite = "0.24"
 # Loro — Rust-native CRDT library used as Pylon's local-first substrate.

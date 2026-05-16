@@ -462,6 +462,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der_derive",
  "flagset",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -1333,6 +1334,9 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "leb128"
@@ -1361,6 +1365,12 @@ dependencies = [
  "cfg-if",
  "windows-link",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
@@ -1696,6 +1706,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint-dig"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
+dependencies = [
+ "lazy_static",
+ "libm",
+ "num-integer",
+ "num-iter",
+ "num-traits",
+ "rand 0.8.5",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1742,6 +1768,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -1863,6 +1890,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,6 +1991,17 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der",
+ "pkcs8",
+ "spki",
+]
 
 [[package]]
 name = "pkcs8"
@@ -2080,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-action"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -2088,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-auth"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "argon2",
  "base64",
@@ -2101,6 +2148,7 @@ dependencies = [
  "pylon-kernel",
  "rand 0.8.5",
  "ring",
+ "rsa",
  "samael",
  "serde",
  "serde_json",
@@ -2113,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-cli"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "dotenvy",
  "pylon-kernel",
@@ -2132,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-crdt"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "loro",
  "pylon-kernel",
@@ -2143,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-functions"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-http",
  "pylon-kernel",
@@ -2154,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-http"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -2162,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-kernel"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "serde",
  "serde_json",
@@ -2170,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-migrate"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde",
@@ -2179,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-observability"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "serde",
  "serde_json",
@@ -2188,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-plugin"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "argon2",
  "hmac 0.12.1",
@@ -2203,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-policy"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-auth",
  "pylon-kernel",
@@ -2212,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-query"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -2220,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-realtime"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "bincode",
  "pylon-kernel",
@@ -2232,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-router"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "base64",
  "pylon-auth",
@@ -2251,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-runtime"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "base64",
  "postgres",
@@ -2283,14 +2331,14 @@ dependencies = [
 
 [[package]]
 name = "pylon-schema"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
 ]
 
 [[package]]
 name = "pylon-staticgen"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -2298,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-storage"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "bytes",
  "chrono",
@@ -2320,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-studio-api"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "pylon-kernel",
  "serde_json",
@@ -2328,7 +2376,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-sync"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "serde",
  "serde_json",
@@ -2336,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "pylon-workers"
-version = "0.3.102"
+version = "0.3.103"
 dependencies = [
  "futures",
  "pylon-auth",
@@ -2570,6 +2618,27 @@ checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
 dependencies = [
  "bytemuck",
  "byteorder",
+]
+
+[[package]]
+name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid 0.9.6",
+ "digest 0.10.7",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "signature",
+ "spki",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

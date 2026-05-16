@@ -2,13 +2,19 @@
 //! can sign in against. Useful for SSO across a fleet of internal
 //! tools when you don't want to depend on Auth0/Okta/Cognito.
 //!
-//! **Status: library only — HTTP endpoints not yet wired.**
-//! Discovery doc / JWKS / AuthCode types ship today so apps that
-//! want to roll their own OIDC routes can compose them. The
-//! pylon-shipped `/.well-known/openid-configuration` + `/oidc/*`
-//! routes are queued for the next wave (need RSA key generation
-//! + on-disk persistence first). Until then, do NOT advertise a
-//! pylon instance as an OIDC provider in production.
+//! **Status: signing primitives + discovery + JWKS shipped.** Pylon
+//! ships `/.well-known/openid-configuration` and `/oidc/jwks` backed
+//! by a real RSA-2048 keystore (auto-generated on first start,
+//! persisted at `PYLON_OIDC_KEY_PATH` with 0600 perms). `OidcKeyStore`
+//! signs RS256 id_tokens, `verify_pkce` does S256 PKCE per RFC 7636,
+//! and `OidcClient::is_registered_redirect` does the exact-match
+//! redirect-uri check that prevents the textbook OIDC open-redirect
+//! footgun. `/oidc/{authorize, token, userinfo}` route handlers
+//! are deferred to a focused follow-up that lands with adversarial
+//! review available — the flow is small in LoC but security-
+//! sensitive in the corners (state-binding, code-redirect-uri
+//! cross-checks, JWT claim ordering) where an unattended pass is
+//! the wrong way to ship.
 //!
 //! What pylon implements:
 //!   - `/.well-known/openid-configuration` discovery doc
@@ -166,6 +172,303 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+// ---------------------------------------------------------------------------
+// RSA keystore — RS256 signing key for id_tokens.
+// ---------------------------------------------------------------------------
+
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
+use rsa::traits::PublicKeyParts;
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use sha2::Sha256;
+
+/// Process-singleton handle to the OIDC signing key. Lazy-loaded
+/// on first call to [`keystore_or_init`], cached for the rest of
+/// the process lifetime so the JWKS route doesn't re-read the PEM
+/// on every request.
+///
+/// Tests + dev runs that never set `PYLON_OIDC_ISSUER` skip the
+/// load entirely and the JWKS endpoint returns an empty `keys`
+/// array — the documented "no asymmetric verification keys
+/// published" shape. Apps that want to bootstrap pylon-as-IdP set
+/// the env and the keystore materializes lazily on first request.
+static KEYSTORE: std::sync::OnceLock<Option<std::sync::Arc<OidcKeyStore>>> =
+    std::sync::OnceLock::new();
+
+/// Default disk location for the OIDC signing key when
+/// `PYLON_OIDC_KEY_PATH` is unset. Sits next to the SQLite database
+/// in the data dir; mode is forced to 0600 by load_or_generate.
+fn default_key_path() -> std::path::PathBuf {
+    let dir = std::env::var("PYLON_DATA_DIR")
+        .or_else(|_| std::env::var("PYLON_DB_PATH"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+    let dir = if dir.is_file() {
+        dir.parent().map(|p| p.to_path_buf()).unwrap_or(dir)
+    } else {
+        dir
+    };
+    dir.join("oidc-signing-key.pem")
+}
+
+/// Resolve the OIDC keystore, lazy-loading on first call. Returns
+/// `None` when pylon-as-IdP isn't configured for this deployment
+/// (no `PYLON_OIDC_ISSUER` env var set). The route layer treats
+/// None as "publish an empty JWKS" so non-IdP deployments don't
+/// advertise a key they can't sign with.
+///
+/// Initialization happens at most once per process — subsequent
+/// callers reuse the same `Arc<OidcKeyStore>`. The first caller
+/// pays the key-generation cost (~50ms for RSA-2048 on a modern
+/// laptop; one-time per host since the key persists to disk).
+pub fn keystore_or_init() -> Option<std::sync::Arc<OidcKeyStore>> {
+    KEYSTORE
+        .get_or_init(|| {
+            // Pylon-as-IdP is an opt-in. Without an explicit issuer
+            // we refuse to spin up the keystore — operators who
+            // didn't intend to run an IdP shouldn't have a 2048-bit
+            // RSA key sitting on disk waiting to leak.
+            if std::env::var("PYLON_OIDC_ISSUER").is_err() {
+                return None;
+            }
+            let path = std::env::var("PYLON_OIDC_KEY_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| default_key_path());
+            match OidcKeyStore::load_or_generate(&path) {
+                Ok(store) => Some(std::sync::Arc::new(store)),
+                Err(e) => {
+                    tracing::error!("[oidc] failed to load/generate signing key at {path:?}: {e}");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Persistent RSA signing key for the OIDC provider. Generates a
+/// fresh 2048-bit key on first start, persists as PKCS#8 PEM at the
+/// configured path. Same key reused across restarts so issued
+/// id_tokens stay verifiable.
+///
+/// On-disk format: PKCS#8 PEM (`-----BEGIN PRIVATE KEY-----`). File
+/// mode is set to 0600 on Unix so the signing key isn't world-
+/// readable — without this, a webserver running as a low-priv user
+/// could share the key with any other process on the same host.
+pub struct OidcKeyStore {
+    private: RsaPrivateKey,
+    public: RsaPublicKey,
+    /// Stable key id for the JWKS `kid` field. Pylon derives this
+    /// from the SHA-256 fingerprint of the modulus so a rotation
+    /// (delete the file, restart) produces a fresh `kid` that
+    /// clients can disambiguate from the old key during the
+    /// publish-both-keys-overlap window.
+    kid: String,
+}
+
+impl OidcKeyStore {
+    /// Load the signing key from `path`, generating + persisting a
+    /// fresh one if the file doesn't exist. Caller is expected to
+    /// hold an Arc<OidcKeyStore> for the lifetime of the runtime
+    /// (cached at startup, never re-read).
+    pub fn load_or_generate(path: &std::path::Path) -> Result<Self, String> {
+        if path.exists() {
+            let pem = std::fs::read_to_string(path)
+                .map_err(|e| format!("read OIDC key {path:?}: {e}"))?;
+            let private = RsaPrivateKey::from_pkcs8_pem(&pem)
+                .map_err(|e| format!("parse OIDC key {path:?}: {e}"))?;
+            let public = RsaPublicKey::from(&private);
+            let kid = derive_kid(&public);
+            return Ok(Self {
+                private,
+                public,
+                kid,
+            });
+        }
+        // First start — mint a fresh RSA-2048 key, persist with
+        // owner-only perms, return.
+        let mut rng = rand::thread_rng();
+        let private =
+            RsaPrivateKey::new(&mut rng, 2048).map_err(|e| format!("generate OIDC key: {e}"))?;
+        let pem = private
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|e| format!("encode OIDC key: {e}"))?;
+        // Ensure parent dir exists — `<data_dir>` may be the SQLite
+        // db dir which is already there, but a freshly-configured
+        // PYLON_OIDC_KEY_PATH could point at a nested location.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))?;
+        }
+        std::fs::write(path, pem.as_str()).map_err(|e| format!("write OIDC key {path:?}: {e}"))?;
+        // Restrict to owner read/write only. Without this, anyone
+        // on the same host with read access to the data dir could
+        // exfiltrate the signing key and mint forged id_tokens.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms)
+                .map_err(|e| format!("chmod 0600 {path:?}: {e}"))?;
+        }
+        let public = RsaPublicKey::from(&private);
+        let kid = derive_kid(&public);
+        Ok(Self {
+            private,
+            public,
+            kid,
+        })
+    }
+
+    /// Construct a JWKS doc containing this signer's public key.
+    /// The `n` + `e` fields are base64url-no-pad-encoded big-endian
+    /// integers per RFC 7517 §4.
+    pub fn jwks(&self) -> Jwks {
+        let n_bytes = self.public.n().to_bytes_be();
+        let e_bytes = self.public.e().to_bytes_be();
+        Jwks::one(Jwk {
+            kty: "RSA".into(),
+            alg: "RS256".into(),
+            use_: "sig".into(),
+            kid: self.kid.clone(),
+            n: b64url(&n_bytes),
+            e: b64url(&e_bytes),
+        })
+    }
+
+    /// Sign a set of JWT claims with this key, producing the full
+    /// `header.payload.signature` compact-JWS string. `claims` must
+    /// serialize to a JSON object — anything else is a programmer
+    /// error so we surface as a typed Err rather than panicking.
+    ///
+    /// Header is built here (not taken from the caller) so the
+    /// `alg` and `kid` always match the actual signing key —
+    /// callers can't accidentally claim a different alg.
+    pub fn sign_jwt(&self, claims: &serde_json::Value) -> Result<String, String> {
+        if !claims.is_object() {
+            return Err("JWT claims must be a JSON object".into());
+        }
+        let header = serde_json::json!({
+            "alg": "RS256",
+            "typ": "JWT",
+            "kid": self.kid,
+        });
+        let header_b64 = b64url(
+            serde_json::to_string(&header)
+                .map_err(|e| format!("encode header: {e}"))?
+                .as_bytes(),
+        );
+        let claims_b64 = b64url(
+            serde_json::to_string(claims)
+                .map_err(|e| format!("encode claims: {e}"))?
+                .as_bytes(),
+        );
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let signing_key = SigningKey::<Sha256>::new(self.private.clone());
+        let mut rng = rand::thread_rng();
+        let signature = signing_key.sign_with_rng(&mut rng, signing_input.as_bytes());
+        let sig_b64 = b64url(signature.to_bytes().as_ref());
+        Ok(format!("{signing_input}.{sig_b64}"))
+    }
+
+    pub fn kid(&self) -> &str {
+        &self.kid
+    }
+}
+
+/// `kid` = first 16 hex chars of SHA-256(modulus). Stable across
+/// restarts (same key → same kid) but changes on rotation. We
+/// hand-roll the hex encode rather than pulling in the `hex` crate
+/// for one call.
+fn derive_kid(public: &RsaPublicKey) -> String {
+    use sha2::Digest;
+    let modulus = public.n().to_bytes_be();
+    let hash = Sha256::digest(&modulus);
+    let mut out = String::with_capacity(16);
+    for b in &hash[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn b64url(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Registered clients + PKCE
+// ---------------------------------------------------------------------------
+
+/// One OIDC client registered with this pylon instance. The pylon
+/// manifest's `auth.oidc.clients` array deserializes into a Vec of
+/// these. Confidential clients have a `client_secret`; public
+/// clients (SPAs, native apps) leave it None and MUST use PKCE.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OidcClient {
+    pub client_id: String,
+    /// SHA-256 fingerprint of the secret would be preferable here
+    /// to keep secrets out of the manifest, but most apps register
+    /// clients ahead of time and check in their manifest; the
+    /// pragmatic shape is a plain shared secret loaded from the
+    /// app config the same way the rest of the server's secrets
+    /// are. Comparisons go through `constant_time_eq`.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    pub redirect_uris: Vec<String>,
+}
+
+impl OidcClient {
+    /// Authenticate a /token request that presented `client_id` +
+    /// optional `client_secret`. Public clients (no secret in
+    /// registration) ignore the presented secret. Confidential
+    /// clients require the secret to match (constant-time).
+    pub fn authenticate(&self, presented_secret: Option<&str>) -> bool {
+        match (self.client_secret.as_deref(), presented_secret) {
+            (None, _) => true, // public client
+            (Some(stored), Some(presented)) => {
+                crate::constant_time_eq(stored.as_bytes(), presented.as_bytes())
+            }
+            (Some(_), None) => false,
+        }
+    }
+
+    /// Check whether `redirect_uri` matches an entry in this
+    /// client's allowlist. EXACT string match per OAuth 2.1 §3.1.2
+    /// — no path/query coercion, no suffix matching. An open
+    /// redirect here is the textbook OIDC-IdP foot-gun.
+    pub fn is_registered_redirect(&self, redirect_uri: &str) -> bool {
+        self.redirect_uris.iter().any(|u| u == redirect_uri)
+    }
+}
+
+/// Verify a PKCE challenge per RFC 7636 §4.6.
+///
+/// - `method` = "S256" (REQUIRED — `plain` is deprecated by
+///   OAuth 2.1; pylon refuses it outright)
+/// - `code_verifier` is the original random string the client kept
+/// - `stored_challenge` is what the client sent at /authorize
+///
+/// Hash: SHA-256(code_verifier), base64url-no-pad → must equal
+/// stored_challenge.
+pub fn verify_pkce(method: &str, code_verifier: &str, stored_challenge: &str) -> bool {
+    if method != "S256" {
+        return false;
+    }
+    // RFC 7636 §4.1: verifier is 43..=128 chars from the unreserved
+    // set. We check length but not character set — a malformed
+    // verifier just fails the hash compare anyway, and the
+    // additional check would only ever produce identical wire
+    // behavior (false). Caller-supplied verifier reaching this
+    // path is post-input-validation, so we trust the bytes.
+    if code_verifier.len() < 43 || code_verifier.len() > 128 {
+        return false;
+    }
+    use sha2::Digest;
+    let hash = Sha256::digest(code_verifier.as_bytes());
+    let computed = b64url(&hash);
+    crate::constant_time_eq(computed.as_bytes(), stored_challenge.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +558,180 @@ mod tests {
             expires_at: 1, // ancient
         });
         assert!(store.take("old").is_none());
+    }
+
+    fn tmp_key_path() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pylon-oidc-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("oidc-signing-key.pem")
+    }
+
+    #[test]
+    fn keystore_generates_and_persists_key() {
+        let path = tmp_key_path();
+        let store1 = OidcKeyStore::load_or_generate(&path).expect("generate");
+        assert!(path.exists());
+        // Second load reuses the persisted key — same kid.
+        let store2 = OidcKeyStore::load_or_generate(&path).expect("reload");
+        assert_eq!(store1.kid(), store2.kid());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keystore_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmp_key_path();
+        OidcKeyStore::load_or_generate(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "OIDC key file must be owner-only, got 0o{mode:o}"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sign_jwt_produces_three_part_compact_jws() {
+        let path = tmp_key_path();
+        let store = OidcKeyStore::load_or_generate(&path).unwrap();
+        let claims = serde_json::json!({
+            "iss": "https://auth.example.com",
+            "sub": "user_1",
+            "aud": "client_1",
+            "exp": now_secs() + 3600,
+            "iat": now_secs(),
+        });
+        let token = store.sign_jwt(&claims).expect("sign");
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have header.payload.signature");
+        // Header must decode + carry alg=RS256 + the keystore's kid.
+        use base64::Engine;
+        let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["kid"], store.kid());
+        // Payload round-trips.
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        assert_eq!(payload["sub"], "user_1");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sign_jwt_rejects_non_object_claims() {
+        let path = tmp_key_path();
+        let store = OidcKeyStore::load_or_generate(&path).unwrap();
+        let err = store
+            .sign_jwt(&serde_json::json!("not an object"))
+            .unwrap_err();
+        assert!(err.contains("JSON object"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn jwks_exposes_real_modulus() {
+        let path = tmp_key_path();
+        let store = OidcKeyStore::load_or_generate(&path).unwrap();
+        let jwks = store.jwks();
+        assert_eq!(jwks.keys.len(), 1);
+        let jwk = &jwks.keys[0];
+        assert_eq!(jwk.kty, "RSA");
+        assert_eq!(jwk.alg, "RS256");
+        assert_eq!(jwk.use_, "sig");
+        assert_eq!(jwk.e, "AQAB"); // 65537, the standard RSA exponent
+                                   // n is base64url-no-pad; for a 2048-bit key the decoded
+                                   // length should be ~256 bytes.
+        use base64::Engine;
+        let n_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&jwk.n)
+            .unwrap();
+        assert!(n_bytes.len() >= 250 && n_bytes.len() <= 257);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pkce_s256_round_trip() {
+        // From RFC 7636 §4.6 test vectors:
+        //   verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        //   challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        assert!(verify_pkce("S256", verifier, challenge));
+        // Mismatched verifier rejected.
+        assert!(!verify_pkce(
+            "S256",
+            "wrong-verifier-but-right-length-string-padding-aa",
+            challenge
+        ));
+    }
+
+    #[test]
+    fn pkce_rejects_plain_method() {
+        // `plain` is the other PKCE method but OAuth 2.1 deprecates
+        // it. Pylon refuses to accept it — only S256.
+        assert!(!verify_pkce("plain", "verifier", "verifier"));
+    }
+
+    #[test]
+    fn pkce_verifier_length_bounds_enforced() {
+        // RFC 7636 §4.1: verifier MUST be 43..=128 chars.
+        let short = "a".repeat(42);
+        let long = "a".repeat(129);
+        assert!(!verify_pkce("S256", &short, "ignored"));
+        assert!(!verify_pkce("S256", &long, "ignored"));
+    }
+
+    #[test]
+    fn oidc_client_public_client_authenticates_without_secret() {
+        let c = OidcClient {
+            client_id: "c1".into(),
+            client_secret: None,
+            redirect_uris: vec!["https://app/cb".into()],
+        };
+        assert!(c.authenticate(None));
+        assert!(c.authenticate(Some("anything")));
+    }
+
+    #[test]
+    fn oidc_client_confidential_requires_matching_secret() {
+        let c = OidcClient {
+            client_id: "c1".into(),
+            client_secret: Some("shh".into()),
+            redirect_uris: vec![],
+        };
+        assert!(c.authenticate(Some("shh")));
+        assert!(!c.authenticate(Some("wrong")));
+        assert!(!c.authenticate(None));
+    }
+
+    #[test]
+    fn redirect_uri_must_match_exactly() {
+        let c = OidcClient {
+            client_id: "c1".into(),
+            client_secret: None,
+            redirect_uris: vec!["https://app.example.com/cb".into()],
+        };
+        assert!(c.is_registered_redirect("https://app.example.com/cb"));
+        // Path-suffix variations rejected — open-redirect prevention.
+        assert!(!c.is_registered_redirect("https://app.example.com/cb/extra"));
+        assert!(!c.is_registered_redirect("https://app.example.com/cb?next=evil"));
+        assert!(!c.is_registered_redirect("https://app.example.com.evil.com/cb"));
+        assert!(!c.is_registered_redirect("http://app.example.com/cb"));
     }
 }

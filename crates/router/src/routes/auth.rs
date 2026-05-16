@@ -4696,31 +4696,24 @@ pub(crate) fn handle(
         return Some((200, serde_json::to_string(&doc).unwrap_or_default()));
     }
     if url == "/oidc/jwks" && method == HttpMethod::Get {
-        // We mint HS256 JWTs (Wave 3); HS256 doesn't publish a public
-        // key (symmetric). When PYLON_OIDC_JWKS_RSA_N + _E are set,
-        // we publish them — apps that have rotated to RSA can drop the
-        // PEM-encoded modulus + exponent into env at deploy.
-        let n = std::env::var("PYLON_OIDC_JWKS_RSA_N").unwrap_or_default();
-        let e = std::env::var("PYLON_OIDC_JWKS_RSA_E").unwrap_or_else(|_| "AQAB".into());
-        let kid = std::env::var("PYLON_OIDC_JWKS_KID").unwrap_or_else(|_| "pylon-default".into());
-        let keys = if n.is_empty() {
-            // No RSA key configured → empty JWKS (correct OIDC response;
-            // means "no asymmetric verification keys published").
-            vec![]
-        } else {
-            vec![pylon_auth::oidc_provider::Jwk {
-                kty: "RSA".into(),
-                alg: "RS256".into(),
-                use_: "sig".into(),
-                kid,
-                n,
-                e,
-            }]
+        // JWKS now sourced from the real RSA keystore — pylon
+        // generates a 2048-bit signing key on first start (when
+        // PYLON_OIDC_ISSUER is set) and persists it at
+        // PYLON_OIDC_KEY_PATH (defaults to a 0600-perm PEM next to
+        // the SQLite db). Pre-fix the operator had to manually
+        // paste base64url(n) + base64url(e) into env vars from a
+        // pre-generated key — a footgun that produced silent
+        // mismatches between the published JWKS and the actual
+        // signing key.
+        //
+        // Apps that haven't opted into IdP mode (PYLON_OIDC_ISSUER
+        // unset) get an empty `keys` array — the documented
+        // "no asymmetric verification keys published" shape.
+        let jwks = match pylon_auth::oidc_provider::keystore_or_init() {
+            Some(store) => store.jwks(),
+            None => pylon_auth::oidc_provider::Jwks { keys: vec![] },
         };
-        return Some((
-            200,
-            serde_json::to_string(&pylon_auth::oidc_provider::Jwks { keys }).unwrap_or_default(),
-        ));
+        return Some((200, serde_json::to_string(&jwks).unwrap_or_default()));
     }
 
     // ─── Stripe billing ────────────────────────────────────────────────
