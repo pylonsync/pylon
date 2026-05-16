@@ -593,6 +593,25 @@ async function handleCall(msg: CallMessage): Promise<void> {
     tenantId:
       ((rawAuth.tenantId ?? rawAuth.tenant_id) as string | null | undefined) ??
       null,
+    // `elevate` round-trips through the host runtime which mutates
+    // the per-call caller_is_admin flag — that's what subsequent
+    // scheduler.runAfter() reads. We also mutate the local
+    // `auth.isAdmin` so handler code that re-checks `ctx.auth.isAdmin`
+    // after elevation sees the new value (it would otherwise stay
+    // false even though scheduling now works, which is confusing).
+    async elevate(options: { admin: boolean; reason: string }) {
+      await rpc(msg.call_id, {
+        type: "elevate_auth",
+        admin: options.admin,
+        reason: options.reason,
+      });
+      if (options.admin) {
+        // Mutate in-place. AuthInfo isn't frozen and handlers hold a
+        // reference, so the read on the next line of their code
+        // reflects the elevated state.
+        (auth as { isAdmin: boolean }).isAdmin = true;
+      }
+    },
   };
 
   // Env is read-only config — safe to expose on every ctx variant. Without
@@ -712,9 +731,18 @@ async function main() {
     const name = basename(file, file.endsWith(".ts") ? ".ts" : ".js");
     try {
       const mod = await import(join(process.cwd(), fnDir, file));
-      const def = mod.default as FnDefinition;
-      if (def && def.type && def.handler) {
-        registry.set(name, def);
+      const def = mod.default as FnDefinition | undefined;
+      // Runtime shape check — a misnamed/malformed export should
+      // log + skip, not crash the loader. TS narrows `def.handler`
+      // as always-defined because the FnDefinition type says so,
+      // but at runtime we don't know what the user actually exported.
+      const anyDef = def as unknown as Record<string, unknown> | undefined;
+      if (
+        anyDef &&
+        typeof anyDef.type === "string" &&
+        typeof anyDef.handler === "function"
+      ) {
+        registry.set(name, def as FnDefinition);
       }
     } catch (err) {
       console.error(`[functions] Failed to load ${file}:`, err);

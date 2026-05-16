@@ -12,6 +12,36 @@ export interface AuthInfo {
   /** Active tenant id (selected organization) for multi-tenant apps.
    *  Null when the session hasn't selected one. */
   tenantId: string | null;
+  /**
+   * Promote the call's auth context after the handler has done its
+   * own authentication check (HMAC signature verification on a
+   * webhook, JWT validation, custom token check). Used by webhook
+   * receivers — they're necessarily public (external systems POST
+   * to them) but want to schedule internal:true workers after
+   * they've proven the request came from a trusted source.
+   *
+   * The framework does NOT verify the developer actually checked
+   * anything before calling this — that's on you. The `reason` is
+   * mandatory and gets logged at INFO with the function name so
+   * every elevation is auditable.
+   *
+   * ```ts
+   * // Github webhook example:
+   * const ok = await verifyGithubSignature(secret, rawBody, sig);
+   * if (!ok) throw ctx.error("INVALID_SIGNATURE", "bad sig");
+   * await ctx.auth.elevate({
+   *   admin: true,
+   *   reason: "github webhook hmac verified",
+   * });
+   * // Now this works — caller_is_admin=true for the gate:
+   * await ctx.scheduler.runAfter(0, "deployProject", { deploymentId });
+   * ```
+   *
+   * After calling `elevate({ admin: true })`, `auth.isAdmin` is also
+   * mutated to true locally so subsequent reads in the same handler
+   * see the new value.
+   */
+  elevate(options: { admin: boolean; reason: string }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -415,7 +415,14 @@ impl FnRunner {
         request: Option<crate::protocol::RequestInfo>,
         caller_internal: bool,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
-        let caller_is_admin = auth.is_admin;
+        // Mutable so `ctx.auth.elevate({ admin: true, ... })` can
+        // promote the call mid-flight. Webhook receivers need this:
+        // they're public (external systems POST to them) but want to
+        // schedule internal:true workers after they've HMAC-verified
+        // the request. The TS SDK emits an `ElevateAuth` message;
+        // the handler arm below flips this flag, and the subsequent
+        // `Schedule` arm sees the new value.
+        let mut caller_is_admin = auth.is_admin;
         let caller_user_id = auth.user_id.clone();
         let caller_tenant_id = auth.tenant_id.clone();
         let timeout = *self.call_timeout.lock().unwrap();
@@ -542,6 +549,48 @@ impl FnRunner {
                         call_id.clone(),
                         serde_json::json!({"cancelled": true}),
                     );
+                    self.send(&reply)?;
+                }
+
+                TsMessage::ElevateAuth(req) if req.call_id == call_id => {
+                    // Promote the per-call auth context after the
+                    // handler has done its own auth check (signature
+                    // verification on a webhook, JWT validation, etc.).
+                    //
+                    // We do NOT enforce that the developer actually
+                    // verified anything — the framework can't know.
+                    // The audit-log requirement (mandatory non-empty
+                    // `reason`) makes every elevation traceable so
+                    // a misuse is at least findable post-incident.
+                    //
+                    // Today: only `admin` is supported. Tomorrow could
+                    // also flip caller_internal, set a synthetic user
+                    // id, etc. — keep this single-field for now so the
+                    // semantics are easy to reason about.
+                    let reply = if req.reason.trim().is_empty() {
+                        DbResultMessage::err(
+                            call_id.clone(),
+                            "ELEVATE_NO_REASON",
+                            "elevate({ reason }) requires a non-empty reason — every privilege escalation must be auditable",
+                        )
+                    } else if !req.admin {
+                        // No-op elevation request. Still reply OK so
+                        // future-compatible callers don't error when
+                        // they pass `admin: false` to revert (not yet
+                        // supported, but reserve the shape).
+                        DbResultMessage::ok(call_id.clone(), serde_json::json!({"elevated": false}))
+                    } else {
+                        // Promote. Log at INFO with fn name + reason
+                        // so operators have an audit trail without
+                        // having to plumb a dedicated table.
+                        tracing::info!(
+                            "[functions] elevate_auth: fn=\"{}\" admin=true reason=\"{}\"",
+                            fn_name,
+                            req.reason
+                        );
+                        caller_is_admin = true;
+                        DbResultMessage::ok(call_id.clone(), serde_json::json!({"elevated": true}))
+                    };
                     self.send(&reply)?;
                 }
 

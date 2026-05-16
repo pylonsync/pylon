@@ -161,6 +161,19 @@ pub enum TsMessage {
     #[serde(rename = "schedule")]
     Schedule(ScheduleMessage),
 
+    /// Elevate the call's auth context after the handler has done
+    /// its own authentication check (HMAC signature verify, JWT
+    /// validation, custom token check). Used by webhook receivers
+    /// — they're necessarily public (external systems POST to
+    /// them) but need to schedule internal:true workers after
+    /// they've proven the request came from a trusted source.
+    ///
+    /// The framework doesn't verify the developer actually checked
+    /// anything before elevating — that's on them. The `reason`
+    /// field is mandatory so every elevation is auditable.
+    #[serde(rename = "elevate_auth")]
+    ElevateAuth(ElevateAuthMessage),
+
     /// Cancel a previously scheduled function.
     #[serde(rename = "cancel_schedule")]
     CancelSchedule(CancelScheduleMessage),
@@ -291,6 +304,23 @@ pub struct ScheduleMessage {
 pub struct CancelScheduleMessage {
     pub call_id: String,
     pub schedule_id: String,
+}
+
+/// Elevate the call's auth context. See `TsMessage::ElevateAuth`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ElevateAuthMessage {
+    pub call_id: String,
+    /// Flip caller_is_admin to true for the rest of this call. Allows
+    /// subsequent `ctx.scheduler.runAfter` calls to enqueue internal:
+    /// true targets without bouncing through an HTTP loopback with the
+    /// platform admin token.
+    #[serde(default)]
+    pub admin: bool,
+    /// Human-readable rationale for the elevation. Logged at INFO so
+    /// an operator can audit who elevated and why (e.g. "github
+    /// webhook hmac verified"). Mandatory — empty reason is rejected
+    /// at the handler so accidental elevations always carry blame.
+    pub reason: String,
 }
 
 /// Call another function from within an action.
