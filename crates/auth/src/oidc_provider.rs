@@ -2,19 +2,31 @@
 //! can sign in against. Useful for SSO across a fleet of internal
 //! tools when you don't want to depend on Auth0/Okta/Cognito.
 //!
-//! **Status: signing primitives + discovery + JWKS shipped.** Pylon
-//! ships `/.well-known/openid-configuration` and `/oidc/jwks` backed
-//! by a real RSA-2048 keystore (auto-generated on first start,
-//! persisted at `PYLON_OIDC_KEY_PATH` with 0600 perms). `OidcKeyStore`
-//! signs RS256 id_tokens, `verify_pkce` does S256 PKCE per RFC 7636,
-//! and `OidcClient::is_registered_redirect` does the exact-match
-//! redirect-uri check that prevents the textbook OIDC open-redirect
-//! footgun. `/oidc/{authorize, token, userinfo}` route handlers
-//! are deferred to a focused follow-up that lands with adversarial
-//! review available — the flow is small in LoC but security-
-//! sensitive in the corners (state-binding, code-redirect-uri
-//! cross-checks, JWT claim ordering) where an unattended pass is
-//! the wrong way to ship.
+//! **Status: full auth-code + PKCE flow shipped.** Pylon ships
+//! `/.well-known/openid-configuration`, `/oidc/jwks`,
+//! `/oidc/authorize`, `/oidc/token`, `/oidc/userinfo` backed by a
+//! real RSA-2048 keystore (auto-generated on first start,
+//! persisted at `PYLON_OIDC_KEY_PATH` with 0600 perms).
+//!
+//! Mandatory operator config to enable IdP mode:
+//!   - `PYLON_OIDC_ISSUER` — the externally-visible issuer URL
+//!     (e.g. `https://auth.example.com`). Stamped into the
+//!     discovery doc + id_token `iss` claim.
+//!   - `PYLON_OIDC_CLIENTS` — JSON array of registered clients:
+//!     `[{"client_id":"...","client_secret":"...","redirect_uris":["..."]}]`.
+//!     `client_secret` is optional (public clients use PKCE).
+//!
+//! Security stance:
+//!   - PKCE S256 is REQUIRED for every authorize request — plain
+//!     PKCE rejected per OAuth 2.1, no-PKCE rejected outright.
+//!   - redirect_uri matched against the client's registered list
+//!     by EXACT string compare (no path coercion).
+//!   - id_token claims: iss, sub, aud, exp (10 min), iat, nonce
+//!     (when supplied at /authorize), email, email_verified, name.
+//!   - access_token is opaque random (32-byte b64url), TTL 1h.
+//!   - refresh_token NOT issued. Clients re-do the auth code flow
+//!     when the access_token expires — keeps the surface small and
+//!     drops a class of long-lived bearer leak.
 //!
 //! What pylon implements:
 //!   - `/.well-known/openid-configuration` discovery doc
@@ -441,6 +453,148 @@ impl OidcClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AccessTokenStore — opaque bearer tokens for the userinfo endpoint
+// ---------------------------------------------------------------------------
+
+/// One issued access_token. Pylon's tokens are opaque (32 random
+/// bytes base64url-encoded) rather than self-contained JWTs — the
+/// userinfo endpoint resolves the bearer to a user_id via this
+/// store, then projects the User row's safe-for-client fields.
+/// Opaque tokens make revocation O(1) (just remove the row) which
+/// the JWT-shaped alternative makes painful.
+#[derive(Debug, Clone)]
+pub struct AccessToken {
+    pub token: String,
+    pub user_id: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub expires_at: u64,
+}
+
+pub struct AccessTokenStore {
+    tokens: std::sync::Mutex<std::collections::HashMap<String, AccessToken>>,
+}
+
+impl Default for AccessTokenStore {
+    fn default() -> Self {
+        Self {
+            tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl AccessTokenStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn put(&self, t: AccessToken) {
+        self.tokens.lock().unwrap().insert(t.token.clone(), t);
+    }
+
+    /// Look up a token by string. Returns None for unknown or
+    /// expired tokens; an expired token is also evicted as a
+    /// best-effort cleanup so the map doesn't grow without bound.
+    pub fn get(&self, token: &str) -> Option<AccessToken> {
+        let mut map = self.tokens.lock().unwrap();
+        let entry = map.get(token).cloned()?;
+        if entry.expires_at <= now_secs() {
+            map.remove(token);
+            return None;
+        }
+        Some(entry)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process-singleton: provider state (keystore + clients + code/token stores)
+// ---------------------------------------------------------------------------
+
+/// All the state a pylon-as-IdP needs that the HTTP routes share
+/// across requests. Lazy-initialized on first /oidc/* request that
+/// requires it.
+///
+/// Wraps the keystore + the client registry + the auth code store
+/// + the access token store in one Arc-able bundle so the route
+/// layer does ONE lookup per request.
+pub struct OidcProvider {
+    pub keystore: std::sync::Arc<OidcKeyStore>,
+    pub clients: Vec<OidcClient>,
+    pub auth_codes: AuthCodeStore,
+    pub access_tokens: AccessTokenStore,
+}
+
+impl OidcProvider {
+    pub fn find_client(&self, client_id: &str) -> Option<&OidcClient> {
+        self.clients.iter().find(|c| c.client_id == client_id)
+    }
+}
+
+static PROVIDER: std::sync::OnceLock<Option<std::sync::Arc<OidcProvider>>> =
+    std::sync::OnceLock::new();
+
+/// Resolve the process-wide OIDC provider state, lazy-loading on
+/// first call. Returns None when pylon-as-IdP isn't configured
+/// (no `PYLON_OIDC_ISSUER`). Routes treat None as "this isn't an
+/// IdP" and return 404.
+pub fn provider_or_init() -> Option<std::sync::Arc<OidcProvider>> {
+    PROVIDER
+        .get_or_init(|| {
+            if std::env::var("PYLON_OIDC_ISSUER").is_err() {
+                return None;
+            }
+            // Keystore lazy-init reuses the same opt-in env, so this
+            // never produces a key without an issuer set.
+            let keystore = keystore_or_init()?;
+            let clients = load_clients_from_env();
+            if clients.is_empty() {
+                tracing::warn!(
+                    "[oidc] PYLON_OIDC_ISSUER set but PYLON_OIDC_CLIENTS missing/empty — \
+                     no registered clients, /oidc/authorize will reject every request"
+                );
+            }
+            Some(std::sync::Arc::new(OidcProvider {
+                keystore,
+                clients,
+                auth_codes: AuthCodeStore::new(),
+                access_tokens: AccessTokenStore::new(),
+            }))
+        })
+        .clone()
+}
+
+/// Parse `PYLON_OIDC_CLIENTS` env var as a JSON array of
+/// OidcClient. Bad JSON or wrong shape produces an empty list +
+/// a tracing::error — the route layer then refuses every authorize
+/// request, surfacing the misconfiguration loudly instead of
+/// silently allowing whatever client_id arrives.
+fn load_clients_from_env() -> Vec<OidcClient> {
+    let raw = match std::env::var("PYLON_OIDC_CLIENTS") {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    match serde_json::from_str::<Vec<OidcClient>>(&raw) {
+        Ok(clients) => clients,
+        Err(e) => {
+            tracing::error!(
+                "[oidc] PYLON_OIDC_CLIENTS invalid JSON ({e}) — refusing all authorize requests"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Generate a fresh URL-safe 32-byte token (auth code or access
+/// token). Uses the rand crate; 256 bits of entropy from the OS
+/// CSPRNG is overkill but adequate.
+pub fn mint_random_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    b64url(&bytes)
+}
+
 /// Verify a PKCE challenge per RFC 7636 §4.6.
 ///
 /// - `method` = "S256" (REQUIRED — `plain` is deprecated by
@@ -718,6 +872,45 @@ mod tests {
         assert!(c.authenticate(Some("shh")));
         assert!(!c.authenticate(Some("wrong")));
         assert!(!c.authenticate(None));
+    }
+
+    #[test]
+    fn access_token_round_trip_and_expiry() {
+        let store = AccessTokenStore::new();
+        store.put(AccessToken {
+            token: "tok-1".into(),
+            user_id: "u-1".into(),
+            client_id: "c-1".into(),
+            scopes: vec!["openid".into(), "email".into()],
+            expires_at: now_secs() + 60,
+        });
+        let got = store.get("tok-1").expect("active token resolves");
+        assert_eq!(got.user_id, "u-1");
+        assert_eq!(got.scopes, vec!["openid".to_string(), "email".to_string()]);
+        // Expired token disappears + returns None.
+        store.put(AccessToken {
+            token: "tok-2".into(),
+            user_id: "u-2".into(),
+            client_id: "c-1".into(),
+            scopes: vec![],
+            expires_at: 1, // ancient
+        });
+        assert!(store.get("tok-2").is_none());
+        // Best-effort eviction means a second get also gets None.
+        assert!(store.get("tok-2").is_none());
+    }
+
+    #[test]
+    fn mint_random_token_is_base64url_no_pad() {
+        let t = mint_random_token();
+        // 32 bytes base64url no-pad = 43 chars.
+        assert_eq!(t.len(), 43);
+        assert!(!t.contains('='));
+        assert!(!t.contains('+'));
+        assert!(!t.contains('/'));
+        assert!(!t.contains('\n'));
+        // Two consecutive mints differ.
+        assert_ne!(t, mint_random_token());
     }
 
     #[test]

@@ -4716,6 +4716,407 @@ pub(crate) fn handle(
         return Some((200, serde_json::to_string(&jwks).unwrap_or_default()));
     }
 
+    // ─── OIDC Provider — auth-code + PKCE flow ─────────────────────────
+    //
+    // GET /oidc/authorize — initiate auth-code flow. Requires the
+    // user to be authenticated; if not, 302s to PYLON_LOGIN_URL?next=
+    // the original /oidc/authorize URL (default /login). The app's
+    // own login page completes session establishment then redirects
+    // the browser back here.
+    //
+    // POST /oidc/token — exchange a code for {access_token, id_token}.
+    // Validates: client auth (constant-time secret compare),
+    // code/redirect_uri binding, PKCE S256 verifier. Public clients
+    // (no client_secret) MUST send code_verifier.
+    //
+    // GET /oidc/userinfo — bearer-protected user claims. Resolves
+    // the opaque access_token to a user_id, projects the User row
+    // through the standard auth.user.expose/hide config (same
+    // protection /api/auth/session uses against passwordHash leaks).
+    if url.starts_with("/oidc/authorize") && method == HttpMethod::Get {
+        let provider = match pylon_auth::oidc_provider::provider_or_init() {
+            Some(p) => p,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "OIDC_NOT_CONFIGURED",
+                        "set PYLON_OIDC_ISSUER to enable IdP mode",
+                    ),
+                ))
+            }
+        };
+        let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let q = crate::parse_query(query);
+        let response_type = q.get("response_type").map(String::as_str).unwrap_or("");
+        let client_id = q.get("client_id").map(String::as_str).unwrap_or("");
+        let redirect_uri = q.get("redirect_uri").map(String::as_str).unwrap_or("");
+        let scope = q.get("scope").map(String::as_str).unwrap_or("");
+        let state = q.get("state").map(String::as_str).unwrap_or("");
+        let code_challenge = q.get("code_challenge").map(String::as_str).unwrap_or("");
+        let code_challenge_method = q
+            .get("code_challenge_method")
+            .map(String::as_str)
+            .unwrap_or("");
+        let nonce = q.get("nonce").map(String::as_str).unwrap_or("");
+
+        // Phase 1: validate identity of the request (client_id +
+        // redirect_uri) before doing anything user-visible. A bad
+        // client_id or unregistered redirect_uri MUST produce a
+        // direct error response (not a redirect) — RFC 6749 §3.1.2.4.
+        // Otherwise an attacker who controls a malicious redirect_uri
+        // can frame an error in the URL as if it came from the
+        // legitimate IdP.
+        let client = match provider.find_client(client_id) {
+            Some(c) => c,
+            None => return Some((400, json_error("invalid_client", "unknown client_id"))),
+        };
+        if !client.is_registered_redirect(redirect_uri) {
+            return Some((
+                400,
+                json_error(
+                    "invalid_redirect_uri",
+                    "redirect_uri does not match any registered URI for this client",
+                ),
+            ));
+        }
+        // Phase 2: errors from here on out get redirected to the
+        // (now-validated) redirect_uri with OAuth `error` +
+        // `error_description` + `state` params, per RFC 6749 §4.1.2.1.
+        let redirect_err = |code: &str, desc: &str| -> Option<(u16, String)> {
+            let mut url = format!(
+                "{}?error={}&error_description={}",
+                redirect_uri,
+                crate::url_encode(code),
+                crate::url_encode(desc),
+            );
+            if !state.is_empty() {
+                url.push_str(&format!("&state={}", crate::url_encode(state)));
+            }
+            ctx.add_response_header("Location", url);
+            Some((302, String::new()))
+        };
+        if response_type != "code" {
+            return redirect_err(
+                "unsupported_response_type",
+                "pylon only supports response_type=code",
+            );
+        }
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        if !scopes.contains(&"openid") {
+            return redirect_err("invalid_scope", "openid scope is required");
+        }
+        // PKCE is mandatory — pylon-as-IdP refuses no-PKCE
+        // authorize requests entirely. Plain method also rejected.
+        if code_challenge.is_empty() || code_challenge_method != "S256" {
+            return redirect_err(
+                "invalid_request",
+                "PKCE S256 (code_challenge + code_challenge_method=S256) is required",
+            );
+        }
+        // Phase 3: caller's session. If not logged in, 302 to the
+        // app's login page with `next` set so the browser comes
+        // back here after auth.
+        let user_id = match ctx.auth_ctx.user_id.as_deref() {
+            Some(u) => u.to_string(),
+            None => {
+                let login_base =
+                    std::env::var("PYLON_LOGIN_URL").unwrap_or_else(|_| "/login".to_string());
+                let next = format!("/oidc/authorize?{}", query.trim_start_matches('?'));
+                let target = if login_base.contains('?') {
+                    format!("{login_base}&next={}", crate::url_encode(&next))
+                } else {
+                    format!("{login_base}?next={}", crate::url_encode(&next))
+                };
+                ctx.add_response_header("Location", target);
+                return Some((302, String::new()));
+            }
+        };
+
+        // Phase 4: mint the auth code, redirect back to the client.
+        let code = pylon_auth::oidc_provider::mint_random_token();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        provider
+            .auth_codes
+            .put(pylon_auth::oidc_provider::AuthCode {
+                code: code.clone(),
+                user_id,
+                client_id: client.client_id.clone(),
+                redirect_uri: redirect_uri.to_string(),
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                nonce: if nonce.is_empty() {
+                    None
+                } else {
+                    Some(nonce.to_string())
+                },
+                code_challenge: Some(code_challenge.to_string()),
+                code_challenge_method: Some("S256".into()),
+                expires_at: now + 10 * 60, // 10-minute auth-code TTL per OAuth 2.1
+            });
+        let mut redirect = format!("{}?code={}", redirect_uri, crate::url_encode(&code),);
+        if !state.is_empty() {
+            redirect.push_str(&format!("&state={}", crate::url_encode(state)));
+        }
+        ctx.add_response_header("Location", redirect);
+        return Some((302, String::new()));
+    }
+
+    if url == "/oidc/token" && method == HttpMethod::Post {
+        let provider = match pylon_auth::oidc_provider::provider_or_init() {
+            Some(p) => p,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "OIDC_NOT_CONFIGURED",
+                        "set PYLON_OIDC_ISSUER to enable IdP mode",
+                    ),
+                ))
+            }
+        };
+        // /token bodies are application/x-www-form-urlencoded per
+        // RFC 6749 §4.1.3. Reuse the existing query-string parser.
+        let form = crate::parse_query(body);
+        let grant_type = form.get("grant_type").map(String::as_str).unwrap_or("");
+        if grant_type != "authorization_code" {
+            return Some((
+                400,
+                json_error(
+                    "unsupported_grant_type",
+                    "pylon only supports grant_type=authorization_code",
+                ),
+            ));
+        }
+        let code_param = form.get("code").map(String::as_str).unwrap_or("");
+        let redirect_uri = form.get("redirect_uri").map(String::as_str).unwrap_or("");
+        let client_id = form.get("client_id").map(String::as_str).unwrap_or("");
+        let client_secret = form.get("client_secret").map(String::as_str);
+        let code_verifier = form.get("code_verifier").map(String::as_str).unwrap_or("");
+
+        // Authenticate client BEFORE consuming the auth code. A bad
+        // client_secret must not burn a single-use code that the
+        // legitimate client could otherwise still redeem.
+        let client = match provider.find_client(client_id) {
+            Some(c) => c,
+            None => return Some((401, json_error("invalid_client", "unknown client_id"))),
+        };
+        if !client.authenticate(client_secret) {
+            return Some((
+                401,
+                json_error("invalid_client", "client authentication failed"),
+            ));
+        }
+        // Consume the code (single-use, expiry checked).
+        let stored = match provider.auth_codes.take(code_param) {
+            Some(c) => c,
+            None => {
+                return Some((
+                    400,
+                    json_error(
+                        "invalid_grant",
+                        "auth code unknown, expired, or already used",
+                    ),
+                ))
+            }
+        };
+        // Code MUST be bound to this client and this redirect_uri —
+        // RFC 6749 §4.1.3. Without these checks an attacker who
+        // somehow obtained a code (e.g. via a referer leak from a
+        // legitimate redirect_uri) could redeem it from a different
+        // client or against a different redirect_uri.
+        if stored.client_id != client.client_id {
+            return Some((
+                400,
+                json_error("invalid_grant", "code was issued to a different client"),
+            ));
+        }
+        if stored.redirect_uri != redirect_uri {
+            return Some((
+                400,
+                json_error(
+                    "invalid_grant",
+                    "redirect_uri does not match the one used at /authorize",
+                ),
+            ));
+        }
+        // PKCE verifier check — every authorize required a challenge
+        // so the take() above ALWAYS returned a code with one.
+        let challenge = stored.code_challenge.as_deref().unwrap_or_default();
+        let method = stored.code_challenge_method.as_deref().unwrap_or("S256");
+        if !pylon_auth::oidc_provider::verify_pkce(method, code_verifier, challenge) {
+            return Some((400, json_error("invalid_grant", "PKCE verifier mismatch")));
+        }
+
+        // Mint id_token + access_token.
+        let issuer = std::env::var("PYLON_OIDC_ISSUER").unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id_token_ttl: u64 = 600; // 10 min
+        let access_token_ttl: u64 = 3600; // 1 hour
+
+        // Pull email + name from the user row when scope requested.
+        let user_entity = &ctx.store.manifest().auth.user.entity;
+        let user_row = ctx
+            .store
+            .get_by_id(user_entity, &stored.user_id)
+            .ok()
+            .flatten();
+        let email = user_row
+            .as_ref()
+            .and_then(|r| r.get("email"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = user_row
+            .as_ref()
+            .and_then(|r| r.get("displayName").or_else(|| r.get("name")))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("iss".into(), serde_json::Value::String(issuer));
+        claims.insert(
+            "sub".into(),
+            serde_json::Value::String(stored.user_id.clone()),
+        );
+        claims.insert(
+            "aud".into(),
+            serde_json::Value::String(client.client_id.clone()),
+        );
+        claims.insert(
+            "exp".into(),
+            serde_json::Value::Number((now + id_token_ttl).into()),
+        );
+        claims.insert("iat".into(), serde_json::Value::Number(now.into()));
+        if let Some(n) = stored.nonce.as_ref() {
+            claims.insert("nonce".into(), serde_json::Value::String(n.clone()));
+        }
+        if stored.scopes.iter().any(|s| s == "email") && !email.is_empty() {
+            claims.insert("email".into(), serde_json::Value::String(email.clone()));
+            // Pylon doesn't have per-user email_verified today;
+            // every sign-up flow that hits this code path went
+            // through magic-link / OAuth / SAML which all imply
+            // verification. Stamping true is the pragmatic answer
+            // until a real per-user verified flag lands.
+            claims.insert("email_verified".into(), serde_json::Value::Bool(true));
+        }
+        if stored.scopes.iter().any(|s| s == "profile") {
+            if let Some(n) = name.as_ref() {
+                claims.insert("name".into(), serde_json::Value::String(n.clone()));
+            }
+        }
+        let id_token = match provider
+            .keystore
+            .sign_jwt(&serde_json::Value::Object(claims))
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("[oidc] id_token signing failed: {e}");
+                return Some((500, json_error("server_error", "id_token signing failed")));
+            }
+        };
+        let access_token = pylon_auth::oidc_provider::mint_random_token();
+        provider
+            .access_tokens
+            .put(pylon_auth::oidc_provider::AccessToken {
+                token: access_token.clone(),
+                user_id: stored.user_id.clone(),
+                client_id: client.client_id.clone(),
+                scopes: stored.scopes.clone(),
+                expires_at: now + access_token_ttl,
+            });
+        let body = serde_json::json!({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": access_token_ttl,
+            "id_token": id_token,
+            "scope": stored.scopes.join(" "),
+        });
+        return Some((200, body.to_string()));
+    }
+
+    if url == "/oidc/userinfo" && method == HttpMethod::Get {
+        let provider = match pylon_auth::oidc_provider::provider_or_init() {
+            Some(p) => p,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "OIDC_NOT_CONFIGURED",
+                        "set PYLON_OIDC_ISSUER to enable IdP mode",
+                    ),
+                ))
+            }
+        };
+        let bearer = ctx
+            .request_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, v)| v.strip_prefix("Bearer "))
+            .map(|s| s.trim().to_string());
+        let token = match bearer {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                return Some((
+                    401,
+                    json_error("invalid_token", "missing bearer access_token"),
+                ))
+            }
+        };
+        let access = match provider.access_tokens.get(&token) {
+            Some(a) => a,
+            None => {
+                return Some((
+                    401,
+                    json_error("invalid_token", "access_token unknown or expired"),
+                ))
+            }
+        };
+        let user_entity = &ctx.store.manifest().auth.user.entity;
+        let row = match ctx
+            .store
+            .get_by_id(user_entity, &access.user_id)
+            .ok()
+            .flatten()
+        {
+            Some(r) => r,
+            None => return Some((404, json_error("user_not_found", "user no longer exists"))),
+        };
+        // Project the row through auth.user.expose/hide (same path
+        // /api/auth/session uses) so passwordHash + underscore-
+        // prefixed secrets never leak via userinfo.
+        let auth_user = &ctx.store.manifest().auth.user;
+        let projected = crate::maybe_project_user_row(user_entity, row, auth_user);
+        let email = projected
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut response = serde_json::Map::new();
+        response.insert(
+            "sub".into(),
+            serde_json::Value::String(access.user_id.clone()),
+        );
+        if access.scopes.iter().any(|s| s == "email") && !email.is_empty() {
+            response.insert("email".into(), serde_json::Value::String(email.into()));
+            response.insert("email_verified".into(), serde_json::Value::Bool(true));
+        }
+        if access.scopes.iter().any(|s| s == "profile") {
+            if let Some(name) = projected
+                .get("displayName")
+                .or_else(|| projected.get("name"))
+                .and_then(|v| v.as_str())
+            {
+                response.insert("name".into(), serde_json::Value::String(name.into()));
+            }
+        }
+        return Some((200, serde_json::Value::Object(response).to_string()));
+    }
+
     // ─── Stripe billing ────────────────────────────────────────────────
     //
     // POST /api/billing/checkout — mint a Stripe Checkout Session for
