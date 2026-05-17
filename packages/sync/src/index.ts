@@ -1683,9 +1683,98 @@ export class SyncEngine {
    * mutates the server session (sign-in, sign-out, `/api/auth/select-org`)
    * so the cached session and React subscribers pick up the change without
    * waiting for the next pull.
+   *
+   * Most apps shouldn't need to call this directly — prefer the higher-
+   * level helpers below (`selectOrg`, `clearOrg`, `signOut`) which do the
+   * fetch + notify in one step, or the React `useSession()` hook which
+   * exposes the same helpers bound to the in-scope engine. This is the
+   * escape hatch for code that talks to /api/auth/* via its own client.
    */
   notifySessionChanged(): Promise<void> {
     return this.refreshResolvedSession();
+  }
+
+  /**
+   * Switch the caller's active tenant (organization) and refresh the
+   * resolved session in one shot. Membership is verified server-side
+   * (POST /api/auth/select-org throws 403 if the user isn't a member
+   * of the target org), and the engine's local replica resets so
+   * `db.useQuery` stops returning the previous tenant's rows.
+   *
+   * Throws on any non-2xx response. The error carries the
+   * server-issued JSON error body when available, so callers can
+   * branch on `err.code === "NOT_A_MEMBER"` etc.
+   */
+  async selectOrg(orgId: string): Promise<void> {
+    await this.authMutate("/api/auth/select-org", { orgId });
+    await this.refreshResolvedSession();
+  }
+
+  /**
+   * Drop the caller's active tenant — back to the "no active org"
+   * state typical of a login-lobby route. Refreshes the resolved
+   * session so React subscribers re-render with `tenantId: null`.
+   */
+  async clearOrg(): Promise<void> {
+    await this.authMutate("/api/auth/select-org", { orgId: null });
+    await this.refreshResolvedSession();
+  }
+
+  /**
+   * Revoke the current session server-side (DELETE /api/auth/session)
+   * and refresh — leaves the caller anonymous. Local sync stops on
+   * the next pull cycle; replica content stays in IndexedDB so a
+   * subsequent sign-in as the same user is instant.
+   */
+  async signOut(): Promise<void> {
+    await this.authMutate("/api/auth/session", undefined, "DELETE");
+    await this.refreshResolvedSession();
+  }
+
+  /** Shared transport for the auth helpers above. Same bearer/cookie
+   *  policy as `request()` — keeps the auth flows on the same
+   *  authentication footing as data sync. */
+  private async authMutate(
+    path: string,
+    body?: unknown,
+    method = "POST",
+  ): Promise<unknown> {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const token =
+      this.config.token ??
+      this.storage.get(this.tokenStorageKey()) ??
+      undefined;
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${this.config.baseUrl}${path}`, {
+      method,
+      headers,
+      credentials: "include",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // Server returned non-JSON (HTML error page from a proxy,
+        // empty 204, etc.) — fall through; the !res.ok branch will
+        // synthesise a useful Error from the status.
+      }
+    }
+    if (!res.ok) {
+      const err = new Error(
+        (parsed as { error?: { message?: string } } | null)?.error?.message ??
+          `${method} ${path} failed: ${res.status}`,
+      ) as Error & { status?: number; code?: string };
+      err.status = res.status;
+      const code = (parsed as { error?: { code?: string } } | null)?.error
+        ?.code;
+      if (code) err.code = code;
+      throw err;
+    }
+    return parsed;
   }
 
   /**

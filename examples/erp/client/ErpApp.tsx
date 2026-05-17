@@ -823,49 +823,29 @@ export function ErpApp() {
   // `useSession` fetches /api/auth/me, caches it on the engine, and
   // notifies on change — including the replica reset when the tenant
   // flips. We no longer mirror it in localStorage.
-  const { tenantId: activeOrgId } = useSession(db.sync);
+  const { tenantId: activeOrgId, selectOrg: doSelectOrg, clearOrg, signOut: doSignOut } = useSession(db.sync);
   const [page, setPage] = useState<Page>("dashboard");
 
   async function signOut() {
-    const token = localStorage.getItem(storageKey("token"));
+    // Drop locally-stored UI state, then let the SDK handle the
+    // server revoke + engine refresh in one call.
     localStorage.removeItem(storageKey("token"));
     localStorage.removeItem(storageKey("user"));
-    if (token) {
-      fetch(`${BASE_URL}/api/auth/session`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {});
-    }
     try {
       indexedDB.deleteDatabase(`pylon_sync_erp`);
     } catch {}
     setCurrentUser(null);
-    // Token changed → sync engine picks it up on next pull (identity-
-    // change detection), but nudge it so useSession flips to anonymous
-    // immediately instead of waiting for the reconnect cycle.
-    await db.sync.notifySessionChanged();
+    await doSignOut();
   }
 
   async function selectOrg(orgId: string | null) {
-    const token = localStorage.getItem(storageKey("token"));
-    if (!token) return;
-    const res = await fetch(`${BASE_URL}/api/auth/select-org`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ orgId }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `switch failed (${res.status})`);
+    // SDK helpers do fetch + engine refresh + replica reset in one
+    // step — no more manual notifySessionChanged dance.
+    if (orgId == null) {
+      await clearOrg();
+    } else {
+      await doSelectOrg(orgId);
     }
-    // Server session just flipped. `notifySessionChanged` re-reads
-    // /api/auth/me, trips the tenant-flip branch in the engine which
-    // resets the replica, and notifies subscribers — so `useSession`
-    // above re-renders with the new tenant and queries re-run.
-    await db.sync.notifySessionChanged();
   }
 
   if (!currentUser) return <Login onReady={setCurrentUser} />;

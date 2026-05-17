@@ -145,23 +145,29 @@ const storage = createWriteThroughStorage(seed, async (key, value) => {
 const engine = createSyncEngine("https://your-app.com", { storage });
 ```
 
-When the token changes (sign-in, sign-out, switch user), call `engine.notifySessionChanged()` so the engine refreshes `/api/auth/me` and resets the replica if the visible set changed.
+When the token changes (sign-in, sign-out, switch user) and you mutated it via your own client rather than the SDK helpers below, call `engine.notifySessionChanged()` so the engine refreshes `/api/auth/me` and resets the replica if the visible set changed. The helpers do this for you.
 
 ## Multi-tenant: switching active org
 
-After calling `/api/auth/select-org`:
+Use the engine's built-in helper — it POSTs `/api/auth/select-org`, verifies membership server-side, resets the local replica so stale rows from the previous tenant disappear, and refreshes the cached session in one call:
 
 ```typescript
-await fetch("/api/auth/select-org", {
-  method: "POST",
-  headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ orgId: "org_xyz" }),
-});
-
-await engine.notifySessionChanged();
+await engine.selectOrg("org_xyz");
 // engine.resolvedSession() now reflects the new tenantId
 // the local replica is reset because the visible set changed
 ```
+
+React apps get the same helpers off `useSession()`:
+
+```typescript
+const { selectOrg, clearOrg, signOut } = useSession(engine);
+
+await selectOrg("org_xyz");   // switch active org
+await clearOrg();             // drop active org (back to no-tenant state)
+await signOut();              // revoke session server-side
+```
+
+All three throw on non-2xx with `.code` (e.g. `"NOT_A_MEMBER"`) and `.status` carrying the server's response, so UI code can branch on the specific error without re-parsing the body.
 
 ## Real-time transport details
 
