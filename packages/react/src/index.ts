@@ -7,6 +7,7 @@ import { defaultStorage, type Storage as PylonStorage } from "@pylonsync/sync";
 export {
   useQuery,
   useQueryOne,
+  useReactiveQuery,
   useMutation,
   useInfiniteQuery,
   usePaginatedQuery,
@@ -29,6 +30,7 @@ export type {
   IncludeSpec,
   UseQueryReturn,
   UseQueryOneReturn,
+  UseReactiveQueryReturn,
   UseMutationReturn,
   UseInfiniteQueryReturn,
   UsePaginatedQueryReturn,

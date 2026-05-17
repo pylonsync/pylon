@@ -4,6 +4,7 @@ import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@
 import {
   useQuery as useQueryHook,
   useQueryOne as useQueryOneHook,
+  useReactiveQuery as useReactiveQueryHook,
   useMutation as useMutationHook,
   useInfiniteQuery as useInfiniteQueryHook,
   useAggregate as useAggregateHook,
@@ -12,6 +13,7 @@ import {
   type QueryOptions,
   type UseQueryReturn,
   type UseQueryOneReturn,
+  type UseReactiveQueryReturn,
   type UseMutationReturn,
   type UseInfiniteQueryReturn,
   type AggregateSpec,
@@ -97,6 +99,31 @@ export const db = {
   /** Live query for a single row by ID. */
   useQueryOne<T = Row>(entity: string, id: string): UseQueryOneReturn<T> {
     return useQueryOneHook<T>(getSync(), entity, id);
+  },
+
+  /**
+   * Reactive query — Convex-style auto-rerunning server handler.
+   *
+   * The server runs your `query()` handler with dependency tracking
+   * (every `ctx.db.*` read is recorded), registers the subscription,
+   * and pushes the initial result. Any future mutation touching the
+   * dep set triggers a re-run + push.
+   *
+   * ```tsx
+   * const { data: feed, loading } = db.useReactiveQuery<FeedItem[]>(
+   *   "getFeed",
+   *   { userId: currentUser.id },
+   * );
+   * ```
+   *
+   * Authoring side: define the handler with `query()` from
+   * `@pylonsync/functions`. Any handler is eligible — no opt-in flag.
+   */
+  useReactiveQuery<T = unknown>(
+    fnName: string,
+    args?: unknown,
+  ): UseReactiveQueryReturn<T> {
+    return useReactiveQueryHook<T>(getSync(), fnName, args);
   },
 
   /**

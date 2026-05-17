@@ -70,6 +70,28 @@ export interface ClientChange {
   op_id?: string;
 }
 
+/**
+ * Reactive subscription spec — what the server needs to replay a
+ * subscription if the client reconnects. Cached client-side so the
+ * `ws.onopen` reconnect sweep can re-register every active sub
+ * without the React hooks having to know about reconnect lifecycle.
+ */
+export interface ReactiveSpec {
+  fn_name: string;
+  args: unknown;
+}
+
+/**
+ * Push message routed to a reactive subscription handler. `result`
+ * fires on initial run + every time the server's re-run produces a
+ * value whose hash differs from the last push. `error` fires when
+ * the server can't execute the handler (function not registered,
+ * reactive runtime unavailable, runtime error in user code).
+ */
+export type ReactiveMessage =
+  | { kind: "result"; result: unknown }
+  | { kind: "error"; code: string; message: string };
+
 // ---------------------------------------------------------------------------
 // Local store — in-memory replica of server state
 // ---------------------------------------------------------------------------
@@ -722,6 +744,22 @@ export class SyncEngine {
   private crdtSubscribers: Map<string, number> = new Map();
 
   /**
+   * Reactive query subscriptions registered via `subscribeReactive`.
+   * Two maps:
+   *  - `reactiveSpecs`: sub_id → {fn_name, args} for re-registration
+   *    on WS reconnect. Server-side state evaporates on disconnect.
+   *  - `reactiveHandlers`: sub_id → handler that receives result + error
+   *    pushes. The React hook owns these handlers and unsubscribes on
+   *    unmount.
+   *
+   * Both maps are keyed by the same client-minted `sub_id` so they
+   * stay in sync. Cleared together by `unsubscribeReactive`.
+   */
+  private reactiveSpecs: Map<string, ReactiveSpec> = new Map();
+  private reactiveHandlers: Map<string, (msg: ReactiveMessage) => void> =
+    new Map();
+
+  /**
    * Register a binary-frame handler. Returns an unsubscribe fn that
    * pulls the handler back out — call on hook unmount / module
    * teardown so handlers don't leak.
@@ -1003,6 +1041,18 @@ export class SyncEngine {
         const [entity, rowId] = key.split("\x00");
         this.sendWs({ type: "crdt-subscribe", entity, rowId });
       }
+      // Re-register every reactive subscription on the fresh socket.
+      // The server's ReactiveRegistry tears down on disconnect (via
+      // `disconnect_client`) so without this resync the handlers
+      // would silently stop receiving result pushes.
+      for (const [sub_id, spec] of this.reactiveSpecs) {
+        this.sendWs({
+          type: "reactive-subscribe",
+          sub_id,
+          fn_name: spec.fn_name,
+          args: spec.args,
+        });
+      }
       // Pull-on-open catches every event broadcast in the gap between
       // the prior `pull()` returning and this socket actually opening.
       // The WS has no replay-on-connect (it's just a fanout), so events
@@ -1060,6 +1110,29 @@ export class SyncEngine {
         // Presence event.
         if (msg.type === "presence") {
           this.store.notify();
+          return;
+        }
+
+        // Reactive query push: the server-side ReactiveRegistry re-ran
+        // a subscribed handler and the result hash changed. Route to
+        // the handler registered by `subscribeReactive` so the React
+        // hook re-renders.
+        if (msg.type === "reactive-result" && typeof msg.sub_id === "string") {
+          const handler = this.reactiveHandlers.get(msg.sub_id);
+          if (handler) {
+            handler({ kind: "result", result: msg.result });
+          }
+          return;
+        }
+        if (msg.type === "reactive-error" && typeof msg.sub_id === "string") {
+          const handler = this.reactiveHandlers.get(msg.sub_id);
+          if (handler) {
+            handler({
+              kind: "error",
+              code: typeof msg.code === "string" ? msg.code : "REACTIVE_ERROR",
+              message: typeof msg.message === "string" ? msg.message : "",
+            });
+          }
           return;
         }
       } catch {
@@ -1862,6 +1935,53 @@ export class SyncEngine {
     } else {
       this.crdtSubscribers.set(key, prev - 1);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Reactive query subscriptions
+  //
+  // Convex-shaped: the client mounts `useReactiveQuery(fnName, args)`,
+  // the server runs the handler with dep tracking, registers the sub,
+  // and pushes the initial result. Whenever a future mutation touches
+  // anything in the dep set, the server re-runs the handler and pushes
+  // the new result. The handler always re-runs under the subscriber's
+  // original auth context — not the mutating user's — so policy gates
+  // applied at first run apply on every re-run.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Register a reactive query subscription. The caller-minted `sub_id`
+   * is used by the React hook to dispatch result/error pushes to the
+   * right component. Returns nothing — push handling is async via the
+   * registered handler.
+   *
+   * Idempotent: re-calling with the same `sub_id` replaces the prior
+   * handler + spec. Useful when args change and the hook re-registers.
+   *
+   * The actual subscribe message goes over the WS — works only when
+   * the socket is open. When called before the WS opens (initial
+   * mount during start()), the spec is still recorded and gets sent
+   * on `ws.onopen`'s re-registration sweep.
+   */
+  subscribeReactive(
+    sub_id: string,
+    fn_name: string,
+    args: unknown,
+    handler: (msg: ReactiveMessage) => void,
+  ): void {
+    this.reactiveSpecs.set(sub_id, { fn_name, args });
+    this.reactiveHandlers.set(sub_id, handler);
+    this.sendWs({ type: "reactive-subscribe", sub_id, fn_name, args });
+  }
+
+  /** Tear down a reactive subscription. Sends the unsubscribe to the
+   *  server and clears local state. No-op for unknown sub_ids — React
+   *  StrictMode double-unmount won't error. */
+  unsubscribeReactive(sub_id: string): void {
+    if (!this.reactiveSpecs.has(sub_id)) return;
+    this.reactiveSpecs.delete(sub_id);
+    this.reactiveHandlers.delete(sub_id);
+    this.sendWs({ type: "reactive-unsubscribe", sub_id });
   }
 
   private sendWs(msg: unknown): void {

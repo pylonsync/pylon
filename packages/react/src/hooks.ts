@@ -185,6 +185,88 @@ export function useQueryOne<T = Row>(
 }
 
 // ---------------------------------------------------------------------------
+// useReactiveQuery — Convex-style auto-rerunning server query
+// ---------------------------------------------------------------------------
+
+export interface UseReactiveQueryReturn<T> {
+  /** Latest server-pushed result. `null` until the initial run lands. */
+  data: T | null;
+  /** True until the first result lands (or the first error). */
+  loading: boolean;
+  /** Most recent error from the server-side handler, if any. */
+  error: Error | null;
+}
+
+/**
+ * Subscribe to a server-side `query()` handler with automatic re-run
+ * on dependency changes. Mirrors Convex's reactive query model:
+ *
+ * 1. Mount: client sends `reactive-subscribe` over WS with `fn_name`
+ *    + `args`. Server runs the handler under the connection's auth,
+ *    records which entities the handler read via `ctx.db.*`, registers
+ *    the subscription, and pushes the initial result.
+ * 2. On every server-side mutation, the runtime's reactive registry
+ *    looks up subs whose dep set overlaps the changed entity, re-runs
+ *    them, hashes the result, and pushes only when the hash changed.
+ * 3. Unmount: client sends `reactive-unsubscribe`; server tears down
+ *    the registration and stops re-running.
+ *
+ * Auth context for re-runs is captured at subscribe time — the
+ * subscriber's identity, not the mutating user's. Policy gates the
+ * handler runs at first execution apply on every re-run.
+ *
+ * ```tsx
+ * const { data, loading } = useReactiveQuery<MessageWithAuthor[]>(
+ *   sync,
+ *   "getMessagesWithAuthors",
+ *   { channelId: "c_1" },
+ * );
+ * ```
+ *
+ * Args object identity matters: changing the args reference triggers
+ * an unsubscribe + resubscribe with a fresh sub_id. Stabilize via
+ * `useMemo` if you build args inline on every render.
+ */
+export function useReactiveQuery<T = unknown>(
+  sync: SyncEngine,
+  fnName: string,
+  args?: unknown,
+): UseReactiveQueryReturn<T> {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<Error | null>(null);
+  // Stable serialization of args — when the JSON shape changes we
+  // re-subscribe. Object identity changes alone don't re-subscribe.
+  const argsKey = useMemo(() => JSON.stringify(args ?? null), [args]);
+
+  useEffect(() => {
+    const sub_id = generateId();
+    setLoading(true);
+    setError(null);
+    sync.subscribeReactive(sub_id, fnName, args ?? null, (msg) => {
+      if (msg.kind === "result") {
+        setData(msg.result as T);
+        setLoading(false);
+        setError(null);
+      } else {
+        // Reactive error pushes (e.g. handler unavailable) — surface
+        // to the consumer and stop spinning.
+        setError(
+          Object.assign(new Error(msg.message || msg.code), { code: msg.code }),
+        );
+        setLoading(false);
+      }
+    });
+    return () => {
+      sync.unsubscribeReactive(sub_id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync, fnName, argsKey]);
+
+  return { data, loading, error };
+}
+
+// ---------------------------------------------------------------------------
 // Client-side filter application (matches the server's operator set)
 // ---------------------------------------------------------------------------
 

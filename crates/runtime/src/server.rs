@@ -561,13 +561,19 @@ fn start_server(
     // closes the gap (on next reconnect / tab-refocus). Live UX
     // requires the bus.
     let cluster_bus: Arc<dyn pylon_cluster::ClusterBus> = build_cluster_bus();
-    let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> =
-        Arc::new(crate::datastore::WsSseNotifier::with_cluster_bus(
+    // Reactive query registry — backs useReactiveQuery hooks. Created
+    // before the notifier so the notifier can hold a strong ref and
+    // forward every change event into the registry's `on_change`.
+    let reactive_registry = crate::reactive::ReactiveRegistry::new(Arc::clone(&ws_hub));
+    let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
+        crate::datastore::WsSseNotifier::with_cluster_bus(
             Arc::clone(&ws_hub),
             Arc::clone(&sse_hub),
             runtime.manifest().auth.user.clone(),
             Arc::clone(&cluster_bus),
-        ));
+        )
+        .with_reactive(Arc::clone(&reactive_registry)),
+    );
     // Subscriber: inbound peer events → local hubs. Idempotent —
     // calling subscribe registers a handler; Noop never delivers, so
     // single-machine builds pay nothing for the call.
@@ -576,6 +582,7 @@ fn start_server(
         Arc::clone(&ws_hub),
         Arc::clone(&sse_hub),
         runtime.manifest().auth.user.clone(),
+        Some(Arc::clone(&reactive_registry)),
     );
     // Single EmailAdapter for the whole runtime: the function runner's
     // ctx.email.send hook + the per-request route handlers below both
@@ -593,6 +600,18 @@ fn start_server(
         Arc::clone(&fn_email_adapter),
         Arc::clone(&plugin_reg),
     );
+
+    // Reactive registry needs FnOps to invoke handlers for initial
+    // run + re-run. Wire it now that fn_ops is built, then spawn the
+    // re-runner thread. If functions aren't available (no functions/
+    // dir, no Bun), reactive subscribes will fail at the FnOps lookup
+    // — that's the correct behavior. The registry itself still works
+    // for the rest of the codebase that holds an Arc.
+    if let Some(ref ops) = fn_ops_maybe {
+        let dyn_ops: Arc<dyn pylon_router::FnOps> = Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
+        reactive_registry.set_fn_ops(dyn_ops);
+    }
+    reactive_registry.start_runner();
 
     // Dev mode flag. Gates a *lot* of permissive behavior: magic codes
     // appear in JSON responses, /studio is open without admin auth,
@@ -856,8 +875,9 @@ fn start_server(
         let hub = Arc::clone(&ws_hub);
         let auth = Arc::clone(&ws_auth);
         let fetcher = snapshot_fetcher.clone();
+        let reactive = Arc::clone(&reactive_registry);
         std::thread::spawn(move || {
-            crate::ws::start_ws_server(hub, auth, ws_port, Some(fetcher));
+            crate::ws::start_ws_server(hub, auth, ws_port, Some(fetcher), Some(reactive));
         });
     }
 
@@ -950,6 +970,7 @@ fn start_server(
         let wh = Arc::clone(&ws_hub);
         let sh = Arc::clone(&sse_hub);
         let cb = Arc::clone(&cluster_bus);
+        let rr = Arc::clone(&reactive_registry);
         let mc = Arc::clone(&magic_codes);
         let pr = Arc::clone(&plugin_reg);
         let rm = Arc::clone(&room_mgr);
@@ -1070,6 +1091,7 @@ fn start_server(
                 let hub = Arc::clone(&ws_hub);
                 let auth = Arc::clone(&ws_auth);
                 let fetcher = snapshot_fetcher.clone();
+                let reactive = Arc::clone(&reactive_registry);
                 std::thread::Builder::new()
                     .name("ws-upgrade".into())
                     .stack_size(64 * 1024)
@@ -1080,6 +1102,7 @@ fn start_server(
                             hub,
                             auth,
                             Some(fetcher),
+                            Some(reactive),
                         );
                     })
                     .ok();
@@ -3583,7 +3606,8 @@ fn start_server(
                     Arc::clone(&sh),
                     rt.manifest().auth.user.clone(),
                     Arc::clone(&cb),
-                );
+                )
+                .with_reactive(Arc::clone(&rr));
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),
                 };

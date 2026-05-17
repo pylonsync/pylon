@@ -945,6 +945,11 @@ pub struct WsSseNotifier {
     /// [`Self::with_cluster_bus`] at construction; defaults to a
     /// no-op bus so single-machine builds pay zero overhead.
     pub cluster_bus: Arc<dyn pylon_cluster::ClusterBus>,
+    /// Reactive query registry. Every change event is forwarded so
+    /// the registry can dirty + schedule re-runs for affected
+    /// subscriptions. None when reactive queries aren't wired (tests,
+    /// minimal setups).
+    pub reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 }
 
 impl WsSseNotifier {
@@ -959,6 +964,7 @@ impl WsSseNotifier {
             sse,
             auth_user,
             cluster_bus: Arc::new(pylon_cluster::NoopBus::new()),
+            reactive: None,
         }
     }
 
@@ -975,7 +981,15 @@ impl WsSseNotifier {
             sse,
             auth_user,
             cluster_bus,
+            reactive: None,
         }
+    }
+
+    /// Attach a reactive registry — call after construction. None by
+    /// default; `start_server` wires it once the registry is built.
+    pub fn with_reactive(mut self, reactive: Arc<crate::reactive::ReactiveRegistry>) -> Self {
+        self.reactive = Some(reactive);
+        self
     }
 }
 
@@ -990,6 +1004,15 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         //
         // Cluster publish carries the SAME projected event the local
         // hubs receive — peers must never see the raw row either.
+        //
+        // Reactive registry hand-off happens on the UNPROJECTED event:
+        // dep matching is by (entity, row_id) only — no row data is
+        // read — so the User projection is irrelevant. Forwarding the
+        // raw event saves the registry from re-considering projection
+        // when it diffs deps.
+        if let Some(reactive) = &self.reactive {
+            reactive.on_change(event);
+        }
         if event.entity == self.auth_user.entity {
             if let Some(data) = event.data.clone() {
                 let projected =
@@ -1118,16 +1141,23 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
 /// cluster publish (no re-broadcast — that's how feedback loops
 /// happen). The handler is the only place inbound peer events touch
 /// the hubs; the local mutation path goes through `notify` directly.
+///
+/// Reactive registry receives peer events too: a mutation on machine
+/// A that triggers a subscription on machine B's `useReactiveQuery`
+/// must dirty the sub on B and schedule a re-run. Without this, the
+/// reactive path would silently ignore cross-machine writes.
 pub fn install_cluster_bus_subscriber(
     bus: &Arc<dyn pylon_cluster::ClusterBus>,
     ws: Arc<WsHub>,
     sse: Arc<SseHub>,
     auth_user: pylon_kernel::ManifestAuthUserConfig,
+    reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     use std::sync::Arc as StdArc;
     let ws_handler = StdArc::clone(&ws);
     let sse_handler = StdArc::clone(&sse);
     let auth_user_handler = auth_user;
+    let reactive_handler = reactive;
     bus.subscribe(StdArc::new(move |envelope: pylon_cluster::Envelope| {
         // Change events: same User projection + fanout as the local
         // notifier. Already projected by the originating machine, but
@@ -1135,6 +1165,9 @@ pub fn install_cluster_bus_subscriber(
         // defends against an older peer that hasn't been upgraded
         // yet and ships unprojected rows.
         if let Some(event) = envelope.as_change() {
+            if let Some(r) = &reactive_handler {
+                r.on_change(&event);
+            }
             if event.entity == auth_user_handler.entity {
                 if let Some(data) = event.data.clone() {
                     let projected = pylon_router::maybe_project_user_row(

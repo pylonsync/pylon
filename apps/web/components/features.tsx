@@ -13,6 +13,11 @@ const FEATURES: { lane: Lane; title: string; desc: string }[] = [
   },
   {
     lane: "app",
+    title: "Reactive server queries",
+    desc: "Write a query() that joins entities or computes a derived value. db.useReactiveQuery subscribes once — the server tracks what it read and re-pushes the result whenever any dependency changes.",
+  },
+  {
+    lane: "app",
     title: "Server functions",
     desc: "Queries, mutations, and actions in TypeScript with v.* validators. Filename = RPC name. Call from React with callFn or a typed client.",
   },

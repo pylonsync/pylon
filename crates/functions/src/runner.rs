@@ -861,6 +861,14 @@ impl TraceBuilder {
 /// Execute a DB operation from a TypeScript function against the DataStore.
 ///
 /// Returns the result value and optional row count (for traces).
+///
+/// Every read op also feeds the active dep recorder (see
+/// [`crate::deps`]) so reactive query handlers get an automatic
+/// dependency set. Writes are tracked too, even though reactive subs
+/// only consume the read set — recording writes here is harmless and
+/// keeps the entry points symmetric for any future "what does this
+/// handler touch" analysis. The recorder is a thread-local no-op
+/// when no reactive scope is active, so non-reactive paths pay nothing.
 fn execute_db_op(
     store: &dyn DataStore,
     msg: &DbOpMessage,
@@ -871,20 +879,25 @@ fn execute_db_op(
     match msg.op {
         DbOp::Get => {
             let id = msg.id.as_deref().unwrap_or("");
+            crate::deps::record_read(&msg.entity, Some(id));
             match store.get_by_id(&msg.entity, id) {
                 Ok(Some(row)) => (Ok(row), Some(1)),
                 Ok(None) => (Ok(serde_json::Value::Null), Some(0)),
                 Err(e) => (Err(e), None),
             }
         }
-        DbOp::List => match store.list(&msg.entity) {
-            Ok(rows) => {
-                let count = rows.len();
-                (Ok(serde_json::json!(rows)), Some(count))
+        DbOp::List => {
+            crate::deps::record_read(&msg.entity, None);
+            match store.list(&msg.entity) {
+                Ok(rows) => {
+                    let count = rows.len();
+                    (Ok(serde_json::json!(rows)), Some(count))
+                }
+                Err(e) => (Err(e), None),
             }
-            Err(e) => (Err(e), None),
-        },
+        }
         DbOp::Paginate => {
+            crate::deps::record_read(&msg.entity, None);
             // Fetch limit+1 to detect "isDone" without an extra round trip,
             // matching the router's /api/entities/:e/cursor endpoint.
             let requested = msg.limit.unwrap_or(20).min(1000).max(1) as usize;
@@ -941,6 +954,7 @@ fn execute_db_op(
         DbOp::Lookup => {
             let field = msg.field.as_deref().unwrap_or("");
             let value = msg.value.as_deref().unwrap_or("");
+            crate::deps::record_read(&msg.entity, None);
             match store.lookup(&msg.entity, field, value) {
                 Ok(Some(row)) => (Ok(row), Some(1)),
                 Ok(None) => (Ok(serde_json::Value::Null), Some(0)),
@@ -949,6 +963,7 @@ fn execute_db_op(
         }
         DbOp::Query => {
             let filter = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
+            crate::deps::record_read(&msg.entity, None);
             match store.query_filtered(&msg.entity, &filter) {
                 Ok(rows) => {
                     let count = rows.len();
@@ -983,6 +998,7 @@ fn execute_db_op(
         }
         DbOp::Search => {
             let query = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
+            crate::deps::record_read(&msg.entity, None);
             match store.search(&msg.entity, &query) {
                 Ok(result) => {
                     // Surface a coarse hit count for traces. The

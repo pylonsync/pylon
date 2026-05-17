@@ -353,6 +353,31 @@ impl Shard {
         dead
     }
 
+    /// Send a single text frame to one client by id. Reactive query
+    /// push path: re-runner calls this with the new JSON result
+    /// envelope. No-op if the id has already been swept out (dead
+    /// connection) — caller doesn't need to know about delivery.
+    fn send_text_to_one(&self, client_id: u64, text: &str) {
+        let handle = {
+            let clients = self.clients.lock().unwrap();
+            clients.get(&client_id).map(Arc::clone)
+        };
+        let Some(handle) = handle else {
+            return;
+        };
+        let mut guard = match handle.socket.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.send(Message::Text(text.to_string())).is_err() {
+            // Drop guard before re-locking clients (avoid lock
+            // inversion vs other paths that take clients lock first).
+            drop(guard);
+            let mut clients = self.clients.lock().unwrap();
+            clients.remove(&client_id);
+        }
+    }
+
     /// Binary fanout for CRDT updates. Same per-client lock pattern as
     /// `broadcast` above; the only difference is `Message::Binary` and
     /// the payload is `Arc<[u8]>` so a single Loro snapshot allocates
@@ -595,6 +620,16 @@ impl WsHub {
         }
     }
 
+    /// Send a text frame (JSON) to a single client by id. Used by the
+    /// reactive query re-runner — when a sub's result changes, push
+    /// the new payload directly to the subscribed client rather than
+    /// broadcasting to every WS connection. Silently drops if the
+    /// client has disconnected since the registry indexed it.
+    pub fn send_text_to(&self, client_id: u64, text: &str) {
+        let shard_idx = (client_id as usize) % NUM_SHARDS;
+        self.shards[shard_idx].send_text_to_one(client_id, text);
+    }
+
     /// Assign a client to a shard via round-robin and register it.
     /// Returns `(id, socket_handle)` — the caller keeps the handle and uses
     /// it for reads; the shard also keeps an Arc clone for broadcasts.
@@ -667,6 +702,7 @@ pub fn start_ws_server(
     auth: Arc<WsAuth>,
     port: u16,
     snapshot_fetcher: Option<SnapshotFetcher>,
+    reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     // Dual-stack v6+v4. The Yapless Mac app + any client that
     // resolves `localhost` to `::1` first (the macOS default) would
@@ -714,12 +750,13 @@ pub fn start_ws_server(
         let hub = Arc::clone(&hub);
         let auth = Arc::clone(&auth);
         let fetcher = snapshot_fetcher.clone();
+        let reactive_cl = reactive.as_ref().map(Arc::clone);
         let spawn_result = thread::Builder::new()
             .name("ws-client".into())
             .stack_size(64 * 1024)
             .spawn(move || {
                 let _conn_slot = guard;
-                handle_ws_connection(hub, auth, stream, fetcher);
+                handle_ws_connection(hub, auth, stream, fetcher, reactive_cl);
             });
         if spawn_result.is_err() {
             // Thread creation failed — guard is already dropped here, slot
@@ -740,6 +777,7 @@ fn handle_ws_connection(
     auth: Arc<WsAuth>,
     stream: TcpStream,
     snapshot_fetcher: Option<SnapshotFetcher>,
+    reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     // Short read timeout bounds how long the PER-CLIENT mutex is held
     // while this thread is blocked in socket.read(). Each client now has
@@ -832,7 +870,7 @@ fn handle_ws_connection(
     // a custom error response, and we already have the socket open for
     // a clean close frame.
     let token = token_slot.lock().unwrap().clone();
-    run_authenticated_session(ws, hub, auth, token, snapshot_fetcher);
+    run_authenticated_session(ws, hub, auth, token, snapshot_fetcher, reactive);
 }
 
 /// Take an already-handshaken WebSocket, resolve its bearer token,
@@ -850,6 +888,7 @@ fn run_authenticated_session(
     auth: Arc<WsAuth>,
     token: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
+    reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     // Use the shared bearer resolver so WS sees the same identities
     // HTTP does — admin token / API key / JWT / session — not only
@@ -935,6 +974,29 @@ fn run_authenticated_session(
                         &parsed,
                         snapshot_fetcher.as_ref(),
                     ),
+                    "reactive-subscribe" | "reactive-unsubscribe" => {
+                        if let Some(reg) = reactive.as_ref() {
+                            handle_reactive_control(reg, &hub, client_id, &auth_ctx, kind, &parsed);
+                        } else {
+                            // Reactive not wired (binary built without
+                            // the function runtime, or no
+                            // functions/ directory). Tell the client
+                            // explicitly so the React hook can fall
+                            // back to a one-shot fetch instead of
+                            // hanging on a sub_id that will never
+                            // deliver.
+                            let sub_id =
+                                parsed.get("sub_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let frame = serde_json::json!({
+                                "type": "reactive-error",
+                                "sub_id": sub_id,
+                                "code": "REACTIVE_UNAVAILABLE",
+                                "message": "reactive queries require the TS function runtime",
+                            })
+                            .to_string();
+                            hub.send_text_to(client_id, &frame);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -949,6 +1011,9 @@ fn run_authenticated_session(
                 // remove_client so the broadcast path can never look up
                 // a stale client_id between the two ops.
                 hub.subscriptions.unsubscribe_all(client_id);
+                if let Some(reg) = reactive.as_ref() {
+                    reg.disconnect_client(client_id);
+                }
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -975,6 +1040,9 @@ fn run_authenticated_session(
             }
             Err(_) => {
                 hub.subscriptions.unsubscribe_all(client_id);
+                if let Some(reg) = reactive.as_ref() {
+                    reg.disconnect_client(client_id);
+                }
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -1051,6 +1119,111 @@ fn handle_crdt_control(
         }
         "crdt-unsubscribe" => {
             hub.subscriptions.unsubscribe(client_id, entity, row_id);
+        }
+        _ => {}
+    }
+}
+
+/// Apply a parsed `reactive-subscribe` / `reactive-unsubscribe`
+/// control message.
+///
+/// Subscribe shape:
+///
+///     {
+///       "type": "reactive-subscribe",
+///       "sub_id": "<client-minted id>",
+///       "fn_name": "getMessagesWithAuthors",
+///       "args": { ... }
+///     }
+///
+/// The server runs the handler under the connection's auth context,
+/// records the dep set, and pushes the initial result back. From then
+/// on, any change event matching the dep set triggers a re-run + push.
+///
+/// Auth carry-over: the `auth_ctx` for re-runs is captured here
+/// (the WS connection's resolved identity). Mutations from other
+/// users do NOT cause re-runs under those users' auth — re-runs
+/// always use the original subscriber's identity, so a sub gated
+/// behind `auth.userId == row.ownerId` keeps that gate every time.
+///
+/// Unsubscribe shape:
+///
+///     { "type": "reactive-unsubscribe", "sub_id": "..." }
+///
+/// Errors push a `reactive-error` frame so the client can surface
+/// the failure instead of waiting indefinitely for a `reactive-result`.
+fn handle_reactive_control(
+    reg: &Arc<crate::reactive::ReactiveRegistry>,
+    hub: &Arc<WsHub>,
+    client_id: u64,
+    auth_ctx: &pylon_auth::AuthContext,
+    kind: &str,
+    parsed: &serde_json::Value,
+) {
+    let sub_id = match parsed.get("sub_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return,
+    };
+    match kind {
+        "reactive-subscribe" => {
+            let fn_name = parsed
+                .get("fn_name")
+                .or_else(|| parsed.get("fnName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if fn_name.is_empty() {
+                let frame = serde_json::json!({
+                    "type": "reactive-error",
+                    "sub_id": sub_id,
+                    "code": "MISSING_FN_NAME",
+                    "message": "reactive-subscribe requires fn_name",
+                })
+                .to_string();
+                hub.send_text_to(client_id, &frame);
+                return;
+            }
+            let args = parsed.get("args").cloned().unwrap_or(serde_json::json!({}));
+            // Map AuthContext → AuthInfo for the runner. The runner
+            // operates on AuthInfo (user_id + is_admin + tenant_id);
+            // the WS auth context carries the same shape plus a few
+            // server-side bits we drop here.
+            let auth_info = pylon_functions::protocol::AuthInfo {
+                user_id: auth_ctx.user_id.clone(),
+                is_admin: auth_ctx.is_admin,
+                tenant_id: auth_ctx.tenant_id.clone(),
+            };
+            let outcome = reg.run_handler(&fn_name, args.clone(), auth_info.clone());
+            let Some(outcome) = outcome else {
+                let frame = serde_json::json!({
+                    "type": "reactive-error",
+                    "sub_id": sub_id,
+                    "code": "INITIAL_RUN_FAILED",
+                    "message": format!("handler {fn_name} failed"),
+                })
+                .to_string();
+                hub.send_text_to(client_id, &frame);
+                return;
+            };
+            reg.register(
+                sub_id.clone(),
+                fn_name,
+                args,
+                auth_info,
+                client_id,
+                &outcome,
+            );
+            // Initial push.
+            let frame = serde_json::json!({
+                "type": "reactive-result",
+                "sub_id": sub_id,
+                "result": outcome.value,
+            })
+            .to_string();
+            hub.send_text_to(client_id, &frame);
+        }
+        "reactive-unsubscribe" => {
+            reg.unsubscribe(&sub_id);
         }
         _ => {}
     }
@@ -1217,6 +1390,7 @@ pub fn handle_http_upgrade(
     hub: Arc<WsHub>,
     auth: Arc<WsAuth>,
     snapshot_fetcher: Option<SnapshotFetcher>,
+    reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     let accept = ws_accept_value(&upgrade.sec_key);
     let mut response = tiny_http::Response::empty(101)
@@ -1247,7 +1421,14 @@ pub fn handle_http_upgrade(
         ..Default::default()
     };
     let ws = WebSocket::from_raw_socket(stream, Role::Server, Some(ws_config));
-    run_authenticated_session(ws, hub, auth, upgrade.bearer_token, snapshot_fetcher);
+    run_authenticated_session(
+        ws,
+        hub,
+        auth,
+        upgrade.bearer_token,
+        snapshot_fetcher,
+        reactive,
+    );
 }
 
 /// Adapter so a `Box<dyn tiny_http::ReadWrite + Send>` satisfies our

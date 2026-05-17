@@ -25,6 +25,7 @@
 //! - **Mutation**: read+write, transactional, handler IS the transaction
 //! - **Action**: external I/O allowed, non-transactional, calls queries/mutations
 
+pub mod deps;
 pub mod pool;
 pub mod protocol;
 pub mod registry;
