@@ -17,7 +17,8 @@ use pylon_router::{route, RouterContext};
 // signature in the file with "type alias takes 1 generic argument
 // but 2 were supplied".
 use worker::{
-    event, Context, D1Database, D1Type, Env, Headers, Request, Response, Result as WResult,
+    event, Context, D1Database, D1Type, Env, Fetch, Headers, Method, Request, RequestInit,
+    Response, Result as WResult,
 };
 
 use crate::d1_store::{D1DataStore, D1Executor};
@@ -63,7 +64,9 @@ impl D1Executor for WorkerD1Executor {
         let typed = json_params_to_d1(params);
         let bound = stmt.bind_refs(typed.iter()).map_err(|e| e.to_string())?;
         let result = futures::executor::block_on(bound.all()).map_err(|e| e.to_string())?;
-        let rows = result.results::<serde_json::Value>().map_err(|e| e.to_string())?;
+        let rows = result
+            .results::<serde_json::Value>()
+            .map_err(|e| e.to_string())?;
         Ok(rows)
     }
 }
@@ -95,7 +98,11 @@ fn json_params_to_d1(params: &[serde_json::Value]) -> Vec<D1Type<'static>> {
                 // D1Type::Text borrows; we need 'static so leak.
                 // This path is called per-query; allocations are
                 // tiny relative to the network round-trip cost.
-                Box::leak(serde_json::to_string(other).unwrap_or_default().into_boxed_str()),
+                Box::leak(
+                    serde_json::to_string(other)
+                        .unwrap_or_default()
+                        .into_boxed_str(),
+                ),
             ),
         })
         .collect()
@@ -153,21 +160,64 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
     let change_log = pylon_sync::ChangeLog::new();
     let auth_ctx = session_store.resolve(auth_token.as_deref());
     let noop = NoopAll::new(&manifest);
-    let email = NoopEmailSender;
+    // EmailSender: HTTP-POST transport. When PYLON_EMAIL_WEBHOOK_URL
+    // is set in the env, ctx.email.send POSTs a `{to, subject, body}`
+    // JSON envelope to that URL. The operator points it at any
+    // HTTP endpoint that delivers mail — Resend, Postmark, SES via
+    // API Gateway, or another Cloudflare Worker. Without the env,
+    // sends log a warning + drop silently so apps don't 500 on
+    // first deploy.
+    let email_url = env
+        .var("PYLON_EMAIL_WEBHOOK_URL")
+        .ok()
+        .map(|v| v.to_string())
+        .filter(|s| !s.is_empty());
+    let email_auth = env
+        .var("PYLON_EMAIL_WEBHOOK_BEARER")
+        .ok()
+        .map(|v| v.to_string())
+        .filter(|s| !s.is_empty());
+    let email = HttpWebhookEmailSender {
+        url: email_url,
+        bearer: email_auth,
+    };
 
     // Optional real bindings — if the operator declared them in
-    // wrangler.toml, plug in the KV / R2 adapters; otherwise fall
+    // wrangler.toml, plug in the live adapters; otherwise fall
     // back to NoopAll's typed-503 stubs so missing bindings
-    // surface as KV_BINDING_REQUIRED / R2_BINDING_REQUIRED rather
-    // than mysteriously failing.
+    // surface as <FOO>_BINDING_REQUIRED rather than mysteriously
+    // failing.
     let kv_cache_opt = env.kv("PYLON_CACHE").ok().map(crate::KvCache::new);
     let r2_files_opt = env.bucket("PYLON_FILES").ok().map(crate::R2Files::new);
+    let rooms_opt = if env.durable_object("PYLON_ROOMS").is_ok() {
+        Some(crate::WorkersRooms::new(env.clone(), "PYLON_ROOMS"))
+    } else {
+        None
+    };
+    let pubsub_opt = if env.durable_object("PYLON_PUBSUB").is_ok() {
+        Some(crate::WorkersPubSub::new(env.clone(), "PYLON_PUBSUB"))
+    } else {
+        None
+    };
+    let jobs_opt = crate::WorkersJobs::from_env(&env);
     let cache_ref: &dyn pylon_router::CacheOps = match kv_cache_opt.as_ref() {
         Some(c) => c,
         None => &noop,
     };
     let files_ref: &dyn pylon_router::FileOps = match r2_files_opt.as_ref() {
         Some(f) => f,
+        None => &noop,
+    };
+    let rooms_ref: &dyn pylon_router::RoomOps = match rooms_opt.as_ref() {
+        Some(r) => r,
+        None => &noop,
+    };
+    let pubsub_ref: &dyn pylon_router::PubSubOps = match pubsub_opt.as_ref() {
+        Some(p) => p,
+        None => &noop,
+    };
+    let jobs_ref: &dyn pylon_router::JobOps = match jobs_opt.as_ref() {
+        Some(j) => j,
         None => &noop,
     };
     let cookie_config = pylon_auth::CookieConfig::from_env(
@@ -204,10 +254,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         policy_engine: &policy_engine,
         change_log: &change_log,
         notifier: &pylon_router::NoopNotifier,
-        rooms: &noop,
+        rooms: rooms_ref,
         cache: cache_ref,
-        pubsub: &noop,
-        jobs: &noop,
+        pubsub: pubsub_ref,
+        jobs: jobs_ref,
         scheduler: &noop,
         workflows: &noop,
         files: files_ref,
@@ -234,7 +284,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         "Access-Control-Allow-Methods",
         "GET, POST, PATCH, DELETE, OPTIONS",
     )?;
-    headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization")?;
+    headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization",
+    )?;
 
     Ok(Response::ok(response_body)?
         .with_status(status)
@@ -255,18 +308,62 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
     }
 }
 
-/// Email sender stub. Workers EmailSender wiring lands when we
-/// pick the http-transport contract for the env (Resend / Postmark
-/// / plain HTTP POST) — for now, returns Ok(()) so apps that call
-/// ctx.email.send don't 500. Logged at WARN so the gap is visible.
-struct NoopEmailSender;
+/// EmailSender that POSTs `{to, subject, body}` JSON to a
+/// configurable webhook URL. The receiving endpoint is responsible
+/// for the actual mail delivery — operator points it at Resend's
+/// `/emails` endpoint, a Cloudflare Worker that proxies to SES, or
+/// any other HTTP-API mail provider. Optional Bearer auth via
+/// PYLON_EMAIL_WEBHOOK_BEARER.
+///
+/// When `url` is unset, send() logs a warning and returns Ok(()) —
+/// matches the pre-pool behaviour of "fail open" so apps don't 500
+/// on first deploy before email is wired.
+///
+/// Note: EmailSender trait is sync but Workers' Fetch is async.
+/// futures::executor::block_on bridges the gap; Workers's single-
+/// threaded runtime tolerates it inside request handlers (same
+/// pattern KvCache + R2Files use).
+struct HttpWebhookEmailSender {
+    url: Option<String>,
+    bearer: Option<String>,
+}
 
-impl pylon_router::EmailSender for NoopEmailSender {
-    fn send(&self, to: &str, _subject: &str, _body: &str) -> std::result::Result<(), String> {
-        worker::console_warn!(
-            "[email] Workers target has no email transport configured — dropped message to {to}. Wire a fetch-based EmailSender to an HTTP transport (Resend/Postmark/SES) to enable.",
-        );
-        Ok(())
+impl pylon_router::EmailSender for HttpWebhookEmailSender {
+    fn send(&self, to: &str, subject: &str, body: &str) -> std::result::Result<(), String> {
+        let Some(url) = self.url.as_deref() else {
+            worker::console_warn!(
+                "[email] PYLON_EMAIL_WEBHOOK_URL unset — dropped message to {to}. Set the env to enable HTTP-transport mail delivery.",
+            );
+            return Ok(());
+        };
+        let payload = serde_json::json!({
+            "to": to,
+            "subject": subject,
+            "body": body,
+        })
+        .to_string();
+        let mut headers = Headers::new();
+        headers
+            .set("Content-Type", "application/json")
+            .map_err(|e| e.to_string())?;
+        if let Some(bearer) = self.bearer.as_deref() {
+            headers
+                .set("Authorization", &format!("Bearer {bearer}"))
+                .map_err(|e| e.to_string())?;
+        }
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(payload.into()));
+        let req = Request::new_with_init(url, &init).map_err(|e| e.to_string())?;
+        let resp = futures::executor::block_on(Fetch::Request(req).send())
+            .map_err(|e| format!("email webhook fetch failed: {e}"))?;
+        let status = resp.status_code();
+        if (200..400).contains(&status) {
+            Ok(())
+        } else {
+            Err(format!("email webhook returned {status}"))
+        }
     }
 }
 
@@ -315,11 +412,7 @@ impl pylon_http::DataStore for EmptyDataStore {
     ) -> std::result::Result<bool, pylon_http::DataError> {
         Ok(false)
     }
-    fn delete(
-        &self,
-        _entity: &str,
-        _id: &str,
-    ) -> std::result::Result<bool, pylon_http::DataError> {
+    fn delete(&self, _entity: &str, _id: &str) -> std::result::Result<bool, pylon_http::DataError> {
         Ok(false)
     }
     fn query_filtered(

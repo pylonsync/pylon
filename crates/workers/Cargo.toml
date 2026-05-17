@@ -16,16 +16,24 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 # Enable to compile the Workers fetch handler (WASM target only).
-workers = ["dep:worker", "dep:wasm-bindgen", "dep:serde-wasm-bindgen", "dep:futures"]
+workers = [
+    "dep:worker",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:async-trait",
+    "dep:js-sys",
+    "dep:serde-wasm-bindgen",
+    "dep:futures",
+]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.124" }
-pylon-http = { path = "../http", version = "0.3.124" }
-pylon-router = { path = "../router", version = "0.3.124" }
-pylon-auth = { path = "../auth", version = "0.3.124" }
-pylon-policy = { path = "../policy", version = "0.3.124" }
-pylon-sync = { path = "../sync", version = "0.3.124" }
-pylon-realtime = { path = "../realtime", version = "0.3.124" }
+pylon-kernel = { path = "../core", version = "0.3.125" }
+pylon-http = { path = "../http", version = "0.3.125" }
+pylon-router = { path = "../router", version = "0.3.125" }
+pylon-auth = { path = "../auth", version = "0.3.125" }
+pylon-policy = { path = "../policy", version = "0.3.125" }
+pylon-sync = { path = "../sync", version = "0.3.125" }
+pylon-realtime = { path = "../realtime", version = "0.3.125" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -34,6 +42,14 @@ serde_json = { workspace = true }
 # and `http` for the macro story tasks #94+ use.
 worker = { version = "0.5", optional = true, features = ["d1", "queue", "http"] }
 wasm-bindgen = { version = "0.2", optional = true }
+# `#[durable_object]` macro expands to code that references
+# `wasm_bindgen_futures::future_to_promise` directly — must be a
+# direct dep, can't come via worker re-exports.
+wasm-bindgen-futures = { version = "0.4", optional = true }
+# Same story: the macro emits `async_trait` attribute usage.
+async-trait = { version = "0.1", optional = true }
+# Needed by the macro's generated wasm-bindgen code.
+js-sys = { version = "0.3", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 futures = { version = "0.3", optional = true }
 
@@ -42,3 +58,7 @@ futures = { version = "0.3", optional = true }
 # fail before reaching our own code.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+# Used by queue_jobs.rs for generating job ids. Pulled here as a
+# direct dep so the wasm32 build resolves it; the workspace
+# already has rand via other crates.
+rand = { workspace = true }

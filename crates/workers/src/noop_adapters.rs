@@ -229,6 +229,15 @@ impl SchedulerOps for NoopAll {
     }
 }
 
+// Workflows on Workers stays on the noop path because the
+// `worker` crate (0.5 at time of writing) doesn't surface a
+// Workflows binding API. Cloudflare Workflows is post-crate-
+// version; once `worker::Workflow` lands, swap this impl for a
+// real WorkersWorkflows adapter that wires
+// env.workflow("PYLON_WORKFLOWS") through. Until then, every
+// WorkflowOps call returns the typed WORKFLOWS_BINDING_REQUIRED
+// error so customers see a clear "not supported on this target"
+// signal instead of a silent hang.
 impl WorkflowOps for NoopAll {
     fn definitions(&self) -> serde_json::Value {
         // List the workflow names declared in the manifest's actions

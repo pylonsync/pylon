@@ -38,9 +38,21 @@ pub mod handler;
 #[cfg(feature = "workers")]
 pub mod kv_cache;
 #[cfg(feature = "workers")]
+pub mod pubsub_do;
+#[cfg(feature = "workers")]
+pub mod queue_jobs;
+#[cfg(feature = "workers")]
 pub mod r2_files;
+#[cfg(feature = "workers")]
+pub mod rooms_do;
 
 #[cfg(feature = "workers")]
 pub use kv_cache::KvCache;
 #[cfg(feature = "workers")]
+pub use pubsub_do::{PylonPubSub, WorkersPubSub};
+#[cfg(feature = "workers")]
+pub use queue_jobs::WorkersJobs;
+#[cfg(feature = "workers")]
 pub use r2_files::R2Files;
+#[cfg(feature = "workers")]
+pub use rooms_do::{PylonRoom, WorkersRooms};

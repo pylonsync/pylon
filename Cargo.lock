@@ -2141,6 +2141,7 @@ dependencies = [
  "base64",
  "chrono",
  "flate2",
+ "getrandom 0.2.17",
  "hmac 0.12.1",
  "k256",
  "openssl",
@@ -2387,7 +2388,10 @@ dependencies = [
 name = "pylon-workers"
 version = "0.3.124"
 dependencies = [
+ "async-trait",
  "futures",
+ "getrandom 0.2.17",
+ "js-sys",
  "pylon-auth",
  "pylon-http",
  "pylon-kernel",
@@ -2395,10 +2399,12 @@ dependencies = [
  "pylon-realtime",
  "pylon-router",
  "pylon-sync",
+ "rand 0.8.5",
  "serde",
  "serde-wasm-bindgen 0.6.5",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "worker",
 ]
 

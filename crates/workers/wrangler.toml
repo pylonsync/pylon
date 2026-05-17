@@ -18,14 +18,30 @@ PYLON_DEV_MODE = "false"
 
 # Secrets (set via `wrangler secret put`):
 #   PYLON_ADMIN_TOKEN
-#   PYLON_AI_API_KEY (optional)
+#   PYLON_AI_API_KEY                (optional)
+#   PYLON_EMAIL_WEBHOOK_URL         (optional; mail-provider HTTP endpoint)
+#   PYLON_EMAIL_WEBHOOK_BEARER      (optional; bearer for the above)
 
-# Durable Objects for WebSocket rooms (future)
-# [durable_objects]
-# bindings = [
-#   { name = "ROOM", class_name = "RoomDO" }
-# ]
+# Durable Objects for Rooms + PubSub (PylonRoom / PylonPubSub
+# adapters land in pylon-workers/src/{rooms_do,pubsub_do}.rs).
+# [[durable_objects.bindings]]
+# name = "PYLON_ROOMS"
+# class_name = "PylonRoom"
+# [[durable_objects.bindings]]
+# name = "PYLON_PUBSUB"
+# class_name = "PylonPubSub"
+# [[migrations]]
+# tag = "v1"
+# new_classes = ["PylonRoom", "PylonPubSub"]
 
-# Cron triggers for scheduled jobs (future)
+# Cloudflare Queues for background jobs.
+# [[queues.producers]]
+# binding = "PYLON_JOBS"
+# queue = "pylon-jobs"
+# [[queues.consumers]]
+# queue = "pylon-jobs"
+# max_batch_size = 10
+
+# Cron triggers for scheduled jobs.
 # [triggers]
 # crons = ["*/5 * * * *"]
