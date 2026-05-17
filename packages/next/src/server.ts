@@ -34,13 +34,39 @@ export type PylonAuth = {
  *
  * `loginUrl` is where {@link PylonServer.requireAuth} / {@link
  * PylonServer.requireMe} redirect when the session is missing.
+ *
+ * `timeoutMs` caps every server-side fetch to the control plane.
+ * Default 10s. The point is to fail loudly during a backend hiccup
+ * (machine restart, Fly proxy stall) rather than letting the React
+ * server render block until Vercel's 30s edge timeout. Pair with a
+ * route-level `error.tsx` so users see "server unavailable, retry"
+ * instead of a blank-tab hang.
  */
 export type PylonServerConfig = {
 	cookieName: string;
 	target?: string;
 	getMeFn?: string;
 	loginUrl?: string;
+	timeoutMs?: number;
 };
+
+/**
+ * Thrown by `createPylonServer` helpers when the control plane is
+ * unreachable — network error, fetch timeout, or any non-HTTP error.
+ * Distinct from `ApiError` (which carries an HTTP status from a
+ * response that DID come back). `requireMe`/`requireAuth` rethrow this
+ * instead of redirecting to /login so the route's `error.tsx` can
+ * render a "server unavailable, retry" UI without misleadingly
+ * suggesting the user signed out.
+ */
+export class PylonUnreachableError extends Error {
+	readonly cause?: unknown;
+	constructor(message: string, cause?: unknown) {
+		super(message);
+		this.name = "PylonUnreachableError";
+		this.cause = cause;
+	}
+}
 
 /**
  * Bound server helpers — built once per app via {@link createPylonServer}
@@ -107,8 +133,44 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 	const targetOpt = config.target;
 	const getMeFn = config.getMeFn ?? "getMe";
 	const loginUrl = config.loginUrl ?? "/login";
+	const timeoutMs = config.timeoutMs ?? 10_000;
 
 	const target = (): string => resolveTarget(targetOpt);
+
+	/**
+	 * Wrap a control-plane fetch with the configured timeout, normalizing
+	 * any non-HTTP failure (abort, DNS, connection-refused, mid-stream
+	 * disconnect during a machine restart) into {@link PylonUnreachableError}.
+	 * Callers that need to differentiate "server hiccup" from "real 4xx"
+	 * key off the error type.
+	 */
+	async function fetchWithTimeout(
+		url: string,
+		init: RequestInit = {},
+	): Promise<Response> {
+		const ac = new AbortController();
+		const t = setTimeout(() => ac.abort(), timeoutMs);
+		try {
+			return await fetch(url, {
+				cache: "no-store",
+				...init,
+				signal: ac.signal,
+			});
+		} catch (err) {
+			if (err instanceof Error && err.name === "AbortError") {
+				throw new PylonUnreachableError(
+					`Pylon control plane timed out after ${timeoutMs}ms (${url})`,
+					err,
+				);
+			}
+			throw new PylonUnreachableError(
+				`Pylon control plane unreachable (${url}): ${err instanceof Error ? err.message : String(err)}`,
+				err,
+			);
+		} finally {
+			clearTimeout(t);
+		}
+	}
 
 	async function readSession(): Promise<{
 		header: string;
@@ -123,26 +185,19 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 	async function getAuth(): Promise<PylonAuth | null> {
 		const session = await readSession();
 		if (!session) return null;
-		const auth = await fetch(`${target()}/api/auth/me`, {
+		// Network failures bubble as PylonUnreachableError — DON'T swallow
+		// them as null. Older code did `.catch(() => ({}))` which made a
+		// hung backend look like an unauthenticated session, so
+		// `requireAuth` redirected to /login when the real fix was "retry".
+		// The route's `error.tsx` boundary handles the throw correctly.
+		const res = await fetchWithTimeout(`${target()}/api/auth/me`, {
 			headers: { cookie: session.header },
-			cache: "no-store",
-		})
-			.then(
-				(r) =>
-					r.json() as Promise<{
-						user_id?: string;
-						tenant_id?: string | null;
-						is_admin?: boolean;
-					}>,
-			)
-			.catch(
-				() =>
-					({}) as {
-						user_id?: string;
-						tenant_id?: string | null;
-						is_admin?: boolean;
-					},
-			);
+		});
+		const auth = (await res.json()) as {
+			user_id?: string;
+			tenant_id?: string | null;
+			is_admin?: boolean;
+		};
 		if (!auth.user_id) return null;
 		return {
 			userId: auth.user_id,
@@ -165,8 +220,7 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 		const session = await readSession();
 		const headers = new Headers(init.headers);
 		if (session) headers.set("cookie", session.header);
-		return fetch(`${target()}${path}`, {
-			cache: "no-store",
+		return fetchWithTimeout(`${target()}${path}`, {
 			...init,
 			headers,
 		});
@@ -191,10 +245,15 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 		// Providers are env-derived on the control plane; they don't
 		// change per-request but DO change across deploys. no-store is
 		// the safe default until a caller opts into caching.
+		//
+		// This one DOES swallow control-plane unreachability — the
+		// providers list is decorative chrome on the /login page and a
+		// transient hiccup shouldn't make the whole login surface
+		// error-boundary. The form still works (server-side auth
+		// endpoints handle their own errors); the user just sees no
+		// "Sign in with Google" button for a moment.
 		try {
-			const res = await fetch(`${target()}/api/auth/providers`, {
-				cache: "no-store",
-			});
+			const res = await fetchWithTimeout(`${target()}/api/auth/providers`);
 			if (!res.ok) return [];
 			return (await res.json()) as OAuthProvider[];
 		} catch {
@@ -211,24 +270,25 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 		// to safe fields (passwordHash + framework-internal columns
 		// stripped). This replaces the older two-step
 		// /api/auth/me + /api/fn/getMe dance.
+		//
+		// Network failures throw PylonUnreachableError (caught by the
+		// route's error.tsx). Older code swallowed them as null which
+		// made `requireMe` redirect to /login during a backend restart
+		// even though the user's session was perfectly valid — a
+		// "signed out" UX for what was actually a 5-second hiccup.
 		const session = await readSession();
 		if (!session) return null;
-		const resp = await fetch(`${target()}/api/auth/session`, {
+		const res = await fetchWithTimeout(`${target()}/api/auth/session`, {
 			headers: { cookie: session.header },
-			cache: "no-store",
-		})
-			.then(
-				(r) =>
-					r.json() as Promise<{
-						session?: {
-							user_id?: string;
-							tenant_id?: string | null;
-							is_admin?: boolean;
-						};
-						user?: U | null;
-					}>,
-			)
-			.catch(() => ({}) as { session?: undefined; user?: undefined });
+		});
+		const resp = (await res.json()) as {
+			session?: {
+				user_id?: string;
+				tenant_id?: string | null;
+				is_admin?: boolean;
+			};
+			user?: U | null;
+		};
 		if (!resp.session?.user_id || !resp.user) return null;
 		return {
 			auth: {
@@ -346,15 +406,21 @@ export async function pylonJson<T = unknown>(
  */
 export async function getOAuthProviders(opts: {
 	target?: string;
+	timeoutMs?: number;
 } = {}): Promise<OAuthProvider[]> {
 	const target = resolveTarget(opts.target);
+	const ac = new AbortController();
+	const t = setTimeout(() => ac.abort(), opts.timeoutMs ?? 10_000);
 	try {
 		const res = await fetch(`${target}/api/auth/providers`, {
 			cache: "no-store",
+			signal: ac.signal,
 		});
 		if (!res.ok) return [];
 		return (await res.json()) as OAuthProvider[];
 	} catch {
 		return [];
+	} finally {
+		clearTimeout(t);
 	}
 }
