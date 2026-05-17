@@ -2391,12 +2391,8 @@ mod auth_gate_tests {
     /// Variant of `with_ctx` that takes an explicit ChangeNotifier.
     /// Used by tests asserting that auth surfaces (select-org,
     /// session revoke, ...) push the session-changed envelope.
-    fn with_ctx_notifier<F>(
-        is_dev: bool,
-        auth: &AuthContext,
-        notifier: &dyn ChangeNotifier,
-        f: F,
-    ) where
+    fn with_ctx_notifier<F>(is_dev: bool, auth: &AuthContext, notifier: &dyn ChangeNotifier, f: F)
+    where
         F: FnOnce(&RouterContext),
     {
         with_ctx_full(is_dev, auth, &NoopPluginHooks, None, Some(notifier), f);
@@ -2446,8 +2442,7 @@ mod auth_gate_tests {
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
         let default_notifier = NoopNotifier;
-        let notifier: &dyn ChangeNotifier =
-            notifier_override.unwrap_or(&default_notifier);
+        let notifier: &dyn ChangeNotifier = notifier_override.unwrap_or(&default_notifier);
         let rooms = StubRooms;
         let cache = StubCache;
         let pubsub = StubPubSub;

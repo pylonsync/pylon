@@ -108,11 +108,7 @@ impl Envelope {
     /// `session-changed` WS message to that user's local connections
     /// so multi-tab + multi-machine deployments stay in sync without
     /// the app calling notifySessionChanged.
-    pub fn session_changed(
-        instance_id: &str,
-        user_id: &str,
-        tenant_id: Option<&str>,
-    ) -> Self {
+    pub fn session_changed(instance_id: &str, user_id: &str, tenant_id: Option<&str>) -> Self {
         Self {
             instance_id: instance_id.to_string(),
             kind: "session-changed".to_string(),
