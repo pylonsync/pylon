@@ -1408,6 +1408,86 @@ fn start_server(
             continue;
         }
 
+        // --- /admin/fn/traces: recent function execution traces.
+        //
+        // Companion to /api/fn/traces but accepts the METRICS token
+        // too, so Pylon Cloud's dashboard can stream traces over the
+        // same read-only credential it uses for /metrics and
+        // /admin/logs/tail. Returns the same FnTrace JSON shape.
+        //
+        // Why this exists separate from /api/fn/traces: the existing
+        // endpoint requires full PYLON_ADMIN_TOKEN (writes + drops
+        // permitted). Pylon Cloud stamps a read-only metrics token at
+        // provision time, never the full admin token — keeping the
+        // dashboard from being able to drop tables would be moot if
+        // we required full admin to read traces. New endpoint, same
+        // auth shape as /admin/logs/tail, no behavior change on the
+        // existing one.
+        if url.starts_with("/admin/fn/traces") && method == Method::Get {
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/fn/traces requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer in non-dev mode",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            let limit: usize = url
+                .split_once('?')
+                .map(|(_, q)| q)
+                .and_then(|q| {
+                    q.split('&').find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        if k == "limit" {
+                            v.parse().ok()
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or(100)
+                .min(500);
+            let traces = match fn_ops_maybe.as_ref() {
+                Some(ops) => {
+                    use pylon_router::FnOps as _;
+                    let traces = ops.recent_traces(limit);
+                    serde_json::to_string(&traces).unwrap_or_else(|_| "[]".into())
+                }
+                None => "[]".into(),
+            };
+            let response = with_security_headers(
+                Response::from_string(traces)
+                    .with_status_code(200u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+
         // --- Rate limiting: check per-IP request count ---
         // peer_ip honors PYLON_TRUST_PROXY_HOPS so a deploy behind a
         // load balancer (Fly, nginx, CloudFront) gets per-client

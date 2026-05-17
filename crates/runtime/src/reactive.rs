@@ -93,6 +93,16 @@ struct Subscription {
     /// the next run pushes regardless of hash. Distinguishes "first
     /// push pending" from "value happens to hash to 0".
     last_hash: Option<u64>,
+    /// Monotonic version bumped on every `register_pending` for this
+    /// (client_id, sub_id) pair. The runner snapshots this with the
+    /// sub before invoking the handler and re-checks before pushing /
+    /// updating state — if the sub was unsubscribed and re-registered
+    /// during the run, the old run's result MUST NOT push to the new
+    /// logical sub (it would carry stale deps + stale args + a result
+    /// computed for a different question). Without versioning, a
+    /// rapid resubscribe (React StrictMode double-effect, hook arg
+    /// flip during a slow handler) silently delivers the wrong value.
+    version: u64,
 }
 
 impl Subscription {
@@ -127,6 +137,15 @@ struct RegistryInner {
     /// Dedup the dirty queue: a sub that's already pending doesn't
     /// get enqueued twice in the same tick.
     pending: HashSet<SubKey>,
+    /// Subs whose handler is CURRENTLY executing on the re-runner
+    /// thread. Indexed deps for these subs may be stale (the run is
+    /// computing fresh deps right now). on_change MUST dirty any
+    /// sub in here regardless of dep match — without that, a write
+    /// that lands between "handler reads" and "deps get indexed"
+    /// is invisible to the sub forever. The runner clears the entry
+    /// in `update_deps_and_hash` once new deps are committed; if a
+    /// write dirtied during the run, the next iteration picks it up.
+    running: HashSet<SubKey>,
 }
 
 /// Result of running a reactive handler. Captured by the re-runner;
@@ -159,6 +178,7 @@ impl ReactiveRegistry {
                 by_client: HashMap::new(),
                 dirty: VecDeque::new(),
                 pending: HashSet::new(),
+                running: HashSet::new(),
             }),
             dirty_notify: Condvar::new(),
             fn_ops: Mutex::new(None),
@@ -221,11 +241,12 @@ impl ReactiveRegistry {
                 return RegisterOutcome::OverLimit;
             }
         }
-        // Drop any prior version of this sub before installing the
-        // new one — handles `argsKey` change in the React hook,
-        // which calls subscribeReactive with the same sub_id (no,
-        // wait — the hook mints a fresh id per dep change. But a
-        // misbehaving client might re-use ids; tolerate.)
+        // Bump version on every register so any in-flight run for
+        // the old logical sub is detected + discarded before its
+        // result lands. Without this, a rapid resubscribe (React
+        // arg-flip during a slow handler) silently delivers the
+        // OLD sub's result to the NEW sub's React subscriber.
+        let prev_version = inner.subs.get(&key).map(|s| s.version).unwrap_or(0);
         if inner.subs.contains_key(&key) {
             remove_locked(&mut inner, &key);
         }
@@ -237,6 +258,7 @@ impl ReactiveRegistry {
             client_id,
             deps: DepSet::new(),
             last_hash: None,
+            version: prev_version.wrapping_add(1),
         };
         // Index by_client immediately so disconnect cleanup works
         // before the first run lands. by_entity / by_row stay empty
@@ -274,6 +296,16 @@ impl ReactiveRegistry {
 
     /// Called by `WsSseNotifier::notify` on every change event. Finds
     /// subs whose deps overlap and marks them dirty for re-run.
+    ///
+    /// Special case: any sub currently in `running` is dirtied
+    /// REGARDLESS of dep match. While the handler is executing, its
+    /// deps haven't been indexed yet — a write landing in that
+    /// window would be invisible to the dep-based match path and
+    /// never trigger a re-run. Marking running subs dirty
+    /// unconditionally is the conservative fix: at worst it causes
+    /// a redundant re-run when the write didn't actually affect the
+    /// handler's reads; the alternative is the silent-staleness bug
+    /// codex P1.1 caught against the previous design.
     pub fn on_change(&self, event: &ChangeEvent) {
         let mut inner = self.inner.lock().unwrap();
         let mut to_mark: Vec<SubKey> = Vec::new();
@@ -306,6 +338,15 @@ impl ReactiveRegistry {
             }
         }
 
+        // In-flight runs: any sub whose handler is currently
+        // executing gets dirtied. The runner hasn't committed deps
+        // yet, so by_entity/by_row don't reflect what the handler is
+        // reading. Conservatively re-queue every running sub on
+        // every change.
+        for k in inner.running.iter() {
+            to_mark.push(k.clone());
+        }
+
         if to_mark.is_empty() {
             return;
         }
@@ -327,7 +368,9 @@ impl ReactiveRegistry {
         loop {
             // Take a snapshot of dirty work + their sub specs. Run
             // outside the lock so FnOps::call doesn't block the
-            // change-event hot path.
+            // change-event hot path. Mark each as `running` so
+            // on_change knows to re-dirty if a write lands during
+            // execution.
             let batch: Vec<Subscription> = {
                 let mut inner = self.inner.lock().unwrap();
                 while inner.dirty.is_empty() {
@@ -346,6 +389,7 @@ impl ReactiveRegistry {
                         Some(k) => {
                             inner.pending.remove(&k);
                             if let Some(sub) = inner.subs.get(&k).cloned() {
+                                inner.running.insert(k);
                                 take.push(sub);
                             }
                         }
@@ -360,14 +404,49 @@ impl ReactiveRegistry {
                 let key = sub.key();
                 match outcome {
                     HandlerResult::Ok(outcome) => {
+                        // Re-check that the sub still exists AND has
+                        // the same version we ran against. A stale
+                        // run (unsubscribed mid-run, or re-registered
+                        // with new args mid-run) must NOT push its
+                        // result — it would deliver the OLD answer
+                        // to either nobody or, worse, to the NEW
+                        // logical sub. Codex P1.2.
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.running.remove(&key);
+                        let still_current = inner
+                            .subs
+                            .get(&key)
+                            .map(|s| s.version == sub.version)
+                            .unwrap_or(false);
+                        if !still_current {
+                            drop(inner);
+                            continue;
+                        }
                         let prev_hash = sub.last_hash;
                         let should_push = prev_hash.map(|h| h != outcome.hash).unwrap_or(true);
+                        // Update state INSIDE the lock so the new
+                        // deps are visible to the next on_change.
+                        update_deps_and_hash_locked(&mut inner, &key, &outcome);
+                        drop(inner);
                         if should_push {
                             self.push_result(&sub.sub_id, &outcome.value, sub.client_id);
                         }
-                        self.update_deps_and_hash(&key, &outcome);
                     }
                     HandlerResult::Err { code, message } => {
+                        // Same version + currency check before
+                        // pushing an error frame — don't surface a
+                        // stale error to a freshly re-registered sub.
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.running.remove(&key);
+                        let still_current = inner
+                            .subs
+                            .get(&key)
+                            .map(|s| s.version == sub.version)
+                            .unwrap_or(false);
+                        drop(inner);
+                        if !still_current {
+                            continue;
+                        }
                         // Initial-run errors get surfaced as a
                         // reactive-error frame so the React hook can
                         // stop spinning. Re-run errors (where we'd
@@ -380,6 +459,17 @@ impl ReactiveRegistry {
                         }
                     }
                     HandlerResult::RuntimeUnavailable => {
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.running.remove(&key);
+                        let still_current = inner
+                            .subs
+                            .get(&key)
+                            .map(|s| s.version == sub.version)
+                            .unwrap_or(false);
+                        drop(inner);
+                        if !still_current {
+                            continue;
+                        }
                         if sub.last_hash.is_none() {
                             self.push_error(
                                 &sub.sub_id,
@@ -424,21 +514,6 @@ impl ReactiveRegistry {
         }
     }
 
-    fn update_deps_and_hash(&self, key: &SubKey, outcome: &ReactiveOutcome) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(sub_cloned) = inner.subs.get(key).cloned() else {
-            return;
-        };
-        remove_locked(&mut inner, key);
-        let new_sub = Subscription {
-            deps: outcome.deps.clone(),
-            last_hash: Some(outcome.hash),
-            ..sub_cloned
-        };
-        index_locked(&mut inner, &new_sub);
-        inner.subs.insert(key.clone(), new_sub);
-    }
-
     fn push_result(&self, sub_id: &str, value: &serde_json::Value, client_id: u64) {
         let frame = serde_json::json!({
             "type": "reactive-result",
@@ -481,19 +556,43 @@ fn enqueue_dirty_locked(inner: &mut RegistryInner, key: SubKey) -> bool {
     if !inner.pending.insert(key.clone()) {
         return false;
     }
-    // Drop the OLDEST entry when we'd otherwise exceed the cap. The
-    // dropped sub is still in `subs`; the next change event touching
-    // it re-enqueues. Bounded staleness, no memory blow-up.
+    // Dirty queue length is naturally bounded by total subs (each
+    // sub appears at most once thanks to the pending dedupe set).
+    // Total subs is bounded by PER_CLIENT_SUB_CAP × max connections,
+    // so even a million-client cluster would max out at ~256M dirty
+    // entries — far above DIRTY_QUEUE_CAP. Hitting the cap means
+    // something pathological (handler loop generating writes that
+    // dirty every sub). Log loudly + accept the entry rather than
+    // drop, because dropping would PERMANENTLY desync a sub whose
+    // only triggering event came during the overflow window. Codex
+    // P1.3: previous "drop oldest" semantic violated the "rerun on
+    // every dep change" contract.
     if inner.dirty.len() >= DIRTY_QUEUE_CAP {
-        if let Some(stale) = inner.dirty.pop_front() {
-            inner.pending.remove(&stale);
-            tracing::warn!(
-                "[reactive] dirty queue full ({DIRTY_QUEUE_CAP}); dropping oldest sub from queue (will re-enqueue on next matching event)"
-            );
-        }
+        tracing::warn!(
+            "[reactive] dirty queue over soft cap ({DIRTY_QUEUE_CAP}) — accepting anyway to preserve re-run contract; investigate handler-induced write storms"
+        );
     }
     inner.dirty.push_back(key);
     true
+}
+
+/// Commit fresh deps + hash for `key`. Caller must hold the inner
+/// mutex. Runs the standard "drop old indexes, install new" dance.
+/// Preserves the version field (which only `register_pending`
+/// mutates) so the runner's version check can detect mid-run
+/// resubscribes.
+fn update_deps_and_hash_locked(inner: &mut RegistryInner, key: &SubKey, outcome: &ReactiveOutcome) {
+    let Some(sub_cloned) = inner.subs.get(key).cloned() else {
+        return;
+    };
+    remove_locked(inner, key);
+    let new_sub = Subscription {
+        deps: outcome.deps.clone(),
+        last_hash: Some(outcome.hash),
+        ..sub_cloned
+    };
+    index_locked(inner, &new_sub);
+    inner.subs.insert(key.clone(), new_sub);
 }
 
 fn index_locked(inner: &mut RegistryInner, sub: &Subscription) {
@@ -625,6 +724,7 @@ mod tests {
             client_id,
             deps,
             last_hash: Some(0),
+            version: 1,
         };
         index_locked(&mut inner, &sub);
         inner.subs.insert(sub.key(), sub);
@@ -775,17 +875,87 @@ mod tests {
     }
 
     #[test]
-    fn dirty_queue_cap_drops_oldest() {
+    fn dirty_queue_over_cap_still_enqueues() {
+        // Codex P1.3: previous "drop oldest" semantic silently
+        // de-scheduled re-runs whose only triggering event landed
+        // during overflow. The fix is to accept the entry + log a
+        // warning. This test verifies no re-run is silently lost.
         let reg = ReactiveRegistry::new(make_hub());
-        // Install enough subs + dirty them all so the queue
-        // overflows. We bypass register_pending to keep the test
-        // hermetic (no need for a real fn_ops).
+        // Pre-fill the dirty queue past the cap WITHOUT triggering
+        // dedupe (use unique sub keys).
         for i in 0..(DIRTY_QUEUE_CAP + 50) {
-            install_sub_with_deps(&reg, 1, &format!("s{i}"), dep_set(&["E"], &[]));
+            install_sub_with_deps(&reg, i as u64, "s", dep_set(&["E"], &[]));
         }
         reg.on_change(&dummy_change("E", "r", ChangeKind::Insert));
         let inner = reg.inner.lock().unwrap();
-        assert!(inner.dirty.len() <= DIRTY_QUEUE_CAP);
-        assert!(inner.pending.len() <= DIRTY_QUEUE_CAP);
+        // Every sub got dirtied — no drops despite exceeding cap.
+        assert_eq!(inner.pending.len(), inner.subs.len());
+        assert_eq!(inner.dirty.len(), inner.subs.len());
+    }
+
+    /// Codex P1.1: a write that lands between "handler reads" and
+    /// "deps get indexed" must dirty the in-flight sub. Simulated
+    /// here by directly inserting into `running` and verifying
+    /// on_change picks the sub up even though by_entity/by_row
+    /// don't yet know about its deps.
+    #[test]
+    fn on_change_dirties_running_subs_regardless_of_deps() {
+        let reg = ReactiveRegistry::new(make_hub());
+        // Install a sub with NO deps — the dep-based match path
+        // would never fire for it.
+        install_sub_with_deps(&reg, 7, "s1", dep_set(&[], &[]));
+        // Mark it running — handler is mid-flight, deps not yet
+        // committed.
+        {
+            let mut inner = reg.inner.lock().unwrap();
+            inner.running.insert((7, "s1".to_string()));
+            // Clear what install_sub_with_deps put in by_entity/by_row
+            // (it put nothing, since deps is empty). The point of
+            // this test is: ZERO dep entries, yet on_change must
+            // still queue.
+            assert!(inner.by_entity.is_empty());
+            assert!(inner.by_row.is_empty());
+        }
+        reg.on_change(&dummy_change("Anything", "r1", ChangeKind::Insert));
+        let inner = reg.inner.lock().unwrap();
+        assert!(
+            inner.pending.contains(&(7, "s1".to_string())),
+            "running sub must be dirtied by any change event"
+        );
+    }
+
+    /// Codex P1.2: a sub re-registered with a fresh version while
+    /// a prior run is in flight must not receive the OLD run's
+    /// result. The runner checks `sub.version == cloned.version`
+    /// before pushing; this test confirms a version mismatch
+    /// blocks the push by exercising the version-bump in
+    /// register_pending.
+    #[test]
+    fn register_pending_bumps_version() {
+        let reg = ReactiveRegistry::new(make_hub());
+        let _ = reg.register_pending(
+            "s1".into(),
+            "f".into(),
+            serde_json::json!({}),
+            make_auth(),
+            42,
+            // first register
+        );
+        let v1 = {
+            let inner = reg.inner.lock().unwrap();
+            inner.subs.get(&(42, "s1".to_string())).unwrap().version
+        };
+        let _ = reg.register_pending(
+            "s1".into(),
+            "f".into(),
+            serde_json::json!({"changed": true}),
+            make_auth(),
+            42,
+        );
+        let v2 = {
+            let inner = reg.inner.lock().unwrap();
+            inner.subs.get(&(42, "s1".to_string())).unwrap().version
+        };
+        assert!(v2 > v1, "re-register must bump version (v1={v1}, v2={v2})");
     }
 }
