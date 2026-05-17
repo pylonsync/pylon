@@ -1408,6 +1408,173 @@ fn start_server(
             continue;
         }
 
+        // --- /admin/entities: list every entity declared in the
+        // manifest, so the dashboard's data browser can render
+        // a left-nav of tables without having to scrape the
+        // manifest separately. Read-only, same auth as the
+        // per-entity browse route below.
+        if url == "/admin/entities" && method == Method::Get {
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/entities requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer",
+                );
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            let entities: Vec<serde_json::Value> = runtime
+                .manifest()
+                .entities
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.name,
+                        "fields": e.fields.iter().map(|f| serde_json::json!({
+                            "name": f.name,
+                            "type": f.field_type,
+                            "optional": f.optional,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let body = serde_json::to_string(&entities).unwrap_or_else(|_| "[]".into());
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(200u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+
+        // --- /admin/entities/<E>: paginated row browse for the
+        // cloud dashboard's data browser. Same auth shape as
+        // /admin/logs/tail + /admin/fn/traces — accepts the
+        // metrics token via `verify_admin_or_metrics_auth`.
+        //
+        // Bypasses entity read-policy because the dashboard
+        // operator IS the operator. Forcing them to write a
+        // permissive read policy just to render rows would widen
+        // everyone's attack surface needlessly; the auth perimeter
+        // (PYLON_METRICS_TOKEN) is what's locked down.
+        //
+        // GET /admin/entities/<EntityName>[?limit=N][&after=<id>]
+        if let Some(rest) = url.strip_prefix("/admin/entities/") {
+            let path = rest.split('?').next().unwrap_or(rest);
+            // Bare entity name (no nested path segments). The full
+            // CRUD surface (PATCH/DELETE for inline edit) is a v2
+            // follow-up; v1 is read-only browse.
+            let is_list = !path.is_empty() && !path.contains('/');
+            if is_list && method == Method::Get {
+                if !is_dev
+                    && !verify_admin_or_metrics_auth(
+                        &request,
+                        admin_token.as_deref(),
+                        &cookie_config,
+                        &session_store,
+                        runtime.as_ref(),
+                    )
+                {
+                    let body = json_error(
+                        "UNAUTHORIZED",
+                        "/admin/entities/<E> requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(body)
+                            .with_status_code(401u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 401);
+                    continue;
+                }
+                let qs = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+                let limit: usize = qs
+                    .split('&')
+                    .find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        if k == "limit" {
+                            v.parse().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(50)
+                    .clamp(1, 200);
+                let after: Option<String> = qs.split('&').find_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    if k == "after" {
+                        Some(percent_decode_str(v))
+                    } else {
+                        None
+                    }
+                });
+                use pylon_http::DataStore as _;
+                let rows = runtime
+                    .list_after(path, after.as_deref(), limit + 1)
+                    .unwrap_or_default();
+                let has_more = rows.len() > limit;
+                let page: Vec<serde_json::Value> = rows.into_iter().take(limit).collect();
+                let next_cursor: Option<String> = if has_more {
+                    page.last()
+                        .and_then(|r| r.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+                let body = serde_json::json!({
+                    "data": page,
+                    "next_cursor": next_cursor,
+                    "has_more": has_more,
+                })
+                .to_string();
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(200u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 200);
+                continue;
+            }
+        }
+
         // --- /admin/fn/traces: recent function execution traces.
         //
         // Companion to /api/fn/traces but accepts the METRICS token
