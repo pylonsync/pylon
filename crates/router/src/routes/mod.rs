@@ -11,7 +11,15 @@
 pub mod actions;
 pub mod admin_data;
 pub mod ai;
+// Auth + auth_admin pull in pylon_auth modules (saml, captcha,
+// oidc_provider, etc.) that are wasm-gated because their deps
+// (samael, openssl, ureq, ring) don't cross-compile to wasm32.
+// The Workers target (pylon-workers) compiles without these
+// routes; OAuth/SAML/SCIM endpoints aren't reachable on Workers
+// for that reason — documented in pylon-workers/src/handler.rs.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod auth_admin;
 pub mod crdt;
 pub mod entities;

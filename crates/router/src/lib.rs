@@ -493,17 +493,25 @@ pub struct RouterContext<'a> {
     /// Long-lived API keys — `pk.key_<id>.<secret>` bearer tokens that
     /// resolve to a user_id with optional scopes/expiry. Created via
     /// `POST /api/auth/api-keys`, listed/revoked from the same path.
+    /// Gated on wasm32 — `api_key` module pulls native crypto.
+    #[cfg(not(target_arch = "wasm32"))]
     pub api_keys: &'a pylon_auth::api_key::ApiKeyStore,
     /// Organizations + memberships + invites — multi-tenant team
     /// management. Endpoints under `/api/auth/orgs/...`.
     pub orgs: &'a pylon_auth::org::OrgStore,
     /// Per-address pending SIWE nonces. Issued at
     /// `/api/auth/siwe/nonce`, consumed at `/api/auth/siwe/verify`.
+    /// Gated on wasm32 — SIWE verification needs k256 (native-only).
+    #[cfg(not(target_arch = "wasm32"))]
     pub siwe: &'a pylon_auth::siwe::NonceStore,
     /// Phone-number magic codes. Endpoints under `/api/auth/phone/...`.
+    /// Gated on wasm32 — SMS providers use ureq.
+    #[cfg(not(target_arch = "wasm32"))]
     pub phone_codes: &'a pylon_auth::phone::PhoneCodeStore,
     /// WebAuthn / passkey credentials + per-user challenge stash.
-    /// Endpoints under `/api/auth/passkey/...`.
+    /// Endpoints under `/api/auth/passkey/...`. Gated on wasm32 —
+    /// WebAuthn assertion verification uses ring (native-only).
+    #[cfg(not(target_arch = "wasm32"))]
     pub passkeys: &'a pylon_auth::webauthn::PasskeyStore,
     /// Single-use email-delivered tokens (password reset, email
     /// change, magic-link sign-in). Endpoints under
@@ -519,11 +527,15 @@ pub struct RouterContext<'a> {
     /// auth middleware to populate `auth_ctx.is_trusted_device`.
     pub trusted_devices: &'a dyn pylon_auth::trusted_device::TrustedDeviceStore,
     /// Per-org SSO config + state. Endpoints under
-    /// `/api/auth/orgs/<slug>/sso/...`.
+    /// `/api/auth/orgs/<slug>/sso/...`. Gated on wasm32 — OIDC
+    /// discovery fetches use ureq.
+    #[cfg(not(target_arch = "wasm32"))]
     pub org_sso: &'a dyn pylon_auth::org_sso::OrgSsoStore,
     /// Per-org SAML 2.0 SSO config + state. Endpoints under
     /// `/api/auth/orgs/<slug>/saml/...`. Note: signature verification
     /// is OFF by default — see `pylon_auth::saml::signature_verification_bypassed`.
+    /// Gated on wasm32 — samael needs openssl-sys (native-only).
+    #[cfg(not(target_arch = "wasm32"))]
     pub saml: &'a dyn pylon_auth::saml::SamlStore,
     pub policy_engine: &'a PolicyEngine,
     pub change_log: &'a ChangeLog,
@@ -665,6 +677,7 @@ fn truncate_for_redirect(s: &str) -> String {
 /// the validated record's callback URLs to know where to redirect on
 /// both success and failure — and validate is single-use, so it can
 /// only be called once per token.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn complete_oauth_login_pkce(
     ctx: &RouterContext,
     provider: &str,
@@ -1039,6 +1052,7 @@ fn route_inner(
     // /api/auth/* (sessions, OAuth, magic-link, password, email verify,
     // /me, /providers, /sessions, refresh).
     // -----------------------------------------------------------------------
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(r) = routes::auth::handle(ctx, method, url, body, auth_token) {
         return r;
     }
@@ -1089,6 +1103,7 @@ fn route_inner(
     if let Some(r) = routes::admin_data::handle(ctx, method, url, body, auth_token) {
         return r;
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(r) = routes::auth_admin::handle(ctx, method, url, body, auth_token) {
         return r;
     }

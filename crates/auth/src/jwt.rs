@@ -21,10 +21,19 @@
 //!
 //! Spec: <https://www.rfc-editor.org/rfc/rfc7519> + RFC 7515 (JWS).
 
-use crate::apple_jwt::base64_url;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// base64url helper. Inlined here (was previously `use
+// crate::apple_jwt::base64_url`) because `apple_jwt` is
+// cfg-gated for wasm32 — pylon-workers needs JWT but can't
+// pull in the Apple ES256/ring code path. Same `impl AsRef<[u8]>`
+// surface as the original so callers don't need adjustment.
+fn base64_url<T: AsRef<[u8]>>(input: T) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD.encode(input.as_ref())
+}
 
 type HmacSha256 = Hmac<Sha256>;
 

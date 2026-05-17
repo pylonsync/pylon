@@ -384,7 +384,16 @@ impl OrgStore {
     }
 
     // ----- Invites -----
+    //
+    // create_invite + accept_invite need argon2-backed password
+    // hashing (crate::password). argon2 doesn't cross-compile to
+    // wasm32, so both methods are gated for the Workers target.
+    // Workers-side org code that needs invitation flows would
+    // need a WebCrypto-based replacement; the rest of OrgStore
+    // (members, roles, list_invites, revoke_invite) stays
+    // available on every target.
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create_invite(
         &self,
         org_id: &str,
@@ -456,6 +465,7 @@ impl OrgStore {
     /// checks expiry + accepted-at, ensures the accepting user's email
     /// matches the invite, CAS-stamps `acceptedAt`, then inserts the
     /// membership row.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn accept_invite(
         &self,
         token: &str,

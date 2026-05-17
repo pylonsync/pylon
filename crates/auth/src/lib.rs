@@ -1,27 +1,51 @@
-pub mod api_key;
-pub mod apple_jwt;
+// Modules. The ones touching ring / openssl / samael / ureq /
+// k256 / argon2 / rsa get `#[cfg(not(target_arch = "wasm32"))]`
+// because those deps don't cross-compile to wasm32 (ring's
+// vendored curve25519.c rejects the wasm target, openssl needs
+// C build tools, ureq needs native sockets). pylon-router's
+// route handlers that consume these modules are cfg-gated in
+// the same shape so the Workers (wasm32) build of pylon-router
+// + pylon-workers ends up with the auth-flow routes returning
+// typed 503s instead of failing to compile.
 pub mod audit;
-pub mod captcha;
 pub mod cookie;
 pub mod device;
-pub mod email;
 pub mod email_blocklist;
 pub mod email_templates;
 pub mod jwt;
-pub mod oidc_provider;
 pub mod org;
-pub mod org_sso;
-pub mod password;
-pub mod phone;
-pub mod provider;
 pub mod rate_limit;
-pub mod saml;
 pub mod scim;
-pub mod siwe;
-pub mod stripe;
-pub mod totp;
 pub mod trusted_device;
 pub mod verification;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod api_key;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod apple_jwt;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod captcha;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod email;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod oidc_provider;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod org_sso;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod password;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod phone;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod provider;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod saml;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod siwe;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stripe;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod totp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod webauthn;
 
 pub use cookie::{extract_token as extract_session_cookie, CookieConfig, SameSite};
@@ -252,6 +276,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// accepted session tokens — admin / API-key / JWT bearers worked
 /// over HTTP but silently failed over WS. Caught in the 2026-05-10
 /// codex pass-3 audit (P3 REGRESSION).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_bearer_token(
     token: Option<&str>,
     sessions: &SessionStore,
@@ -442,6 +467,10 @@ pub struct OAuthConfig {
     pub tenant: Option<String>,
     /// Apple-specific extras (team id, key id, ES256 PEM). Required
     /// for Sign in with Apple — ignored for any other provider.
+    /// Gated on wasm32 because `provider::AppleConfig` lives in the
+    /// native-only `provider` module (Apple ES256 signing needs
+    /// ring which doesn't cross-compile to wasm32).
+    #[cfg(not(target_arch = "wasm32"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apple: Option<provider::AppleConfig>,
     /// OIDC issuer URL when this config targets a generic-OIDC
@@ -453,6 +482,15 @@ pub struct OAuthConfig {
     pub oidc_issuer: Option<String>,
 }
 
+// The full OAuthConfig impl — token exchange, userinfo fetch,
+// PKCE, ID-token verification — depends on `provider::` (gated on
+// wasm32) and `ureq` (native-only). Gate the entire block so the
+// struct itself stays available to wasm32 consumers as a data
+// type while the network-touching methods only compile on native.
+// pylon-router's OAuth routes use cfg-gates of their own to
+// route around the missing methods on wasm32 (Workers target
+// returns typed 503 for OAuth-flow endpoints today).
+#[cfg(not(target_arch = "wasm32"))]
 impl OAuthConfig {
     /// Resolve the [`provider::ProviderSpec`] backing this config. For
     /// `oidc_issuer`-configured providers, falls through to the OIDC
@@ -940,11 +978,15 @@ pub fn generate_pkce() -> PkcePair {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let code_verifier = apple_jwt::base64_url(bytes);
+    // Use the local base64_url helper (defined in jwt.rs as well —
+    // duplicated here to keep this fn target-agnostic; the
+    // apple_jwt module is wasm-gated).
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let code_verifier = URL_SAFE_NO_PAD.encode(bytes);
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
-    let code_challenge = apple_jwt::base64_url(hasher.finalize());
+    let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
     PkcePair {
         code_verifier,
         code_challenge,
@@ -1144,6 +1186,7 @@ fn redact_param_json(input: &str, key: &str) -> String {
 /// token is the same OAuth access token, but the request is a POST
 /// with a fixed query. Kept as a separate fn so the main fetcher
 /// stays uniform across the other parsers.
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo, String> {
     let body = r#"{"query":"query { viewer { id email name } }"}"#;
     let agent = ureq_agent();
@@ -1288,6 +1331,7 @@ fn url_encode(s: &str) -> String {
 /// typical internet latency.
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[cfg(not(target_arch = "wasm32"))]
 fn ureq_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(HTTP_TIMEOUT)
@@ -1297,6 +1341,7 @@ fn ureq_agent() -> ureq::Agent {
         .build()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, String> {
     let agent = ureq_agent();
     let mut req = agent
@@ -1318,6 +1363,7 @@ fn http_post_form(url: &str, body: &str, accept_json: bool) -> Result<String, St
 /// POST a form body using HTTP Basic auth for the client credentials.
 /// Used by Spotify, Reddit, Figma, Zoom, PayPal — providers that
 /// mandate Basic auth on the token endpoint.
+#[cfg(not(target_arch = "wasm32"))]
 fn http_post_form_basic(
     url: &str,
     body: &str,
@@ -1347,6 +1393,7 @@ fn http_post_form_basic(
 /// POST a JSON body, optionally with HTTP Basic auth. Used by
 /// Notion (Basic + JSON) and Atlassian (JSON only) — both reject
 /// form-encoded bodies on their token endpoints.
+#[cfg(not(target_arch = "wasm32"))]
 fn http_post_json(
     url: &str,
     body: &str,
@@ -1377,6 +1424,7 @@ fn http_post_json(
 
 /// POST with empty body + bearer auth. Used for Dropbox userinfo
 /// (an RPC-style endpoint that requires POST instead of GET).
+#[cfg(not(target_arch = "wasm32"))]
 fn http_post_bearer(url: &str, token: &str) -> Result<String, String> {
     let agent = ureq_agent();
     match agent
@@ -1394,6 +1442,7 @@ fn http_post_bearer(url: &str, token: &str) -> Result<String, String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn http_get_bearer(url: &str, token: &str) -> Result<String, String> {
     let agent = ureq_agent();
     match agent
@@ -1411,6 +1460,7 @@ fn http_get_bearer(url: &str, token: &str) -> Result<String, String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_github_primary_email(token: &str) -> Result<String, String> {
     let out = http_get_bearer("https://api.github.com/user/emails", token)?;
     let emails: serde_json::Value =
@@ -1466,6 +1516,7 @@ impl OAuthRegistry {
     /// `PYLON_OAUTH_<NAME>_OIDC_ISSUER` registers a provider with id
     /// `<name>` (lowercased) using the discovered endpoints. Useful
     /// for Auth0, Okta, Keycloak, Cognito, Logto, Authentik, etc.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env() -> Self {
         let mut reg = Self::new();
 
@@ -1590,6 +1641,8 @@ impl OAuthRegistry {
     ///
     /// **Trade-off:** env changes after server start aren't picked up
     /// without a restart — same as every other Pylon env-var path.
+    /// Gated on wasm32 because `from_env` itself is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn shared() -> &'static OAuthRegistry {
         static CELL: std::sync::OnceLock<OAuthRegistry> = std::sync::OnceLock::new();
         CELL.get_or_init(Self::from_env)
@@ -2725,6 +2778,7 @@ impl AccountStore {
     /// succeeded) would clobber the first's persisted bundle. Net
     /// result: the user's account is permanently broken until a fresh
     /// OAuth round.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_fresh_access_token(
         &self,
         provider_id: &str,

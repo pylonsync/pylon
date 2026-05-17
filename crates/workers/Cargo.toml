@@ -30,7 +30,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Optional deps — only pulled in when `workers` feature is enabled.
-worker = { version = "0.5", optional = true }
+# worker 0.5 needs `d1` for D1Database, `queue` for Queue bindings,
+# and `http` for the macro story tasks #94+ use.
+worker = { version = "0.5", optional = true, features = ["d1", "queue", "http"] }
 wasm-bindgen = { version = "0.2", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 futures = { version = "0.3", optional = true }
+
+# getrandom needs `js` on wasm32 (browser/Workers crypto). Pulled
+# transitively via rand → rand_core. Without this, wasm32 builds
+# fail before reaching our own code.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

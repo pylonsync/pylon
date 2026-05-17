@@ -19,14 +19,10 @@ pylon-http = { path = "../http", version = "0.3.124" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
-ureq = { workspace = true }
 tracing = { workspace = true }
-argon2 = { workspace = true }
-# Apple "Sign in with Apple" client_secret JWT signing — ES256 over
-# the developer's downloadable .p8 PKCS8 key. ring is already in the
-# tree via rustls so this adds no new transitive deps.
+# Pure-Rust crypto + utilities that compile to wasm32. These are
+# OK on every target the crate ships to.
 base64 = { workspace = true }
-ring = { workspace = true }
 # SHA-256 used for PKCE code_challenge derivation (RFC 7636 §4.2).
 sha2 = { workspace = true }
 # SHA-1 for HIBP Pwned Passwords + TOTP (RFC 6238 default algorithm).
@@ -37,22 +33,34 @@ sha1 = { workspace = true }
 hmac = { workspace = true }
 # RFC 3339 timestamp parser for SIWE expiration_time / not_before fields.
 chrono = { workspace = true }
-# secp256k1 ECDSA recovery + keccak256 — SIWE signature verification.
-k256 = { workspace = true }
-sha3 = { workspace = true }
 # DEFLATE for SAML 2.0 HTTP-Redirect binding (Bindings §3.4.4).
 flate2 = { workspace = true }
-# SAML 2.0 + XMLDSig signature verification.
+
+# Native-only deps. Each one drags in C code that doesn't cross-
+# compile to wasm32-unknown-unknown:
+#   - ring → vendored curve25519.c that clang can't target wasm
+#   - samael → openssl-sys → C OpenSSL build
+#   - ureq → native sockets (replaced on wasm32 by worker::Fetch)
+#   - k256/argon2/rsa → pure-Rust but pull getrandom which needs
+#     the `js` feature on wasm32 (handled in pylon-workers Cargo.toml
+#     for the workers crate's own dep tree).
+#
+# The pylon-workers crate (Cloudflare Workers target) gates the
+# modules that USE these deps via #[cfg(not(target_arch = "wasm32"))]
+# in lib.rs. Without this split, pylon-router (and downstream
+# pylon-workers) refuses to compile to wasm at all.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { workspace = true }
 samael = { workspace = true }
-# OIDC provider RS256 signing key (RSA-2048 PKCS#8 PEM disk
-# persistence + RSA-PKCS1-v1_5/SHA-256 signing). ring doesn't ship
-# RSA generation, so this is the natural fit.
-rsa = { workspace = true }
-# Force vendored OpenSSL for samael's transitive openssl-sys dep.
-# Without this, cross-compiling the macOS x86_64 binary from arm64
-# CI runners fails because pkg-config can't find a cross OpenSSL,
-# which has been blocking @pylonsync/cli npm publishes since v0.3.24
-# (the dispatcher requires all 4 platform binaries). `vendored`
-# bundles OpenSSL source and builds it for the target — no system
-# OpenSSL needed on either side of the cross.
 openssl = { version = "0.10", features = ["vendored"] }
+ring = { workspace = true }
+k256 = { workspace = true }
+sha3 = { workspace = true }
+argon2 = { workspace = true }
+rsa = { workspace = true }
+
+# rand pulls getrandom transitively. On wasm32 getrandom defaults
+# to a target with no entropy source and refuses to compile —
+# add the `js` feature so it uses browser/Workers crypto.getRandomValues.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
