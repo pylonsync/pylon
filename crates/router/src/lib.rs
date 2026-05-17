@@ -1056,6 +1056,26 @@ fn route_inner(
     if let Some(r) = routes::auth::handle(ctx, method, url, body, auth_token) {
         return r;
     }
+    // On wasm32 the auth.rs module is excluded because it depends
+    // on native-only crypto (ring/k256/argon2/samael/ureq). The
+    // pure-data routes (/me, /session GET/DELETE, /sessions,
+    // /refresh) could be served from the wasm32 build but
+    // currently aren't — they share auth.rs with the network paths
+    // and carving them out cleanly is a separate refactor. Until
+    // then, return an explicit typed 501 so a Workers customer
+    // hitting /api/auth/* sees "feature unavailable on this
+    // target" instead of a silent NOT_FOUND fallthrough that
+    // looks like a routing bug.
+    #[cfg(target_arch = "wasm32")]
+    if url.starts_with("/api/auth/") {
+        return (
+            501,
+            json_error(
+                "AUTH_UNAVAILABLE_ON_WORKERS",
+                "Auth flows (OAuth/SAML/magic-link/email-verify/passkey/phone) require native crypto deps (ring/samael/argon2/etc.) that don't cross-compile to wasm32. Deploy on Fly for full auth surface, or use bearer-token auth on Workers via custom routes.",
+            ),
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Sync + GDPR — handled by crates/router/src/routes/sync.rs.

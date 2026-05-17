@@ -129,15 +129,15 @@ impl DurableObject for PylonRoom {
             worker::WebSocketIncomingMessage::String(s) => s,
             worker::WebSocketIncomingMessage::Binary(_) => return Ok(()),
         };
-        // Fan out to every connected WS except the sender. The DO
-        // tracks active sockets via `get_websockets()`.
+        // Fan out to every connected WS. Worker's WebSocket
+        // doesn't expose stable peer IDs, so we send to all
+        // including the sender — sender-dedup is the caller's
+        // responsibility (clients usually filter on their own
+        // message id). The `ws` parameter is unused intentionally
+        // (the sender's frame is included via get_websockets()).
+        let _ = &ws;
         for peer in self.state.get_websockets() {
-            // Best-effort comparison — Worker's WebSocket doesn't
-            // expose stable peer IDs, so we skip the exact-match
-            // check and just send to all. Sender-dedup is the
-            // caller's responsibility.
             let _ = peer.send_with_str(&text);
-            let _ = ws.send_with_str(""); // touch ws so the compiler doesn't drop it
         }
         Ok(())
     }
@@ -232,6 +232,15 @@ impl PylonRoom {
             data: serde_json::Value,
         }
         let body: Body = req.json().await?;
+        // Match the native RoomManager::set_presence contract:
+        // returns None when the user hasn't joined. Updating
+        // presence must NOT silently create membership — that
+        // would let `/api/rooms/presence` bypass the
+        // join-event/snapshot path and produce divergent
+        // semantics between native + Workers backends.
+        if !self.members.borrow().contains_key(&body.user_id) {
+            return Response::from_json(&serde_json::json!({ "presence": null }));
+        }
         self.members
             .borrow_mut()
             .insert(body.user_id.clone(), body.data.clone());

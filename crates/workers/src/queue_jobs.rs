@@ -54,12 +54,26 @@ impl WorkersJobs {
         Self { queue, registry }
     }
 
-    /// Try to construct from env bindings. Returns None if either
-    /// binding is missing — caller falls back to NoopAll's typed
-    /// QUEUES_BINDING_REQUIRED 503s.
+    /// Try to construct from env bindings. Returns None if
+    /// either binding is missing OR if the operator hasn't set
+    /// `PYLON_JOBS_CONSUMER_READY=1` — the second gate prevents
+    /// the worker from accepting jobs that nobody will run
+    /// (the `#[event(queue)]` consumer arm + drain handler must
+    /// be deployed on the same worker; until that's in place the
+    /// adapter falls back to NoopAll's QUEUES_BINDING_REQUIRED
+    /// 503 so enqueues fail loudly instead of silently piling up).
     pub fn from_env(env: &Env) -> Option<Self> {
         let queue = env.queue("PYLON_JOBS").ok()?;
         let registry = env.kv("PYLON_JOBS_REGISTRY").ok()?;
+        let consumer_ready = env
+            .var("PYLON_JOBS_CONSUMER_READY")
+            .ok()
+            .map(|v| v.to_string())
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !consumer_ready {
+            return None;
+        }
         Some(Self::new(queue, registry))
     }
 }

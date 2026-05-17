@@ -33,6 +33,11 @@ pub struct PylonPubSub {
     /// reconnect. Hydrated from storage on first request after
     /// hibernation wake.
     history: RefCell<VecDeque<serde_json::Value>>,
+    /// Monotonic publish sequence — used as the storage key
+    /// suffix so older entries don't get overwritten when the
+    /// in-memory ring wraps. Persisted to `seq` so it survives
+    /// DO hibernation; rebuilt from storage on first request.
+    next_seq: RefCell<usize>,
 }
 
 #[durable_object]
@@ -42,6 +47,7 @@ impl DurableObject for PylonPubSub {
             state,
             env,
             history: RefCell::new(VecDeque::with_capacity(HISTORY_CAP)),
+            next_seq: RefCell::new(0),
         }
     }
 
@@ -69,6 +75,7 @@ impl PylonPubSub {
         };
         let collected: std::cell::RefCell<Vec<(usize, serde_json::Value)>> =
             std::cell::RefCell::new(Vec::new());
+        let mut max_seq = 0usize;
         map.for_each(&mut |value, key| {
             let Some(key_str) = key.as_string() else {
                 return;
@@ -80,6 +87,9 @@ impl PylonPubSub {
             let Ok(seq) = seq_str.parse::<usize>() else {
                 return;
             };
+            if seq + 1 > max_seq {
+                max_seq = seq + 1;
+            }
             if let Ok(msg) = serde_wasm_bindgen::from_value::<serde_json::Value>(value) {
                 collected.borrow_mut().push((seq, msg));
             }
@@ -90,13 +100,25 @@ impl PylonPubSub {
         for (_, msg) in entries.into_iter().rev().take(HISTORY_CAP).rev() {
             hist.push_back(msg);
         }
+        // Resume the seq counter so subsequent publishes don't
+        // overwrite stored entries.
+        *self.next_seq.borrow_mut() = max_seq;
     }
 
     async fn handle_publish(&self, req: &mut Request) -> Result<Response> {
         let payload: serde_json::Value = req.json().await?;
-        // Append to in-memory ring + persist with a sequence key.
+        // Monotonic seq for the storage key so we don't overwrite
+        // stored entries when the in-memory ring wraps. Earlier
+        // version used hist.len() which caps at HISTORY_CAP after
+        // pop_front — every later publish would clobber the last
+        // slot (P2 finding from codex).
+        let seq = {
+            let mut n = self.next_seq.borrow_mut();
+            let v = *n;
+            *n = n.saturating_add(1);
+            v
+        };
         let mut hist = self.history.borrow_mut();
-        let seq = hist.len();
         if hist.len() >= HISTORY_CAP {
             hist.pop_front();
         }
@@ -107,6 +129,16 @@ impl PylonPubSub {
             .storage()
             .put(&format!("h:{seq}"), payload.clone())
             .await;
+        // Evict the oldest persisted entry too so storage stays
+        // bounded — without this, the KV under the DO grows
+        // unbounded over the channel's lifetime.
+        if seq >= HISTORY_CAP {
+            let _ = self
+                .state
+                .storage()
+                .delete(&format!("h:{}", seq - HISTORY_CAP))
+                .await;
+        }
         // Fan out to subscribers. Workers WebSocket doesn't give
         // us a stable subscriber id — we send to everyone, the
         // client filters by their own subscription state.
@@ -203,7 +235,22 @@ impl PubSubOps for WorkersPubSub {
                 pylon_router::json_error("MISSING_CHANNEL", "body needs `channel`"),
             );
         }
-        let data = parsed.get("data").cloned().unwrap_or(serde_json::json!({}));
+        // Accept either `message` (the existing /api/pubsub/publish
+        // contract — what every framework client sends) or `data`
+        // (a Workers-only shorthand). Default to the parsed body
+        // minus `channel` if neither key is present, so structured
+        // payloads still work.
+        let data = parsed
+            .get("message")
+            .cloned()
+            .or_else(|| parsed.get("data").cloned())
+            .unwrap_or_else(|| {
+                let mut copy = parsed.clone();
+                if let Some(obj) = copy.as_object_mut() {
+                    obj.remove("channel");
+                }
+                copy
+            });
         match self.do_request(channel, Method::Post, "/publish", Some(data)) {
             Ok((status, body)) => (status, body),
             Err(e) => (502, pylon_router::json_error("PUBSUB_DO_FAILED", &e)),
