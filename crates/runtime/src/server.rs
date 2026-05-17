@@ -2936,6 +2936,7 @@ fn start_server(
                     user_id: auth_ctx.user_id.clone(),
                     is_admin: auth_ctx.is_admin,
                     tenant_id: auth_ctx.tenant_id.clone(),
+                    roles: auth_ctx.roles.clone(),
                 };
 
                 let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();

@@ -26,14 +26,25 @@
 //! must NOT cause re-evaluation under the webhook's elevated admin
 //! auth — the subscriber's view is the subscriber's auth.
 //!
-//! ## Coalescing
+//! ## Client-scoped subscription keys
 //!
-//! Multiple change events touching the same subscription within one
-//! tick coalesce into a single re-run. The dirty set buffers
-//! sub_ids; a dedicated re-runner thread drains it on a short
-//! cadence (16ms default — matches a 60Hz UI frame). Without
-//! coalescing, a batch insert of 100 rows would trigger 100 re-runs
-//! per subscriber.
+//! `sub_id` is client-minted. Two clients picking the same id
+//! (browser back-button, two tabs, app bugs) would collide if we
+//! keyed `subs` by sub_id alone — the second register overwrites
+//! the first; the first client's re-runs push to the second client's
+//! socket; data leaks across sessions. Internal keys are
+//! `(client_id, sub_id)` tuples; the protocol still exposes sub_id
+//! to the client.
+//!
+//! ## Off-WS-thread handler execution
+//!
+//! Both the initial subscribe run AND every re-run go through the
+//! single re-runner thread. The WS reader thread NEVER blocks on
+//! `fn_ops.call`. Without that discipline, a slow handler (a query
+//! touching 10k rows, a TS handler doing `await` against an external
+//! API) would hold the per-client socket mutex for the duration of
+//! the call — ping/pong stalls, broadcast back-pressure breaks,
+//! and the client looks frozen.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +58,25 @@ use pylon_sync::{ChangeEvent, ChangeKind};
 
 use crate::ws::WsHub;
 
+/// Internal key. Client-scoped so two clients picking the same
+/// `sub_id` don't collide. The protocol still exposes just `sub_id`
+/// to the client; we tuple it with `client_id` here.
+pub type SubKey = (u64, String);
+
+/// Cap on outstanding subscriptions per client. A buggy client that
+/// loops `subscribeReactive` with new sub_ids could otherwise leak
+/// registry slots until disconnect. Beyond this cap, new subscribes
+/// are refused with a REACTIVE_LIMIT error.
+const PER_CLIENT_SUB_CAP: usize = 256;
+
+/// Cap on the dirty queue length. Prevents an explosive
+/// change-event burst (1k mutations in a tick) from holding
+/// megabytes of pending work indefinitely. Once exceeded we drop
+/// the OLDEST entries — they'll get rescheduled on the next event
+/// touching the sub anyway. Bounded staleness rather than
+/// unbounded memory.
+const DIRTY_QUEUE_CAP: usize = 10_000;
+
 /// One reactive subscription. Cheap to clone (Arc'd at the registry
 /// layer, not here) but we keep ownership simple by storing by value.
 #[derive(Clone)]
@@ -59,22 +89,21 @@ struct Subscription {
     /// push the new result back to the right socket.
     client_id: u64,
     deps: DepSet,
-    /// Hash of the last result we sent. Skip the push if the new
-    /// result hashes the same — saves a frame on every change that
-    /// doesn't actually move the handler's output.
-    last_hash: u64,
+    /// Hash of the last result we sent. `None` means "never sent" —
+    /// the next run pushes regardless of hash. Distinguishes "first
+    /// push pending" from "value happens to hash to 0".
+    last_hash: Option<u64>,
+}
+
+impl Subscription {
+    fn key(&self) -> SubKey {
+        (self.client_id, self.sub_id.clone())
+    }
 }
 
 /// Per-subscription state + indexes for fast change-event matching.
-///
-/// Three locks (we never hold more than one at a time to dodge
-/// deadlocks):
-///  - `subs` — sub_id → Subscription
-///  - `by_entity` — entity → Set<sub_id>
-///  - `by_row` — (entity, row_id) → Set<sub_id>
-///  - `by_client` — client_id → Set<sub_id> (so disconnect can clean
-///    up every sub for a client in one pass)
-///  - `dirty` — pending re-runs, drained by the re-runner thread
+/// All mutations go through the single `inner` mutex — never held
+/// across `fn_ops.call` or socket I/O.
 pub struct ReactiveRegistry {
     inner: Mutex<RegistryInner>,
     /// Wake the re-runner thread when the dirty set transitions
@@ -87,26 +116,37 @@ pub struct ReactiveRegistry {
 }
 
 struct RegistryInner {
-    subs: HashMap<String, Subscription>,
-    by_entity: HashMap<String, HashSet<String>>,
-    by_row: HashMap<(String, String), HashSet<String>>,
-    by_client: HashMap<u64, HashSet<String>>,
-    /// Sub_ids waiting to be re-run. VecDeque so we drain in
-    /// insertion order — slightly fairer when one chatty entity
-    /// dominates the bus.
-    dirty: VecDeque<String>,
+    subs: HashMap<SubKey, Subscription>,
+    by_entity: HashMap<String, HashSet<SubKey>>,
+    by_row: HashMap<(String, String), HashSet<SubKey>>,
+    by_client: HashMap<u64, HashSet<SubKey>>,
+    /// Sub keys waiting to be run (initial or re-run). VecDeque so
+    /// we drain in insertion order — slightly fairer when one chatty
+    /// entity dominates the bus.
+    dirty: VecDeque<SubKey>,
     /// Dedup the dirty queue: a sub that's already pending doesn't
     /// get enqueued twice in the same tick.
-    pending: HashSet<String>,
+    pending: HashSet<SubKey>,
 }
 
-/// Result of running a reactive handler for a fresh subscription or
-/// a re-run. Encapsulates the value the runtime needs to push and
-/// the dep set the registry needs to store.
+/// Result of running a reactive handler. Captured by the re-runner;
+/// the registry consumes deps + hash for state updates and pushes
+/// `value` to the client.
 pub struct ReactiveOutcome {
     pub value: serde_json::Value,
     pub deps: DepSet,
     pub hash: u64,
+}
+
+/// Outcome of `register_pending` — exposed so the WS handler can
+/// surface back-pressure to the client.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegisterOutcome {
+    /// Sub registered; initial run is queued on the re-runner.
+    Queued,
+    /// Per-client cap exceeded. Client should drop the call /
+    /// surface an error in the UI.
+    OverLimit,
 }
 
 impl ReactiveRegistry {
@@ -148,76 +188,73 @@ impl ReactiveRegistry {
             .expect("spawn reactive re-runner");
     }
 
-    /// Run a query handler with dep tracking active. Used by the
-    /// initial subscribe path AND the re-runner.
+    /// Register a subscription with empty deps + queue its initial
+    /// run on the re-runner thread. Returns [`RegisterOutcome`] so
+    /// the WS handler knows whether to surface a back-pressure
+    /// error to the client.
     ///
-    /// Returns None if the runner reports an error — caller decides
-    /// whether to surface that to the client or just skip the push
-    /// (re-runs swallow errors so a temporarily-failing handler
-    /// doesn't keep firing error messages at the UI).
-    pub fn run_handler(
-        &self,
-        fn_name: &str,
-        args: serde_json::Value,
-        auth: AuthInfo,
-    ) -> Option<ReactiveOutcome> {
-        let fn_ops = {
-            let guard = self.fn_ops.lock().unwrap();
-            guard.as_ref().map(Arc::clone)
-        };
-        let fn_ops = fn_ops?;
-        let guard = pylon_functions::deps::enter();
-        let result = fn_ops.call(fn_name, args, auth, None, None);
-        let deps = guard.take();
-        match result {
-            Ok((value, _trace)) => {
-                let hash = hash_value(&value);
-                Some(ReactiveOutcome { value, deps, hash })
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[reactive] handler {fn_name} failed: {} {}",
-                    e.code,
-                    e.message
-                );
-                None
-            }
-        }
-    }
-
-    /// Register a new subscription and index its deps. Caller must
-    /// have just produced `outcome` from [`run_handler`].
-    pub fn register(
+    /// Off-thread by design: the WS reader thread MUST return to
+    /// reading immediately so socket I/O (ping/pong, broadcast
+    /// back-pressure) keeps flowing. Without this discipline a slow
+    /// handler would hold the per-client socket mutex for the
+    /// duration of the call.
+    pub fn register_pending(
         &self,
         sub_id: String,
         fn_name: String,
         args: serde_json::Value,
         auth: AuthInfo,
         client_id: u64,
-        outcome: &ReactiveOutcome,
-    ) {
+    ) -> RegisterOutcome {
+        let key: SubKey = (client_id, sub_id.clone());
         let mut inner = self.inner.lock().unwrap();
-        // If a sub with this id already exists (client retry), drop
-        // the old indexes before overwriting.
-        if inner.subs.contains_key(&sub_id) {
-            remove_locked(&mut inner, &sub_id);
+        // Per-client cap: bounded by PER_CLIENT_SUB_CAP. Replacing an
+        // existing sub doesn't count toward the cap (idempotent
+        // re-register). Genuine new subs above the cap get refused.
+        if !inner.subs.contains_key(&key) {
+            let existing = inner
+                .by_client
+                .get(&client_id)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            if existing >= PER_CLIENT_SUB_CAP {
+                return RegisterOutcome::OverLimit;
+            }
+        }
+        // Drop any prior version of this sub before installing the
+        // new one — handles `argsKey` change in the React hook,
+        // which calls subscribeReactive with the same sub_id (no,
+        // wait — the hook mints a fresh id per dep change. But a
+        // misbehaving client might re-use ids; tolerate.)
+        if inner.subs.contains_key(&key) {
+            remove_locked(&mut inner, &key);
         }
         let sub = Subscription {
-            sub_id: sub_id.clone(),
+            sub_id,
             fn_name,
             args,
             auth,
             client_id,
-            deps: outcome.deps.clone(),
-            last_hash: outcome.hash,
+            deps: DepSet::new(),
+            last_hash: None,
         };
-        index_locked(&mut inner, &sub);
-        inner.subs.insert(sub_id, sub);
+        // Index by_client immediately so disconnect cleanup works
+        // before the first run lands. by_entity / by_row stay empty
+        // until the first run captures deps.
+        inner
+            .by_client
+            .entry(client_id)
+            .or_default()
+            .insert(key.clone());
+        inner.subs.insert(key.clone(), sub);
+        enqueue_dirty_locked(&mut inner, key);
+        self.dirty_notify.notify_one();
+        RegisterOutcome::Queued
     }
 
-    pub fn unsubscribe(&self, sub_id: &str) {
+    pub fn unsubscribe(&self, client_id: u64, sub_id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        remove_locked(&mut inner, sub_id);
+        remove_locked(&mut inner, &(client_id, sub_id.to_string()));
     }
 
     /// Tear down every subscription owned by `client_id`. Called from
@@ -225,13 +262,13 @@ impl ReactiveRegistry {
     /// re-runs would keep firing for a socket nobody reads.
     pub fn disconnect_client(&self, client_id: u64) {
         let mut inner = self.inner.lock().unwrap();
-        let sub_ids: Vec<String> = inner
+        let keys: Vec<SubKey> = inner
             .by_client
             .get(&client_id)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
-        for sub_id in sub_ids {
-            remove_locked(&mut inner, &sub_id);
+        for k in keys {
+            remove_locked(&mut inner, &k);
         }
     }
 
@@ -239,47 +276,31 @@ impl ReactiveRegistry {
     /// subs whose deps overlap and marks them dirty for re-run.
     pub fn on_change(&self, event: &ChangeEvent) {
         let mut inner = self.inner.lock().unwrap();
-        let mut to_mark: Vec<String> = Vec::new();
+        let mut to_mark: Vec<SubKey> = Vec::new();
 
         // Row-level matches: exact (entity, row_id) intersection.
-        // Subscriptions with empty `rows` (entity-only, or row cap
-        // blown) fall through to the entity index below — we don't
-        // suppress entity matches when row matches are empty.
         if let Some(row_subs) = inner
             .by_row
             .get(&(event.entity.clone(), event.row_id.clone()))
         {
-            for sid in row_subs {
-                to_mark.push(sid.clone());
+            for k in row_subs {
+                to_mark.push(k.clone());
             }
         }
 
-        // Entity-level matches: only subs that opted into
-        // entity-only mode (no precise row deps) get matched here.
-        // Subs with precise row deps that DIDN'T cover this row
-        // shouldn't re-run on changes to other rows.
+        // Entity-level matches: subs that opted into entity-only
+        // mode (no precise row deps) get matched here. Subs with
+        // precise row deps that didn't cover this row are skipped
+        // EXCEPT on Delete (the deleted row may not have been read
+        // individually but the handler still listed the entity).
         if let Some(entity_subs) = inner.by_entity.get(&event.entity) {
-            // Snapshot to drop the borrow before mutating dirty set.
-            let candidates: Vec<String> = entity_subs.iter().cloned().collect();
-            for sid in candidates {
-                if let Some(sub) = inner.subs.get(&sid) {
+            let candidates: Vec<SubKey> = entity_subs.iter().cloned().collect();
+            for k in candidates {
+                if let Some(sub) = inner.subs.get(&k) {
                     if sub.deps.entity_only() {
-                        to_mark.push(sid);
-                    } else {
-                        // Sub has precise row deps; skip unless the
-                        // change touches a row in its read set, which
-                        // the by_row branch above already handled.
-                        // Special-case: delete events for entities
-                        // the sub LISTED via `ctx.db.list/query` (no
-                        // row id read) need to dirty too — the sub's
-                        // row set wouldn't include the deleted row,
-                        // and `entity_only` is false because some
-                        // other path read individual rows. Treat any
-                        // entity in the dep set as a match for
-                        // delete events to stay safe.
-                        if matches!(event.kind, ChangeKind::Delete) {
-                            to_mark.push(sid);
-                        }
+                        to_mark.push(k);
+                    } else if matches!(event.kind, ChangeKind::Delete) {
+                        to_mark.push(k);
                     }
                 }
             }
@@ -289,9 +310,8 @@ impl ReactiveRegistry {
             return;
         }
         let mut newly_dirty = false;
-        for sid in to_mark {
-            if inner.pending.insert(sid.clone()) {
-                inner.dirty.push_back(sid);
+        for k in to_mark {
+            if enqueue_dirty_locked(&mut inner, k) {
                 newly_dirty = true;
             }
         }
@@ -301,8 +321,8 @@ impl ReactiveRegistry {
     }
 
     /// Re-runner thread body. Sleeps on the condvar until something
-    /// goes dirty, then drains the dirty queue, re-running each sub
-    /// and pushing changed results.
+    /// goes dirty, then drains the dirty queue, running each sub
+    /// (initial or re-run) and pushing changed results.
     fn runner_loop(self: Arc<Self>) {
         loop {
             // Take a snapshot of dirty work + their sub specs. Run
@@ -323,9 +343,9 @@ impl ReactiveRegistry {
                 let mut take = Vec::new();
                 for _ in 0..64 {
                     match inner.dirty.pop_front() {
-                        Some(sid) => {
-                            inner.pending.remove(&sid);
-                            if let Some(sub) = inner.subs.get(&sid).cloned() {
+                        Some(k) => {
+                            inner.pending.remove(&k);
+                            if let Some(sub) = inner.subs.get(&k).cloned() {
                                 take.push(sub);
                             }
                         }
@@ -337,51 +357,86 @@ impl ReactiveRegistry {
 
             for sub in batch {
                 let outcome = self.run_handler(&sub.fn_name, sub.args.clone(), sub.auth.clone());
-                let Some(outcome) = outcome else {
-                    continue;
-                };
-                if outcome.hash == sub.last_hash {
-                    // No-op for the client. Update deps in case the
-                    // handler's reads shifted (rare; happens when the
-                    // result is value-equal but the handler took a
-                    // different code path).
-                    self.update_deps(&sub.sub_id, &outcome);
-                    continue;
+                let key = sub.key();
+                match outcome {
+                    HandlerResult::Ok(outcome) => {
+                        let prev_hash = sub.last_hash;
+                        let should_push = prev_hash.map(|h| h != outcome.hash).unwrap_or(true);
+                        if should_push {
+                            self.push_result(&sub.sub_id, &outcome.value, sub.client_id);
+                        }
+                        self.update_deps_and_hash(&key, &outcome);
+                    }
+                    HandlerResult::Err { code, message } => {
+                        // Initial-run errors get surfaced as a
+                        // reactive-error frame so the React hook can
+                        // stop spinning. Re-run errors (where we'd
+                        // already pushed a successful result) get
+                        // logged + dropped — the client keeps showing
+                        // the last good value rather than flipping to
+                        // an error state on a transient handler glitch.
+                        if sub.last_hash.is_none() {
+                            self.push_error(&sub.sub_id, sub.client_id, &code, &message);
+                        }
+                    }
+                    HandlerResult::RuntimeUnavailable => {
+                        if sub.last_hash.is_none() {
+                            self.push_error(
+                                &sub.sub_id,
+                                sub.client_id,
+                                "REACTIVE_UNAVAILABLE",
+                                "function runtime not configured",
+                            );
+                        }
+                    }
                 }
-                self.push_result(&sub.sub_id, &outcome.value, sub.client_id);
-                self.update_deps_and_hash(&sub.sub_id, &outcome);
             }
         }
     }
 
-    fn update_deps(&self, sub_id: &str, outcome: &ReactiveOutcome) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(sub_cloned) = inner.subs.get(sub_id).cloned() else {
-            return;
+    fn run_handler(&self, fn_name: &str, args: serde_json::Value, auth: AuthInfo) -> HandlerResult {
+        let fn_ops = {
+            let guard = self.fn_ops.lock().unwrap();
+            guard.as_ref().map(Arc::clone)
         };
-        // Remove old indexes, then re-index with new deps.
-        remove_locked(&mut inner, sub_id);
-        let new_sub = Subscription {
-            deps: outcome.deps.clone(),
-            ..sub_cloned
+        let Some(fn_ops) = fn_ops else {
+            return HandlerResult::RuntimeUnavailable;
         };
-        index_locked(&mut inner, &new_sub);
-        inner.subs.insert(sub_id.to_string(), new_sub);
+        let guard = pylon_functions::deps::enter();
+        let result = fn_ops.call(fn_name, args, auth, None, None);
+        let deps = guard.take();
+        match result {
+            Ok((value, _trace)) => {
+                let hash = hash_value(&value);
+                HandlerResult::Ok(ReactiveOutcome { value, deps, hash })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[reactive] handler {fn_name} failed: {} {}",
+                    e.code,
+                    e.message
+                );
+                HandlerResult::Err {
+                    code: e.code,
+                    message: e.message,
+                }
+            }
+        }
     }
 
-    fn update_deps_and_hash(&self, sub_id: &str, outcome: &ReactiveOutcome) {
+    fn update_deps_and_hash(&self, key: &SubKey, outcome: &ReactiveOutcome) {
         let mut inner = self.inner.lock().unwrap();
-        let Some(sub_cloned) = inner.subs.get(sub_id).cloned() else {
+        let Some(sub_cloned) = inner.subs.get(key).cloned() else {
             return;
         };
-        remove_locked(&mut inner, sub_id);
+        remove_locked(&mut inner, key);
         let new_sub = Subscription {
             deps: outcome.deps.clone(),
-            last_hash: outcome.hash,
+            last_hash: Some(outcome.hash),
             ..sub_cloned
         };
         index_locked(&mut inner, &new_sub);
-        inner.subs.insert(sub_id.to_string(), new_sub);
+        inner.subs.insert(key.clone(), new_sub);
     }
 
     fn push_result(&self, sub_id: &str, value: &serde_json::Value, client_id: u64) {
@@ -389,6 +444,17 @@ impl ReactiveRegistry {
             "type": "reactive-result",
             "sub_id": sub_id,
             "result": value,
+        })
+        .to_string();
+        self.ws_hub.send_text_to(client_id, &frame);
+    }
+
+    fn push_error(&self, sub_id: &str, client_id: u64, code: &str, message: &str) {
+        let frame = serde_json::json!({
+            "type": "reactive-error",
+            "sub_id": sub_id,
+            "code": code,
+            "message": message,
         })
         .to_string();
         self.ws_hub.send_text_to(client_id, &frame);
@@ -405,35 +471,61 @@ impl ReactiveRegistry {
     }
 }
 
+enum HandlerResult {
+    Ok(ReactiveOutcome),
+    Err { code: String, message: String },
+    RuntimeUnavailable,
+}
+
+fn enqueue_dirty_locked(inner: &mut RegistryInner, key: SubKey) -> bool {
+    if !inner.pending.insert(key.clone()) {
+        return false;
+    }
+    // Drop the OLDEST entry when we'd otherwise exceed the cap. The
+    // dropped sub is still in `subs`; the next change event touching
+    // it re-enqueues. Bounded staleness, no memory blow-up.
+    if inner.dirty.len() >= DIRTY_QUEUE_CAP {
+        if let Some(stale) = inner.dirty.pop_front() {
+            inner.pending.remove(&stale);
+            tracing::warn!(
+                "[reactive] dirty queue full ({DIRTY_QUEUE_CAP}); dropping oldest sub from queue (will re-enqueue on next matching event)"
+            );
+        }
+    }
+    inner.dirty.push_back(key);
+    true
+}
+
 fn index_locked(inner: &mut RegistryInner, sub: &Subscription) {
+    let key = sub.key();
     for entity in &sub.deps.entities {
         inner
             .by_entity
             .entry(entity.clone())
             .or_default()
-            .insert(sub.sub_id.clone());
+            .insert(key.clone());
     }
     for row in &sub.deps.rows {
         inner
             .by_row
             .entry(row.clone())
             .or_default()
-            .insert(sub.sub_id.clone());
+            .insert(key.clone());
     }
     inner
         .by_client
         .entry(sub.client_id)
         .or_default()
-        .insert(sub.sub_id.clone());
+        .insert(key);
 }
 
-fn remove_locked(inner: &mut RegistryInner, sub_id: &str) {
-    let Some(sub) = inner.subs.remove(sub_id) else {
+fn remove_locked(inner: &mut RegistryInner, key: &SubKey) {
+    let Some(sub) = inner.subs.remove(key) else {
         return;
     };
     for entity in &sub.deps.entities {
         if let Some(s) = inner.by_entity.get_mut(entity) {
-            s.remove(sub_id);
+            s.remove(key);
             if s.is_empty() {
                 inner.by_entity.remove(entity);
             }
@@ -441,32 +533,26 @@ fn remove_locked(inner: &mut RegistryInner, sub_id: &str) {
     }
     for row in &sub.deps.rows {
         if let Some(s) = inner.by_row.get_mut(row) {
-            s.remove(sub_id);
+            s.remove(key);
             if s.is_empty() {
                 inner.by_row.remove(row);
             }
         }
     }
     if let Some(s) = inner.by_client.get_mut(&sub.client_id) {
-        s.remove(sub_id);
+        s.remove(key);
         if s.is_empty() {
             inner.by_client.remove(&sub.client_id);
         }
     }
-    inner.pending.remove(sub_id);
-    // dirty VecDeque is allowed to retain a stale entry — when the
-    // runner pops it the subs lookup returns None and we skip. Cheaper
-    // than O(n) scanning the deque on every unsubscribe.
+    inner.pending.remove(key);
+    // dirty VecDeque keeps the stale entry; the runner skips it
+    // when subs.get returns None.
 }
 
 fn hash_value(value: &serde_json::Value) -> u64 {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    // Serialize via the standard `to_string` — produces deterministic
-    // output for the same value (object key order is preserved by
-    // serde_json's Map). Slightly more expensive than walking the
-    // tree, but correct under all the corner cases a hand-rolled
-    // hash would have to enumerate.
     let s = value.to_string();
     h.write(s.as_bytes());
     h.finish()
@@ -507,6 +593,7 @@ mod tests {
             user_id: Some("u1".into()),
             is_admin: false,
             tenant_id: Some("t1".into()),
+            roles: Vec::new(),
         }
     }
 
@@ -521,113 +608,90 @@ mod tests {
         }
     }
 
+    /// Directly install a sub at "ready" state for change-matching tests
+    /// (bypasses the runner since there's no fn_ops in unit tests).
+    fn install_sub_with_deps(
+        reg: &Arc<ReactiveRegistry>,
+        client_id: u64,
+        sub_id: &str,
+        deps: DepSet,
+    ) {
+        let mut inner = reg.inner.lock().unwrap();
+        let sub = Subscription {
+            sub_id: sub_id.to_string(),
+            fn_name: "f".into(),
+            args: serde_json::json!({}),
+            auth: make_auth(),
+            client_id,
+            deps,
+            last_hash: Some(0),
+        };
+        index_locked(&mut inner, &sub);
+        inner.subs.insert(sub.key(), sub);
+    }
+
     #[test]
     fn entity_only_sub_matches_any_row_change() {
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(
-            dep_set(&["Recording"], &[]),
-            serde_json::json!({"count": 0}),
-        );
-        reg.register(
-            "s1".into(),
-            "getCount".into(),
-            serde_json::json!({}),
-            make_auth(),
-            42,
-            &outcome,
-        );
+        install_sub_with_deps(&reg, 42, "s1", dep_set(&["Recording"], &[]));
         reg.on_change(&dummy_change("Recording", "r_99", ChangeKind::Insert));
         let inner = reg.inner.lock().unwrap();
-        assert!(inner.pending.contains("s1"));
+        assert!(inner.pending.contains(&(42, "s1".to_string())));
     }
 
     #[test]
     fn precise_row_sub_skips_unrelated_row_change() {
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(
-            dep_set(&["Recording"], &[("Recording", "r_1")]),
-            serde_json::json!({}),
-        );
-        reg.register(
-            "s1".into(),
-            "getOne".into(),
-            serde_json::json!({"id": "r_1"}),
-            make_auth(),
+        install_sub_with_deps(
+            &reg,
             42,
-            &outcome,
+            "s1",
+            dep_set(&["Recording"], &[("Recording", "r_1")]),
         );
         reg.on_change(&dummy_change("Recording", "r_2", ChangeKind::Update));
         let inner = reg.inner.lock().unwrap();
-        assert!(
-            !inner.pending.contains("s1"),
-            "row-precise sub should not fire on unrelated row update"
-        );
+        assert!(!inner.pending.contains(&(42, "s1".to_string())));
     }
 
     #[test]
     fn precise_row_sub_fires_for_matching_row() {
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(
-            dep_set(&["Recording"], &[("Recording", "r_1")]),
-            serde_json::json!({}),
-        );
-        reg.register(
-            "s1".into(),
-            "getOne".into(),
-            serde_json::json!({"id": "r_1"}),
-            make_auth(),
+        install_sub_with_deps(
+            &reg,
             42,
-            &outcome,
+            "s1",
+            dep_set(&["Recording"], &[("Recording", "r_1")]),
         );
         reg.on_change(&dummy_change("Recording", "r_1", ChangeKind::Update));
         let inner = reg.inner.lock().unwrap();
-        assert!(inner.pending.contains("s1"));
+        assert!(inner.pending.contains(&(42, "s1".to_string())));
     }
 
     #[test]
     fn delete_fires_precise_sub_even_for_unread_row() {
-        // A handler that listed Org rows (no row ids read) needs to
-        // re-run when an Org is deleted, even though its dep set has
-        // no precise row entries. Verified via the
-        // ChangeKind::Delete special case in on_change.
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(
-            dep_set(&["Recording"], &[("Recording", "r_a")]),
-            serde_json::json!({}),
-        );
-        reg.register(
-            "s1".into(),
-            "getAll".into(),
-            serde_json::json!({}),
-            make_auth(),
+        install_sub_with_deps(
+            &reg,
             42,
-            &outcome,
+            "s1",
+            dep_set(&["Recording"], &[("Recording", "r_a")]),
         );
         reg.on_change(&dummy_change("Recording", "r_b", ChangeKind::Delete));
         let inner = reg.inner.lock().unwrap();
-        assert!(
-            inner.pending.contains("s1"),
-            "delete should dirty precise subs that didn't read the deleted row"
-        );
+        assert!(inner.pending.contains(&(42, "s1".to_string())));
     }
 
     #[test]
     fn unsubscribe_removes_indexes() {
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(
-            dep_set(&["Recording", "Org"], &[("Recording", "r_1")]),
-            serde_json::json!({}),
-        );
-        reg.register(
-            "s1".into(),
-            "getOne".into(),
-            serde_json::json!({}),
-            make_auth(),
+        install_sub_with_deps(
+            &reg,
             42,
-            &outcome,
+            "s1",
+            dep_set(&["Recording", "Org"], &[("Recording", "r_1")]),
         );
         assert_eq!(reg.len(), 1);
-        reg.unsubscribe("s1");
+        reg.unsubscribe(42, "s1");
         let inner = reg.inner.lock().unwrap();
         assert_eq!(inner.subs.len(), 0);
         assert!(inner.by_entity.is_empty());
@@ -639,55 +703,89 @@ mod tests {
     fn disconnect_client_tears_down_all_their_subs() {
         let reg = ReactiveRegistry::new(make_hub());
         for i in 0..5 {
-            let outcome = make_outcome(dep_set(&["Recording"], &[]), serde_json::json!({"i": i}));
-            reg.register(
-                format!("s{i}"),
-                "f".into(),
-                serde_json::json!({"i": i}),
-                make_auth(),
-                42,
-                &outcome,
-            );
+            install_sub_with_deps(&reg, 42, &format!("s{i}"), dep_set(&["R"], &[]));
         }
-        // Also register one sub for a different client — it should
-        // survive the disconnect.
-        let outcome = make_outcome(
-            dep_set(&["Recording"], &[]),
-            serde_json::json!({"other": true}),
-        );
-        reg.register(
-            "other".into(),
-            "f".into(),
-            serde_json::json!({}),
-            make_auth(),
-            99,
-            &outcome,
-        );
+        install_sub_with_deps(&reg, 99, "other", dep_set(&["R"], &[]));
         assert_eq!(reg.len(), 6);
         reg.disconnect_client(42);
         assert_eq!(reg.len(), 1);
-        assert!(reg.inner.lock().unwrap().subs.contains_key("other"));
+        assert!(reg
+            .inner
+            .lock()
+            .unwrap()
+            .subs
+            .contains_key(&(99, "other".to_string())));
     }
 
     #[test]
     fn dedupe_pending_dirties_only_enqueue_once() {
         let reg = ReactiveRegistry::new(make_hub());
-        let outcome = make_outcome(dep_set(&["Recording"], &[]), serde_json::json!({}));
-        reg.register(
-            "s1".into(),
-            "f".into(),
-            serde_json::json!({}),
-            make_auth(),
-            42,
-            &outcome,
-        );
-        // Trigger three changes back-to-back; pending set should
-        // dedupe so the dirty deque only holds one entry.
+        install_sub_with_deps(&reg, 42, "s1", dep_set(&["Recording"], &[]));
         reg.on_change(&dummy_change("Recording", "r_1", ChangeKind::Insert));
         reg.on_change(&dummy_change("Recording", "r_2", ChangeKind::Update));
         reg.on_change(&dummy_change("Recording", "r_3", ChangeKind::Insert));
         let inner = reg.inner.lock().unwrap();
         assert_eq!(inner.dirty.len(), 1);
         assert_eq!(inner.pending.len(), 1);
+    }
+
+    /// Two clients pick the same sub_id. Without client-scoped keys
+    /// they'd collide in `subs` and the second register would
+    /// overwrite the first, sending re-runs for the first client's
+    /// state to the second client's socket — cross-client data leak.
+    #[test]
+    fn same_sub_id_on_two_clients_does_not_collide() {
+        let reg = ReactiveRegistry::new(make_hub());
+        install_sub_with_deps(&reg, 1, "shared_id", dep_set(&["A"], &[]));
+        install_sub_with_deps(&reg, 2, "shared_id", dep_set(&["B"], &[]));
+        assert_eq!(reg.len(), 2);
+        // Unsubscribing client 1's "shared_id" must not remove
+        // client 2's "shared_id" — keys are tuples now.
+        reg.unsubscribe(1, "shared_id");
+        assert_eq!(reg.len(), 1);
+        let inner = reg.inner.lock().unwrap();
+        assert!(inner.subs.contains_key(&(2, "shared_id".to_string())));
+        assert!(!inner.subs.contains_key(&(1, "shared_id".to_string())));
+    }
+
+    #[test]
+    fn per_client_sub_cap_refuses_overflow() {
+        let reg = ReactiveRegistry::new(make_hub());
+        // Stuff a client up to the cap with installs (which bypass
+        // the cap since they're test helpers). Now try a real
+        // register_pending and confirm it OverLimits.
+        for i in 0..PER_CLIENT_SUB_CAP {
+            install_sub_with_deps(&reg, 7, &format!("s{i}"), dep_set(&["A"], &[]));
+        }
+        let outcome = reg.register_pending(
+            "overflow".into(),
+            "f".into(),
+            serde_json::json!({}),
+            make_auth(),
+            7,
+            // client_id matches the stuffed client
+        );
+        assert_eq!(outcome, RegisterOutcome::OverLimit);
+        assert!(!reg
+            .inner
+            .lock()
+            .unwrap()
+            .subs
+            .contains_key(&(7, "overflow".to_string())));
+    }
+
+    #[test]
+    fn dirty_queue_cap_drops_oldest() {
+        let reg = ReactiveRegistry::new(make_hub());
+        // Install enough subs + dirty them all so the queue
+        // overflows. We bypass register_pending to keep the test
+        // hermetic (no need for a real fn_ops).
+        for i in 0..(DIRTY_QUEUE_CAP + 50) {
+            install_sub_with_deps(&reg, 1, &format!("s{i}"), dep_set(&["E"], &[]));
+        }
+        reg.on_change(&dummy_change("E", "r", ChangeKind::Insert));
+        let inner = reg.inner.lock().unwrap();
+        assert!(inner.dirty.len() <= DIRTY_QUEUE_CAP);
+        assert!(inner.pending.len() <= DIRTY_QUEUE_CAP);
     }
 }

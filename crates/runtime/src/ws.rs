@@ -1184,46 +1184,33 @@ fn handle_reactive_control(
                 return;
             }
             let args = parsed.get("args").cloned().unwrap_or(serde_json::json!({}));
-            // Map AuthContext → AuthInfo for the runner. The runner
-            // operates on AuthInfo (user_id + is_admin + tenant_id);
-            // the WS auth context carries the same shape plus a few
-            // server-side bits we drop here.
+            // Map AuthContext → AuthInfo. Carries the FULL identity
+            // (roles included) so RBAC-style policies see the same
+            // values on re-run as on the first run.
             let auth_info = pylon_functions::protocol::AuthInfo {
                 user_id: auth_ctx.user_id.clone(),
                 is_admin: auth_ctx.is_admin,
                 tenant_id: auth_ctx.tenant_id.clone(),
+                roles: auth_ctx.roles.clone(),
             };
-            let outcome = reg.run_handler(&fn_name, args.clone(), auth_info.clone());
-            let Some(outcome) = outcome else {
+            // Dispatch the initial run to the re-runner thread —
+            // the WS reader thread MUST NOT block on fn_ops.call.
+            // The re-runner picks it up, runs the handler, captures
+            // deps, and pushes the result via reactive-result.
+            let outcome = reg.register_pending(sub_id.clone(), fn_name, args, auth_info, client_id);
+            if outcome == crate::reactive::RegisterOutcome::OverLimit {
                 let frame = serde_json::json!({
                     "type": "reactive-error",
                     "sub_id": sub_id,
-                    "code": "INITIAL_RUN_FAILED",
-                    "message": format!("handler {fn_name} failed"),
+                    "code": "REACTIVE_LIMIT",
+                    "message": "per-client reactive subscription limit reached",
                 })
                 .to_string();
                 hub.send_text_to(client_id, &frame);
-                return;
-            };
-            reg.register(
-                sub_id.clone(),
-                fn_name,
-                args,
-                auth_info,
-                client_id,
-                &outcome,
-            );
-            // Initial push.
-            let frame = serde_json::json!({
-                "type": "reactive-result",
-                "sub_id": sub_id,
-                "result": outcome.value,
-            })
-            .to_string();
-            hub.send_text_to(client_id, &frame);
+            }
         }
         "reactive-unsubscribe" => {
-            reg.unsubscribe(&sub_id);
+            reg.unsubscribe(client_id, &sub_id);
         }
         _ => {}
     }

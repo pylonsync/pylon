@@ -2180,6 +2180,10 @@ fn auth_info_to_context(auth: &pylon_functions::protocol::AuthInfo) -> pylon_aut
     if let Some(tenant) = &auth.tenant_id {
         ctx = ctx.with_tenant(tenant.clone());
     }
+    // Carry roles across — RBAC-style policies (`auth.roles.contains
+    // ("admin_panel")`) silently denied on reactive query re-runs
+    // before this fix because AuthInfo dropped the roles field.
+    ctx.roles = auth.roles.clone();
     ctx
 }
 
@@ -3817,11 +3821,20 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
                         user_id: a.user_id.clone(),
                         is_admin: a.is_admin,
                         tenant_id: a.tenant_id.clone(),
+                        // Persisted Job.auth doesn't carry roles
+                        // today (pre-0.3.135 schema). Empty is the
+                        // safe choice — RBAC-gated jobs that need
+                        // roles must run as admin (job auth already
+                        // permits that via is_admin) or re-fetch the
+                        // user row at execution time. Job schema
+                        // extension to carry roles is a follow-up.
+                        roles: Vec::new(),
                     },
                     None => FnAuth {
                         user_id: None,
                         is_admin: false,
                         tenant_id: None,
+                        roles: Vec::new(),
                     },
                 };
                 match ops.call(&fn_name, job.payload.clone(), auth, None, None) {

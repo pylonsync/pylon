@@ -103,6 +103,7 @@ pub(crate) fn handle(
                 user_id: ctx.auth_ctx.user_id.clone(),
                 is_admin: ctx.auth_ctx.is_admin,
                 tenant_id: ctx.auth_ctx.tenant_id.clone(),
+                roles: ctx.auth_ctx.roles.clone(),
             };
 
             let identity = auth.user_id.as_deref().unwrap_or_else(|| {
@@ -214,6 +215,7 @@ pub(crate) fn handle(
                 user_id: ctx.auth_ctx.user_id.clone(),
                 is_admin: ctx.auth_ctx.is_admin,
                 tenant_id: ctx.auth_ctx.tenant_id.clone(),
+                roles: ctx.auth_ctx.roles.clone(),
             };
 
             let identity = auth.user_id.as_deref().unwrap_or_else(|| {

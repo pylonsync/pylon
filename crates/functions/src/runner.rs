@@ -650,6 +650,12 @@ impl FnRunner {
                         user_id: trace.user_id().map(|s| s.to_string()),
                         is_admin: false,
                         tenant_id: trace.tenant_id().map(|s| s.to_string()),
+                        // Nested calls don't currently propagate the
+                        // outer trace's roles — trace_log doesn't capture
+                        // them. Empty here matches pre-roles behavior;
+                        // RBAC-gated nested calls fall back to denying
+                        // unless the outer is admin (which bypasses).
+                        roles: Vec::new(),
                     };
                     // Prefer the nested_call_hook if installed — it lets the
                     // caller wrap mutations in their own BEGIN/COMMIT around

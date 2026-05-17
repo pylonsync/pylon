@@ -374,12 +374,14 @@ pub enum FnType {
 
 /// Auth context passed to function handlers.
 ///
-/// Mirrors the three fields of the runtime's `AuthContext` that a
-/// mutation can legitimately read: the authenticated user id, admin
-/// flag, and active tenant. Functions that gate on `ctx.auth.tenantId`
-/// (anything org-scoped in a B2B app) need the last one forwarded — it's
-/// easy to forget and catches out every new multi-tenant example until
-/// someone hits "why is my session_tenant always null inside functions".
+/// Mirrors the runtime's `AuthContext` fields a mutation can
+/// legitimately read: authenticated user id, admin flag, active
+/// tenant, and JWT/manifest-issued roles. Functions that gate on
+/// `ctx.auth.tenantId` (anything org-scoped) or `ctx.auth.roles`
+/// (RBAC-style policies) need these forwarded — reactive query
+/// re-runs in particular have to carry the FULL identity captured
+/// at subscribe time, not a stripped-down subset, or role-gated
+/// policies see empty roles on re-run and silently deny.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,6 +389,8 @@ pub struct AuthInfo {
     pub is_admin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
 }
 
 /// Error info in protocol messages.
@@ -411,6 +415,7 @@ mod tests {
                 user_id: Some("user_1".into()),
                 is_admin: false,
                 tenant_id: None,
+                roles: Vec::new(),
             },
         );
         let json = serde_json::to_string(&msg).unwrap();
