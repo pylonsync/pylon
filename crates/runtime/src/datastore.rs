@@ -1131,6 +1131,36 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
             snapshot,
         ));
     }
+
+    /// Push a `session-changed` envelope to every WS client connected
+    /// as this user. Fires when the auth surface mutates the session
+    /// (POST /api/auth/select-org, DELETE /api/auth/session, etc.).
+    ///
+    /// SDK contract: receiving clients call refreshResolvedSession()
+    /// which re-reads /api/auth/me and — on a tenant flip — resets
+    /// the local replica. The envelope's `tenant_id` field is
+    /// informational; the SDK doesn't trust it (the auth surface is
+    /// the source of truth) but ships it so consumers that want a
+    /// low-latency optimistic tenant readout can use it.
+    ///
+    /// Cluster: also published over the bus so a session mutation on
+    /// machine A reaches the same user's WS connections on machine B.
+    /// Without this, a user with two tabs landed on different machines
+    /// would only see one tab refresh after a tenant switch.
+    fn notify_session_changed(&self, user_id: &str, tenant_id: Option<&str>) {
+        let envelope = serde_json::json!({
+            "type": "session-changed",
+            "tenant_id": tenant_id,
+        })
+        .to_string();
+        self.ws.send_text_to_user(user_id, &envelope);
+        self.cluster_bus
+            .publish(&pylon_cluster::Envelope::session_changed(
+                self.cluster_bus.instance_id(),
+                user_id,
+                tenant_id,
+            ));
+    }
 }
 
 /// Install the cluster-bus subscriber that fans inbound peer events
@@ -1223,6 +1253,21 @@ pub fn install_cluster_bus_subscriber(
                     );
                 }
             }
+            return;
+        }
+        // Session-changed: a peer mutated a user's session (select-org,
+        // clear-org, revoke). Fan to that user's local WS connections
+        // so their tabs landed on this machine refresh in step with
+        // tabs landed on the originating machine. The local-mutation
+        // path goes through `notify_session_changed` directly; this
+        // closes the cross-machine leg of the same surface.
+        if let Some((user_id, tenant_id)) = envelope.as_session_changed() {
+            let payload = serde_json::json!({
+                "type": "session-changed",
+                "tenant_id": tenant_id,
+            })
+            .to_string();
+            ws_handler.send_text_to_user(&user_id, &payload);
         }
     }));
 }

@@ -406,6 +406,39 @@ impl Shard {
         }
     }
 
+    /// Send a text message to every client in this shard whose
+    /// authenticated user_id matches. Used by the session-changed
+    /// push: when SessionStore mutates a session's tenant, the hub
+    /// fans the new state to all of that user's connected tabs so
+    /// each engine refreshes without app-level notifySessionChanged
+    /// calls. Admin-token connections (no user_id) are skipped.
+    fn send_text_to_user(&self, user_id: &str, msg: &Arc<str>) {
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .iter()
+                .filter(|(_, h)| h.auth.user_id.as_deref() == Some(user_id))
+                .map(|(id, h)| (*id, Arc::clone(h)))
+                .collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            let mut guard = match handle.socket.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.send(Message::Text((**msg).to_string())).is_err() {
+                dead.push(id);
+            }
+        }
+        if !dead.is_empty() {
+            let mut clients = self.clients.lock().unwrap();
+            for id in &dead {
+                clients.remove(id);
+            }
+        }
+    }
+
     fn count(&self) -> usize {
         self.clients.lock().unwrap().len()
     }
@@ -625,6 +658,18 @@ impl WsHub {
     /// the new payload directly to the subscribed client rather than
     /// broadcasting to every WS connection. Silently drops if the
     /// client has disconnected since the registry indexed it.
+    /// Fan a text message to every connected client whose authenticated
+    /// user_id matches. Used by the session-changed push so all of a
+    /// user's open tabs refresh in lockstep when their session mutates.
+    /// O(connected-clients) across all shards — fine for the auth
+    /// surface's rare events; not for hot-path broadcasts.
+    pub fn send_text_to_user(&self, user_id: &str, text: &str) {
+        let msg: Arc<str> = Arc::from(text);
+        for shard in &self.shards {
+            shard.send_text_to_user(user_id, &msg);
+        }
+    }
+
     pub fn send_text_to(&self, client_id: u64, text: &str) {
         let shard_idx = (client_id as usize) % NUM_SHARDS;
         self.shards[shard_idx].send_text_to_one(client_id, text);

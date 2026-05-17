@@ -102,6 +102,41 @@ impl Envelope {
         }
     }
 
+    /// Session-changed envelope. Carries the user_id whose session
+    /// mutated plus the post-mutation tenant_id (None for "no active
+    /// org" / revoked). Subscribers on other machines fan a
+    /// `session-changed` WS message to that user's local connections
+    /// so multi-tab + multi-machine deployments stay in sync without
+    /// the app calling notifySessionChanged.
+    pub fn session_changed(
+        instance_id: &str,
+        user_id: &str,
+        tenant_id: Option<&str>,
+    ) -> Self {
+        Self {
+            instance_id: instance_id.to_string(),
+            kind: "session-changed".to_string(),
+            payload: serde_json::json!({
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+            }),
+        }
+    }
+
+    /// Decode a session-changed payload to `(user_id, tenant_id)`.
+    /// None if kind doesn't match or payload is malformed.
+    pub fn as_session_changed(&self) -> Option<(String, Option<String>)> {
+        if self.kind != "session-changed" {
+            return None;
+        }
+        let user_id = self.payload.get("user_id")?.as_str()?.to_string();
+        let tenant_id = self
+            .payload
+            .get("tenant_id")
+            .and_then(|v| v.as_str().map(String::from));
+        Some((user_id, tenant_id))
+    }
+
     /// Decode the change-event payload. Returns None if `kind` isn't
     /// `"change"` or the payload doesn't deserialize. Caller handles
     /// the None as "skip this envelope" — unknown / malformed events

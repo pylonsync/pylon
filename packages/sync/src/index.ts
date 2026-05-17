@@ -1113,6 +1113,19 @@ export class SyncEngine {
           return;
         }
 
+        // Session mutated server-side. Fires for select-org / clear-org
+        // / session revoke — every tab connected as this user gets the
+        // envelope (cross-machine too via the cluster bus). Trigger
+        // a fresh /api/auth/me read which updates the cached session
+        // AND, on tenant flip, resets the replica so stale rows from
+        // the previous tenant disappear. App code calling
+        // /api/auth/select-org via raw fetch no longer needs the
+        // manual `notifySessionChanged()` step.
+        if (msg.type === "session-changed") {
+          void this.refreshResolvedSession();
+          return;
+        }
+
         // Reactive query push: the server-side ReactiveRegistry re-ran
         // a subscribed handler and the result hash changed. Route to
         // the handler registered by `subscribeReactive` so the React

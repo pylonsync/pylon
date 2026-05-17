@@ -936,6 +936,14 @@ pub(crate) fn handle(
         if target.is_empty() {
             // Clear the active org — the user is dropping out of all tenants.
             ctx.session_store.set_tenant(token, None);
+            // Push session-changed over WS so every tab connected as
+            // this user refreshes immediately. App code calling
+            // /api/auth/select-org via raw fetch no longer needs the
+            // manual notifySessionChanged() step — the SDK's
+            // SyncEngine handles the envelope (refreshResolvedSession
+            // + replica reset on tenant flip). The local-mutation
+            // path AND the cluster bus both fan out.
+            ctx.notifier.notify_session_changed(user_id, None);
             return Some((200, serde_json::json!({"tenantId": null}).to_string()));
         }
         // Look up an OrgMember row matching this user + target org.
@@ -943,6 +951,7 @@ pub(crate) fn handle(
         match ctx.store.query_filtered("OrgMember", &filter) {
             Ok(rows) if !rows.is_empty() => {
                 ctx.session_store.set_tenant(token, Some(target.clone()));
+                ctx.notifier.notify_session_changed(user_id, Some(&target));
                 return Some((200, serde_json::json!({"tenantId": target}).to_string()));
             }
             Ok(_) => {
@@ -1989,10 +1998,23 @@ pub(crate) fn handle(
 
     // DELETE /api/auth/session
     if url == "/api/auth/session" && method == HttpMethod::Delete {
+        // Capture the resolved user_id BEFORE revoking — revoke takes
+        // the token, and post-revoke we have no way to look up which
+        // user the (now-gone) token belonged to. The push wakes any
+        // OTHER tabs of the same user that were still connected on
+        // the now-revoked session — they get a session-changed
+        // envelope, their SyncEngine refreshes, /api/auth/me returns
+        // anonymous, replica resets. Without this push the other
+        // tabs would keep showing the old user's rows until their
+        // next pull cycle.
+        let user_id = ctx.auth_ctx.user_id.clone();
         if let Some(token) = auth_token {
             ctx.session_store.revoke(token);
         }
         ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
+        if let Some(uid) = user_id.as_deref() {
+            ctx.notifier.notify_session_changed(uid, None);
+        }
         return Some((200, serde_json::json!({"revoked": true}).to_string()));
     }
 

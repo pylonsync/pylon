@@ -35,6 +35,19 @@ pub trait ChangeNotifier: Send + Sync {
     /// Default impl is a no-op so backends without WebSocket support
     /// (Workers, no-op notifier) compile without ceremony.
     fn notify_crdt(&self, _entity: &str, _row_id: &str, _snapshot: &[u8]) {}
+
+    /// Push a `session-changed` envelope to every connected WS client
+    /// whose authenticated user_id matches. Fires when the server
+    /// mutates a session (select-org, clear-org, revoke). The SDK's
+    /// SyncEngine handles the envelope by refetching /api/auth/me and
+    /// resetting the local replica if the visible set changed.
+    ///
+    /// `tenant_id` is the post-mutation value (None for "no active
+    /// org" / "revoked"). The SDK doesn't actually trust this scalar
+    /// — it re-reads /api/auth/me — but ships it so consumers that
+    /// want low-latency tenant readout can use it without a round
+    /// trip. Default impl is a no-op for non-WS backends.
+    fn notify_session_changed(&self, _user_id: &str, _tenant_id: Option<&str>) {}
 }
 
 /// No-op notifier for platforms without real-time push.
@@ -2372,14 +2385,28 @@ mod auth_gate_tests {
     where
         F: FnOnce(&RouterContext),
     {
-        with_ctx_full(is_dev, auth, &NoopPluginHooks, Some(cookie_config), f);
+        with_ctx_full(is_dev, auth, &NoopPluginHooks, Some(cookie_config), None, f);
+    }
+
+    /// Variant of `with_ctx` that takes an explicit ChangeNotifier.
+    /// Used by tests asserting that auth surfaces (select-org,
+    /// session revoke, ...) push the session-changed envelope.
+    fn with_ctx_notifier<F>(
+        is_dev: bool,
+        auth: &AuthContext,
+        notifier: &dyn ChangeNotifier,
+        f: F,
+    ) where
+        F: FnOnce(&RouterContext),
+    {
+        with_ctx_full(is_dev, auth, &NoopPluginHooks, None, Some(notifier), f);
     }
 
     fn with_ctx_hooks<F>(is_dev: bool, auth: &AuthContext, hooks: &dyn PluginHookOps, f: F)
     where
         F: FnOnce(&RouterContext),
     {
-        with_ctx_full(is_dev, auth, hooks, None, f);
+        with_ctx_full(is_dev, auth, hooks, None, None, f);
     }
 
     fn with_ctx_full<F>(
@@ -2387,6 +2414,7 @@ mod auth_gate_tests {
         auth: &AuthContext,
         hooks: &dyn PluginHookOps,
         cookie_config_override: Option<CookieConfig>,
+        notifier_override: Option<&dyn ChangeNotifier>,
         f: F,
     ) where
         F: FnOnce(&RouterContext),
@@ -2417,7 +2445,9 @@ mod auth_gate_tests {
         let saml = pylon_auth::saml::InMemorySamlStore::new();
         let policy_engine = PolicyEngine::from_manifest(&manifest);
         let change_log = ChangeLog::new();
-        let notifier = NoopNotifier;
+        let default_notifier = NoopNotifier;
+        let notifier: &dyn ChangeNotifier =
+            notifier_override.unwrap_or(&default_notifier);
         let rooms = StubRooms;
         let cache = StubCache;
         let pubsub = StubPubSub;
@@ -2449,7 +2479,7 @@ mod auth_gate_tests {
             trusted_origins: &[],
             policy_engine: &policy_engine,
             change_log: &change_log,
-            notifier: &notifier,
+            notifier,
             rooms: &rooms,
             cache: &cache,
             pubsub: &pubsub,
@@ -4148,6 +4178,90 @@ mod auth_gate_tests {
             assert_eq!(set_cookies.len(), 1, "no Domain → single Set-Cookie");
             assert!(set_cookies[0].contains("test-token-no-domain"));
         });
+    }
+
+    /// Recording ChangeNotifier — captures every notify_session_changed
+    /// call so regression tests can assert which user_id + tenant the
+    /// router pushed. The change/presence/crdt methods are no-ops
+    /// because the tests below only exercise the auth-mutation
+    /// surface.
+    struct RecordingNotifier {
+        session_changes: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl RecordingNotifier {
+        fn new() -> Self {
+            Self {
+                session_changes: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn session_changes(&self) -> Vec<(String, Option<String>)> {
+            self.session_changes.lock().unwrap().clone()
+        }
+    }
+
+    impl ChangeNotifier for RecordingNotifier {
+        fn notify(&self, _event: &pylon_sync::ChangeEvent) {}
+        fn notify_presence(&self, _json: &str) {}
+        fn notify_session_changed(&self, user_id: &str, tenant_id: Option<&str>) {
+            self.session_changes
+                .lock()
+                .unwrap()
+                .push((user_id.to_string(), tenant_id.map(String::from)));
+        }
+    }
+
+    /// Regression: DELETE /api/auth/session must push session-changed
+    /// for the now-revoked user so OTHER tabs of theirs refresh and
+    /// surface the signed-out state. Pre-fix, other tabs kept
+    /// showing the previous user's rows until the next pull cycle.
+    /// (Select-org's push has the same shape; both routes funnel
+    /// through `ctx.notifier.notify_session_changed` so one test
+    /// covers the wiring of both.)
+    #[test]
+    fn session_revoke_pushes_session_changed() {
+        let notifier = RecordingNotifier::new();
+        let user_id = "user-bob";
+
+        let recorder = &notifier;
+        let mut captured_token: Option<String> = None;
+        with_ctx_notifier(false, &AuthContext::anonymous(), recorder, |ctx| {
+            // Mint a real session through SessionStore so the token
+            // resolves through the normal bearer path. Capture the
+            // token to use as the auth bearer in the next call.
+            let session = ctx.session_store.create(user_id.to_string());
+            captured_token = Some(session.token);
+        });
+        let token = captured_token.expect("session minted");
+
+        let auth = AuthContext {
+            user_id: Some(user_id.into()),
+            is_admin: false,
+            is_guest: false,
+            roles: vec![],
+            tenant_id: None,
+            api_key_id: None,
+            api_key_scopes: None,
+            is_trusted_device: false,
+        };
+        with_ctx_notifier(false, &auth, recorder, |ctx| {
+            let (status, _body, _ct) = route(
+                ctx,
+                HttpMethod::Delete,
+                "/api/auth/session",
+                "",
+                Some(&token),
+            );
+            assert_eq!(status, 200);
+        });
+
+        let changes = notifier.session_changes();
+        assert_eq!(
+            changes,
+            vec![(user_id.to_string(), None)],
+            "session revoke must push session-changed(user, None); got {changes:?}",
+        );
     }
 }
 
