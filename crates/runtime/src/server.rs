@@ -1655,6 +1655,196 @@ fn start_server(
             continue;
         }
 
+        // --- /admin/jobs[/...]: read-only job-queue surface for the
+        // cloud dashboard. Same auth shape as /admin/fn/traces (accepts
+        // PYLON_METRICS_TOKEN via verify_admin_or_metrics_auth). The
+        // existing /api/jobs/* surface requires full admin token and
+        // also handles writes; this is the read-only sibling.
+        //
+        //   GET /admin/jobs                   → list jobs
+        //   GET /admin/jobs/stats             → stats counters
+        //   GET /admin/jobs/dead              → dead-letter queue
+        //   GET /admin/jobs/<id>              → one job detail
+        if url.starts_with("/admin/jobs") && method == Method::Get {
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/jobs requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer",
+                );
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            let path = url.split('?').next().unwrap_or(url.as_str());
+            let body: String = if path == "/admin/jobs/stats" {
+                serde_json::to_string(&job_queue.stats()).unwrap_or_else(|_| "{}".into())
+            } else if path == "/admin/jobs/dead" {
+                serde_json::to_string(&job_queue.dead_letters()).unwrap_or_else(|_| "[]".into())
+            } else if path == "/admin/jobs" {
+                let status_filter = url
+                    .split("status=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next());
+                let queue_filter = url.split("queue=").nth(1).and_then(|s| s.split('&').next());
+                let limit: usize = url
+                    .split("limit=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(100)
+                    .min(500);
+                serde_json::to_string(&job_queue.list_jobs(status_filter, queue_filter, limit))
+                    .unwrap_or_else(|_| "[]".into())
+            } else if let Some(job_id) = path.strip_prefix("/admin/jobs/") {
+                if job_id.is_empty() {
+                    "{}".into()
+                } else {
+                    match job_queue.get_job(job_id) {
+                        Some(job) => serde_json::to_string(&job).unwrap_or_else(|_| "{}".into()),
+                        None => {
+                            let nf = json_error("NOT_FOUND", "Job not found");
+                            let response = with_security_headers(
+                                Response::from_string(nf)
+                                    .with_status_code(404u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", 404);
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                "{}".into()
+            };
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(200u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+
+        // --- /admin/workflows[/...]: read-only workflow surface.
+        //
+        //   GET /admin/workflows/definitions  → registered workflow defs
+        //   GET /admin/workflows              → instances (optional ?status=)
+        //   GET /admin/workflows/<id>         → one instance detail
+        if url.starts_with("/admin/workflows") && method == Method::Get {
+            if !is_dev
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/workflows requires PYLON_ADMIN_TOKEN or PYLON_METRICS_TOKEN bearer",
+                );
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 401);
+                continue;
+            }
+            let path = url.split('?').next().unwrap_or(url.as_str());
+            let body: String = if path == "/admin/workflows/definitions" {
+                serde_json::to_string(&workflow_engine.definitions())
+                    .unwrap_or_else(|_| "[]".into())
+            } else if path == "/admin/workflows" {
+                let status_filter: Option<crate::workflows::WorkflowStatus> = url
+                    .split("status=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| match s {
+                        "running" => Some(crate::workflows::WorkflowStatus::Running),
+                        "completed" => Some(crate::workflows::WorkflowStatus::Completed),
+                        "failed" => Some(crate::workflows::WorkflowStatus::Failed),
+                        "waiting" => Some(crate::workflows::WorkflowStatus::WaitingForEvent),
+                        "sleeping" => Some(crate::workflows::WorkflowStatus::Sleeping),
+                        "pending" => Some(crate::workflows::WorkflowStatus::Pending),
+                        "cancelled" => Some(crate::workflows::WorkflowStatus::Cancelled),
+                        _ => None,
+                    });
+                serde_json::to_string(&workflow_engine.list(status_filter.as_ref()))
+                    .unwrap_or_else(|_| "[]".into())
+            } else if let Some(wf_id) = path.strip_prefix("/admin/workflows/") {
+                if wf_id.is_empty() {
+                    "{}".into()
+                } else {
+                    match workflow_engine.get(wf_id) {
+                        Some(wf) => serde_json::to_string(&wf).unwrap_or_else(|_| "{}".into()),
+                        None => {
+                            let nf = json_error("NOT_FOUND", "Workflow instance not found");
+                            let response = with_security_headers(
+                                Response::from_string(nf)
+                                    .with_status_code(404u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", 404);
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                "{}".into()
+            };
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(200u16)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            continue;
+        }
+
         // --- Rate limiting: check per-IP request count ---
         // peer_ip honors PYLON_TRUST_PROXY_HOPS so a deploy behind a
         // load balancer (Fly, nginx, CloudFront) gets per-client
