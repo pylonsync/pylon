@@ -327,8 +327,7 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
             .meta("org_id", org_id.to_string())
             .build(),
     );
-    let cookie_value = ctx.cookie_config.set_value(&session.token);
-    ctx.add_response_header("Set-Cookie", cookie_value);
+    ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
 }
@@ -611,8 +610,7 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             .meta("org_id", org_id.to_string())
             .build(),
     );
-    let cookie_value = ctx.cookie_config.set_value(&session.token);
-    ctx.add_response_header("Set-Cookie", cookie_value);
+    ctx.set_browser_session_cookie(&session.token);
     ctx.add_response_header("Location", state_record.callback_url);
     (302, String::new())
 }
@@ -1861,8 +1859,7 @@ pub(crate) fn handle(
                 return Some(match result {
                     Ok((user_id, session)) => {
                         audit_oauth_login(ctx, &user_id, provider);
-                        let cookie_value = ctx.cookie_config.set_value(&session.token);
-                        ctx.add_response_header("Set-Cookie", cookie_value);
+                        ctx.set_browser_session_cookie(&session.token);
                         ctx.add_response_header("Location", state_record.callback_url);
                         (302, String::new())
                     }
@@ -1953,8 +1950,7 @@ pub(crate) fn handle(
             ) {
                 Ok((user_id, session)) => {
                     audit_oauth_login(ctx, &user_id, provider);
-                    let cookie_value = ctx.cookie_config.set_value(&session.token);
-                    ctx.add_response_header("Set-Cookie", cookie_value);
+                    ctx.set_browser_session_cookie(&session.token);
                     ctx.add_response_header("Location", state_record.callback_url);
                     return Some((302, String::new()));
                 }

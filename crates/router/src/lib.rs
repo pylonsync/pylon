@@ -634,6 +634,25 @@ impl<'a> RouterContext<'a> {
             }
         }
     }
+
+    /// Emit a session cookie unconditionally — for browser-302 flows
+    /// (OAuth/SSO/SAML callbacks) where the request came from an IdP
+    /// redirect and therefore won't carry Origin, so
+    /// `maybe_set_session_cookie`'s Origin gate would skip it.
+    ///
+    /// Includes the host-only-clear pairing for the same reason
+    /// `maybe_set_session_cookie` does — without it, an iPhone (or any
+    /// device) that held a `${name}` cookie at the bare host BEFORE
+    /// `PYLON_COOKIE_DOMAIN` got set keeps sending BOTH cookies forever
+    /// and the server arbitrarily picks one per request. Manifested on
+    /// iOS Chrome OAuth: the post-callback /dashboard load read the
+    /// stale host-only token, found no session, bounced back to /login.
+    pub fn set_browser_session_cookie(&self, token: &str) {
+        self.add_response_header("Set-Cookie", self.cookie_config.set_value(token));
+        if let Some(clear) = self.cookie_config.host_only_clear_value() {
+            self.add_response_header("Set-Cookie", clear);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2346,8 +2365,30 @@ mod auth_gate_tests {
         with_ctx_hooks(is_dev, auth, &NoopPluginHooks, f);
     }
 
+    /// Variant of `with_ctx` that takes an explicit CookieConfig. Lets
+    /// cookie-shape regression tests avoid `std::env::set_var` races
+    /// against the rest of the test binary.
+    fn with_ctx_cookie<F>(is_dev: bool, auth: &AuthContext, cookie_config: CookieConfig, f: F)
+    where
+        F: FnOnce(&RouterContext),
+    {
+        with_ctx_full(is_dev, auth, &NoopPluginHooks, Some(cookie_config), f);
+    }
+
     fn with_ctx_hooks<F>(is_dev: bool, auth: &AuthContext, hooks: &dyn PluginHookOps, f: F)
     where
+        F: FnOnce(&RouterContext),
+    {
+        with_ctx_full(is_dev, auth, hooks, None, f);
+    }
+
+    fn with_ctx_full<F>(
+        is_dev: bool,
+        auth: &AuthContext,
+        hooks: &dyn PluginHookOps,
+        cookie_config_override: Option<CookieConfig>,
+        f: F,
+    ) where
         F: FnOnce(&RouterContext),
     {
         let manifest = empty_manifest();
@@ -2386,7 +2427,8 @@ mod auth_gate_tests {
         let files = StubFiles;
         let openapi = StubOpenApi;
         let email = StubEmail;
-        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
+        let cookie_config = cookie_config_override
+            .unwrap_or_else(|| CookieConfig::from_env(&CookieConfig::default_name_for("test")));
 
         let ctx = RouterContext {
             store: &store,
@@ -4027,6 +4069,85 @@ mod auth_gate_tests {
             m.policies[0].allow_read.as_deref(),
             Some("auth.userId == data.ownerId")
         );
+    }
+
+    /// Regression: every browser-302 auth callback (OAuth GET, OAuth
+    /// form_post, org SSO, SAML ACS) must emit BOTH the new
+    /// domain-scoped session cookie AND a Max-Age=0 for the host-only
+    /// variant of the same name. Without the pairing, any device that
+    /// holds a host-only cookie from before PYLON_COOKIE_DOMAIN was set
+    /// keeps sending two cookies on every request and the server
+    /// arbitrarily picks one — manifested on iOS Chrome OAuth as a
+    /// /dashboard bounce back to /login. `set_browser_session_cookie`
+    /// is the choke point all four callbacks route through.
+    #[test]
+    fn browser_session_cookie_pairs_host_only_clear() {
+        let cookie_config = CookieConfig {
+            name: "test_session".into(),
+            domain: Some(".example.com".into()),
+            secure: true,
+            same_site: pylon_auth::SameSite::Lax,
+            max_age_secs: 60,
+            path: "/".into(),
+        };
+        let anon = AuthContext::anonymous();
+        with_ctx_cookie(false, &anon, cookie_config, |ctx| {
+            ctx.set_browser_session_cookie("test-token-12345");
+            let headers = ctx.take_response_headers();
+            let set_cookies: Vec<&str> = headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie"))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(
+                set_cookies.len(),
+                2,
+                "expected new-cookie + host-only-clear; got {set_cookies:?}"
+            );
+            let new_cookie = set_cookies
+                .iter()
+                .find(|v| v.contains("test-token-12345"))
+                .expect("new session cookie present");
+            assert!(new_cookie.contains("Domain=.example.com"));
+            assert!(new_cookie.contains("HttpOnly"));
+            let clear_cookie = set_cookies
+                .iter()
+                .find(|v| !v.contains("test-token-12345"))
+                .expect("host-only clear present");
+            assert!(
+                !clear_cookie.contains("Domain="),
+                "host-only clear must omit Domain= so it targets the bare host"
+            );
+            assert!(clear_cookie.contains("Max-Age=0"));
+        });
+    }
+
+    /// Sanity-check the no-domain case: without a Domain attribute
+    /// there's no host-only variant to clear, so we emit a single
+    /// Set-Cookie. (Avoids double-setting in dev where the cookie is
+    /// already host-only.)
+    #[test]
+    fn browser_session_cookie_skips_clear_when_no_domain() {
+        let cookie_config = CookieConfig {
+            name: "test_session".into(),
+            domain: None,
+            secure: true,
+            same_site: pylon_auth::SameSite::Lax,
+            max_age_secs: 60,
+            path: "/".into(),
+        };
+        let anon = AuthContext::anonymous();
+        with_ctx_cookie(false, &anon, cookie_config, |ctx| {
+            ctx.set_browser_session_cookie("test-token-no-domain");
+            let headers = ctx.take_response_headers();
+            let set_cookies: Vec<&str> = headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("Set-Cookie"))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(set_cookies.len(), 1, "no Domain → single Set-Cookie");
+            assert!(set_cookies[0].contains("test-token-no-domain"));
+        });
     }
 }
 
