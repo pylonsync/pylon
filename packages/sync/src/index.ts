@@ -2004,9 +2004,17 @@ export class SyncEngine {
       undefined;
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
+    // credentials: "include" so cookie-auth apps (Yapless and any other
+    // app relying on the `<app>_session` cookie pylon sets at login)
+    // actually authenticate on /api/sync/pull + /api/entities/<E>/cursor.
+    // Without it the pull goes anonymous, every policy default-denies,
+    // and the response is `{changes: []}` even when the same browser
+    // session can read every row via the entity API. Reported in
+    // Repro C against v0.3.131; closed in v0.3.134.
     const res = await fetch(`${this.config.baseUrl}${path}`, {
       method,
       headers,
+      credentials: "include",
       body: body ? JSON.stringify(body) : undefined,
     });
 

@@ -294,3 +294,60 @@ describe("LocalStore.entityNames", () => {
     expect(names).toEqual(["A", "B"]);
   });
 });
+
+describe("SyncEngine cookie auth", () => {
+  // Regression test for Repro C (v0.3.131): the SyncEngine's `request`
+  // method must send `credentials: "include"` on every HTTP call so
+  // cookie-authenticated browser sessions reach the server with their
+  // session cookie. Without it, /api/sync/pull and the entity
+  // reconcile endpoint go anonymous, the default-deny policy returns
+  // nothing, and the local replica stays empty forever — even when
+  // the same browser session can read every row via the entity API.
+  test("pull request sends cookies (credentials: include)", async () => {
+    let capturedInit: RequestInit | undefined;
+    const restore = installFetch(async (url, init) => {
+      capturedInit = init;
+      if (url.includes("/api/sync/pull")) {
+        return {
+          status: 200,
+          body: { changes: [], cursor: { last_seq: 0 }, has_more: false },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+    try {
+      const engine = makeEngine();
+      await engine.pull();
+      expect(capturedInit).toBeDefined();
+      expect(capturedInit!.credentials).toBe("include");
+    } finally {
+      restore();
+    }
+  });
+
+  test("reconcile entity fetch sends cookies (credentials: include)", async () => {
+    let capturedInit: RequestInit | undefined;
+    const restore = installFetch(async (url, init) => {
+      if (url.includes("/api/entities/")) {
+        capturedInit = init;
+      }
+      return {
+        status: 200,
+        body: {
+          data: [{ id: "r1", title: "alive" }],
+          next_cursor: null,
+          has_more: false,
+        },
+      };
+    });
+    try {
+      const engine = makeEngine();
+      seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
+      await engine.reconcile(["Recording"]);
+      expect(capturedInit).toBeDefined();
+      expect(capturedInit!.credentials).toBe("include");
+    } finally {
+      restore();
+    }
+  });
+});
