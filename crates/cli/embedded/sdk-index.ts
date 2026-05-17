@@ -114,6 +114,30 @@ export interface IndexDefinition {
   name: string;
   fields: string[];
   unique: boolean;
+  /**
+   * Optional SQL predicate. When set, the framework emits a *partial*
+   * index — `CREATE [UNIQUE] INDEX … WHERE <predicate>` — so the index
+   * (and any uniqueness constraint) only applies to rows matching the
+   * predicate.
+   *
+   * Use case: enforce "max 1 hobby-tier org per user" without breaking
+   * paid users who legitimately own many orgs:
+   *
+   * ```ts
+   * indexes: [{
+   *   name: "uniq_hobby_owner",
+   *   fields: ["createdBy"],
+   *   unique: true,
+   *   where: "plan = 'hobby'",
+   * }]
+   * ```
+   *
+   * The predicate is passed straight through to the database. Both
+   * SQLite and Postgres accept this syntax — write SQL the underlying
+   * engine understands. Pylon does NOT validate or escape this string,
+   * so DO NOT interpolate user input here.
+   */
+  where?: string;
 }
 
 export interface RelationDefinition {
@@ -294,6 +318,8 @@ export interface ManifestIndex {
   name: string;
   fields: string[];
   unique: boolean;
+  /** Optional partial-index predicate — see `IndexDefinition.where`. */
+  where?: string;
 }
 
 export interface ManifestRelation {
@@ -394,6 +420,7 @@ export function entitiesToManifest(
         name: idx.name,
         fields: idx.fields,
         unique: idx.unique,
+        ...(idx.where ? { where: idx.where } : {}),
       })),
     };
     if (e.relations && e.relations.length > 0) {
@@ -491,6 +518,12 @@ export function policiesToManifest(
  * (User entity named "User", strip `passwordHash`, 30-day sessions,
  * no cookie cache, trusted origins from `PYLON_TRUSTED_ORIGINS` env).
  *
+ * `trustedOrigins` is the unified source for **all three gates** —
+ * CORS, CSRF, and OAuth-redirect. Loopback origins
+ * (`http://localhost`, `127.0.0.1`, `[::1]`, any port) are always
+ * auto-trusted across all three gates so `pylon dev` works without
+ * any allowlist config.
+ *
  * @example
  * auth({
  *   user: {
@@ -535,7 +568,42 @@ export type AuthConfig = {
       claims?: string[];
     };
   };
-  /** Per-app trusted origins for OAuth `?callback=` validation. Merged with `PYLON_TRUSTED_ORIGINS` env. */
+  /**
+   * Org / OrgMember / OrgInvite entity configuration. Apps that use
+   * the framework's `/api/auth/orgs/*` surface declare these entities
+   * in their schema with the framework's required fields. Add custom
+   * fields freely (logo, industry, billingEmail, etc.) — the framework
+   * reads / writes only the fields it manages.
+   *
+   * Defaults to entities named `Org`, `OrgMember`, `OrgInvite`. Rename
+   * via the three string fields if your codebase uses different names
+   * (e.g. `Organization` / `Membership`). Set `disabled: true` to opt
+   * out of the framework's routes entirely — useful when the app has
+   * its own org flow in TS and doesn't want the framework's parallel
+   * write paths.
+   */
+  org?: {
+    /** Entity name for the org table. Default `"Org"`. */
+    entity?: string;
+    /** Entity name for membership rows. Default `"OrgMember"`. */
+    memberEntity?: string;
+    /** Entity name for invite rows. Default `"OrgInvite"`. */
+    inviteEntity?: string;
+    /**
+     * Disable the framework's `/api/auth/orgs/*` routes. Endpoints
+     * return `501 ORG_NOT_CONFIGURED`. Use when you implement org
+     * management entirely in your own TypeScript functions.
+     */
+    disabled?: boolean;
+  };
+  /**
+   * Per-app trusted origins. Single declarative source for the three
+   * browser-facing gates: CORS, CSRF, OAuth `?callback=` validation.
+   * Merged with `PYLON_TRUSTED_ORIGINS` (OAuth) / `PYLON_CORS_ORIGIN`
+   * (CORS) / `PYLON_CSRF_ORIGINS` (CSRF) env vars when ops need to
+   * split per-gate. Loopback (`http://localhost`, `127.0.0.1`, `[::1]`,
+   * any port) is always auto-trusted at every gate.
+   */
   trustedOrigins?: string[];
 };
 
@@ -553,6 +621,12 @@ export type ManifestAuthConfig = {
       max_age: number;
       claims: string[];
     };
+  };
+  org: {
+    entity: string;
+    member_entity: string;
+    invite_entity: string;
+    disabled: boolean;
   };
   trusted_origins: string[];
 };
@@ -579,6 +653,12 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
         max_age: cfg.session?.cookieCache?.maxAge ?? 5 * 60,
         claims: cfg.session?.cookieCache?.claims ?? ["is_admin", "tenant_id"],
       },
+    },
+    org: {
+      entity: cfg.org?.entity ?? "Org",
+      member_entity: cfg.org?.memberEntity ?? "OrgMember",
+      invite_entity: cfg.org?.inviteEntity ?? "OrgInvite",
+      disabled: cfg.org?.disabled ?? false,
     },
     trusted_origins: cfg.trustedOrigins ?? [],
   };

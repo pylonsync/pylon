@@ -1,0 +1,41 @@
+[package]
+name = "pylon-cluster"
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pylon-sync = { path = "../sync", version = "0.3.130" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+# UUID for per-process instance ids. v4 is fine — these are short-lived
+# (one per pylon process) and only used to filter self-originated bus
+# messages, not for security.
+uuid = { version = "1", features = ["v4"] }
+
+# Redis client for the cross-machine fanout transport. Sync API matches
+# the rest of the runtime — pylon doesn't have a tokio runtime in its
+# hot path, and the cluster bus runs from dedicated background threads
+# anyway. Feature-gated so default builds don't pull the dep tree.
+redis = { version = "0.27", optional = true, default-features = false, features = ["script"] }
+
+[features]
+default = []
+# Enables the Redis-backed ClusterBus impl. Pulls the `redis` crate
+# and its TCP dependencies. Operators opt in by both building with
+# this feature and setting PYLON_CLUSTER_BUS=redis://... at runtime.
+redis-bus = ["redis"]
+
+[lints]
+workspace = true

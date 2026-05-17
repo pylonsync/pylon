@@ -1,0 +1,130 @@
+---
+title: Horizontal scaling
+description: Running pylon across multiple machines without losing live updates.
+---
+
+# Horizontal scaling
+
+Pylon is a single Rust binary. Single-machine deploys are the happy path
+— one process serves HTTP, WebSocket, SSE, and job execution for the
+whole app. When traffic outgrows one machine, you scale horizontally
+by running `pylon` on multiple instances behind a load balancer.
+
+The catch: **WebSocket broadcasts are in-process by default.** A
+mutation handled by machine A fans out to clients connected to
+machine A. Clients connected to machine B never see it — until their
+next reconnect or visibility-change triggers the client's `reconcile()`
+backstop. Live UX (sub-second propagation) requires more.
+
+## ClusterBus: cross-machine fanout
+
+Pylon ships a `ClusterBus` abstraction. Configure a transport and
+every change event / presence relay / CRDT frame published locally
+also publishes to the bus; subscriber threads on every peer machine
+receive and re-broadcast to their own WebSocket / SSE clients.
+
+The default transport is `NoopBus` — single-machine deploys pay
+zero overhead.
+
+The production transport is **Redis PUB/SUB**.
+
+```bash
+PYLON_CLUSTER_BUS=redis://default:pass@redis.internal:6379/0 \
+PYLON_CLUSTER_NAMESPACE=my-app \
+  pylon serve
+```
+
+`PYLON_CLUSTER_NAMESPACE` prefixes the Redis channel so multiple
+unrelated pylon deploys can share one Redis instance without
+cross-talk. Defaults to `pylon` if unset.
+
+**Connection failures at startup are fatal.** Pylon refuses to boot
+if `PYLON_CLUSTER_BUS` is set but unreachable. The reasoning:
+silently falling back to NoopBus on a multi-machine deploy means
+every machine is deaf to peer mutations, which produces the same
+"phantom row" UX failure the bus is supposed to fix — except much
+harder to diagnose. Loud failure is the right default.
+
+## What's fanned out
+
+- **Change events** (`ChangeEvent`) — every mutation, action write,
+  and entity-CRUD broadcast.
+- **Presence relays** — typing indicators, cursor positions, any
+  message sent via `WsHub::broadcast_presence`.
+- **CRDT binary frames** — Loro snapshots / updates for clients
+  subscribed via `useLoroDoc`. Snapshot bytes are base64-encoded
+  into the JSON envelope so a single pubsub channel handles every
+  payload shape.
+
+## What's NOT fanned out
+
+- **`/api/sync/pull?since=N` cursor catch-up.** Each pylon process
+  keeps its own in-memory `ChangeLog`; seqs are per-machine. Clients
+  that pull from machine A see different seqs than from machine B.
+  The client-side `reconcile()` pass (added in @pylonsync/sync
+  v0.3.130) is the backstop — clients pull authoritative entity row
+  sets from `/api/entities/<entity>/cursor` on reconnect /
+  visibility-change and remove locals not in the server set.
+- **Per-tenant policy filtering.** Each receiving machine re-runs
+  its own per-client read policy before forwarding the inbound event
+  to its connected WS/SSE clients. The bus carries raw events;
+  authz is the local fanout's job.
+
+## Self-event filtering
+
+Pubsub backends deliver every published message to every subscriber,
+including the publisher itself. Without de-dup that produces a
+feedback loop: A publishes → A's subscriber receives → A
+re-broadcasts → already shipped locally → double-delivery.
+
+Every envelope carries the publisher's `instance_id` (one per pylon
+process, minted at startup). Each subscriber filters out events with
+its own id before re-broadcasting. Operators don't need to think
+about this; it's invisible.
+
+## Diagnostics
+
+Pylon logs the bus mode at startup:
+
+```
+[cluster] redis bus connected — channel="my-app:cluster:bus" instance_id=pylon-a3f9c1b2
+[cluster] redis subscriber listening on channel "my-app:cluster:bus"
+```
+
+Or, for single-machine:
+
+```
+[cluster] PYLON_CLUSTER_BUS unset — running with single-machine fanout (NoopBus)
+```
+
+If subscriber reconnects are happening (Redis primary cycled,
+network blip), you'll see them in the logs too:
+
+```
+[cluster] redis subscriber connection ended: <error>
+[cluster] reconnecting redis subscriber in 4s
+[cluster] redis subscriber listening on channel "my-app:cluster:bus"
+```
+
+## When to enable
+
+- Anytime you run more than one `pylon` process serving the same app.
+- Fly autoscale with `min_machines_running > 1`.
+- K8s deployments with `replicas > 1`.
+- Blue/green rollouts where two versions of the binary briefly serve
+  traffic simultaneously.
+- Local multi-process dev simulating production.
+
+## When NOT to enable
+
+- Single-machine deploys. NoopBus is free; adding Redis is added
+  failure surface for zero benefit.
+- Per-developer local dev. The reconcile() backstop covers the
+  rare cases where two tabs need to see each other's writes without
+  a real cluster bus.
+
+## Backend choice
+
+Today: Redis PUB/SUB only. The trait is transport-agnostic; future
+transports (NATS, Cloudflare Durable Objects, Postgres LISTEN/NOTIFY)
+can land without API changes for callers.

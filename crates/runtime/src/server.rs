@@ -546,19 +546,37 @@ fn start_server(
         .unwrap_or(3600);
     let ai_rate_limiter = Arc::new(RateLimiter::new(ai_rl_max, ai_rl_window));
 
-    // TypeScript function runtime: optional Bun process that loads functions/*.ts
-    // If no `functions/` directory exists or Bun isn't installed, this is None
-    // and /api/fn/* routes return 503.
-    // Build a notifier adapter so function mutations (`ctx.db.insert/update/delete`)
-    // emit change events to WS + SSE subscribers on COMMIT. Without this,
-    // functions write to the DB but sync clients never see the update
-    // live — they only catch up on the next refetch.
+    // Cluster bus: enables horizontal scaling. When PYLON_CLUSTER_BUS
+    // points at a Redis URL, every change event / presence relay /
+    // CRDT frame from this machine gets published; peer pylon
+    // machines' subscriber threads receive + re-broadcast to their
+    // own WS/SSE clients. Default = Noop (zero-overhead single-
+    // machine).
+    //
+    // Operators on Fly autoscale, K8s replicas, blue/green rollouts —
+    // any deploy where >1 pylon process serves the same app — MUST
+    // configure this. Without it, a mutation on machine A is
+    // invisible to clients connected to machine B, and the client's
+    // reconcile() backstop is the only mechanism that eventually
+    // closes the gap (on next reconnect / tab-refocus). Live UX
+    // requires the bus.
+    let cluster_bus: Arc<dyn pylon_cluster::ClusterBus> = build_cluster_bus();
     let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> =
-        Arc::new(crate::datastore::WsSseNotifier {
-            ws: Arc::clone(&ws_hub),
-            sse: Arc::clone(&sse_hub),
-            auth_user: runtime.manifest().auth.user.clone(),
-        });
+        Arc::new(crate::datastore::WsSseNotifier::with_cluster_bus(
+            Arc::clone(&ws_hub),
+            Arc::clone(&sse_hub),
+            runtime.manifest().auth.user.clone(),
+            Arc::clone(&cluster_bus),
+        ));
+    // Subscriber: inbound peer events → local hubs. Idempotent —
+    // calling subscribe registers a handler; Noop never delivers, so
+    // single-machine builds pay nothing for the call.
+    crate::datastore::install_cluster_bus_subscriber(
+        &cluster_bus,
+        Arc::clone(&ws_hub),
+        Arc::clone(&sse_hub),
+        runtime.manifest().auth.user.clone(),
+    );
     // Single EmailAdapter for the whole runtime: the function runner's
     // ctx.email.send hook + the per-request route handlers below both
     // share it. Constructing per-request was fine when adapters were
@@ -931,6 +949,7 @@ fn start_server(
         let cl = Arc::clone(&change_log);
         let wh = Arc::clone(&ws_hub);
         let sh = Arc::clone(&sse_hub);
+        let cb = Arc::clone(&cluster_bus);
         let mc = Arc::clone(&magic_codes);
         let pr = Arc::clone(&plugin_reg);
         let rm = Arc::clone(&room_mgr);
@@ -3559,11 +3578,12 @@ fn start_server(
                 // Plugin handled the route.
                 (s, b, "application/json", false, Vec::new())
             } else {
-                let notifier = WsSseNotifier {
-                    ws: Arc::clone(&wh),
-                    sse: Arc::clone(&sh),
-                    auth_user: rt.manifest().auth.user.clone(),
-                };
+                let notifier = WsSseNotifier::with_cluster_bus(
+                    Arc::clone(&wh),
+                    Arc::clone(&sh),
+                    rt.manifest().auth.user.clone(),
+                    Arc::clone(&cb),
+                );
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),
                 };
@@ -3764,6 +3784,52 @@ fn start_server(
 
 fn json_error(code: &str, message: &str) -> String {
     pylon_router::json_error(code, message)
+}
+
+/// Construct the cluster bus from env.
+///
+/// Resolution order:
+///  - `PYLON_CLUSTER_BUS=redis://...` → [`pylon_cluster::RedisBus`].
+///  - unset or empty → [`pylon_cluster::NoopBus`].
+///
+/// `PYLON_CLUSTER_NAMESPACE` optionally prefixes the Redis channel —
+/// set this when multiple unrelated pylon deploys share a Redis
+/// instance (otherwise their mutations cross-talk and every machine
+/// rebroadcasts every other deploy's events).
+///
+/// Connection failures are fatal at boot — pylon refuses to start if
+/// you ask for cluster fanout but Redis is unreachable. Better to
+/// surface the misconfiguration loudly than to silently degrade to
+/// single-machine mode where peer machines stay deaf.
+fn build_cluster_bus() -> Arc<dyn pylon_cluster::ClusterBus> {
+    let url = std::env::var("PYLON_CLUSTER_BUS").unwrap_or_default();
+    if url.is_empty() {
+        tracing::info!(
+            "[cluster] PYLON_CLUSTER_BUS unset — running with single-machine fanout (NoopBus)"
+        );
+        return Arc::new(pylon_cluster::NoopBus::new());
+    }
+    let namespace = std::env::var("PYLON_CLUSTER_NAMESPACE").ok();
+    if url.starts_with("redis://") || url.starts_with("rediss://") {
+        match pylon_cluster::RedisBus::connect(&url, namespace.as_deref()) {
+            Ok(bus) => Arc::new(bus),
+            Err(e) => {
+                tracing::error!(
+                    "[cluster] PYLON_CLUSTER_BUS=\"{url}\" failed to connect: {e}. \
+                     Refusing to boot — multi-machine deploys MUST have a working bus, \
+                     and falling back to NoopBus would silently break cross-machine sync. \
+                     Either fix the URL or unset PYLON_CLUSTER_BUS to run single-machine."
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::error!(
+            "[cluster] PYLON_CLUSTER_BUS=\"{url}\" — only redis:// and rediss:// URLs are supported. \
+             Refusing to boot."
+        );
+        std::process::exit(1);
+    }
 }
 
 /// Verify a request carries one of: PYLON_ADMIN_TOKEN bearer,

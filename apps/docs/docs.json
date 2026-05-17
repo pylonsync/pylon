@@ -103,6 +103,7 @@
               "operations/deploy",
               "operations/sst",
               "operations/sizing",
+              "operations/scaling",
               "operations/token-rotation",
               "operations/incident",
               "operations/workers-costs"

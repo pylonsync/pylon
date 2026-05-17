@@ -3,6 +3,7 @@ members = [
   "crates/action",
   "crates/auth",
   "crates/cli",
+  "crates/cluster",
   "crates/core",
   "crates/crdt",
   "crates/functions",

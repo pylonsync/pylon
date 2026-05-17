@@ -931,10 +931,52 @@ use std::sync::Arc;
 /// now emit would leak credential material to any client whose User
 /// `allowRead` policy permitted the row at all (e.g. apps that let
 /// users look up displayNames across the org).
+///
+/// Also publishes every fanout to the [`pylon_cluster::ClusterBus`] so
+/// horizontally-scaled deploys propagate mutations across machines —
+/// a Stripe webhook landing on machine A fans to WS clients on B/C.
+/// When the bus is [`pylon_cluster::NoopBus`] (single-machine default)
+/// the publish call is a no-op.
 pub struct WsSseNotifier {
     pub ws: Arc<WsHub>,
     pub sse: Arc<SseHub>,
     pub auth_user: pylon_kernel::ManifestAuthUserConfig,
+    /// Cross-machine fanout transport. Set via
+    /// [`Self::with_cluster_bus`] at construction; defaults to a
+    /// no-op bus so single-machine builds pay zero overhead.
+    pub cluster_bus: Arc<dyn pylon_cluster::ClusterBus>,
+}
+
+impl WsSseNotifier {
+    /// Construct with no cluster fanout (single-machine deploy).
+    pub fn new(
+        ws: Arc<WsHub>,
+        sse: Arc<SseHub>,
+        auth_user: pylon_kernel::ManifestAuthUserConfig,
+    ) -> Self {
+        Self {
+            ws,
+            sse,
+            auth_user,
+            cluster_bus: Arc::new(pylon_cluster::NoopBus::new()),
+        }
+    }
+
+    /// Construct with an explicit cluster bus. Used by `server.rs` when
+    /// PYLON_CLUSTER_BUS is set — production multi-machine deploys.
+    pub fn with_cluster_bus(
+        ws: Arc<WsHub>,
+        sse: Arc<SseHub>,
+        auth_user: pylon_kernel::ManifestAuthUserConfig,
+        cluster_bus: Arc<dyn pylon_cluster::ClusterBus>,
+    ) -> Self {
+        Self {
+            ws,
+            sse,
+            auth_user,
+            cluster_bus,
+        }
+    }
 }
 
 impl pylon_router::ChangeNotifier for WsSseNotifier {
@@ -945,6 +987,9 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         // / SSE leg of the parity gap. Non-User events pass through
         // `maybe_project_user_row` unchanged (it short-circuits on
         // entity name).
+        //
+        // Cluster publish carries the SAME projected event the local
+        // hubs receive — peers must never see the raw row either.
         if event.entity == self.auth_user.entity {
             if let Some(data) = event.data.clone() {
                 let projected =
@@ -955,16 +1000,32 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
                 };
                 self.ws.broadcast(&projected_event);
                 self.sse.broadcast(&projected_event);
+                self.cluster_bus.publish(&pylon_cluster::Envelope::change(
+                    self.cluster_bus.instance_id(),
+                    &projected_event,
+                ));
                 return;
             }
         }
         self.ws.broadcast(event);
         self.sse.broadcast(event);
+        self.cluster_bus.publish(&pylon_cluster::Envelope::change(
+            self.cluster_bus.instance_id(),
+            event,
+        ));
     }
 
     fn notify_presence(&self, json: &str) {
         self.ws.broadcast_presence(json);
         self.sse.broadcast_message(json);
+        // Presence relays are cross-machine too — a typing indicator
+        // on machine A should reach clients on machine B.
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(json) {
+            self.cluster_bus.publish(&pylon_cluster::Envelope::presence(
+                self.cluster_bus.instance_id(),
+                payload,
+            ));
+        }
     }
 
     /// Encode a CRDT broadcast frame (1-byte type + length-prefixed
@@ -1034,7 +1095,103 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
                 tracing::warn!("[crdt] dropping binary frame for {entity}/{row_id}: {e}");
             }
         }
+        // Cross-machine: ship the raw snapshot bytes. The receiving
+        // machine's bus subscriber re-runs the same subscription
+        // filter + per-tenant policy gate as the local fanout above,
+        // so a User-entity CRDT frame (already short-circuited locally
+        // by the early return) never crosses machines — by virtue of
+        // never reaching this line for `User`.
+        self.cluster_bus.publish(&pylon_cluster::Envelope::crdt(
+            self.cluster_bus.instance_id(),
+            entity,
+            row_id,
+            snapshot,
+        ));
     }
+}
+
+/// Install the cluster-bus subscriber that fans inbound peer events
+/// to the local WS/SSE hubs. Call once at server startup AFTER the
+/// notifier is constructed.
+///
+/// Subscriber path mirrors [`WsSseNotifier::notify`] but skips the
+/// cluster publish (no re-broadcast — that's how feedback loops
+/// happen). The handler is the only place inbound peer events touch
+/// the hubs; the local mutation path goes through `notify` directly.
+pub fn install_cluster_bus_subscriber(
+    bus: &Arc<dyn pylon_cluster::ClusterBus>,
+    ws: Arc<WsHub>,
+    sse: Arc<SseHub>,
+    auth_user: pylon_kernel::ManifestAuthUserConfig,
+) {
+    use std::sync::Arc as StdArc;
+    let ws_handler = StdArc::clone(&ws);
+    let sse_handler = StdArc::clone(&sse);
+    let auth_user_handler = auth_user;
+    bus.subscribe(StdArc::new(move |envelope: pylon_cluster::Envelope| {
+        // Change events: same User projection + fanout as the local
+        // notifier. Already projected by the originating machine, but
+        // the projection is idempotent — re-running is cheap and
+        // defends against an older peer that hasn't been upgraded
+        // yet and ships unprojected rows.
+        if let Some(event) = envelope.as_change() {
+            if event.entity == auth_user_handler.entity {
+                if let Some(data) = event.data.clone() {
+                    let projected = pylon_router::maybe_project_user_row(
+                        &event.entity,
+                        data,
+                        &auth_user_handler,
+                    );
+                    let projected_event = pylon_sync::ChangeEvent {
+                        data: Some(projected),
+                        ..event
+                    };
+                    ws_handler.broadcast(&projected_event);
+                    sse_handler.broadcast(&projected_event);
+                    return;
+                }
+            }
+            ws_handler.broadcast(&event);
+            sse_handler.broadcast(&event);
+            return;
+        }
+        // Presence: opaque JSON, broadcast as-is. The originating
+        // machine already shaped it as the WS wire format expects.
+        if envelope.kind == "presence" {
+            if let Ok(json) = serde_json::to_string(&envelope.payload) {
+                ws_handler.broadcast_presence(&json);
+                sse_handler.broadcast_message(&json);
+            }
+            return;
+        }
+        // CRDT binary: re-encode the wire frame and fan to local
+        // subscribers. The User short-circuit happens implicitly —
+        // the originating machine never publishes User CRDT frames.
+        if let Some(crdt) = envelope.as_crdt() {
+            let subs = ws_handler
+                .subscriptions()
+                .subscribers(&crdt.entity, &crdt.row_id);
+            if subs.is_empty() {
+                return;
+            }
+            match pylon_router::encode_crdt_frame(
+                pylon_router::CRDT_FRAME_SNAPSHOT,
+                &crdt.entity,
+                &crdt.row_id,
+                &crdt.snapshot,
+            ) {
+                Ok(frame) => ws_handler.broadcast_binary_to(&subs, frame),
+                Err(e) => {
+                    tracing::warn!(
+                        "[cluster] inbound CRDT frame encode failed for {}/{}: {}",
+                        crdt.entity,
+                        crdt.row_id,
+                        e
+                    );
+                }
+            }
+        }
+    }));
 }
 
 /// Serialize a value to JSON, falling back to `{}` on failure.
@@ -4982,11 +5139,7 @@ mod user_projection_broadcast_tests {
         let ws = WsHub::new(Arc::clone(&policy));
         let sse = SseHub::new(Arc::clone(&policy));
 
-        let notifier = WsSseNotifier {
-            ws,
-            sse,
-            auth_user: manifest.auth.user.clone(),
-        };
+        let notifier = WsSseNotifier::new(ws, sse, manifest.auth.user.clone());
 
         // Build an event that carries `passwordHash` — emulates what
         // a TS mutation handler's `ctx.db.update("User", id, ...)`
@@ -5069,11 +5222,11 @@ mod user_projection_broadcast_tests {
         let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
         let ws = WsHub::new(Arc::clone(&policy));
         let sse = SseHub::new(Arc::clone(&policy));
-        let notifier = WsSseNotifier {
-            ws: Arc::clone(&ws),
-            sse: Arc::clone(&sse),
-            auth_user: manifest.auth.user.clone(),
-        };
+        let notifier = WsSseNotifier::new(
+            Arc::clone(&ws),
+            Arc::clone(&sse),
+            manifest.auth.user.clone(),
+        );
 
         // Use an unattached hub — broadcast() is a no-op when there
         // are no clients, so the test doesn't have to await any
@@ -5115,11 +5268,11 @@ mod user_projection_broadcast_tests {
         let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
         let ws = WsHub::new(Arc::clone(&policy));
         let sse = SseHub::new(Arc::clone(&policy));
-        let notifier = WsSseNotifier {
-            ws: Arc::clone(&ws),
-            sse: Arc::clone(&sse),
-            auth_user: manifest.auth.user.clone(),
-        };
+        let notifier = WsSseNotifier::new(
+            Arc::clone(&ws),
+            Arc::clone(&sse),
+            manifest.auth.user.clone(),
+        );
 
         // Should be a no-op and not touch WsHub::broadcast_binary_to
         // for the User entity. We can't easily intercept the
