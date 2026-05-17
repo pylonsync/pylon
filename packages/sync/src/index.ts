@@ -1692,16 +1692,21 @@ export class SyncEngine {
   }
 
   /**
-   * Public alias for `refreshResolvedSession`. Call after anything that
-   * mutates the server session (sign-in, sign-out, `/api/auth/select-org`)
-   * so the cached session and React subscribers pick up the change without
-   * waiting for the next pull.
+   * Public alias for `refreshResolvedSession`. Almost never needed by
+   * app code today — the server pushes a `session-changed` envelope
+   * over WS whenever the session is mutated (select-org, clear-org,
+   * session revoke, even from other tabs / admin tools / server
+   * actions), and the engine's WS handler refreshes automatically.
    *
-   * Most apps shouldn't need to call this directly — prefer the higher-
-   * level helpers below (`selectOrg`, `clearOrg`, `signOut`) which do the
-   * fetch + notify in one step, or the React `useSession()` hook which
-   * exposes the same helpers bound to the in-scope engine. This is the
-   * escape hatch for code that talks to /api/auth/* via its own client.
+   * Kept as an escape hatch for the rare case where you mutated the
+   * session via a path that doesn't go through the framework's auth
+   * surface (e.g. directly writing to the SessionStore from a Rust
+   * plugin that bypassed `notify_session_changed`).
+   *
+   * The `selectOrg` / `clearOrg` / `signOut` helpers below remain as
+   * convenience wrappers that combine the HTTP call with an immediate
+   * local refresh — useful when the same tab needs the new state
+   * before the WS round-trip lands.
    */
   notifySessionChanged(): Promise<void> {
     return this.refreshResolvedSession();
