@@ -106,6 +106,39 @@ export class LocalStore {
     return this.tables.get(entity)?.get(id) ?? null;
   }
 
+  /** Snapshot of every entity name with at least one local row. Used by
+   *  `SyncEngine.reconcile` to know which tables to diff against the
+   *  server's current truth. Returning a fresh array lets callers iterate
+   *  without holding a reference into the live map. */
+  entityNames(): string[] {
+    const names: string[] = [];
+    for (const [name, table] of this.tables) {
+      if (table.size > 0) names.push(name);
+    }
+    return names;
+  }
+
+  /**
+   * Remove a row recorded as deleted by the server-truth reconciler.
+   * Records a tombstone at `tombstoneSeq` so a stale insert/update
+   * replayed afterwards (e.g. from a slow WS frame) doesn't resurrect
+   * it. Callers pass the current sync cursor as `tombstoneSeq` — any
+   * future change events will have higher seqs and pass the tombstone
+   * check; older replays will be filtered.
+   *
+   * Differs from `optimisticDelete` which uses `MAX_SAFE_INTEGER` (the
+   * caller is asserting it knows the future). Reconciliation only knows
+   * what the server currently shows; a row re-created server-side later
+   * MUST be allowed back in.
+   */
+  reconcileRemove(entity: string, id: string, tombstoneSeq: number): boolean {
+    const table = this.tables.get(entity);
+    if (!table || !table.has(id)) return false;
+    table.delete(id);
+    this.recordTombstone(entity, id, tombstoneSeq);
+    return true;
+  }
+
   /** Check if `(entity, id)` has a tombstone. */
   private isTombstoned(entity: string, id: string, at_seq?: number): boolean {
     const tombSeq = this.tombstones.get(entity)?.get(id);
@@ -494,6 +527,20 @@ export interface SyncEngineConfig {
    * hosts (RN, Tauri, Workers) inject an adapter to persist these values.
    */
   storage?: import("./storage").Storage;
+  /**
+   * Debounce window (ms) between `reconcile()` calls. Reconcile triggers
+   * fire on connect, WS reconnect, and visibility-change; the debounce
+   * prevents the back-to-back triggers from re-fetching every entity
+   * twice within seconds. Default 2000ms.
+   */
+  reconcileMinIntervalMs?: number;
+  /**
+   * Opt out of the automatic visibility-change reconcile. The reconcile
+   * pass runs on connect/reconnect regardless; this only disables the
+   * tab-refocus trigger. Default: enabled (reconcile fires when the tab
+   * becomes visible).
+   */
+  reconcileOnVisibility?: boolean;
 }
 
 /**
@@ -834,6 +881,21 @@ export class SyncEngine {
       await this.persistence.saveCursor(this.cursor);
     }
 
+    // First-load reconciliation pass — closes the "phantom row" gap when
+    // the local IndexedDB has rows the server doesn't (deletes made by
+    // another surface while this tab was closed, or events that fell
+    // off the in-memory ChangeLog before this tab's cursor caught up).
+    // Fires after pull so we don't reconcile against rows that pull
+    // would have applied anyway. Errors are swallowed inside
+    // reconcileInner so a failed reconcile doesn't take down startup.
+    void this.reconcile();
+
+    // Wire the visibility-change reconcile so a tab that returns from
+    // the background (laptop wakes, tab unhidden) catches up against
+    // server truth without waiting for a WS event. Closes the "Stripe
+    // webhook on a sibling Fly machine" / "missed WS event" gap.
+    this.attachVisibilityListener();
+
     const transport = this.config.transport ?? "websocket";
     if (transport === "websocket") {
       this.connectWs();
@@ -842,6 +904,24 @@ export class SyncEngine {
     } else if (transport === "poll") {
       this.startPolling();
     }
+  }
+
+  private visibilityHandler: (() => void) | null = null;
+  private attachVisibilityListener(): void {
+    if (this.config.reconcileOnVisibility === false) return;
+    if (typeof document === "undefined") return;
+    if (this.visibilityHandler) return;
+    this.visibilityHandler = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!this.running) return;
+      // Reconcile fires only on tab-becomes-visible; the debounce in
+      // reconcile() collapses bursts from rapid background/foreground
+      // flips. Pull runs alongside so cursor catches up to anything
+      // emitted while the tab was hidden.
+      void this.pull();
+      void this.reconcile();
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
   }
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -867,6 +947,10 @@ export class SyncEngine {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.visibilityHandler && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = null;
     }
     this.setConnectionStatus("offline");
   }
@@ -919,6 +1003,14 @@ export class SyncEngine {
         const [entity, rowId] = key.split("\x00");
         this.sendWs({ type: "crdt-subscribe", entity, rowId });
       }
+      // Pull-on-open catches every event broadcast in the gap between
+      // the prior `pull()` returning and this socket actually opening.
+      // The WS has no replay-on-connect (it's just a fanout), so events
+      // emitted to other live clients during that window would otherwise
+      // be lost forever to this tab. Reconcile fires after the pull
+      // since pull is the cheap incremental path; reconcile is the
+      // server-truth backstop for anything pull couldn't replay.
+      void this.pull().then(() => this.reconcile());
     };
 
     // Bind binaryType BEFORE installing the handler so the first
@@ -1114,12 +1206,19 @@ export class SyncEngine {
    * Does NOT issue the subsequent pull — callers decide when to re-pull.
    * That keeps the lifecycle explicit: a caller can reset, swap config,
    * then pull.
+   *
+   * Clears IndexedDB too. Without that, locals that should have been
+   * deleted server-side (e.g. another client deleted rows while this tab
+   * was closed, then this tab's cursor 410'd) survived on disk and got
+   * rehydrated on the next page load — phantom rows that no purge of
+   * in-memory state could fix.
    */
   async resetReplica(): Promise<void> {
     this.cursor = { last_seq: 0 };
     this.store.clearAll();
     if (this.persistence) {
       try {
+        await this.persistence.clear();
         await this.persistence.saveCursor(this.cursor);
       } catch {
         /* best-effort */
@@ -1238,6 +1337,200 @@ export class SyncEngine {
    *  storm against a misconfigured server. Resets to 0 on any pull
    *  that doesn't throw a 410. */
   private consecutive_410s = 0;
+
+  /** Timestamp of the last `reconcile()` invocation. Used to debounce —
+   *  reconcile runs on connect, WS reconnect, AND visibility-change, so
+   *  a quick tab-flick after a normal reconnect shouldn't refetch every
+   *  entity twice within seconds. Configurable via `reconcileMinIntervalMs`. */
+  private lastReconcileAt = 0;
+
+  /** In-flight reconcile promise — coalesces concurrent callers so a
+   *  visibility-change firing during an in-progress reconcile doesn't
+   *  double the work. */
+  private inFlightReconcile: Promise<void> | null = null;
+
+  /**
+   * Reconcile the local replica against server truth.
+   *
+   * For each entity that has at least one local row, fetch the
+   * authoritative row set from `/api/entities/<entity>` (already
+   * policy-filtered) and apply the diff:
+   *
+   * - Local rows whose id is missing from the server set → removed.
+   * - Server rows whose JSON differs from local → overwritten.
+   * - Server rows the local replica doesn't have → inserted.
+   *
+   * This is the safety net the WS / pull path can't provide on its own:
+   *
+   *   - Deletes made by other surfaces (Mac SDK, server-side actions,
+   *     admin tools) while this client was offline can fall off the
+   *     in-memory ChangeLog before this client reconnects. The pull
+   *     then returns an empty diff and the local phantom rows persist
+   *     forever. Reconcile catches them.
+   *
+   *   - Mutations broadcast on a sibling Fly machine (multi-instance
+   *     deploys, autoscaled apps) never reach this WS. Reconcile is
+   *     the only mechanism that observes them.
+   *
+   *   - Events broadcast in the brief window between a pull completing
+   *     and the WS opening get dropped because the WS has no replay-
+   *     on-connect; reconcile makes those eventually-consistent.
+   *
+   * Debounced via `lastReconcileAt` so a flurry of triggers
+   * (reconnect + visibility-change firing back-to-back) coalesces to
+   * one network round per entity.
+   *
+   * Pass an explicit entity list to scope the reconcile (callers like
+   * `db.useQueryOne` that know what they care about). When called with
+   * no arg, every entity with local rows is checked.
+   */
+  async reconcile(entities?: string[]): Promise<void> {
+    if (this.inFlightReconcile) return this.inFlightReconcile;
+    const minIntervalMs = this.config.reconcileMinIntervalMs ?? 2_000;
+    const now = Date.now();
+    if (entities === undefined && now - this.lastReconcileAt < minIntervalMs) {
+      return;
+    }
+    const work = this.reconcileInner(entities).finally(() => {
+      this.inFlightReconcile = null;
+      this.lastReconcileAt = Date.now();
+    });
+    this.inFlightReconcile = work;
+    return work;
+  }
+
+  private async reconcileInner(entities?: string[]): Promise<void> {
+    const names = entities ?? this.store.entityNames();
+    if (names.length === 0) return;
+    // Tombstone seq for any local row the server doesn't return. Using
+    // the current cursor means future inserts (which have higher seqs)
+    // bypass the tombstone — re-creation server-side still propagates.
+    const tombstoneSeq = this.cursor.last_seq;
+    for (const entity of names) {
+      let serverRows: Row[];
+      try {
+        serverRows = await this.fetchEntityRows(entity);
+      } catch (err) {
+        // Network errors are expected (offline, transient 5xx). Skip
+        // this entity; the next reconcile trigger will retry.
+        const status = (err as { status?: number })?.status;
+        if (status === 403 || status === 404) {
+          // Entity is no longer readable (policy revoked) or removed
+          // from the manifest. Drop every local row for it — keeping
+          // them around just leaks invisible state.
+          await this.dropEntity(entity, tombstoneSeq);
+        }
+        continue;
+      }
+      await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);
+    }
+  }
+
+  /** Fetch every row for an entity. Uses cursor pagination so big tables
+   *  don't blow past server-side limits; loops until `has_more` is false
+   *  or a safety cap is hit. */
+  private async fetchEntityRows(entity: string): Promise<Row[]> {
+    const out: Row[] = [];
+    let cursor: string | null = null;
+    // 200 pages × 100 per page = 20k rows. Anything larger should not be
+    // mirrored client-side anyway — see useInfiniteQuery for huge tables.
+    for (let page = 0; page < 200; page++) {
+      const qs: string = cursor
+        ? `?limit=100&after=${encodeURIComponent(cursor)}`
+        : `?limit=100`;
+      const resp: {
+        data: Row[];
+        next_cursor: string | null;
+        has_more: boolean;
+      } = await this.request("GET", `/api/entities/${entity}/cursor${qs}`);
+      for (const row of resp.data) out.push(row);
+      if (!resp.has_more || !resp.next_cursor) break;
+      cursor = resp.next_cursor;
+    }
+    return out;
+  }
+
+  private async applyEntityReconcile(
+    entity: string,
+    serverRows: Row[],
+    tombstoneSeq: number,
+  ): Promise<void> {
+    const serverIds = new Set<string>();
+    const changes: ChangeEvent[] = [];
+    for (const row of serverRows) {
+      const id = (row as { id?: unknown }).id;
+      if (typeof id !== "string" || id.length === 0) continue;
+      serverIds.add(id);
+      const local = this.store.get(entity, id);
+      if (!local) {
+        changes.push({
+          seq: tombstoneSeq + 1,
+          entity,
+          row_id: id,
+          kind: "insert",
+          data: row,
+          timestamp: "",
+        });
+      } else if (rowsDiffer(local, row)) {
+        changes.push({
+          seq: tombstoneSeq + 1,
+          entity,
+          row_id: id,
+          kind: "update",
+          data: row,
+          timestamp: "",
+        });
+      }
+    }
+    if (changes.length > 0) {
+      await this.store.applyChangesAsync(changes);
+    }
+    // Removals: every local row whose id isn't in the server set is
+    // stale. Tombstone with the current cursor so future legitimate
+    // re-creations still flow through.
+    const locals = this.store.list(entity);
+    let removed = false;
+    for (const local of locals) {
+      const id = (local as { id?: unknown }).id;
+      if (typeof id !== "string") continue;
+      if (!serverIds.has(id)) {
+        if (this.store.reconcileRemove(entity, id, tombstoneSeq)) {
+          removed = true;
+          if (this.persistence) {
+            try {
+              await this.persistence.deleteRow(entity, id);
+            } catch {
+              /* best-effort */
+            }
+          }
+        }
+      }
+    }
+    if (removed) this.store.notify();
+  }
+
+  private async dropEntity(
+    entity: string,
+    tombstoneSeq: number,
+  ): Promise<void> {
+    const locals = this.store.list(entity);
+    let removed = false;
+    for (const local of locals) {
+      const id = (local as { id?: unknown }).id;
+      if (typeof id !== "string") continue;
+      if (this.store.reconcileRemove(entity, id, tombstoneSeq)) {
+        removed = true;
+        if (this.persistence) {
+          try {
+            await this.persistence.deleteRow(entity, id);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    }
+    if (removed) this.store.notify();
+  }
 
   /**
    * Fetch `/api/auth/me` and update the cached `_resolvedSession`. Callers:
@@ -1668,6 +1961,30 @@ export async function getServerData(
   }
 
   return { entities: entityData, cursor };
+}
+
+/**
+ * Stable equality check for reconciler diffs. Keys are sorted so
+ * `{a:1,b:2}` and `{b:2,a:1}` compare equal — without that, every
+ * reconcile pass would think every row had changed (insertion order
+ * varies by mutation path on the server). Recursive on objects only;
+ * arrays and primitives use their natural shape.
+ */
+function rowsDiffer(a: Row, b: Row): boolean {
+  return stableStringify(a) !== stableStringify(b);
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => stableStringify(v)).join(",") + "]";
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const parts = keys.map(
+    (k) => JSON.stringify(k) + ":" + stableStringify(obj[k]),
+  );
+  return "{" + parts.join(",") + "}";
 }
 
 // ---------------------------------------------------------------------------
