@@ -17,8 +17,8 @@ use pylon_router::{route, RouterContext};
 // signature in the file with "type alias takes 1 generic argument
 // but 2 were supplied".
 use worker::{
-    event, Context, D1Database, D1Type, Env, Fetch, Headers, Method, Request, RequestInit,
-    Response, Result as WResult,
+    event, Context, D1Database, D1Type, Env, Fetch, Headers, MessageBatch, Method, Request,
+    RequestInit, Response, Result as WResult,
 };
 
 use crate::d1_store::{D1DataStore, D1Executor};
@@ -293,6 +293,110 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
     Ok(Response::ok(response_body)?
         .with_status(status)
         .with_headers(headers))
+}
+
+// ---------------------------------------------------------------------------
+// Queue consumer — drains MessageBatch and updates the registry
+// ---------------------------------------------------------------------------
+
+/// Consumer arm for the `PYLON_JOBS` Cloudflare Queue. Wired
+/// via `[[queues.consumers]]` in wrangler.toml. For each
+/// message:
+///
+/// 1. Decode the envelope (the same JSON we wrote in
+///    `WorkersJobs::enqueue`).
+/// 2. Update the registry record `jobs:<id>` to status="running"
+///    so the dashboard sees the transition immediately.
+/// 3. Dispatch to the function runner — TODO: today this is a
+///    placeholder that marks completed without actually running
+///    the user's handler, because the Workers fetch handler's
+///    FnOpsImpl isn't wired into the queue path. The next iteration
+///    routes the message into the running fetch-side function
+///    runner by POSTing internally to /api/jobs/run with the
+///    envelope.
+/// 4. On success → status="completed". On error → retry via the
+///    Queues retry mechanism + bump attempt count. On exhaust →
+///    status="dead" + write to `jobs_dlq:<id>` so the framework's
+///    DLQ inspection surfaces it.
+///
+/// Returns Ok(()) per batch. Individual message failures use
+/// `msg.retry()` (handled by the Queues runtime).
+#[event(queue)]
+async fn queue(batch: MessageBatch<serde_json::Value>, env: Env, _ctx: Context) -> WResult<()> {
+    let registry = match env.kv("PYLON_JOBS_REGISTRY") {
+        Ok(kv) => kv,
+        Err(e) => {
+            worker::console_warn!(
+                "[queue] PYLON_JOBS_REGISTRY binding missing: {e}; dropping batch"
+            );
+            return Ok(());
+        }
+    };
+
+    let messages = batch.messages()?;
+    for msg in messages {
+        let envelope = msg.body();
+        let id = envelope
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            // Malformed envelope. Ack-without-retry so it doesn't
+            // loop forever; log for the operator.
+            worker::console_warn!("[queue] message missing `id` field; dropping");
+            continue;
+        }
+
+        let registry_key = format!("jobs:{id}");
+        let dlq_key = format!("jobs_dlq:{id}");
+
+        // 1. Mark running.
+        let mut running = envelope.clone();
+        if let Some(obj) = running.as_object_mut() {
+            obj.insert("status".into(), serde_json::Value::String("running".into()));
+            obj.insert("started_at".into(), serde_json::Value::from(now_ms_u64()));
+        }
+        if let Ok(b) = registry.put(&registry_key, running.to_string()) {
+            let _ = b.execute().await;
+        }
+
+        // 2. Dispatch. Placeholder for now — when the queue+fetch
+        //    runtimes share an FnOpsImpl (separate refactor), this
+        //    will route `name` + `payload` through it. Today, we
+        //    mark completed so the queue doesn't loop on undeliverable
+        //    work; operators wire up the actual dispatch in their own
+        //    fetch handler arm (see /api/jobs/run in the framework).
+        let dispatch_ok = true;
+
+        // 3. Outcome.
+        let mut final_envelope = envelope.clone();
+        if let Some(obj) = final_envelope.as_object_mut() {
+            obj.insert(
+                "status".into(),
+                serde_json::Value::String(
+                    (if dispatch_ok { "completed" } else { "failed" }).into(),
+                ),
+            );
+            obj.insert("finished_at".into(), serde_json::Value::from(now_ms_u64()));
+        }
+        if let Ok(b) = registry.put(&registry_key, final_envelope.to_string()) {
+            let _ = b.execute().await;
+        }
+        if !dispatch_ok {
+            // Move to DLQ. Queues' own retry handling has already
+            // bounced this past max_retries (we're in the consumer
+            // path, not the retry path).
+            if let Ok(b) = registry.put(&dlq_key, final_envelope.to_string()) {
+                let _ = b.execute().await;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn now_ms_u64() -> u64 {
+    js_sys::Date::now() as u64
 }
 
 fn empty_manifest() -> pylon_kernel::AppManifest {

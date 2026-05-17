@@ -160,6 +160,32 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --bin pylon --target ${{ matrix.target }}
 
+  # Workers target build check. pylon-workers + transitives
+  # (pylon-auth, pylon-router) must compile to wasm32 or every
+  # Cloudflare Workers deployment stays broken — which is exactly
+  # how this target slipped into unbuildable state historically.
+  # Doesn't build the worker bundle (that needs `worker-build`
+  # which downloads a wasm-opt binary not friendly to caching);
+  # `cargo check` is enough to catch the regression class.
+  wasm32-workers:
+    name: wasm32 workers check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
+      - run: cargo check -p pylon-workers --features workers --target wasm32-unknown-unknown
+
   typescript:
     name: typescript packages
     needs: changes
@@ -237,7 +263,7 @@ jobs:
 
   ci-passed:
     name: CI passed
-    needs: [changes, fmt, clippy, test, build, typescript, create-pylon-smoke, audit, swift]
+    needs: [changes, fmt, clippy, test, build, wasm32-workers, typescript, create-pylon-smoke, audit, swift]
     if: always()
     runs-on: ubuntu-latest
     steps:
