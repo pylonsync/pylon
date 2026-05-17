@@ -81,6 +81,125 @@ pub fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
     Ok(manifest_json)
 }
 
+/// Scan a package.json blob for dep names whose version specifier is
+/// `workspace:*` (or `workspace:^*`/`workspace:~*` — bun accepts all
+/// three). Returns the dep names; the caller decides whether they're
+/// safe to strip (i.e. already satisfied by node_modules).
+///
+/// Tiny custom scan rather than full JSON parsing because we don't
+/// want to take a serde_json hit in the hot path — package.json is
+/// read on every `pylon start`. The format we care about is stable
+/// (`"name": "workspace:*"` inside a `dependencies` /
+/// `devDependencies` / `peerDependencies` / `optionalDependencies`
+/// object) and the regex-style parse is good enough.
+fn scan_workspace_deps(pkg_json: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // Match `"<name>": "workspace:*"` (with optional `^` or `~`
+    // after the colon) anywhere in the file. Quoting is canonical;
+    // bun rewrites lockfiles to this form, and humans rarely
+    // hand-format with extra whitespace.
+    let mut i = 0;
+    let bytes = pkg_json.as_bytes();
+    while let Some(rel) = pkg_json[i..].find("\"workspace:") {
+        let start = i + rel;
+        // Walk back to find the preceding `"<name>"`.
+        let before = &pkg_json[..start];
+        let Some(colon) = before.rfind(':') else {
+            i = start + 1;
+            continue;
+        };
+        let key_seg = &before[..colon];
+        let Some(close_q) = key_seg.rfind('"') else {
+            i = start + 1;
+            continue;
+        };
+        let key_seg2 = &key_seg[..close_q];
+        let Some(open_q) = key_seg2.rfind('"') else {
+            i = start + 1;
+            continue;
+        };
+        let name = &before[open_q + 1..close_q];
+        if !name.is_empty() && !name.contains('"') {
+            out.push(name.to_string());
+        }
+        i = start + 1;
+        // bytes is referenced just to keep the borrow checker calm
+        // about the slice indexing above; unused otherwise.
+        let _ = bytes;
+    }
+    out
+}
+
+/// Strip the given dep names from package.json by replacing each
+/// `"<name>": "workspace:*",?` line with nothing, then cleaning up
+/// any stray trailing-comma artifact. Preserves indentation and
+/// non-dep content verbatim so the temp file remains valid JSON.
+///
+/// JSON-aware enough for the package.json shape (no embedded
+/// {}-escaped strings that would confuse the trim), not a general
+/// JSON rewriter.
+fn strip_workspace_deps_from_pkg_json(pkg_json: &str, deps: &[String]) -> String {
+    let mut out = pkg_json.to_string();
+    for name in deps {
+        // Match `"<name>": "workspace:..."` with optional trailing
+        // comma and surrounding whitespace. The dep object always
+        // has each entry on its own line in practice (bun + npm both
+        // emit that shape), so deleting the whole line is safe.
+        let needle = format!("\"{name}\"");
+        loop {
+            let Some(pos) = out.find(&needle) else { break };
+            // Only strip if this occurrence is followed by `:
+            // "workspace:` — guards against the same string appearing
+            // elsewhere (e.g. as a value, in a comment, etc.).
+            let after = &out[pos + needle.len()..];
+            let trimmed = after.trim_start();
+            if !trimmed.starts_with(':') {
+                break;
+            }
+            let after_colon = trimmed[1..].trim_start();
+            if !after_colon.starts_with("\"workspace:") {
+                break;
+            }
+            // Locate end of the line (including any trailing comma
+            // and the newline itself).
+            let line_end = out[pos..]
+                .find('\n')
+                .map(|n| pos + n + 1)
+                .unwrap_or(out.len());
+            // Walk back to the start of the line so we drop the full
+            // line, not a mid-line fragment.
+            let line_start = out[..pos].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            out.replace_range(line_start..line_end, "");
+        }
+    }
+    // Clean up `,\n  }` / `,\n}` artifacts left behind when the
+    // stripped entry was the last in its object — JSON parsers
+    // (including bun's) reject trailing commas.
+    let cleaned: String = out
+        .lines()
+        .scan(false, |prev_was_comma_only, line| {
+            let trimmed = line.trim_start();
+            if *prev_was_comma_only && (trimmed.starts_with('}') || trimmed.starts_with(']')) {
+                *prev_was_comma_only = false;
+            }
+            *prev_was_comma_only = trimmed.ends_with(',');
+            Some(line.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Final pass: drop ",\n  }" → "\n  }" so we don't ship trailing
+    // commas into bun. Done as text replace rather than full reparse
+    // because the package.json shape we touch is well-defined.
+    let cleaned = cleaned
+        .replace(",\n  }", "\n  }")
+        .replace(",\n  ]", "\n  ]")
+        .replace(",\n\t}", "\n\t}")
+        .replace(",\n\t]", "\n\t]")
+        .replace(",\n}", "\n}")
+        .replace(",\n]", "\n]");
+    cleaned
+}
+
 /// Walk up from `entry_file`'s directory to the nearest
 /// `package.json`. Used to decide where (and whether) to run
 /// `bun install`. Returns `None` when no package.json is found by
@@ -162,10 +281,77 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         }
     }
 
+    // workspace:* dep handling. Apps authored inside a monorepo
+    // (the pylon-chat example, anyone else using bun workspaces)
+    // pin their @pylonsync/* deps as `workspace:*` so local dev
+    // gets the live source. In Pylon Cloud, the base image has
+    // already symlinked those packages into node_modules — bun
+    // install in the deployed container has no workspace root to
+    // resolve `workspace:*` against, so it dies with "Workspace
+    // dependency X not found" and the machine enters a restart
+    // loop. Symptom on 2026-05-17: chat-api spent ~hours bouncing.
+    //
+    // Detect this and write a temp package.json with workspace:*
+    // entries stripped (only those whose target is already in
+    // node_modules — anything missing should still error so the
+    // operator notices). Run install against the temp, restore
+    // the original on success/failure. Self-host monorepo dev
+    // never hits this branch because bun install resolves the
+    // workspace deps normally.
+    let pkg_json_text = std::fs::read_to_string(&pkg_json).map_err(|e| Diagnostic {
+        severity: Severity::Error,
+        code: "PKG_JSON_READ_FAILED".into(),
+        message: format!("Failed to read {}: {e}", pkg_json.display()),
+        span: None,
+        hint: None,
+    })?;
+    let workspace_deps = scan_workspace_deps(&pkg_json_text);
+    let satisfied_workspace_deps: Vec<&String> = workspace_deps
+        .iter()
+        .filter(|name| node_modules.join(name).join("package.json").is_file())
+        .collect();
+    // Stripping only kicks in when we DID find workspace:* entries
+    // AND every one of them is satisfied by an existing
+    // node_modules entry (typically a symlink the base image
+    // pre-populated). Mixed states fall through to the normal
+    // install path, which will fail loudly so the operator sees
+    // exactly which dep is missing.
+    let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
+    let restore_after =
+        if !workspace_deps.is_empty() && satisfied_workspace_deps.len() == workspace_deps.len() {
+            let stripped = strip_workspace_deps_from_pkg_json(&pkg_json_text, &workspace_deps);
+            if let Err(e) = std::fs::rename(&pkg_json, &pkg_json_backup_path) {
+                return Err(Diagnostic {
+                    severity: Severity::Error,
+                    code: "PKG_JSON_BACKUP_FAILED".into(),
+                    message: format!(
+                        "Failed to back up package.json before stripping workspace:* deps: {e}"
+                    ),
+                    span: None,
+                    hint: None,
+                });
+            }
+            if let Err(e) = std::fs::write(&pkg_json, stripped) {
+                // Restore before bailing so the next attempt sees the
+                // original file, not a half-state.
+                let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
+                return Err(Diagnostic {
+                    severity: Severity::Error,
+                    code: "PKG_JSON_WRITE_FAILED".into(),
+                    message: format!("Failed to write stripped package.json: {e}"),
+                    span: None,
+                    hint: None,
+                });
+            }
+            true
+        } else {
+            false
+        };
+
     let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
     let mut cmd = std::process::Command::new("bun");
     cmd.arg("install").current_dir(&pkg_dir);
-    if has_lockfile {
+    if has_lockfile && !restore_after {
         // `--frozen-lockfile` makes the install deterministic and
         // fails if the lockfile is out of sync with package.json.
         // That's the right default for Pylon Cloud (we want every
@@ -173,19 +359,37 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         // for self-host (the user is the source of truth for what
         // ships). The error message bun emits in this case is
         // specific enough that we don't need to rewrite it.
+        //
+        // Skipped on the strip-workspace-deps path because the
+        // committed lockfile WILL be out of sync with the
+        // temporarily-stripped package.json — frozen-lockfile would
+        // false-positive there and abort an otherwise valid deploy.
         cmd.arg("--frozen-lockfile");
     }
 
-    let output = cmd.output().map_err(|e| Diagnostic {
-        severity: Severity::Error,
-        code: "BUN_EXEC_FAILED".into(),
-        message: format!(
-            "Failed to execute `bun install` in {}: {e}",
-            pkg_dir.display()
-        ),
-        span: None,
-        hint: Some("Ensure bun is installed and available on PATH".into()),
+    let output = cmd.output().map_err(|e| {
+        if restore_after {
+            let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
+        }
+        Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_EXEC_FAILED".into(),
+            message: format!(
+                "Failed to execute `bun install` in {}: {e}",
+                pkg_dir.display()
+            ),
+            span: None,
+            hint: Some("Ensure bun is installed and available on PATH".into()),
+        }
     })?;
+
+    // Always restore the original package.json before returning so
+    // callers see the file as the user authored it (matters for
+    // subsequent `pylon dev` watcher restarts, `pylon codegen` runs,
+    // and any operator inspecting the running container).
+    if restore_after {
+        let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -304,5 +508,106 @@ mod tests {
             result.is_ok(),
             "fresh marker path should not invoke bun: {result:?}"
         );
+    }
+
+    /// Regression: chat-example's package.json uses `workspace:*`
+    /// for @pylonsync/*. Without scan_workspace_deps, the deployed
+    /// container's `bun install` died with "Workspace dependency X
+    /// not found" → restart loop. Confirms we detect both styles
+    /// bun normalizes to.
+    #[test]
+    fn scan_workspace_deps_finds_workspace_specifiers() {
+        let pkg_json = r#"{
+            "name": "chat-example",
+            "dependencies": {
+                "@pylonsync/functions": "workspace:*",
+                "@pylonsync/react": "workspace:^*",
+                "@pylonsync/sdk": "workspace:~*",
+                "stripe": "^14.0.0"
+            }
+        }"#;
+        let mut deps = scan_workspace_deps(pkg_json);
+        deps.sort();
+        assert_eq!(
+            deps,
+            vec![
+                "@pylonsync/functions".to_string(),
+                "@pylonsync/react".to_string(),
+                "@pylonsync/sdk".to_string(),
+            ],
+        );
+    }
+
+    /// Non-workspace values must not be misidentified — e.g. a
+    /// version string that happens to contain "workspace" inside
+    /// a comment-shaped field. Sanity guard against the regex-style
+    /// scan over-matching.
+    #[test]
+    fn scan_workspace_deps_ignores_non_workspace_values() {
+        let pkg_json = r#"{
+            "description": "uses workspace: pattern in docs",
+            "dependencies": {
+                "stripe": "^14.0.0",
+                "@sentry/bun": "8.0.0"
+            }
+        }"#;
+        assert!(scan_workspace_deps(pkg_json).is_empty());
+    }
+
+    /// Strip should leave a parse-clean JSON behind — no trailing
+    /// commas, no half-deleted entries. We don't reparse the result
+    /// (no serde_json dep) but check the shape via simple string
+    /// invariants the bun parser cares about.
+    #[test]
+    fn strip_workspace_deps_leaves_valid_json_shape() {
+        let pkg_json = r#"{
+  "name": "chat-example",
+  "dependencies": {
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sdk": "workspace:*"
+  }
+}"#;
+        let stripped = strip_workspace_deps_from_pkg_json(
+            pkg_json,
+            &[
+                "@pylonsync/functions".into(),
+                "@pylonsync/react".into(),
+                "@pylonsync/sdk".into(),
+            ],
+        );
+        // None of the workspace entries should survive.
+        assert!(!stripped.contains("workspace:"));
+        assert!(!stripped.contains("@pylonsync/functions"));
+        // No trailing-comma artifacts — the most common shape that
+        // breaks bun's parser when we strip the last dep in an
+        // object.
+        assert!(!stripped.contains(",\n  }"));
+        assert!(!stripped.contains(",\n}"));
+        // The rest of the package.json structure remains intact.
+        assert!(stripped.contains("\"name\": \"chat-example\""));
+        assert!(stripped.contains("\"dependencies\""));
+    }
+
+    /// Mixed deps: only the workspace ones get stripped, the rest
+    /// stay in place. Important because the chat example will
+    /// eventually grow non-pylon deps that DO need installing.
+    #[test]
+    fn strip_workspace_deps_preserves_non_workspace_deps() {
+        let pkg_json = r#"{
+  "dependencies": {
+    "@pylonsync/functions": "workspace:*",
+    "stripe": "^14.0.0",
+    "@pylonsync/sdk": "workspace:*"
+  }
+}"#;
+        let stripped = strip_workspace_deps_from_pkg_json(
+            pkg_json,
+            &["@pylonsync/functions".into(), "@pylonsync/sdk".into()],
+        );
+        assert!(stripped.contains("\"stripe\": \"^14.0.0\""));
+        assert!(!stripped.contains("@pylonsync/functions"));
+        assert!(!stripped.contains("@pylonsync/sdk"));
+        assert!(!stripped.contains("workspace:"));
     }
 }
