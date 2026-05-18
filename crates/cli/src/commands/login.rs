@@ -25,8 +25,29 @@ use crate::cloud_client::{
 };
 use crate::output;
 
-pub fn run(_args: &[String], json_mode: bool) -> ExitCode {
+pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let cloud = cloud_url();
+
+    // `pylon login --code XXXX-XXXX` — agent-onboarding handoff.
+    // Dashboard mints a real token, stashes it behind a one-time
+    // 8-char code, shows the code to the user inside a paste-ready
+    // Claude Code prompt. The agent then runs THIS path to redeem.
+    // Trades the 6-step "click, copy, paste, return" loop for a
+    // single autonomous step.
+    let code_flag = args
+        .windows(2)
+        .find(|w| w[0] == "--code")
+        .map(|w| w[1].clone())
+        .or_else(|| {
+            args.iter()
+                .find(|a| a.starts_with("--code="))
+                .map(|a| a.trim_start_matches("--code=").to_string())
+        });
+
+    if let Some(code) = code_flag {
+        return run_with_code(&cloud, &code, json_mode);
+    }
+
     let token_url = format!(
         "{}/dashboard/account/cli-tokens",
         cloud.trim_end_matches('/')
@@ -91,6 +112,75 @@ pub fn run(_args: &[String], json_mode: bool) -> ExitCode {
         println!("✓ Signed in as {email}");
         println!("  Cloud: {cloud}");
         println!("  You can now run `pylon deploy --target cloud` from any Pylon project.");
+    }
+    ExitCode::Ok
+}
+
+/// `pylon login --code <code>` — exchange a one-time auth code minted
+/// in the dashboard for a real API key. Used by the agent-onboarding
+/// "Connect Claude Code" flow: dashboard stashes the token behind a
+/// short code, the agent redeems it without the token ever appearing
+/// in chat history.
+fn run_with_code(cloud: &str, code: &str, json_mode: bool) -> ExitCode {
+    use crate::cloud_client::post_json;
+    use serde::Deserialize;
+
+    #[derive(serde::Serialize)]
+    struct Args<'a> {
+        code: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct Out {
+        token: String,
+        #[allow(dead_code)]
+        label: String,
+        user: UserOut,
+    }
+    #[derive(Deserialize)]
+    struct UserOut {
+        email: String,
+        #[allow(dead_code)]
+        id: String,
+    }
+
+    let exchange_creds = Credentials {
+        cloud_url: cloud.to_string(),
+        token: String::new(),
+        user_email: None,
+    };
+    let resp: Out = match post_json(
+        &exchange_creds,
+        "/api/fn/exchangeCliAuthCode",
+        &Args { code },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&format!("Exchange failed: {e}"));
+            return ExitCode::Usage;
+        }
+    };
+
+    let creds = Credentials {
+        cloud_url: cloud.to_string(),
+        token: resp.token,
+        user_email: Some(resp.user.email.clone()),
+    };
+    if let Err(e) = save_credentials(&creds) {
+        output::print_error(&format!("Failed to save credentials: {e}"));
+        return ExitCode::Error;
+    }
+
+    if json_mode {
+        let out = serde_json::json!({
+            "ok": true,
+            "cloud_url": cloud,
+            "user_email": resp.user.email,
+            "via": "code-exchange",
+        });
+        println!("{}", serde_json::to_string(&out).unwrap_or_default());
+    } else {
+        println!("✓ Signed in as {}", resp.user.email);
+        println!("  Cloud: {cloud}");
     }
     ExitCode::Ok
 }
