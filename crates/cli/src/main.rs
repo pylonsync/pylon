@@ -4,6 +4,7 @@ mod cloud_client;
 mod commands;
 mod manifest;
 mod output;
+mod project_context;
 mod studio_config;
 mod swift_codegen;
 
@@ -71,9 +72,18 @@ fn run() -> ExitCode {
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
+        Some("data") => commands::cloud_data::run(&args, json_mode),
+        Some("db") => commands::cloud_db::run(&args, json_mode),
+        Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
+        Some("domains") => commands::cloud_domains::run(&args, json_mode),
         Some("login") => commands::login::run(&args, json_mode),
         Some("logout") => commands::login::run_logout(&args, json_mode),
+        Some("logs") => commands::cloud_logs::run(&args, json_mode),
+        Some("members") => commands::cloud_members::run(&args, json_mode),
         Some("migrate") => commands::migrate::run(&args, json_mode),
+        Some("projects") => commands::cloud_projects::run(&args, json_mode),
+        Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
+        Some("status") => commands::cloud_status::run(&args, json_mode),
         Some("plugins") => commands::plugins::run(&args, json_mode),
         Some("schema") => match positional.get(1).copied() {
             Some("check") => commands::schema::run_check(&args, json_mode),
@@ -130,10 +140,37 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 21] = [
-    "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env", "explain", "init",
-    "login", "logout", "migrate", "plugins", "restore", "schema", "seed", "start", "test",
-    "version", "help",
+const TOP_LEVEL_COMMANDS: [&str; 30] = [
+    "backup",
+    "build",
+    "cache",
+    "codegen",
+    "data",
+    "db",
+    "deploy",
+    "deployments",
+    "dev",
+    "doctor",
+    "domains",
+    "env",
+    "explain",
+    "init",
+    "login",
+    "logout",
+    "logs",
+    "members",
+    "migrate",
+    "plugins",
+    "projects",
+    "restore",
+    "schema",
+    "secrets",
+    "seed",
+    "start",
+    "status",
+    "test",
+    "version",
+    "help",
 ];
 
 const SCHEMA_SUBCOMMANDS: [&str; 5] = ["check", "diff", "push", "inspect", "history"];
@@ -157,6 +194,15 @@ fn print_usage() {
     println!();
     println!("  login                     Authenticate against Pylon Cloud");
     println!("  logout                    Remove stored Pylon Cloud credentials");
+    println!("  projects [list|use|current]   List / set / show current cloud project");
+    println!("  secrets  [list|set|rm|import] Manage project secrets");
+    println!("  logs tail                 Tail the project's request log");
+    println!("  domains  [list|add|verify|rm] Manage custom domains");
+    println!("  db       [list|backup|restore] Database snapshots");
+    println!("  data     [entities|list|get] Browse entity rows from the shell");
+    println!("  deployments [list|rollback]   List + roll back deploys");
+    println!("  members  [list|invite]    Org members");
+    println!("  status                    One-glance project health");
     println!();
     println!("  schema check              Validate schema");
     println!("  schema diff               Show schema changes");
