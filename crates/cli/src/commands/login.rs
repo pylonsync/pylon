@@ -27,7 +27,10 @@ use crate::output;
 
 pub fn run(_args: &[String], json_mode: bool) -> ExitCode {
     let cloud = cloud_url();
-    let token_url = format!("{}/dashboard/account/cli-tokens", cloud.trim_end_matches('/'));
+    let token_url = format!(
+        "{}/dashboard/account/cli-tokens",
+        cloud.trim_end_matches('/')
+    );
 
     if !json_mode {
         println!();

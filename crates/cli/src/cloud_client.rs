@@ -81,8 +81,8 @@ pub fn save_credentials(creds: &Credentials) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(creds)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json =
+        serde_json::to_string_pretty(creds).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&tmp, json)?;
     #[cfg(unix)]
     {
@@ -145,9 +145,9 @@ where
         .set("Content-Type", "application/json")
         .send_json(serde_json::to_value(body).map_err(|e| e.to_string())?);
     match res {
-        Ok(resp) => resp.into_json::<O>().map_err(|e| {
-            format!("Cloud returned 200 but the body wasn't the expected shape: {e}")
-        }),
+        Ok(resp) => resp
+            .into_json::<O>()
+            .map_err(|e| format!("Cloud returned 200 but the body wasn't the expected shape: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             Err(format!("Cloud returned {code}: {body}"))
@@ -175,9 +175,9 @@ where
         .set("Content-Type", content_type)
         .send_bytes(bytes);
     match res {
-        Ok(resp) => resp.into_json::<O>().map_err(|e| {
-            format!("Cloud returned 200 but the body wasn't the expected shape: {e}")
-        }),
+        Ok(resp) => resp
+            .into_json::<O>()
+            .map_err(|e| format!("Cloud returned 200 but the body wasn't the expected shape: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             Err(format!("Cloud returned {code}: {body}"))

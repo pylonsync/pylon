@@ -124,14 +124,14 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         project_slug: project_slug.clone(),
         tarball_base64: STANDARD.encode(&tarball),
     };
-    let resp: UploadResponse =
-        match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body) {
-            Ok(r) => r,
-            Err(e) => {
-                output::print_error(&format!("Cloud deploy failed: {e}"));
-                return ExitCode::Error;
-            }
-        };
+    let resp: UploadResponse = match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            output::print_error(&format!("Cloud deploy failed: {e}"));
+            return ExitCode::Error;
+        }
+    };
 
     if json_mode {
         let out = serde_json::json!({
@@ -188,7 +188,11 @@ struct ProjectSummary {
 // Project resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_project(args: &[String], creds: &Credentials, json_mode: bool) -> Result<String, String> {
+fn resolve_project(
+    args: &[String],
+    creds: &Credentials,
+    json_mode: bool,
+) -> Result<String, String> {
     // 1. --project <slug>
     if let Some(slug) = args
         .windows(2)
@@ -214,9 +218,7 @@ fn resolve_project(args: &[String], creds: &Credentials, json_mode: bool) -> Res
     // 4. Interactive picker — TTY only. CI / --json get an error
     //    pointing at the flag.
     if json_mode || !std::io::stdin().is_terminal() {
-        return Err(
-            "No project specified. Pass --project <slug> or set PYLON_PROJECT.".into(),
-        );
+        return Err("No project specified. Pass --project <slug> or set PYLON_PROJECT.".into());
     }
     let projects: Vec<ProjectSummary> = post_json(creds, "/api/fn/listMyProjectsForCli", &())
         .map_err(|e| format!("Couldn't list your projects: {e}"))?;
@@ -297,10 +299,7 @@ fn walk_into_tar<W: Write>(
             if matches_gitignore(&path, root, gitignore) {
                 continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_path_buf();
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             tar.append_path_with_name(&path, &rel)?;
         }
         // Symlinks intentionally skipped — they'd be brittle in the

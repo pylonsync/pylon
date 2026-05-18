@@ -150,7 +150,9 @@ fn print_usage() {
     println!("  start [app.ts]            Start production server (no watcher)");
     println!("  init                      Initialize a new project");
     println!("  build                     Build for production");
-    println!("  deploy                    Deploy (--target cloud|docker|fly|compose|workers|systemd)");
+    println!(
+        "  deploy                    Deploy (--target cloud|docker|fly|compose|workers|systemd)"
+    );
     println!("  cache                     Run standalone cache server");
     println!();
     println!("  login                     Authenticate against Pylon Cloud");

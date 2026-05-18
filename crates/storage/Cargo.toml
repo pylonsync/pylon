@@ -14,8 +14,8 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.149" }
-pylon-http = { path = "../http", version = "0.3.149" }
+pylon-kernel = { path = "../core", version = "0.3.150" }
+pylon-http = { path = "../http", version = "0.3.150" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
