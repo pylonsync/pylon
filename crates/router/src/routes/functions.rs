@@ -265,10 +265,7 @@ pub(crate) fn handle(
             let result = fn_ops.call(fn_name, args, auth, None, Some(request_info));
             let post_seq = ctx.change_log.current_seq();
             if post_seq > pre_seq {
-                ctx.add_response_header(
-                    "X-Pylon-Change-Seq",
-                    post_seq.to_string(),
-                );
+                ctx.add_response_header("X-Pylon-Change-Seq", post_seq.to_string());
             }
             return Some(match result {
                 Ok((value, _trace)) => (

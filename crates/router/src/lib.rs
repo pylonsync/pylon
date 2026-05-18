@@ -4245,13 +4245,8 @@ mod auth_gate_tests {
             // compare against its cursor).
             ctx.change_log
                 .append("Post", "seed", ChangeKind::Insert, None);
-            let (status, _body, _ct) = route(
-                ctx,
-                HttpMethod::Delete,
-                "/api/entities/Post/p1",
-                "",
-                None,
-            );
+            let (status, _body, _ct) =
+                route(ctx, HttpMethod::Delete, "/api/entities/Post/p1", "", None);
             assert_eq!(status, 200);
             let headers = ctx.take_response_headers();
             let seq_header = headers
