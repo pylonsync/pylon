@@ -145,6 +145,37 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
             }
         }
     } else {
+        // Validate the slug against the cloud BEFORE persisting it.
+        // Without this a typo silently writes a bad context that fails
+        // every subsequent command with "Could not resolve project" —
+        // the user thinks they're targeting `my-app` but every secret
+        // they set goes nowhere.
+        let creds = match require_credentials() {
+            Ok(c) => c,
+            Err(e) => {
+                output::print_error(&e);
+                eprintln!("  Run: pylon login");
+                return ExitCode::Usage;
+            }
+        };
+        #[derive(serde::Serialize)]
+        struct Args<'a> {
+            slug: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct ValidateOut {
+            id: String,
+        }
+        if let Err(e) = crate::cloud_client::post_json::<_, ValidateOut>(
+            &creds,
+            "/api/fn/getProjectForCli",
+            &Args { slug },
+        ) {
+            output::print_error(&format!("Could not verify project \"{slug}\": {e}"));
+            eprintln!("  List available projects: pylon projects list");
+            return ExitCode::Usage;
+        }
         match write_context_file(slug) {
             Ok(path) => {
                 if json_mode {

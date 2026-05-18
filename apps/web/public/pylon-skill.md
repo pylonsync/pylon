@@ -413,14 +413,37 @@ PYLON_DEV_MODE=false
 Scaffolding:
 
 ```bash
+pylon deploy                     # default — actual hosted deploy to Pylon Cloud
 pylon deploy --target fly        # Dockerfile + fly.toml
 pylon deploy --target docker     # Dockerfile
 pylon deploy --target compose    # docker-compose.yml + Dockerfile
 pylon deploy --target workers    # Cloudflare wrangler.toml (experimental)
 pylon deploy --target systemd    # VPS unit file
+pylon deploy --target manifest   # just regenerate manifest + client bindings
 ```
 
 For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop_machines = "stop"` — idle machines sleep and wake on request.
+
+### CLI ops surface (Pylon Cloud)
+
+Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `cloud.pylonsync.com` for anything scripted.
+
+```bash
+pylon projects list                     # all projects you can see
+pylon projects use my-app               # set current project for this dir
+pylon secrets list / set KEY=v / rm KEY / import .env
+pylon logs tail                          # 2s-polling request log
+pylon status                             # uptime / requests / jobs / WS clients
+pylon deployments list / rollback <id>
+pylon domains list / add HOST / verify HOST / rm HOST
+pylon db list / backup / restore <id>
+pylon data entities / list <E> / get <E> <id>
+pylon members list / invite EMAIL [role]
+```
+
+Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
+
+**Project creation** still lives in the dashboard — provisioning a Fly machine + Postgres DB isn't a one-call CLI operation yet. After signup, point the user at `cloud.pylonsync.com/dashboard` to create the first project; then `pylon projects use <slug>` from the local repo and everything else flows through the CLI.
 
 ## Gotchas & rules
 

@@ -5,7 +5,7 @@ description: "@pylonsync/next — server-side helpers, edge proxy, cookie-based 
 
 `@pylonsync/next` is the Next.js-specific layer on top of `@pylonsync/react`. It provides:
 
-- **`createPylonServer`** — server-side fetch helpers (`pylon.requireAuth()`, `pylon.json()`) that forward the user's session cookie
+- **`createPylonServer`** — server-side fetch helpers (`pylon.requireAuth()`, `pylon.getMe()`, `pylon.json()`) that forward the user's session cookie
 - **`createPylonClient`** — a same-origin client fetcher for Client Components that respects Next's request lifecycle
 - **`createPylonProxy`** — middleware that gates protected routes on session presence so the UI doesn't flash before redirect
 - **`@pylonsync/next/auth`** — cookie-aware sign-up / sign-in / OAuth flows
@@ -59,16 +59,19 @@ Now use it from any server context:
 ```tsx filename="app/dashboard/page.tsx"
 import { pylon } from "@/lib/pylon";
 
+type User = { id: string; email: string; displayName: string };
 type Post = { id: string; title: string };
 
 export default async function DashboardPage() {
-  // 401 → redirect to /login automatically.
-  const auth = await pylon.requireAuth();
+  // 401 → redirect to /login automatically. Returns
+  // { auth: { userId, tenantId, isAdmin, ... }, user: User }
+  // — uses your getMe server function for the User row.
+  const { user } = await pylon.requireMe<User>();
   // Forwards the user's session cookie to the Pylon backend.
   const posts = await pylon.json<Post[]>("/api/entities/Post");
   return (
     <div>
-      <h1>Welcome, {auth.user.displayName}</h1>
+      <h1>Welcome, {user.displayName}</h1>
       <ul>{posts.map((p) => <li key={p.id}>{p.title}</li>)}</ul>
     </div>
   );
@@ -79,8 +82,10 @@ Useful methods on the returned `pylon`:
 
 | Method | Returns | Use it for |
 | --- | --- | --- |
-| `requireAuth()` | `{ user, session }` (or redirects) | Gate Server Components / Server Actions |
-| `getAuth()` | `{ user, session } \| null` | Read auth without redirecting |
+| `requireAuth()` | `PylonAuth` (`{userId, tenantId, isAdmin, cookieHeader}`) or redirects | Gate Server Components / Actions when you only need the user id |
+| `getAuth()` | `PylonAuth \| null` | Read auth without redirecting |
+| `requireMe<U>()` | `{ auth, user }` (or redirects) | Gate + load the user row via your `getMe` function |
+| `getMe<U>()` | `{ auth, user } \| null` | Same, without redirect |
 | `json<T>(path, init?)` | parsed JSON `T` | Call any Pylon API with the user's session |
 | `fetch(path, init?)` | raw `Response` | When you need headers, streams, status codes |
 
@@ -88,11 +93,11 @@ All paths are relative to the configured `target` and the session cookie rides a
 
 ## 3. Client fetcher — `createPylonClient` / `api`
 
-For Client Components, the package exports a same-origin `api()` helper that the `useQuery` / `useMutation` hooks build on top of. Most apps don't construct one directly — just `import { api } from "@pylonsync/next"`:
+For Client Components, the package exports a same-origin `api()` helper that the `useQuery` / `useMutation` hooks build on top of. Most apps don't construct one directly — just `import { api } from "@pylonsync/next/client"`:
 
 ```tsx
 "use client";
-import { api } from "@pylonsync/next";
+import { api } from "@pylonsync/next/client";
 
 async function rotateToken(secretId: string) {
   await api("/api/fn/rotateSecret", {
