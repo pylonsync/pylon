@@ -4146,6 +4146,21 @@ fn start_server(
                     "Content-Type, Authorization",
                 )
                 .unwrap(),
+            )
+            .with_header(
+                Header::from_bytes(
+                    "Access-Control-Expose-Headers",
+                    // X-Pylon-Change-Seq carries the post-write change-log
+                    // seq number on every mutating response. The SDK reads
+                    // it (across-origin via this expose allow-list) and
+                    // triggers an immediate pull when its local cursor is
+                    // behind, killing the latency window between an action
+                    // HTTP response landing and the WS broadcast of the
+                    // same events arriving. Without expose-headers the
+                    // browser strips the header on cross-origin reads.
+                    "X-Pylon-Change-Seq",
+                )
+                .unwrap(),
             );
         // Cookie-based auth requires `Access-Control-Allow-Credentials:
         // true` on the response, paired with a specific origin. Vary

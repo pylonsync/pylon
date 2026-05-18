@@ -172,6 +172,19 @@ impl ChangeLog {
         }
     }
 
+    /// Current highest assigned sequence number. Reads the seq counter
+    /// without consulting the events deque, so it's correct even when
+    /// the oldest events have been evicted under capacity pressure.
+    /// Returns 0 when no events have been appended.
+    ///
+    /// Used by the action HTTP handler to bracket "events generated
+    /// during this action" (capture pre_seq, run action, capture
+    /// post_seq) and emit a `X-Pylon-Change-Seq` header so the SDK
+    /// can pull immediately if WS broadcast hasn't caught up yet.
+    pub fn current_seq(&self) -> u64 {
+        *self.seq.lock().unwrap()
+    }
+
     /// Append a change event. Returns the assigned sequence number.
     pub fn append(
         &self,

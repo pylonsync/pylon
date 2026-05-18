@@ -1489,6 +1489,7 @@ pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u
                     let seq =
                         ctx.change_log
                             .append(entity, &id, ChangeKind::Insert, Some(full.clone()));
+                    emit_change_seq_header(ctx, seq);
                     broadcast_change_with_crdt(
                         ctx.notifier,
                         ctx.store,
@@ -1512,6 +1513,7 @@ pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u
                     let seq =
                         ctx.change_log
                             .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
+                    emit_change_seq_header(ctx, seq);
                     broadcast_change_with_crdt(
                         ctx.notifier,
                         ctx.store,
@@ -1568,6 +1570,7 @@ pub(crate) fn handle_update(
                     let seq =
                         ctx.change_log
                             .append(entity, id, ChangeKind::Update, Some(full.clone()));
+                    emit_change_seq_header(ctx, seq);
                     broadcast_change_with_crdt(
                         ctx.notifier,
                         ctx.store,
@@ -1591,6 +1594,7 @@ pub(crate) fn handle_update(
                     let seq =
                         ctx.change_log
                             .append(entity, id, ChangeKind::Update, Some(data.clone()));
+                    emit_change_seq_header(ctx, seq);
                     broadcast_change_with_crdt(
                         ctx.notifier,
                         ctx.store,
@@ -1621,6 +1625,7 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
     match ctx.store.delete(entity, id) {
         Ok(true) => {
             let seq = ctx.change_log.append(entity, id, ChangeKind::Delete, None);
+            emit_change_seq_header(ctx, seq);
             broadcast_change(ctx.notifier, seq, entity, id, ChangeKind::Delete, None);
             ctx.plugin_hooks.after_delete(entity, id, ctx.auth_ctx);
             (200, serde_json::json!({"deleted": true}).to_string())
@@ -1636,6 +1641,22 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Stamp the response with `X-Pylon-Change-Seq: <seq>` so the SDK
+/// knows this request generated change events up to `seq` on the
+/// server. The SDK uses it to short-circuit the latency window
+/// between the HTTP response landing in the browser and the WS
+/// broadcast of the same events arriving — if the local replica's
+/// cursor is behind `seq`, the SDK triggers a one-shot pull
+/// immediately instead of waiting for its next periodic poll.
+///
+/// Kills the "manual refetch() after every mutation" pattern that
+/// app code used to need (pylon-cloud's domains/page.tsx is the
+/// canonical example — pre-2026-05-17 it called refetch() four
+/// times for the same reason).
+pub(crate) fn emit_change_seq_header(ctx: &RouterContext, seq: u64) {
+    ctx.add_response_header("X-Pylon-Change-Seq", seq.to_string());
+}
 
 pub(crate) fn broadcast_change(
     notifier: &dyn ChangeNotifier,
@@ -4205,6 +4226,42 @@ mod auth_gate_tests {
                 .unwrap()
                 .push((user_id.to_string(), tenant_id.map(String::from)));
         }
+    }
+
+    /// Regression: entity-mutation responses must carry
+    /// `X-Pylon-Change-Seq` so the SDK can short-circuit the latency
+    /// window between the HTTP response landing and the WS broadcast
+    /// of the same change event arriving. Before this header, app
+    /// code had to call refetch() after every mutation as a
+    /// workaround — see pylon-cloud's domains/page.tsx for the
+    /// canonical example. The SDK observes the header and triggers a
+    /// one-shot pull when its local cursor is behind.
+    #[test]
+    fn entity_delete_emits_change_seq_header() {
+        let admin = AuthContext::admin();
+        with_ctx(true, &admin, |ctx| {
+            // Seed the change log with one prior event so the post-
+            // delete seq is > 0 (we want a header value the SDK can
+            // compare against its cursor).
+            ctx.change_log
+                .append("Post", "seed", ChangeKind::Insert, None);
+            let (status, _body, _ct) = route(
+                ctx,
+                HttpMethod::Delete,
+                "/api/entities/Post/p1",
+                "",
+                None,
+            );
+            assert_eq!(status, 200);
+            let headers = ctx.take_response_headers();
+            let seq_header = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("X-Pylon-Change-Seq"))
+                .map(|(_, v)| v.as_str())
+                .expect("X-Pylon-Change-Seq must be set on entity DELETE");
+            let seq: u64 = seq_header.parse().expect("header parses as u64");
+            assert!(seq > 0, "change seq must advance; got {seq}");
+        });
     }
 
     /// Regression: DELETE /api/auth/session must push session-changed

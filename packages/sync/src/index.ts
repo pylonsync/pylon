@@ -1328,6 +1328,104 @@ export class SyncEngine {
     return this.storage.get(this.tokenStorageKey());
   }
 
+  /**
+   * Call a Pylon Action / Mutation by name.
+   *
+   * Wraps `POST /api/fn/<name>` with the engine's bearer/cookie auth
+   * AND observes the `X-Pylon-Change-Seq` response header. If the
+   * server reports the action generated change events that the local
+   * replica hasn't seen yet, the engine immediately fires a one-shot
+   * pull — closing the latency window between the HTTP response
+   * landing here and the WS broadcast of the same events arriving.
+   *
+   * App code that uses this method no longer needs the
+   * "after-mutation refetch()" workaround pattern (see pylon-cloud's
+   * domains/page.tsx, pre-2026-05-17, which called refetch() four
+   * times for exactly this reason).
+   *
+   * Throws (`Error & {status, code?}`) on non-2xx with the server's
+   * error envelope. Returns the parsed JSON response.
+   */
+  async fn<T = unknown>(name: string, args: unknown = {}): Promise<T> {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      // Guard against accidentally embedding URL slashes/query in the
+      // function name. The framework validates server-side too, but
+      // failing here is a clearer DX error message.
+      throw new Error(`Invalid function name: ${JSON.stringify(name)}`);
+    }
+    return this.requestWithChangeSync<T>(
+      "POST",
+      `/api/fn/${name}`,
+      args,
+    );
+  }
+
+  /** Shared by `fn()` and any future entity-mutation wrappers. POSTs
+   *  with the engine's auth, parses JSON, observes
+   *  `X-Pylon-Change-Seq`, and triggers a one-shot pull when the
+   *  server says it produced events past our local cursor. The pull
+   *  short-circuits cheaply (`{changes:[]}`) if WS broadcast already
+   *  caught us up — so the worst case is one extra in-flight pull
+   *  per mutation, never a stale render. */
+  private async requestWithChangeSync<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const token =
+      this.config.token ??
+      this.storage.get(this.tokenStorageKey()) ??
+      undefined;
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${this.config.baseUrl}${path}`, {
+      method,
+      headers,
+      credentials: "include",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    // Read the change-seq header BEFORE consuming the body — some
+    // fetch polyfills consume headers lazily and discard them after
+    // the body stream is drained.
+    const seqHeader = res.headers.get("x-pylon-change-seq");
+    const text = await res.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // Non-JSON body (HTML proxy error, 204, etc.) — fall through;
+        // the !res.ok branch synthesises an Error from the status.
+      }
+    }
+    if (!res.ok) {
+      const err = new Error(
+        (parsed as { error?: { message?: string } } | null)?.error?.message ??
+          `${method} ${path} failed: ${res.status}`,
+      ) as Error & { status?: number; code?: string };
+      err.status = res.status;
+      const code = (parsed as { error?: { code?: string } } | null)?.error
+        ?.code;
+      if (code) err.code = code;
+      throw err;
+    }
+    // Opportunistic pull when the server reports a seq we haven't
+    // applied locally yet. Fire-and-forget — the caller doesn't
+    // block on this; useQuery hooks pick up the new data via the
+    // store notify whenever the pull lands. Skipped when the seq
+    // is already covered (the common case: a write that doesn't
+    // affect the caller's visible set, or one whose WS event
+    // already raced the response).
+    if (seqHeader) {
+      const seq = Number(seqHeader);
+      if (Number.isFinite(seq) && seq > this.cursor.last_seq) {
+        void this.pull();
+      }
+    }
+    return parsed as T;
+  }
+
   /** Pull changes from the server. */
   async pull(): Promise<void> {
     // Identity change detection. If the token flipped since the last pull

@@ -251,15 +251,32 @@ pub(crate) fn handle(
                 raw_body: body.to_string(),
             };
 
-            return Some(
-                match fn_ops.call(fn_name, args, auth, None, Some(request_info)) {
-                    Ok((value, _trace)) => (
-                        200,
-                        serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
-                    ),
-                    Err(e) => (400, json_error(&e.code, &e.message)),
-                },
-            );
+            // Bracket the action with the change-log's seq counter so
+            // we can tell the SDK "this action generated events up to
+            // seq N." The SDK uses that to short-circuit the latency
+            // window between this HTTP response landing and the WS
+            // broadcast of the same events: if useQuery hasn't seen
+            // seq N yet, the SDK pulls immediately instead of waiting
+            // for the next periodic poll. Kills the need for app
+            // code to call `refetch()` after every mutation (which
+            // was the canonical workaround — see pylon-cloud's
+            // domains/page.tsx pre-2026-05-17 comment).
+            let pre_seq = ctx.change_log.current_seq();
+            let result = fn_ops.call(fn_name, args, auth, None, Some(request_info));
+            let post_seq = ctx.change_log.current_seq();
+            if post_seq > pre_seq {
+                ctx.add_response_header(
+                    "X-Pylon-Change-Seq",
+                    post_seq.to_string(),
+                );
+            }
+            return Some(match result {
+                Ok((value, _trace)) => (
+                    200,
+                    serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+                ),
+                Err(e) => (400, json_error(&e.code, &e.message)),
+            });
         }
     }
 
