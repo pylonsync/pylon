@@ -308,6 +308,34 @@ html, body { background: #fafaf9; color: #18181b; }
   grid-template-columns: 1fr 320px;
 }
 .pylon-landing .hero-layout .app-side { display: none; }
+/* The inner table + metric typography is tuned for a full-width mock.
+   At hero width the metric numbers clip ($49,288 → "$49,2") and the
+   table tries to render five columns in ~360px of horizontal space —
+   email crashes into total, status pill spills into the timestamp.
+   Trim both: drop email + created from the table (keep Customer / Total
+   / Status — the three columns that read at a glance), shrink the
+   metric numerals + padding so the headline value fits. The full
+   five-column table comes back in the single-column layout below
+   1100px. */
+.pylon-landing .hero-layout .app-main { padding: 18px 18px 20px; }
+.pylon-landing .hero-layout .app-main h2.app-title {
+  font-size: 17px;
+  white-space: nowrap;
+}
+.pylon-landing .hero-layout .metric { padding: 10px 10px 8px; }
+.pylon-landing .hero-layout .metric .num { font-size: 20px; }
+.pylon-landing .hero-layout .metric .spark { width: 44px; height: 18px; }
+.pylon-landing .hero-layout .tbl-head,
+.pylon-landing .hero-layout .tbl-row {
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+}
+.pylon-landing .hero-layout .tbl-head > *:nth-child(2),
+.pylon-landing .hero-layout .tbl-head > *:nth-child(5),
+.pylon-landing .hero-layout .tbl-row > *:nth-child(2),
+.pylon-landing .hero-layout .tbl-row > *:nth-child(5) {
+  display: none;
+}
 
 /* === HERO PRODUCT MOCK === */
 .pylon-landing .product-frame {
