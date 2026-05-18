@@ -10,7 +10,7 @@ import { init } from "@pylonsync/react";
  * through context.
  *
  * `baseUrl` is the same-origin Next path because next.config.ts
- * proxies /api/* to the Pylon binary on PYLON_API_URL. Browser →
+ * proxies /api/* to the Pylon binary on PYLON_TARGET. Browser →
  * same-origin → Next server → Pylon: no CORS, no extra DNS, the
  * cookie travels naturally.
  */

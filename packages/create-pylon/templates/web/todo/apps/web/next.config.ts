@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
-const PYLON_API_URL = process.env.PYLON_API_URL ?? "http://localhost:4321";
+// Backend origin. In dev defaults to the `pylon dev` default port.
+// In production (Vercel etc.), set PYLON_TARGET on your project's env.
+// Matches the env var @pylonsync/next reads on the server side — keeping
+// them aligned means one env var sets the URL for both the rewrite and
+// the server-side fetch helpers.
+const PYLON_TARGET = process.env.PYLON_TARGET ?? "http://localhost:4321";
 
 const config: NextConfig = {
 	transpilePackages: [
@@ -12,12 +17,9 @@ const config: NextConfig = {
 		"@pylonsync/sync",
 	],
 	async rewrites() {
-		return [
-			{ source: "/api/fn/:path*", destination: `${PYLON_API_URL}/api/fn/:path*` },
-			{ source: "/api/auth/:path*", destination: `${PYLON_API_URL}/api/auth/:path*` },
-			{ source: "/api/sync/:path*", destination: `${PYLON_API_URL}/api/sync/:path*` },
-			{ source: "/api/:path*", destination: `${PYLON_API_URL}/api/:path*` },
-		];
+		// /api/* → ${PYLON_TARGET}/api/* keeps the browser same-origin
+		// (no CORS preflight, session cookie rides natively).
+		return [{ source: "/api/:path*", destination: `${PYLON_TARGET}/api/:path*` }];
 	},
 };
 

@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const PYLON_API_URL = process.env.PYLON_API_URL ?? "http://localhost:4321";
+const PYLON_TARGET = process.env.PYLON_TARGET ?? "http://localhost:4321";
 
 const config: NextConfig = {
 	transpilePackages: [
@@ -13,10 +13,10 @@ const config: NextConfig = {
 	],
 	async rewrites() {
 		return [
-			{ source: "/api/fn/:path*", destination: `${PYLON_API_URL}/api/fn/:path*` },
-			{ source: "/api/auth/:path*", destination: `${PYLON_API_URL}/api/auth/:path*` },
-			{ source: "/api/sync/:path*", destination: `${PYLON_API_URL}/api/sync/:path*` },
-			{ source: "/api/:path*", destination: `${PYLON_API_URL}/api/:path*` },
+			{ source: "/api/fn/:path*", destination: `${PYLON_TARGET}/api/fn/:path*` },
+			{ source: "/api/auth/:path*", destination: `${PYLON_TARGET}/api/auth/:path*` },
+			{ source: "/api/sync/:path*", destination: `${PYLON_TARGET}/api/sync/:path*` },
+			{ source: "/api/:path*", destination: `${PYLON_TARGET}/api/:path*` },
 		];
 	},
 };
