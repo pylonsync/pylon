@@ -471,6 +471,20 @@ pub enum BroadcastJob {
         json: Arc<str>,
     },
     Plain(Arc<str>),
+    /// Per-user text fanout: deliver `msg` to every client in this
+    /// shard whose authenticated user_id matches `user_id`. Used by
+    /// `notify_session_changed` — has to run on the worker thread
+    /// (not the HTTP request thread) because the per-client socket
+    /// send can block on a slow/dead WS client and would otherwise
+    /// peg the HTTP handler that emitted the notification. Hung
+    /// `POST /api/auth/select-org` symptom on 2026-05-18: a single
+    /// stuck WS client blocked the request thread, then the next
+    /// requests piled up behind it, then the health check failed
+    /// 12s later and Fly's LB pulled the machine.
+    PerUser {
+        user_id: Arc<str>,
+        msg: Arc<str>,
+    },
 }
 
 pub struct WsHub {
@@ -517,6 +531,9 @@ impl WsHub {
                             }
                             BroadcastJob::Plain(msg) => {
                                 shard_clone.broadcast(&msg);
+                            }
+                            BroadcastJob::PerUser { user_id, msg } => {
+                                shard_clone.send_text_to_user(&user_id, &msg);
                             }
                         }
                     }
@@ -661,12 +678,31 @@ impl WsHub {
     /// Fan a text message to every connected client whose authenticated
     /// user_id matches. Used by the session-changed push so all of a
     /// user's open tabs refresh in lockstep when their session mutates.
-    /// O(connected-clients) across all shards — fine for the auth
-    /// surface's rare events; not for hot-path broadcasts.
+    ///
+    /// Non-blocking: each shard's send happens on its broadcast worker
+    /// thread, not the caller's thread. CRITICAL — the per-client
+    /// socket send can block on a slow/dead WS client, so doing this
+    /// on an HTTP request thread (where session-changed gets called)
+    /// would peg the HTTP handler. 2026-05-18 outage: a single stuck
+    /// WS client blocked POST /api/auth/select-org, subsequent
+    /// requests stacked behind it, health check failed 12s later,
+    /// Fly LB pulled the machine. Now identical fire-and-forget
+    /// semantics as `broadcast()` / `broadcast_change()`.
+    ///
+    /// Backpressure: try_send drops the job if the worker channel is
+    /// full (worker thread is behind). That's acceptable for the
+    /// session-changed surface — the SDK already pulls /api/auth/me
+    /// on focus + periodically, so a dropped push delays update by
+    /// at most one pull cycle. Logging suppressed because dropping
+    /// per-user pushes is expected under load.
     pub fn send_text_to_user(&self, user_id: &str, text: &str) {
         let msg: Arc<str> = Arc::from(text);
-        for shard in &self.shards {
-            shard.send_text_to_user(user_id, &msg);
+        let user: Arc<str> = Arc::from(user_id);
+        for tx in &self.broadcast_txs {
+            let _ = tx.try_send(BroadcastJob::PerUser {
+                user_id: Arc::clone(&user),
+                msg: Arc::clone(&msg),
+            });
         }
     }
 
