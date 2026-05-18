@@ -395,41 +395,41 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.149",
-        "@pylonsync/cli-linux-x64": "0.3.149",
+        "@pylonsync/cli-darwin-arm64": "0.3.151",
+        "@pylonsync/cli-linux-x64": "0.3.151",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -461,7 +461,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -481,7 +481,7 @@
     },
     "packages/plugins/feature-flags": {
       "name": "@pylonsync/feature-flags",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -495,7 +495,7 @@
     },
     "packages/plugins/stripe": {
       "name": "@pylonsync/stripe",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -509,7 +509,7 @@
     },
     "packages/plugins/webhooks": {
       "name": "@pylonsync/webhooks",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -523,7 +523,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -537,7 +537,7 @@
     },
     "packages/react-native": {
       "name": "@pylonsync/react-native",
-      "version": "0.3.149",
+      "version": "0.3.151",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -555,11 +555,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.149",
+      "version": "0.3.151",
     },
     "packages/workflows": {
       "name": "@pylonsync/workflows",
@@ -960,7 +960,7 @@
 
     "base64-js": ["base64-js@1.5.1", "", {}, "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="],
 
-    "baseline-browser-mapping": ["baseline-browser-mapping@2.10.30", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-xjOFN16Ha1+Rz4nFYKqHU/LSB+gx/Vi3yQLX7r7sAW+Wa+8hhF2h4pvqTrTMc8+WcDBEunnUurr46Jvv0jk3Vg=="],
+    "baseline-browser-mapping": ["baseline-browser-mapping@2.10.31", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-MujYO3eP72uvmSE0i4wltsodRfIpZATP3jvzRNRGGxgzId7aVocVJJV3nf01qnzzKFGxQVC9bpWxl5cjxTr/7Q=="],
 
     "bench-example": ["bench-example@workspace:examples/bench"],
 
@@ -1032,7 +1032,7 @@
 
     "encodeurl": ["encodeurl@2.0.0", "", {}, "sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg=="],
 
-    "enhanced-resolve": ["enhanced-resolve@5.21.3", "", { "dependencies": { "graceful-fs": "^4.2.4", "tapable": "^2.3.3" } }, "sha512-QyL119InA+XXEkNLNTPCXPugSvOfhwv0JOlGNzvxs0hZaiHLNvXSpudUWsOlsXGWJh8G6ckCScEkVHfX3kw/2Q=="],
+    "enhanced-resolve": ["enhanced-resolve@5.21.4", "", { "dependencies": { "graceful-fs": "^4.2.4", "tapable": "^2.3.3" } }, "sha512-wE4fDO8OjJhrPFH69HUQStq5oKvGRTNXEyW+k5C/pUQLASSsTu7obd2V3GvCDgPcY9AWjhJ4jz9Kh7iRvrxhJg=="],
 
     "erp-web": ["erp-web@workspace:examples/erp/web"],
 
