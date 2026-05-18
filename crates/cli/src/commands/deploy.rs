@@ -9,8 +9,11 @@ use crate::output::{print_diagnostics, print_json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeployTarget {
-    /// Default: just the manifest + client bindings + static pages.
-    Default,
+    /// Just the manifest + client bindings + static pages — no IaaS
+    /// integration. Renamed from "Default" once `pylon deploy` started
+    /// defaulting to --target cloud; this one's now an opt-in via
+    /// `--target manifest`.
+    Manifest,
     /// Generate a Dockerfile.
     Docker,
     /// Generate a Dockerfile + fly.toml.
@@ -27,6 +30,7 @@ enum DeployTarget {
 impl DeployTarget {
     fn from_arg(s: &str) -> Option<Self> {
         match s {
+            "manifest" => Some(Self::Manifest),
             "docker" => Some(Self::Docker),
             "fly" => Some(Self::Fly),
             "compose" => Some(Self::Compose),
@@ -167,15 +171,17 @@ volumes:
 // ---------------------------------------------------------------------------
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
-    // `--target cloud` is the actual hosted deploy — packages source +
-    // POSTs to Pylon Cloud. Short-circuit before file-generation
-    // targets so we don't try to load + serialize the manifest the
-    // cloud is about to rebuild anyway.
+    // Default target is `cloud` — the hosted deploy path is what
+    // `pylon deploy` (no flag) means today. File-generation targets
+    // (docker / fly / compose / workers / systemd / manifest) are
+    // explicit opt-ins. Short-circuit before any manifest load so we
+    // don't waste cycles serializing what the cloud's about to
+    // rebuild anyway.
     let target_raw = args
         .windows(2)
         .find(|w| w[0] == "--target")
         .map(|w| w[1].as_str());
-    if target_raw == Some("cloud") {
+    if target_raw.is_none() || target_raw == Some("cloud") {
         return crate::commands::deploy_cloud::run(args, json_mode);
     }
 
@@ -193,30 +199,30 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|w| w[1].as_str())
         .unwrap_or("deploy");
 
-    let target = target_raw.and_then(DeployTarget::from_arg);
-
-    // Validate --target value if the flag was provided but unrecognised.
-    if let Some(raw) = target_raw {
-        if raw != "cloud" && DeployTarget::from_arg(raw).is_none() {
+    // target_raw is guaranteed Some here (the is_none() short-circuit
+    // above returned). Validate it parses to a known file-generation
+    // target.
+    let raw = target_raw.expect("checked above");
+    let target = match DeployTarget::from_arg(raw) {
+        Some(t) => t,
+        None => {
             print_diagnostics(
                 &[Diagnostic {
                     severity: Severity::Error,
                     code: "INVALID_TARGET".into(),
                     message: format!(
-                        "Unknown deploy target \"{raw}\". Valid targets: cloud, docker, fly, compose, workers, systemd"
+                        "Unknown deploy target \"{raw}\". Valid targets: cloud, docker, fly, compose, workers, systemd, manifest"
                     ),
                     span: None,
                     hint: Some(
-                        "Use --target cloud | docker | fly | compose | workers | systemd".into(),
+                        "Default (no flag) deploys to Pylon Cloud. Use --target docker|fly|compose|workers|systemd to generate IaaS config, or --target manifest for just the bindings.".into(),
                     ),
                 }],
                 json_mode,
             );
             return ExitCode::Error;
         }
-    }
-
-    let target = target.unwrap_or(DeployTarget::Default);
+    };
 
     let manifest = match load_manifest(manifest_path) {
         Ok(m) => m,
@@ -342,7 +348,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             write_or_fail(out_path, "pylon.service", &unit, json_mode);
             generated_files.push("pylon.service".into());
         }
-        DeployTarget::Default => {}
+        DeployTarget::Manifest => {}
     }
 
     // -----------------------------------------------------------------------
@@ -398,7 +404,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 println!("  sudo mkdir -p /var/lib/pylon && sudo chown pylon: /var/lib/pylon");
                 println!("  sudo systemctl enable --now pylon");
             }
-            DeployTarget::Default => {
+            DeployTarget::Manifest => {
                 println!("To run the server:");
                 println!("  pylon dev {manifest_path}");
                 println!();

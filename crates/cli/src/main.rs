@@ -151,7 +151,7 @@ fn print_usage() {
     println!("  init                      Initialize a new project");
     println!("  build                     Build for production");
     println!(
-        "  deploy                    Deploy (--target cloud|docker|fly|compose|workers|systemd)"
+        "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );
     println!("  cache                     Run standalone cache server");
     println!();
