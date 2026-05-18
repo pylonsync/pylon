@@ -1,0 +1,89 @@
+---
+title: Agent handoff
+description: "Sign your coding agent into Pylon Cloud with a one-time paste — no token in chat history."
+---
+
+Pylon Cloud's dashboard can mint a one-time 8-character code that signs a coding agent (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build, anything that runs shell commands from a markdown prompt) into your account, installs the Pylon skill, and hands the agent an opening prompt to riff on. One paste, zero typing.
+
+## Use it
+
+1. Sign in at [cloud.pylonsync.com](https://cloud.pylonsync.com).
+2. Open an organization. The first card on the page is **Hand off to your coding agent**.
+3. Click **Generate prompt**. The dialog shows a short code (e.g. `ABCD-1234`) inside a paste-ready blurb.
+4. Click **Copy prompt**, paste into your coding agent, hit return.
+
+The agent will:
+
+- install the Pylon CLI (`curl -fsSL https://pylonsync.com/install.sh | bash`)
+- sign in with `pylon login --code ABCD-1234`
+- load `https://pylonsync.com/pylon-skill.md` into wherever it persists project rules (`~/.claude/skills/pylon/SKILL.md` for Claude Code, `.cursor/rules/pylon.mdc` for Cursor, `CONVENTIONS.md` for Aider, etc.)
+- run `pylon projects list` + `pylon status` so it knows the starting state
+- ask you what you want to build
+
+## Why a code, not the token
+
+The dashboard mints a real `pk.*` Pylon API key first (the same kind you'd create manually in `/dashboard/account/cli-tokens`), then stashes it on the server behind the short code. The blurb you paste into the agent only contains the code — the actual token never appears in the chat history, the model provider's logs, or any analytics surface that records the prompt.
+
+When the agent runs `pylon login --code ABCD-1234`, the CLI hits `/api/fn/exchangeCliAuthCode` on the cloud, which:
+
+- atomically nulls the stored token + stamps `consumedAt`
+- returns the token to the CLI in one round-trip
+- the CLI writes it to `~/.config/pylon/credentials.json` (mode 0600)
+
+If the code never gets redeemed, the token sits inert in the database for 5 minutes and then becomes unreachable. A revoke from `/dashboard/account/cli-tokens` cleans it up.
+
+## Properties
+
+- **Single-use.** A second `exchangeCliAuthCode` call with the same code hits `CODE_USED`.
+- **Short TTL.** Five minutes. Past that the code returns `CODE_EXPIRED`.
+- **High entropy.** `XXXX-XXXX` over a 30-symbol confusable-pruned alphabet — about 40 bits. Combined with the 5-minute window + the framework's per-IP rate limit, brute-force-guessing a valid code in flight is infeasible.
+- **Revokeable like any other token.** The minted key shows up at `/dashboard/account/cli-tokens` as `Coding agent · MMM D`. Click trash to kill the agent's session immediately.
+
+## Working without the dashboard
+
+If you're scripting and don't want to click through the UI, the `--code` exchange endpoint is just a regular Pylon function. You can write your own pre-mint flow:
+
+```bash
+# from a script holding an existing CLI token in PYLON_TOKEN
+curl -s https://cloud.pylonsync.com/api/auth/api-keys \
+  -H "Authorization: Bearer $PYLON_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"CI agent · '"$(date +%F)"'"}'
+```
+
+Or use the regular `pylon login` paste flow when you already have a token handy. The code-exchange path is purely an agent-onboarding convenience.
+
+## What the blurb contains
+
+For reference, the full prompt the dashboard generates:
+
+```
+I just signed up for Pylon Cloud and want you to help me build. Please run these steps in order:
+
+1. Install the Pylon CLI:
+   curl -fsSL https://pylonsync.com/install.sh | bash
+
+2. Sign in to my Pylon Cloud account (single-use code, expires in 5 min):
+   pylon login --code ABCD-1234
+
+3. Load https://pylonsync.com/pylon-skill.md as your reference for Pylon
+   conventions and save it wherever your tool persists project rules.
+   Common locations:
+   - Claude Code → ~/.claude/skills/pylon/SKILL.md
+   - Cursor → .cursor/rules/pylon.mdc
+   - Aider → append to CONVENTIONS.md
+   - Codex / OpenCode / others → wherever you load long-lived context
+
+4. Show me what's on my account so we know where we're starting:
+   pylon projects list
+   pylon status
+
+Then ask me one question: what am I trying to build?
+
+For context: Pylon is a realtime backend framework for TypeScript apps —
+schema, server functions, live queries, auth, jobs, files, and search in
+a single binary. It pairs with Next.js on Vercel out of the box. Docs at
+https://docs.pylonsync.com. The CLI you just installed can do everything
+the dashboard does (secrets, logs, deploys, domains, db backups, etc.) —
+`pylon --help` lists every command.
+```

@@ -103,6 +103,8 @@
             "pages": [
               "operations/deploy",
               "operations/vercel",
+              "operations/cli",
+              "operations/agent-handoff",
               "operations/sst",
               "operations/sizing",
               "operations/scaling",

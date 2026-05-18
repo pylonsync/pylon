@@ -52,6 +52,10 @@ From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TL
 
 Project page → **Settings** → **Environment**. Set per-project secrets without committing them to git. They show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`, are encrypted at rest, and never appear in logs.
 
+### Hand off to a coding agent
+
+Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Click it, paste the generated prompt into Claude Code (or Codex / OpenCode / Cursor / Aider / grok build), and the agent installs the CLI, signs in, loads the Pylon skill, and asks what you want to build. The session token is exchanged via a 5-minute single-use code — your `pk.*` API key never lands in the chat history. See [Agent handoff](/operations/agent-handoff) for the full flow.
+
 ### Pair with Vercel for the frontend
 
 The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud**. Vercel handles your Next.js / SvelteKit / etc. build + global edge; Pylon Cloud owns the realtime backend, database, and auth.

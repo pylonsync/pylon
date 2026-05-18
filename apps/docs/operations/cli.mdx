@@ -1,0 +1,166 @@
+---
+title: CLI reference
+description: "Every pylon command, what it does, when to use it."
+---
+
+The `pylon` binary covers the full operator surface: dev loop, deploys, secrets, logs, db, data, domains, deployments, members, project health. Anything you can do from the Pylon Cloud dashboard, you can do from the CLI (and pipe to other shell tools).
+
+```bash
+pylon --help        # full command list
+pylon <cmd> --help  # per-command flags
+```
+
+## Install + sign in
+
+```bash
+curl -fsSL https://pylonsync.com/install.sh | bash
+
+pylon login        # opens cloud.pylonsync.com/dashboard/account/cli-tokens,
+                   # prompts you to paste a token
+
+pylon login --code XXXX-XXXX
+                   # agent-handoff path: redeems a one-time code minted by
+                   # the dashboard's "Hand off to your coding agent" card.
+                   # See /operations/agent-handoff.
+
+pylon logout       # delete ~/.config/pylon/credentials.json
+```
+
+`PYLON_CLOUD_URL` overrides the default `https://cloud.pylonsync.com` for staging or self-hosted Pylon Cloud installs.
+
+## Project context
+
+Most commands target a single project. Resolution order (first match wins):
+
+1. `--project <slug>` flag on the command
+2. `PYLON_PROJECT` env var
+3. `.pylon/project` file in cwd or any ancestor (written by `pylon projects use`)
+4. Interactive picker (TTY only)
+
+```bash
+pylon projects list                # all projects you can see
+pylon projects use my-app          # writes .pylon/project + adds to .gitignore
+pylon projects current             # what's the current context?
+pylon projects use ""              # clear the context
+```
+
+## Deploy
+
+```bash
+pylon deploy                       # default → Pylon Cloud (packages local
+                                   # source, uploads via the cli-tokens flow)
+
+pylon deploy --target docker       # generate Dockerfile to ./deploy/
+pylon deploy --target fly          #            Dockerfile + fly.toml
+pylon deploy --target compose      #            docker-compose.yml + Dockerfile
+pylon deploy --target workers      #            wrangler.toml (experimental)
+pylon deploy --target systemd      #            systemd unit file
+pylon deploy --target manifest     #            just manifest + client bindings
+```
+
+`pylon deploy` (no flag) does the actual hosted deploy. The other targets write IaaS config files to `./deploy/`.
+
+## Secrets
+
+```bash
+pylon secrets list                 # keys + last-rotated dates (values never leave the cloud)
+pylon secrets set STRIPE_KEY=sk_…  # one-liner
+pylon secrets set OPENAI_KEY       # prompt for value on stdin
+pylon secrets rm STRIPE_KEY
+pylon secrets import .env          # bulk import from a dotenv file
+pylon secrets import .env --replace  # allow overwriting existing keys
+```
+
+Every write fires `syncSecretsToFly` immediately so the running machine sees the new value within ~10s (no redeploy required).
+
+## Logs
+
+```bash
+pylon logs tail                    # 2s-polling tail of the project's request log,
+                                   # Ctrl-C to stop. Pipe to grep/jq for filtering.
+
+pylon logs tail --json | jq 'select(.status >= 500)'
+                                   # all 5xx in real time
+```
+
+Auto-recovers on `kind: unavailable` (machine stopped, framework predates the tail endpoint, etc.) — backs off to 30s until the surface comes back.
+
+## Database
+
+```bash
+pylon db list                      # snapshot history
+pylon db backup                    # take a fresh snapshot
+pylon db restore <backup-id>       # restore from one
+```
+
+Watch the project's Deployments tab for restore progress; restoring rolls the Fly machine.
+
+## Data browser
+
+```bash
+pylon data entities                # every entity in the deployed schema
+pylon data list Order              # first 50 rows
+pylon data get Order ord_9f2a      # single row, pretty-printed JSON
+```
+
+Owner / admin only (same gate the dashboard data browser uses).
+
+## Domains
+
+```bash
+pylon domains list                 # custom hostnames + provisioning status
+pylon domains add api.example.com  # adds row; prints the CNAME target
+pylon domains verify api.example.com   # checks DNS + cert provisioning
+pylon domains rm api.example.com
+```
+
+The default `pylon-<slug>.fly.dev` hostname is always available regardless.
+
+## Deployments
+
+```bash
+pylon deployments list             # 20 most recent
+pylon deployments rollback <id>    # promote a previous deployment back to current
+```
+
+## Members
+
+```bash
+pylon members list                                       # everyone in the project's org
+pylon members invite teammate@example.com admin          # invite with role
+pylon members invite teammate@example.com                # defaults to member
+```
+
+Roles: `owner`, `admin`, `member`.
+
+## Status
+
+```bash
+pylon status                       # uptime, requests, error rate, jobs, WS/SSE clients
+pylon status --json                # structured output for monitoring scripts
+```
+
+One-glance project health — same surface the dashboard's project overview shows.
+
+## JSON mode
+
+Every command accepts `--json` and emits parseable output for scripts:
+
+```bash
+pylon projects list --json | jq -r '.projects[].slug'
+
+# fail CI on any project not in 'running' status
+pylon status --json | jq -e '.status == "running"'
+
+# nightly backup of every project you can see
+pylon projects list --json | jq -r '.projects[].slug' | \
+  xargs -I{} pylon db backup --project {}
+```
+
+## Env vars
+
+| Variable | Effect |
+| --- | --- |
+| `PYLON_CLOUD_URL` | Override the cloud origin (staging / self-hosted) |
+| `PYLON_PROJECT` | Default project slug (overridden by `--project`) |
+| `XDG_CONFIG_HOME` | Where `pylon login` stashes credentials (defaults to `~/.config`) |

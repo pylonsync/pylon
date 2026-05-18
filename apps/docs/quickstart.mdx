@@ -220,3 +220,7 @@ Want a full UI on top?
 - **React Native**: the [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) ports cleanly to RN with the [`@pylonsync/react-native`](/clients/react-native) bridge
 
 For all three, the same Pylon server backs the UI — wire format is identical across platforms.
+
+## Hand the rest to a coding agent
+
+Once your backend is running, the rest is shell. Pylon Cloud has a [one-paste handoff flow](/operations/agent-handoff) that signs your coding agent (Claude Code, Codex, OpenCode, Cursor, Aider, grok build) into your account, installs the Pylon skill, and asks what to build — no token in chat history. From there the agent can use the [full CLI surface](/operations/cli): `pylon secrets`, `pylon logs tail`, `pylon deploy`, `pylon domains add`, `pylon db backup`, `pylon data list <Entity>`, etc.
