@@ -23,13 +23,19 @@ const ENV_VARS: &[EnvVarDef] = &[
     },
     EnvVarDef {
         name: "PYLON_RATE_LIMIT_MAX",
-        description: "Max requests per window",
+        description: "Max anonymous requests per window (per IP). Tight on purpose — anon traffic is the brute-force surface.",
         default: Some("100"),
         sensitive: false,
     },
     EnvVarDef {
+        name: "PYLON_RATE_LIMIT_MAX_AUTHED",
+        description: "Max authenticated requests per window (per user id). Higher than the anon limit because polling dashboards routinely exceed 100/min.",
+        default: Some("1000"),
+        sensitive: false,
+    },
+    EnvVarDef {
         name: "PYLON_RATE_LIMIT_WINDOW",
-        description: "Rate limit window in seconds",
+        description: "Rate limit window in seconds (applies to both anon and authed limits)",
         default: Some("60"),
         sensitive: false,
     },

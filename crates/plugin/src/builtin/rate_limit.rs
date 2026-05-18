@@ -6,22 +6,55 @@ use crate::{Plugin, PluginError, RequestMeta};
 use pylon_auth::AuthContext;
 
 /// Rate limiting plugin. Limits requests per IP/user within a time window.
+///
+/// Tiered by caller identity:
+///   - Authenticated callers (key prefix `user:`) → `max_authed`
+///   - Anonymous callers (key prefix `ip:` or `__anon__`) → `max_anon`
+///
+/// The two populations have very different traffic shapes: a single
+/// authenticated user driving a polling dashboard easily exceeds
+/// 100/min legitimately, while an anonymous IP hammering auth endpoints
+/// at 100/min looks like brute force. Picking one number for both
+/// either lets attackers in or blocks real users — historically we
+/// optimized for the attacker case and locked legit dashboards out at
+/// `Limit: 100 per 60s` once tab polling + nav fetches stacked up.
 pub struct RateLimitPlugin {
-    max_requests: u32,
+    max_authed: u32,
+    max_anon: u32,
     window: Duration,
     counters: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl RateLimitPlugin {
+    /// Single-tier constructor — same limit for authed and anonymous
+    /// callers. Kept for callers (notably tests) that don't care about
+    /// the distinction.
     pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self::tiered(max_requests, max_requests, window)
+    }
+
+    /// Tiered constructor. `max_authed` applies to per-user buckets
+    /// (`user:<id>` keys), `max_anon` applies to per-IP and shared
+    /// anonymous buckets. Both share the same window.
+    pub fn tiered(max_authed: u32, max_anon: u32, window: Duration) -> Self {
         Self {
-            max_requests,
+            max_authed,
+            max_anon,
             window,
             counters: Mutex::new(HashMap::new()),
         }
     }
 
+    fn limit_for(&self, key: &str) -> u32 {
+        if key.starts_with("user:") {
+            self.max_authed
+        } else {
+            self.max_anon
+        }
+    }
+
     fn check(&self, key: &str) -> Result<(), PluginError> {
+        let limit = self.limit_for(key);
         let mut counters = self.counters.lock().unwrap();
         let now = Instant::now();
 
@@ -34,13 +67,10 @@ impl RateLimitPlugin {
 
         entry.0 += 1;
 
-        if entry.0 > self.max_requests {
+        if entry.0 > limit {
             Err(PluginError {
                 code: "RATE_LIMITED".into(),
-                message: format!(
-                    "Too many requests. Limit: {} per {:?}",
-                    self.max_requests, self.window
-                ),
+                message: format!("Too many requests. Limit: {} per {:?}", limit, self.window),
                 status: 429,
             })
         } else {
@@ -157,5 +187,37 @@ mod tests {
         // Alice is now rate limited, Bob is not.
         assert!(plugin.on_request("GET", "/", &alice).is_err());
         assert!(plugin.on_request("GET", "/", &bob).is_err());
+    }
+
+    #[test]
+    fn tiered_authed_higher_than_anon() {
+        // Authed: 3 allowed, 4th blocked. Anon: 1 allowed, 2nd blocked.
+        // Catches the regression where a single hardcoded 100/min cap
+        // locked legit authed dashboards out the moment polling +
+        // navigation requests stacked up.
+        let plugin = RateLimitPlugin::tiered(3, 1, Duration::from_secs(60));
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_ok());
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_ok());
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_ok());
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_err());
+        // Anon caller from a fresh IP gets the tighter cap.
+        assert!(plugin.check_request(None, "2.2.2.2").is_ok());
+        assert!(plugin.check_request(None, "2.2.2.2").is_err());
+    }
+
+    #[test]
+    fn tiered_error_message_reports_active_limit() {
+        // The error message must show the bucket-specific limit, not a
+        // single hardcoded number — otherwise operators chasing 429s
+        // get the wrong impression of which knob to turn.
+        let plugin = RateLimitPlugin::tiered(2, 1, Duration::from_secs(60));
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_ok());
+        assert!(plugin.check_request(Some("alice"), "1.1.1.1").is_ok());
+        let err = plugin.check_request(Some("alice"), "1.1.1.1").unwrap_err();
+        assert!(err.message.contains("Limit: 2"), "msg: {}", err.message);
+
+        assert!(plugin.check_request(None, "2.2.2.2").is_ok());
+        let err = plugin.check_request(None, "2.2.2.2").unwrap_err();
+        assert!(err.message.contains("Limit: 1"), "msg: {}", err.message);
     }
 }

@@ -369,22 +369,45 @@ fn start_server(
     // auth endpoints (/api/auth/magic/send, /api/auth/magic/verify,
     // /api/auth/session) wide open to brute force and enumeration.
     //
-    // Dev: 100k/min so a React app's initial bundle + auth + sync pulls
-    // (each worth ~6-10 requests) doesn't immediately 429 the dev. Prod:
-    // 100/min per IP — tight enough to crush burst attackers, loose
-    // enough for legitimate multi-tab UIs. Callers passing their own
-    // registry are responsible for their own limits.
+    // Tiered limits:
+    //   - Authenticated (per-user bucket): 1000/min default. Polling
+    //     dashboards + tab fanout + ctx.* lookups easily exceed 100/min
+    //     for a single legit user; the old single-cap default locked
+    //     real apps out the moment a user opened more than one page of
+    //     a richer dashboard. Override via PYLON_RATE_LIMIT_MAX_AUTHED.
+    //   - Anonymous (per-IP bucket): 100/min default. Kept tight on
+    //     purpose — anon traffic against /api/auth/* is the brute-force
+    //     surface and the population that historically warranted a
+    //     conservative cap. Override via PYLON_RATE_LIMIT_MAX.
+    //   - Dev (PYLON_DEV_MODE truthy): both effectively off (100k/min).
+    //
     // Probe dev mode NOW — defined for real at line ~300 but plugin
     // registration below needs it. Same env-var, same logic.
     let is_dev_early = std::env::var("PYLON_DEV_MODE")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(true);
-    let plugin_rl_max: u32 = if is_dev_early { 100_000 } else { 100 };
+    let plugin_rl_max_authed: u32 = if is_dev_early {
+        100_000
+    } else {
+        std::env::var("PYLON_RATE_LIMIT_MAX_AUTHED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000)
+    };
+    let plugin_rl_max_anon: u32 = if is_dev_early {
+        100_000
+    } else {
+        std::env::var("PYLON_RATE_LIMIT_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100)
+    };
     let plugin_reg: Arc<PluginRegistry> = plugins.unwrap_or_else(|| {
         let mut reg = PluginRegistry::new(runtime.manifest().clone());
         reg.register(Arc::new(
-            pylon_plugin::builtin::rate_limit::RateLimitPlugin::new(
-                plugin_rl_max,
+            pylon_plugin::builtin::rate_limit::RateLimitPlugin::tiered(
+                plugin_rl_max_authed,
+                plugin_rl_max_anon,
                 std::time::Duration::from_secs(60),
             ),
         ));

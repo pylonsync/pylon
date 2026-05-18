@@ -50,7 +50,8 @@ Set at minimum:
 - `PYLON_DEV_MODE=false`
 - `PYLON_SESSION_DB=/var/lib/pylon/sessions.db`
 - `PYLON_DB_PATH=/var/lib/pylon/pylon.db`
-- `PYLON_RATE_LIMIT_MAX=30` (default 100 is lenient)
+- `PYLON_RATE_LIMIT_MAX=30` (anon per-IP — default 100 is lenient for auth surfaces)
+- `PYLON_RATE_LIMIT_MAX_AUTHED=1000` (authed per-user — bump higher for polling dashboards)
 
 Recommended:
 
