@@ -202,6 +202,55 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .hero p.lede b { color: var(--ink); font-weight: 500; }
 
 .pylon-landing .hero-ctas { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+/* Secondary path: visually demoted "or run locally" line that lives
+   beneath the primary CTAs. Keeps the npm-create command available
+   for power users without competing with the Cloud signup for the
+   first scan. */
+.pylon-landing .hero-secondary {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px;
+}
+.pylon-landing .hero-secondary-lede {
+  font-size: 13px; color: var(--text-3);
+}
+.pylon-landing .cta-secondary {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 16px;
+  font-size: 13px; color: rgba(255,255,255,.55);
+}
+/* "Live-ship" social proof badge. Pulls visitor attention without
+   stealing it from the CTA — single-line pill, accent-coloured pulse
+   on the left, "v0.3.x · shipped today" on the right. The whole thing
+   links to the GitHub Releases page so a skeptic can verify. */
+.pylon-landing .hero-ship-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-top: 18px;
+  padding: 6px 10px 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--bg-card);
+  font-size: 12.5px; color: var(--text-2);
+  text-decoration: none;
+  box-shadow: var(--shadow-sm);
+  transition: border-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.pylon-landing .hero-ship-badge:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+  box-shadow: var(--shadow-md);
+}
+.pylon-landing .hero-ship-badge .dot {
+  width: 6px; height: 6px; border-radius: 999px;
+  background: var(--pos);
+  box-shadow: 0 0 0 3px rgba(22,163,74,.18);
+}
+.pylon-landing .hero-ship-badge .ver {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px; color: var(--ink); font-weight: 500;
+}
+.pylon-landing .hero-ship-badge .sep { color: var(--text-3); }
+.pylon-landing .hero-ship-badge .when { color: var(--text-2); }
+.pylon-landing .hero-ship-badge .arrow { color: var(--text-3); margin-left: 2px; }
 .pylon-landing .term-pill {
   display: inline-flex; align-items: center; gap: 10px;
   background: var(--bg-card); border: 1px solid var(--line-2);
@@ -1128,7 +1177,13 @@ function CopyCommand({ command }: { command: string }) {
 	);
 }
 
-export function LandingPage() {
+export function LandingPage({
+	version,
+	lastShippedISO,
+}: {
+	version: string;
+	lastShippedISO: string | null;
+}) {
 	const [revenue, setRevenue] = useState(48920);
 	const [orderCount, setOrderCount] = useState(1284);
 	const [clientCount, setClientCount] = useState(47);
@@ -1161,6 +1216,24 @@ export function LandingPage() {
 			clearInterval(tickEvents);
 		};
 	}, []);
+
+	// Live "last shipped" label for the hero proof badge. Today / N days
+	// ago / a calendar date — pick the form that reads as alive without
+	// stretching the truth (week-old releases shouldn't claim "today").
+	const shippedLabel = (() => {
+		if (!lastShippedISO) return null;
+		const shippedAt = new Date(`${lastShippedISO}T00:00:00Z`);
+		const now = new Date();
+		const days = Math.floor(
+			(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) -
+				shippedAt.getTime()) /
+				86_400_000,
+		);
+		if (days <= 0) return "shipped today";
+		if (days === 1) return "shipped yesterday";
+		if (days < 14) return `shipped ${days}d ago`;
+		return `shipped ${shippedAt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+	})();
 
 	return (
 		<>
@@ -1218,23 +1291,49 @@ export function LandingPage() {
 					<div className="shell">
 						<div className="hero-text">
 							<h1 className="h1">
-								The realtime backend, <span className="serif">finally finished.</span>
+								The realtime backend for{" "}
+								<span className="serif">TypeScript apps.</span>
 							</h1>
 							<p className="lede">
 								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
-								Build on SQLite locally. Ship the same app to Postgres, your VPS, or AWS. Pairs absurdly well with React and Next.js.
+								Build on SQLite locally. Ship the same app to Postgres, your VPS, or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
 							</p>
 							<div className="hero-ctas">
 								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free on Pylon Cloud →</Link>
-								<CopyCommand command="npm create @pylonsync/pylon@latest" />
 								<a className="btn ghost" href="https://docs.pylonsync.com">Read the docs →</a>
 							</div>
+							{/* Secondary path — visually demoted from the primary CTA above so the
+							    eye lands on one action, not three competing ones. The npm command
+							    still has copy-to-clipboard so power-users who came for it can grab
+							    it in one click. */}
+							<div className="hero-secondary">
+								<span className="hero-secondary-lede">Or run locally:</span>
+								<CopyCommand command="npm create @pylonsync/pylon@latest" />
+							</div>
+
+							{/* Live-ship badge. The version + cadence are pulled at build time
+							    from packages/sdk/package.json + git, so every Vercel rebuild
+							    refreshes the "this thing is alive" signal without any cron. */}
+							{shippedLabel && (
+								<a
+									className="hero-ship-badge"
+									href="https://github.com/pylonsync/pylon/releases"
+									target="_blank"
+									rel="noopener noreferrer"
+								>
+									<span className="dot" />
+									<span className="ver">v{version}</span>
+									<span className="sep">·</span>
+									<span className="when">{shippedLabel}</span>
+									<span className="arrow">→</span>
+								</a>
+							)}
 
 							<div className="hero-meta-row">
 								<div className="item"><div className="k">Single binary</div><div className="v">Rust, ~28&nbsp;<span className="serif">MB</span></div></div>
 								<div className="item"><div className="k">Read latency</div><div className="v">0.4&nbsp;<span className="serif">ms</span> from mirror</div></div>
 								<div className="item"><div className="k">OAuth providers</div><div className="v">25<span className="serif">+</span> · OIDC</div></div>
-								<div className="item"><div className="k">Tick-rate</div><div className="v">up to 60<span className="serif">/s</span></div></div>
+								<div className="item"><div className="k">Deploys to</div><div className="v">Vercel + Pylon Cloud</div></div>
 							</div>
 						</div>
 
@@ -1825,8 +1924,11 @@ export function LandingPage() {
 							<p>Open source, MIT/Apache. Free tier on Pylon Cloud — pay when you outgrow it, or take the binary and run it yourself.</p>
 							<div className="ctas">
 								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free →</Link>
-								<CopyCommand command="npm create @pylonsync/pylon@latest" />
 								<a className="btn ghost" style={{ color: "rgba(255,255,255,.7)" }} href="https://docs.pylonsync.com">Read the docs</a>
+							</div>
+							<div className="cta-secondary">
+								<span>Or run locally:</span>
+								<CopyCommand command="npm create @pylonsync/pylon@latest" />
 							</div>
 						</div>
 					</div>
@@ -1860,7 +1962,7 @@ export function LandingPage() {
 						</div>
 						<div className="foot-meta" style={{ gridColumn: "1 / -1" }}>
 							<span>© 2026 Pylon Labs, Inc · MIT / Apache-2.0 dual-licensed</span>
-							<span className="status">All systems operational · v0.3.50</span>
+							<span className="status">All systems operational · v{version}</span>
 						</div>
 					</div>
 				</footer>
