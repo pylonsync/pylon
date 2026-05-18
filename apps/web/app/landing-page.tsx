@@ -30,9 +30,9 @@ html, body { background: #fafaf9; color: #18181b; }
   --text-3: #a1a1aa;
   --line: #e7e5e2;
   --line-2: #d4d4d0;
-  --accent: #ff5b1f;
-  --accent-soft: #fff1ea;
-  --accent-deep: #c9420f;
+  --accent: #8B5CF6;
+  --accent-soft: #f5f3ff;
+  --accent-deep: #7C3AED;
   --pos: #16a34a;
   --pos-soft: #e7f6ec;
   --code-bg: #0c0c0f;
@@ -55,7 +55,7 @@ html, body { background: #fafaf9; color: #18181b; }
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
   overflow-x: hidden;
-  -webkit-tap-highlight-color: rgba(255, 91, 31, .18);
+  -webkit-tap-highlight-color: rgba(139, 92, 246, .18);
 }
 .pylon-landing * { box-sizing: border-box; }
 .pylon-landing .mono { font-family: "Geist Mono", ui-monospace, monospace; }
@@ -105,7 +105,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .btn.dark { background: var(--ink); color: #fff; border-color: var(--ink); }
 .pylon-landing .btn.dark:hover { background: #000; box-shadow: 0 4px 14px rgba(0,0,0,.20); }
 .pylon-landing .btn.accent { background: var(--accent); color: #fff; border-color: var(--accent); }
-.pylon-landing .btn.accent:hover { background: var(--accent-deep); border-color: var(--accent-deep); box-shadow: 0 4px 14px rgba(255,91,31,.28); }
+.pylon-landing .btn.accent:hover { background: var(--accent-deep); border-color: var(--accent-deep); box-shadow: 0 4px 14px rgba(139,92,246,.28); }
 .pylon-landing .kbd {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 4px;
@@ -188,7 +188,7 @@ html, body { background: #fafaf9; color: #18181b; }
   line-height: 1.02;
   letter-spacing: -.045em;
   font-weight: 600;
-  margin: 28px 0 24px;
+  margin: 0 0 24px;
   color: var(--ink);
   /* Relaxed from 12ch — the new H1 ("TypeScript apps.") doesn't fit
      in 12ch and forced an extra wrap that gave the hero column three
@@ -211,11 +211,17 @@ html, body { background: #fafaf9; color: #18181b; }
    for power users without competing with the Cloud signup for the
    first scan. */
 .pylon-landing .hero-secondary {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  margin-top: 14px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 18px;
 }
 .pylon-landing .hero-secondary-lede {
   font-size: 13px; color: var(--text-3);
+}
+.pylon-landing .hero-secondary .term-pill {
+  padding: 5px 10px 5px 12px; font-size: 12.5px;
+}
+.pylon-landing .hero-secondary .term-pill .copy {
+  width: 20px; height: 20px; flex: 0 0 20px;
 }
 .pylon-landing .cta-secondary {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -237,6 +243,19 @@ html, body { background: #fafaf9; color: #18181b; }
   text-decoration: none;
   box-shadow: var(--shadow-sm);
   transition: border-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+/* Eyebrow variant — sits above the H1 instead of below the CTAs.
+   Tighter padding, smaller dot, no top margin so it composes as a
+   true header eyebrow rather than a CTA-row sibling. */
+.pylon-landing .hero-ship-badge--eyebrow {
+  margin-top: 0;
+  margin-bottom: 20px;
+  padding: 4px 10px 4px 7px;
+  font-size: 12px;
+}
+.pylon-landing .hero-ship-badge--eyebrow .dot {
+  width: 5px; height: 5px;
+  box-shadow: 0 0 0 2.5px rgba(22,163,74,.18);
 }
 .pylon-landing .hero-ship-badge:hover {
   border-color: var(--ink);
@@ -357,7 +376,7 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .product-frame::before {
   content: ""; position: absolute; inset: 0;
-  background: linear-gradient(180deg, rgba(255,91,31,.04), transparent 30%);
+  background: linear-gradient(180deg, rgba(139,92,246,.04), transparent 30%);
   pointer-events: none;
 }
 .pylon-landing .product-chrome {
@@ -586,7 +605,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .schema-code pre { overflow-x: auto; }
 .pylon-landing .schema-code .k { color: #a155b9; }
 .pylon-landing .schema-code .s { color: #2e7d32; }
-.pylon-landing .schema-code .t { color: #c9420f; }
+.pylon-landing .schema-code .t { color: #7C3AED; }
 .pylon-landing .schema-code .c { color: var(--text-3); font-style: italic; }
 .pylon-landing .schema-code .b { color: var(--ink); font-weight: 500; }
 .pylon-landing .schema-code .anno { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-deep); margin-left: 6px; font-size: 11px; transform: translateY(-1px); }
@@ -660,7 +679,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .compare table { width: 100%; border-collapse: collapse; }
 .pylon-landing .compare th, .pylon-landing .compare td { padding: 16px 20px; text-align: left; font-size: 14px; border-bottom: 1px solid var(--line); }
 .pylon-landing .compare thead th { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; font-weight: 500; background: var(--bg-alt); }
-.pylon-landing .compare th.us, .pylon-landing .compare td.us { background: linear-gradient(180deg, #fff7f2, #fff0e8); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); }
+.pylon-landing .compare th.us, .pylon-landing .compare td.us { background: linear-gradient(180deg, #faf8ff, #f1edff); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); }
 .pylon-landing .compare thead th.us { color: var(--accent-deep); font-weight: 600; border-top: 2px solid var(--accent); }
 .pylon-landing .compare tbody tr:last-child td { border-bottom: none; }
 .pylon-landing .compare td.label { color: var(--ink); font-weight: 500; }
@@ -715,7 +734,7 @@ html, body { background: #fafaf9; color: #18181b; }
   mask-image: radial-gradient(900px 500px at 80% 50%, #000 30%, transparent 75%);
   -webkit-mask-image: radial-gradient(900px 500px at 80% 50%, #000 30%, transparent 75%);
 }
-.pylon-landing .cta-block .accent-glow { position: absolute; right: -200px; top: -100px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(255,91,31,.18), transparent 60%); pointer-events: none; }
+.pylon-landing .cta-block .accent-glow { position: absolute; right: -200px; top: -100px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(139,92,246,.18), transparent 60%); pointer-events: none; }
 .pylon-landing .cta-block .inner { position: relative; max-width: 900px; }
 .pylon-landing .cta-block .eyebrow { color: var(--accent); }
 .pylon-landing .cta-block .eyebrow::before { background: var(--accent); }
@@ -1350,6 +1369,24 @@ export function LandingPage({
 					<div className="hero-grid-bg" />
 					<div className="shell hero-layout">
 						<div className="hero-text">
+							{/* Ship badge promoted to eyebrow position. Standard hero pattern
+							    (Linear, Vercel) — the "this is alive" proof catches the eye
+							    above the H1, then leads into the value prop. Frees the area
+							    below the CTAs from competing rows. */}
+							{shippedLabel && (
+								<a
+									className="hero-ship-badge hero-ship-badge--eyebrow"
+									href="https://github.com/pylonsync/pylon/releases"
+									target="_blank"
+									rel="noopener noreferrer"
+								>
+									<span className="dot" />
+									<span className="ver">v{version}</span>
+									<span className="sep">·</span>
+									<span className="when">{shippedLabel}</span>
+									<span className="arrow">→</span>
+								</a>
+							)}
 							<h1 className="h1">
 								The realtime backend for{" "}
 								<span className="serif">TypeScript apps.</span>
@@ -1362,32 +1399,14 @@ export function LandingPage({
 								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free on Pylon Cloud →</Link>
 								<a className="btn ghost" href="https://docs.pylonsync.com">Read the docs →</a>
 							</div>
-							{/* Secondary path — visually demoted from the primary CTA above so the
-							    eye lands on one action, not three competing ones. The npm command
-							    still has copy-to-clipboard so power-users who came for it can grab
-							    it in one click. */}
+							{/* Secondary path — visually demoted from the primary CTA above so
+							    the eye lands on one action, not two competing ones. The npm
+							    command still has copy-to-clipboard so power-users who came for
+							    it can grab it in one click. */}
 							<div className="hero-secondary">
-								<span className="hero-secondary-lede">Or run locally:</span>
+								<span className="hero-secondary-lede">Prefer to try locally?</span>
 								<CopyCommand command="npm create @pylonsync/pylon@latest" />
 							</div>
-
-							{/* Live-ship badge. The version + cadence are pulled at build time
-							    from packages/sdk/package.json + git, so every Vercel rebuild
-							    refreshes the "this thing is alive" signal without any cron. */}
-							{shippedLabel && (
-								<a
-									className="hero-ship-badge"
-									href="https://github.com/pylonsync/pylon/releases"
-									target="_blank"
-									rel="noopener noreferrer"
-								>
-									<span className="dot" />
-									<span className="ver">v{version}</span>
-									<span className="sep">·</span>
-									<span className="when">{shippedLabel}</span>
-									<span className="arrow">→</span>
-								</a>
-							)}
 						</div>
 
 						{/* PRODUCT MOCK */}
@@ -1453,7 +1472,7 @@ export function LandingPage({
 											<div className="num">{orderCount.toLocaleString()}</div>
 											<div className="delta">↑ 8.1%</div>
 											<svg className="spark" viewBox="0 0 64 22" preserveAspectRatio="none">
-												<polyline fill="none" stroke="#ff5b1f" strokeWidth="1.5" points="0,16 8,14 16,12 24,15 32,10 40,12 48,8 56,9 64,5" />
+												<polyline fill="none" stroke="#8B5CF6" strokeWidth="1.5" points="0,16 8,14 16,12 24,15 32,10 40,12 48,8 56,9 64,5" />
 											</svg>
 										</div>
 										<div className="metric">
@@ -1592,14 +1611,14 @@ export function LandingPage({
 									<svg viewBox="0 0 600 160" preserveAspectRatio="none">
 										<defs>
 											<linearGradient id="ga" x1="0" x2="0" y1="0" y2="1">
-												<stop offset="0%" stopColor="#ff5b1f" stopOpacity=".18" />
-												<stop offset="100%" stopColor="#ff5b1f" stopOpacity="0" />
+												<stop offset="0%" stopColor="#8B5CF6" stopOpacity=".18" />
+												<stop offset="100%" stopColor="#8B5CF6" stopOpacity="0" />
 											</linearGradient>
 										</defs>
 										<path d="M0,120 L20,110 L40,118 L60,95 L80,105 L100,80 L120,90 L140,72 L160,60 L180,75 L200,55 L220,68 L240,40 L260,52 L280,38 L300,48 L320,30 L340,42 L360,28 L380,50 L400,42 L420,55 L440,38 L460,48 L480,30 L500,42 L520,28 L540,38 L560,22 L580,30 L600,18 L600,160 L0,160 Z" fill="url(#ga)" stroke="none" />
-										<path d="M0,120 L20,110 L40,118 L60,95 L80,105 L100,80 L120,90 L140,72 L160,60 L180,75 L200,55 L220,68 L240,40 L260,52 L280,38 L300,48 L320,30 L340,42 L360,28 L380,50 L400,42 L420,55 L440,38 L460,48 L480,30 L500,42 L520,28 L540,38 L560,22 L580,30 L600,18" fill="none" stroke="#ff5b1f" strokeWidth="2" />
-										<circle cx="600" cy="18" r="4" fill="#ff5b1f" />
-										<circle cx="600" cy="18" r="8" fill="#ff5b1f" opacity=".25" />
+										<path d="M0,120 L20,110 L40,118 L60,95 L80,105 L100,80 L120,90 L140,72 L160,60 L180,75 L200,55 L220,68 L240,40 L260,52 L280,38 L300,48 L320,30 L340,42 L360,28 L380,50 L400,42 L420,55 L440,38 L460,48 L480,30 L500,42 L520,28 L540,38 L560,22 L580,30 L600,18" fill="none" stroke="#8B5CF6" strokeWidth="2" />
+										<circle cx="600" cy="18" r="4" fill="#8B5CF6" />
+										<circle cx="600" cy="18" r="8" fill="#8B5CF6" opacity=".25" />
 									</svg>
 								</div>
 								<div className="legend"><span>−60s</span><span>−30s</span><span style={{ color: "var(--accent)" }}>now</span></div>
