@@ -1,5 +1,6 @@
 mod bun;
 mod client_codegen;
+mod cloud_client;
 mod commands;
 mod manifest;
 mod output;
@@ -70,6 +71,8 @@ fn run() -> ExitCode {
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
+        Some("login") => commands::login::run(&args, json_mode),
+        Some("logout") => commands::login::run_logout(&args, json_mode),
         Some("migrate") => commands::migrate::run(&args, json_mode),
         Some("plugins") => commands::plugins::run(&args, json_mode),
         Some("schema") => match positional.get(1).copied() {
@@ -127,9 +130,10 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 19] = [
+const TOP_LEVEL_COMMANDS: [&str; 21] = [
     "backup", "build", "cache", "codegen", "deploy", "dev", "doctor", "env", "explain", "init",
-    "migrate", "plugins", "restore", "schema", "seed", "start", "test", "version", "help",
+    "login", "logout", "migrate", "plugins", "restore", "schema", "seed", "start", "test",
+    "version", "help",
 ];
 
 const SCHEMA_SUBCOMMANDS: [&str; 5] = ["check", "diff", "push", "inspect", "history"];
@@ -146,8 +150,11 @@ fn print_usage() {
     println!("  start [app.ts]            Start production server (no watcher)");
     println!("  init                      Initialize a new project");
     println!("  build                     Build for production");
-    println!("  deploy                    Deploy to production");
+    println!("  deploy                    Deploy (--target cloud|docker|fly|compose|workers|systemd)");
     println!("  cache                     Run standalone cache server");
+    println!();
+    println!("  login                     Authenticate against Pylon Cloud");
+    println!("  logout                    Remove stored Pylon Cloud credentials");
     println!();
     println!("  schema check              Validate schema");
     println!("  schema diff               Show schema changes");

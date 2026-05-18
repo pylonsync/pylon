@@ -28,6 +28,14 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dotenvy = "0.15"
+# Cloud deploy + login flows: sync HTTP, gzip-tar bundling. ureq is
+# chosen over reqwest because the CLI is single-shot — pulling in a
+# Tokio runtime to fire one POST is wasteful + bloats the static
+# binary by ~3MB. ureq also handles HTTPS natively via rustls.
+ureq = { version = "2.10", features = ["json", "tls"] }
+tar = "0.4"
+flate2 = "1.0"
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -167,6 +167,18 @@ volumes:
 // ---------------------------------------------------------------------------
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
+    // `--target cloud` is the actual hosted deploy — packages source +
+    // POSTs to Pylon Cloud. Short-circuit before file-generation
+    // targets so we don't try to load + serialize the manifest the
+    // cloud is about to rebuild anyway.
+    let target_raw = args
+        .windows(2)
+        .find(|w| w[0] == "--target")
+        .map(|w| w[1].as_str());
+    if target_raw == Some("cloud") {
+        return crate::commands::deploy_cloud::run(args, json_mode);
+    }
+
     let positional: Vec<&str> = args
         .iter()
         .filter(|a| !a.starts_with('-') && *a != "deploy")
@@ -181,35 +193,21 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|w| w[1].as_str())
         .unwrap_or("deploy");
 
-    let target = args
-        .windows(2)
-        .find(|w| w[0] == "--target")
-        .map(|w| w[1].as_str())
-        .and_then(|s| {
-            let t = DeployTarget::from_arg(s);
-            if t.is_none() {
-                // Will be reported as a diagnostic below.
-            }
-            t
-        });
+    let target = target_raw.and_then(DeployTarget::from_arg);
 
     // Validate --target value if the flag was provided but unrecognised.
-    if let Some(raw) = args
-        .windows(2)
-        .find(|w| w[0] == "--target")
-        .map(|w| w[1].as_str())
-    {
-        if DeployTarget::from_arg(raw).is_none() {
+    if let Some(raw) = target_raw {
+        if raw != "cloud" && DeployTarget::from_arg(raw).is_none() {
             print_diagnostics(
                 &[Diagnostic {
                     severity: Severity::Error,
                     code: "INVALID_TARGET".into(),
                     message: format!(
-                        "Unknown deploy target \"{raw}\". Valid targets: docker, fly, compose, workers, systemd"
+                        "Unknown deploy target \"{raw}\". Valid targets: cloud, docker, fly, compose, workers, systemd"
                     ),
                     span: None,
                     hint: Some(
-                        "Use --target docker | fly | compose | workers | systemd".into(),
+                        "Use --target cloud | docker | fly | compose | workers | systemd".into(),
                     ),
                 }],
                 json_mode,
