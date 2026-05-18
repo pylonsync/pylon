@@ -52,6 +52,14 @@ From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TL
 
 Project page → **Settings** → **Environment**. Set per-project secrets without committing them to git. They show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`, are encrypted at rest, and never appear in logs.
 
+### Pair with Vercel for the frontend
+
+The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud**. Vercel handles your Next.js / SvelteKit / etc. build + global edge; Pylon Cloud owns the realtime backend, database, and auth.
+
+Set `PYLON_TARGET=https://pylon-<your-slug>.fly.dev` in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
+
+Full checklist: [Deploying to Vercel](/operations/vercel).
+
 ## What's included
 
 - **Same binary as `pylon dev`** — no runtime hooks, no vendor proxies.
