@@ -24,14 +24,16 @@ let package = Package(
             dependencies: [],
             path: "Sources/PylonClient"
         ),
+        // CSQLite intentionally does NOT use pkgConfig: on macOS that would
+        // point the linker at Homebrew's libsqlite3 (/opt/homebrew/...), which
+        // bakes a brew-only install path into shipping binaries — they crash
+        // at launch on every machine that doesn't have that exact brew
+        // formula. The module.modulemap's `link "sqlite3"` is enough: the
+        // linker resolves -lsqlite3 via the macOS SDK to /usr/lib/libsqlite3.dylib,
+        // which is the ABI-stable system sqlite that ships with every macOS.
         .systemLibrary(
             name: "CSQLite",
-            path: "Sources/CSQLite",
-            pkgConfig: "sqlite3",
-            providers: [
-                .apt(["libsqlite3-dev"]),
-                .brew(["sqlite3"]),
-            ]
+            path: "Sources/CSQLite"
         ),
         .target(
             name: "PylonSync",
