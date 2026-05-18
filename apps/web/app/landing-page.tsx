@@ -296,6 +296,18 @@ html, body { background: #fafaf9; color: #18181b; }
      edge, not a small card inside the column. */
   max-width: none;
 }
+/* Inside the hero column the mock has roughly half the viewport to
+   work with — the default 220px sidebar + 1fr main + 360px aside grid
+   squashes the main column to a useless ~30px sliver. Drop the left
+   workspace nav (generic dashboard chrome) and keep main + aside so
+   the dashboard view AND the live-query code snippet — the actual
+   proof of the H1's claim — both stay legible. The sidebar reappears
+   when the layout collapses to single-column at <1100px and the mock
+   has the full viewport again. */
+.pylon-landing .hero-layout .product-body {
+  grid-template-columns: 1fr 320px;
+}
+.pylon-landing .hero-layout .app-side { display: none; }
 
 /* === HERO PRODUCT MOCK === */
 .pylon-landing .product-frame {
