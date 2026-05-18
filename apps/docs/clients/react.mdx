@@ -1,146 +1,139 @@
 ---
 title: React SDK
-description: "@pylonsync/react — hooks for queries, mutations, sessions, search, infinite scroll, multiplayer shards."
+description: "@pylonsync/react — hooks for queries, mutations, sessions, search, presence, multiplayer."
 ---
 
-`@pylonsync/react` is the React-first client. It wraps `@pylonsync/sync` with `useSyncExternalStore`-backed hooks so your components re-render automatically when entity data changes.
+`@pylonsync/react` is the React client. The `db.*` namespace exposes hooks that read from a local sync replica — every component using a hook re-renders automatically when a row changes (your own mutation, a server push, a write from another tab).
 
 ## Install
 
 ```bash
-bun add @pylonsync/sdk @pylonsync/react
+bun add @pylonsync/react
+# or: npm i @pylonsync/react
 ```
 
-The React package depends on `@pylonsync/sync` transitively; you don't need to install it directly.
+## Initialize once
 
-## Configure once
+Pick any entry point that runs before your first hook (`src/main.tsx`, a Next.js root client provider, a top-level component effect):
 
-In your app entry:
+```ts
+import { init } from "@pylonsync/react";
 
-```typescript
-import { configureClient } from "@pylonsync/react";
-
-configureClient({
-  baseUrl: "https://your-app.com",
-  appName: "default", // namespaces localStorage keys
-});
+init({ baseUrl: "http://localhost:4321" });
 ```
 
-Now every hook + auth helper uses this base URL. The auth token is persisted to `localStorage` under `pylon_token` (or `pylon:<appName>:token` if you set a custom app name).
+In Next.js + Vercel, omit `baseUrl` (or pass `""`) so the client talks same-origin and the [Next rewrite](/operations/vercel) forwards `/api/*` to your Pylon backend.
 
-## Hooks
+## The `db.*` namespace
 
-### `useQuery`
+`db` is the public API for apps using a single global sync engine. Every method below subscribes to or writes to the same shared replica.
 
-Live-updating list of entity rows. Re-renders when the local store changes (after server pushes, optimistic mutations, or hydration).
+### `db.useQuery` — live list
 
 ```tsx
-import { useQuery } from "@pylonsync/react";
+import { db } from "@pylonsync/react";
 
-function TodoList() {
-  const { data: todos, loading, error } = useQuery("Todo");
+type Todo = { id: string; title: string; done: boolean };
+
+export function TodoList() {
+  const { data: todos, loading, error } = db.useQuery<Todo>("Todo");
   if (loading) return <Spinner />;
   if (error) return <ErrorBanner error={error} />;
-  return (
-    <ul>
-      {todos.map(t => <li key={t.id}>{t.title}</li>)}
-    </ul>
-  );
+  return <ul>{todos.map((t) => <li key={t.id}>{t.title}</li>)}</ul>;
 }
 ```
 
-With filtering:
+With filtering / ordering / limits:
 
 ```tsx
-const { data } = useQuery("Todo", {
+const { data } = db.useQuery<Todo>("Todo", {
   where: { authorId: "u_xyz", done: false },
   orderBy: { createdAt: "desc" },
   limit: 50,
 });
 ```
 
-### `useQueryOne`
-
-Single row by id:
+### `db.useQueryOne` — single row by ID
 
 ```tsx
-const { data: post } = useQueryOne("Post", postId);
+const { data: post } = db.useQueryOne<Post>("Post", postId);
 ```
 
-### `useInfiniteQuery`
-
-Cursor-paginated list with `loadMore`:
+### `db.useInfiniteQuery` — paginated with `loadMore`
 
 ```tsx
-const { data, hasMore, loadMore, loading } = useInfiniteQuery("Post", { pageSize: 20 });
-
-return (
-  <>
-    {data.map(p => <PostCard key={p.id} post={p} />)}
-    {hasMore && <button onClick={loadMore} disabled={loading}>Load more</button>}
-  </>
-);
+const { data, hasMore, loadMore, loading } = db.useInfiniteQuery<Post>("Post", {
+  pageSize: 20,
+});
 ```
 
-### `useMutation`
+### `db.useReactiveQuery` — server-side query, auto re-runs
 
-Call a server function with typed args:
+For Convex-style server functions that the framework re-runs whenever their dependency set changes:
 
 ```tsx
-const { mutate, loading, error } = useMutation("createTodo");
-
-return (
-  <button
-    onClick={() => mutate({ title: "ship it", authorId: userId })}
-    disabled={loading}
-  >
-    Add
-  </button>
-);
+const { data: feed, loading } = db.useReactiveQuery<FeedItem[]>("getFeed", {
+  userId: currentUser.id,
+});
 ```
 
-For optimistic mutations on entities (insert/update/delete with rollback on failure), use `useEntityMutation`:
+The server records every `ctx.db.*` read inside your `query()` handler and re-runs the handler when any of those rows mutate. See [Reactive queries](/concepts/reactive-queries).
+
+### `db.useMutation` — server function w/ optimistic updates
 
 ```tsx
-const { insert, update, remove } = useEntityMutation("Todo");
+const send = db.useMutation<
+  { channelId: string; body: string },
+  { messageId: string }
+>("sendMessage", {
+  optimistic: (args, ctx) => ({
+    entity: "Message",
+    data: {
+      id: ctx.id,
+      channelId: args.channelId,
+      body: args.body,
+      authorId: me.id,
+      createdAt: ctx.now,
+    },
+  }),
+});
 
-await insert({ title: "x", done: false });
+await send.mutate({ channelId, body: "Hi!" });
+```
+
+The ghost row appears in `db.useQuery("Message", ...)` instantly; the server's broadcast reconciles in-place. See [Optimistic updates](/concepts/optimistic-updates).
+
+### `db.useEntity` — optimistic CRUD bound to one entity
+
+When you'd rather call `insert/update/delete` directly than wire a server function:
+
+```tsx
+const { insert, update, remove } = db.useEntity("Todo");
+
+await insert({ title: "Buy milk", done: false });
 await update(todoId, { done: true });
 await remove(todoId);
 ```
 
-These hit the local store immediately; the sync engine queues the server write and reconciles on response.
+Same store + reconciliation as `db.useMutation`.
 
-### `useSession`
-
-Live-updating auth context:
+### `db.useSearch` — live faceted search
 
 ```tsx
-const session = useSession();
-if (!session.userId) return <SignInForm />;
-return <Dashboard userId={session.userId} role={session.roles[0]} />;
-```
-
-`session` mirrors `AuthContext` and re-renders on sign-in / sign-out / tenant switch.
-
-### `useSearch`
-
-Full-text search with live facet counts (requires the `search` plugin enabled per-entity):
-
-```tsx
-const { hits, facetCounts, loading } = useSearch("Post", {
-  query: input,
-  filters: { tags: selectedTag },
-  facets: ["tags", "authorId"],
+const { hits, facetCounts, total } = db.useSearch<Product>("Product", {
+  query: "red sneakers",
+  filters: { category: "shoes" },
+  facets: ["brand", "color"],
+  sort: ["price", "desc"],
 });
 ```
 
-### `useAggregate`
+Requires the `search` plugin enabled per-entity in your schema. See [Search](/concepts/search).
 
-Live-updating count/sum/avg/min/max/groupBy:
+### `db.useAggregate` — live count / sum / avg / groupBy
 
 ```tsx
-const { data: stats } = useAggregate("Order", {
+const { data: stats } = db.useAggregate("Order", {
   count: true,
   sum: { amount: "total" },
   groupBy: "status",
@@ -148,152 +141,131 @@ const { data: stats } = useAggregate("Order", {
 });
 ```
 
-### `useShard`
-
-Connect to a tick-driven multiplayer shard:
+## Sessions
 
 ```tsx
-const { snapshot, send, connected } = useShard<GameState, Input>("match_42", {
-  subscriberId: userId,
-});
+import { useSession } from "@pylonsync/react";
+import { db } from "@pylonsync/react";
 
-return (
-  <>
-    {snapshot && <GameView state={snapshot} />}
-    <button onClick={() => send({ action: "move", x, y })}>Move</button>
-  </>
+function NavBar() {
+  const { auth, signOut } = useSession(db.sync);
+  if (!auth) return <a href="/login">Sign in</a>;
+  return (
+    <>
+      <span>{auth.user.displayName}</span>
+      <button onClick={signOut}>Sign out</button>
+    </>
+  );
+}
+```
+
+`useSession` returns a live `auth` object that re-renders on sign-in, sign-out, org switch, or remote session revoke. It also exposes `selectOrg`, `clearOrg`, and `refresh` for multi-tenant flows.
+
+## Connection status
+
+```tsx
+import { useSyncStatus } from "@pylonsync/react";
+
+function ConnectionIndicator() {
+  const status = useSyncStatus();
+  // "connected" | "connecting" | "reconnecting" | "offline"
+  if (status === "connected") return null;
+  return <div className="banner">{status}…</div>;
+}
+```
+
+## Presence + rooms
+
+```tsx
+import { useRoom } from "@pylonsync/react";
+
+function Editor({ docId }: { docId: string }) {
+  const room = useRoom(db.sync, `doc:${docId}`);
+  return (
+    <>
+      {room.peers.map((p) => (
+        <Cursor key={p.id} x={p.presence.x} y={p.presence.y} />
+      ))}
+      <textarea
+        onChange={(e) => room.setPresence({ cursor: e.target.selectionStart })}
+      />
+    </>
+  );
+}
+```
+
+## Multiplayer shards
+
+For tick-driven multiplayer (games, collaborative canvases):
+
+```tsx
+import { useShard } from "@pylonsync/react";
+
+const { snapshot, send, connected } = useShard<GameState, Input>(
+  `match_${matchId}`,
+  { subscriberId: userId },
 );
 ```
 
-See [Live queries](/concepts/live-queries) for shard concepts.
+See [Live queries → shards](/concepts/live-queries#shards).
+
+## Imperative calls
+
+For one-shot reads/writes outside the React tree (effects, event handlers, server-rendered code):
+
+```ts
+import { db } from "@pylonsync/react";
+
+const id = await db.insert("Todo", { title: "x", done: false });
+await db.update("Todo", id, { done: true });
+await db.delete("Todo", id);
+
+const result = await db.fn<{ ok: boolean }>("processOrder", { orderId });
+
+for await (const chunk of db.streamFn("chat", { prompt: "hi" })) {
+  console.log(chunk);
+}
+```
+
+These hit the local store optimistically (where applicable) and the server in the background — the same path as the hooks.
 
 ## Auth helpers
 
-Standalone async functions for sign-in flows — they update the storage adapter and then any `useSession` consumers re-render:
+For sign-in flows that the framework owns end-to-end (cookie + storage update + session refresh), use the [`@pylonsync/next/auth`](/clients/next#6-auth-flows---pylonsyncnextauth) helpers (works outside Next.js too — the auth module has no Next-specific deps despite the package path):
 
-```typescript
+```ts
 import {
-  startMagicLink,
-  verifyMagicLink,
-  signInWithPassword,
-  signInWithGoogle,
-  signOut,
-  getCurrentSession,
-} from "@pylonsync/react";
+  loginWithPassword,
+  signupWithPassword,
+  logout,
+  startOAuthLogin,
+} from "@pylonsync/next/auth";
 
-await startMagicLink("alice@example.com");
-const session = await verifyMagicLink("alice@example.com", code);
-// → { token, user_id, expires_at }
-
-await signOut();
+await loginWithPassword({ email, password });
+await logout();
 ```
 
-For long-running clients, start auto-refresh:
+For long-running clients, run the session auto-refresher to keep tokens fresh:
 
-```typescript
+```ts
 import { startSessionAutoRefresh } from "@pylonsync/react";
 
 const cancel = startSessionAutoRefresh({ intervalSeconds: 300 });
 // later: cancel()
 ```
 
-## Direct (non-synced) calls
+## TypeScript
 
-For one-shot fetches that bypass the sync engine (e.g. server-rendered pages, scripts):
+For end-to-end type safety from schema → hooks, use `createTypedDb` with your manifest's generated types:
 
-```typescript
-import { fetchList, fetchById, insert, update, remove, callFn } from "@pylonsync/react";
-
-const todos = await fetchList("Todo");
-const todo  = await fetchById("Todo", id);
-const created = await insert("Todo", { title: "x", done: false });
-await update("Todo", id, { done: true });
-await remove("Todo", id);
-
-const result = await callFn("processOrder", { orderId });
-```
-
-These don't update the local store — use `useEntityMutation` instead if you want optimistic UI.
-
-## Streaming functions
-
-For functions that stream output (AI chat, live data):
-
-```typescript
-import { streamFn } from "@pylonsync/react";
-
-for await (const chunk of streamFn("chat", { prompt: "tell me a joke" })) {
-  console.log(chunk);
-}
-```
-
-## Files
-
-```typescript
-import { uploadFile, uploadFileMultipart } from "@pylonsync/react";
-
-const result = await uploadFile(file, { filename: "avatar.png" });
-// → { id: "file_xyz", url: "/api/files/file_xyz", size: 12345 }
-```
-
-## Typed client (codegen)
-
-After `pylon codegen client manifest.json --out client.ts`, you get a typed wrapper:
-
-```tsx
+```ts
 import { createTypedDb } from "@pylonsync/react";
-import type { AppSchema } from "./client";
+import type { Schema } from "./pylon.codegen";
 
-const db = createTypedDb<AppSchema>();
+export const typedDb = createTypedDb<Schema>();
 
-// Now everything is typed:
-const { data: todos } = db.useQuery("Todo");        // todos: Todo[]
-const { mutate } = db.useMutation("createTodo");    // args: CreateTodoInput
+// Now `typedDb.useQuery("Todo")` autocompletes the entity name +
+// types `data` as `Todo[]` automatically.
 ```
 
-The compiler catches typos in entity names, mismatched arg shapes, and wrong field references.
-
-## SSR / hydration
-
-For Next.js or any SSR framework, fetch on the server and hydrate on the client:
-
-```typescript
-// On the server
-import { getServerData } from "@pylonsync/sync";
-
-const hydration = await getServerData("https://your-app.com", ["Todo", "User"], {
-  token: req.cookies.pylon_token,
-});
-
-// Pass `hydration` to the client...
-```
-
-```tsx
-// On the client
-import { hydrateClient } from "@pylonsync/react";
-
-useEffect(() => {
-  hydrateClient(hydration);
-}, [hydration]);
-```
-
-The first paint shows server-rendered content; the sync engine then takes over for live updates without a redundant initial pull.
-
-For richer Next.js integration (Server Actions, RSC) see [`@pylonsync/next`](/clients/next).
-
-## React Native
-
-`@pylonsync/react`'s hooks work in React Native too, but the storage adapter (`localStorage`) doesn't. Use [`@pylonsync/react-native`](/clients/react-native) instead — it has the AsyncStorage bridge and SQLite-backed persistence.
-
-## Performance
-
-- Hooks use `useSyncExternalStore` so React batches re-renders correctly.
-- The local store keeps an in-memory snapshot per entity; `useQuery` reads are O(1).
-- Optimistic mutations fire a single re-render across all subscribed components.
-- WebSocket updates batch into one render per server tick to avoid render thrashing.
-
-## Common pitfalls
-
-- **Forgetting to call `configureClient` before mounting** — hooks throw if no base URL is set.
-- **Using `useQuery` outside a sync engine** — without `<PylonProvider>` (or the implicit default), the hook can't subscribe. Add the provider once at the app root.
-- **Holding stale data in `where` filters** — `useQuery` re-runs the filter on every store notify, so changing `where` triggers a re-fetch correctly. But if you derive `where` from React state, memoize it with `useMemo` to avoid object identity churn.
+Run `pylon codegen client --target ts` to emit `Schema` from your `app.ts`.

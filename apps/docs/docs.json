@@ -102,6 +102,7 @@
             "group": "Operations",
             "pages": [
               "operations/deploy",
+              "operations/vercel",
               "operations/sst",
               "operations/sizing",
               "operations/scaling",
