@@ -38,7 +38,44 @@ function getReleaseInfo(): { version: string; lastShippedISO: string | null } {
 	return { version, lastShippedISO };
 }
 
-export default function Home() {
+/**
+ * Pull the GitHub star count at build time so the nav can render a
+ * live-looking "★ N" badge. Cached per Vercel rebuild — no client
+ * fetch on page load, no API rate-limit at view time.
+ *
+ * Failures fall through silently with null; the badge collapses to
+ * a plain "GitHub →" link rather than crashing the build. The public
+ * /repos endpoint is 60/hr unauth which comfortably covers Vercel
+ * rebuilds; if Pylon ever hits that ceiling it's because something
+ * else is wrong.
+ */
+async function getStarCount(): Promise<number | null> {
+	try {
+		const res = await fetch("https://api.github.com/repos/pylonsync/pylon", {
+			headers: {
+				Accept: "application/vnd.github+json",
+				"User-Agent": "pylonsync-marketing-site",
+			},
+			next: { revalidate: 3600 }, // 1h ISR so we don't refetch on every request
+		});
+		if (!res.ok) return null;
+		const json = (await res.json()) as { stargazers_count?: number };
+		return typeof json.stargazers_count === "number"
+			? json.stargazers_count
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+export default async function Home() {
 	const { version, lastShippedISO } = getReleaseInfo();
-	return <LandingPage version={version} lastShippedISO={lastShippedISO} />;
+	const stars = await getStarCount();
+	return (
+		<LandingPage
+			version={version}
+			lastShippedISO={lastShippedISO}
+			stars={stars}
+		/>
+	);
 }

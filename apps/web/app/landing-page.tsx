@@ -88,6 +88,29 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .nav-links li a { display: inline-block; padding: 6px 12px; border-radius: 8px; color: var(--text-2); transition: color .15s ease, background .15s ease; }
 .pylon-landing .nav-links li a:hover { color: var(--text); background: var(--bg-alt); }
 .pylon-landing .nav-cta { display: flex; gap: 8px; align-items: center; }
+/* Build-time-cached star count from the GitHub repo. Renders as
+   icon + star + count. Falls back to a plain "GitHub" label when the
+   build-time fetch fails (rate-limited, network blip, etc.) — the
+   link still works, the visitor just doesn't see the count. */
+.pylon-landing .nav-github {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  font-size: 13px; color: var(--text-2);
+  background: var(--bg-card);
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.pylon-landing .nav-github:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.pylon-landing .nav-github svg { display: block; }
+.pylon-landing .nav-github .nav-github-stars {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px;
+  letter-spacing: -.01em;
+}
 .pylon-landing .btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 8px 14px; border-radius: 8px;
@@ -802,7 +825,8 @@ html, body { background: #fafaf9; color: #18181b; }
     min-width: 0;
   }
 
-  .pylon-landing .nav-cta .btn.ghost {
+  .pylon-landing .nav-cta .btn.ghost,
+  .pylon-landing .nav-cta .nav-github {
     display: none;
   }
 
@@ -1237,6 +1261,17 @@ const PRIMITIVES: Array<{ icon: string; tag: "app" | "game"; title: string; body
 	{ icon: "⟳", tag: "game", title: "Tick-based shards", body: <>Authoritative 20/30/60 tps loops in Rust. Area-of-interest, snapshot + delta replication, late-join.</> },
 ];
 
+/**
+ * Compact star count for the GitHub nav badge. Under 1k shows the
+ * exact number; over 1k rounds to one-decimal "k" (e.g. 2400 → 2.4k).
+ * Mirrors the format GitHub itself uses on the repo page.
+ */
+function formatStars(n: number): string {
+	if (n < 1000) return n.toLocaleString();
+	if (n < 10_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	return `${Math.round(n / 1000)}k`;
+}
+
 function CopyCommand({ command }: { command: string }) {
 	const [copied, setCopied] = useState(false);
 	return (
@@ -1260,9 +1295,11 @@ function CopyCommand({ command }: { command: string }) {
 export function LandingPage({
 	version,
 	lastShippedISO,
+	stars,
 }: {
 	version: string;
 	lastShippedISO: string | null;
+	stars: number | null;
 }) {
 	const [revenue, setRevenue] = useState(48920);
 	const [orderCount, setOrderCount] = useState(1284);
@@ -1340,6 +1377,22 @@ export function LandingPage({
 							<li><a href="#compare">Compare</a></li>
 						</ul>
 						<div className="nav-cta">
+							<a
+								className="nav-github"
+								href="https://github.com/pylonsync/pylon"
+								target="_blank"
+								rel="noopener noreferrer"
+								aria-label="Pylon on GitHub"
+							>
+								<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+									<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+								</svg>
+								{stars !== null ? (
+									<span className="nav-github-stars">★ {formatStars(stars)}</span>
+								) : (
+									<span className="nav-github-stars">GitHub</span>
+								)}
+							</a>
 							<Link className="btn ghost" href="https://cloud.pylonsync.com/login">Sign in</Link>
 							<Link className="btn dark" href="https://cloud.pylonsync.com/signup">Start building →</Link>
 							<button
