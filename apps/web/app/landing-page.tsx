@@ -748,13 +748,14 @@ html, body { background: #fafaf9; color: #18181b; }
 
 /* === FOOTER === */
 .pylon-landing footer { padding: 64px 0 40px; background: var(--bg); }
-.pylon-landing .foot-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr; gap: 40px; }
+.pylon-landing .foot-grid { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 40px; }
 .pylon-landing .foot-grid .brand-col { padding-right: 40px; }
-.pylon-landing .foot-grid .brand-col p { font-size: 13.5px; color: var(--text-2); line-height: 1.55; margin: 12px 0 0; max-width: 280px; }
+.pylon-landing .foot-grid .brand-col p { font-size: 13.5px; color: var(--text-2); line-height: 1.55; margin: 12px 0 0; max-width: 320px; }
 .pylon-landing .foot-grid h6 { font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 0 0 14px; font-weight: 500; }
 .pylon-landing .foot-grid ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 9px; }
-.pylon-landing .foot-grid li { font-size: 13.5px; color: var(--text-2); cursor: pointer; }
-.pylon-landing .foot-grid li:hover { color: var(--accent); }
+.pylon-landing .foot-grid li { font-size: 13.5px; }
+.pylon-landing .foot-grid li a { color: var(--text-2); transition: color .15s ease; }
+.pylon-landing .foot-grid li a:hover { color: var(--accent); }
 .pylon-landing .foot-meta { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--text-3); }
 .pylon-landing .foot-meta .status { display: inline-flex; align-items: center; gap: 8px; }
 .pylon-landing .foot-meta .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--pos); box-shadow: 0 0 0 3px var(--pos-soft); }
@@ -1336,7 +1337,6 @@ export function LandingPage({
 							<li><a href="#primitives">Primitives</a></li>
 							<li><a href="https://docs.pylonsync.com">Docs</a></li>
 							<li><a href="https://github.com/pylonsync/pylon/releases">Changelog</a></li>
-							<li><a href="#deploy">Pricing</a></li>
 							<li><a href="#compare">Compare</a></li>
 						</ul>
 						<div className="nav-cta">
@@ -1358,7 +1358,6 @@ export function LandingPage({
 						<a href="#primitives" onClick={() => setMenuOpen(false)}>Primitives</a>
 						<a href="https://docs.pylonsync.com">Docs</a>
 						<a href="https://github.com/pylonsync/pylon/releases">Changelog</a>
-						<a href="#deploy" onClick={() => setMenuOpen(false)}>Pricing</a>
 						<a href="#compare" onClick={() => setMenuOpen(false)}>Compare</a>
 						<a href="https://cloud.pylonsync.com/login" className="sheet-signin">Sign in →</a>
 					</div>
@@ -2014,23 +2013,36 @@ export function LandingPage({
 								<PylonMark size={20} style={{ color: "var(--ink)" }} />
 								Pylon
 							</a>
-							<p>The realtime backend, finally finished. Schema, server functions, live queries, auth, jobs, files, and search — in one binary.</p>
+							<p>The realtime backend for TypeScript apps. Schema, server functions, live queries, auth, jobs, files, and search — in one binary.</p>
 						</div>
 						<div>
 							<h6>Product</h6>
-							<ul><li>Overview</li><li>Live queries</li><li>Workflows</li><li>Plugins</li><li>Pylon Cloud</li><li>Pricing</li></ul>
+							<ul>
+								<li><a href="#features">Overview</a></li>
+								<li><a href="https://docs.pylonsync.com/concepts/live-queries">Live queries</a></li>
+								<li><a href="https://docs.pylonsync.com/plugins/overview">Plugins</a></li>
+								<li><a href="#compare">Compare</a></li>
+								<li><a href="https://cloud.pylonsync.com">Pylon Cloud</a></li>
+							</ul>
 						</div>
 						<div>
 							<h6>Developers</h6>
-							<ul><li>Documentation</li><li>Quickstart</li><li>Examples</li><li>Claude Code skill</li><li>Changelog</li><li>API reference</li></ul>
+							<ul>
+								<li><a href="https://docs.pylonsync.com">Documentation</a></li>
+								<li><a href="https://docs.pylonsync.com/quickstart">Quickstart</a></li>
+								<li><a href="https://docs.pylonsync.com/operations/vercel">Deploy to Vercel</a></li>
+								<li><a href="https://github.com/pylonsync/pylon/tree/main/examples">Examples</a></li>
+								<li><a href="/skill">Claude Code skill</a></li>
+								<li><a href="https://github.com/pylonsync/pylon/releases">Changelog</a></li>
+							</ul>
 						</div>
 						<div>
 							<h6>Resources</h6>
-							<ul><li>GitHub</li><li>Discussions</li><li>Status</li><li>Security</li><li>Brand</li></ul>
-						</div>
-						<div>
-							<h6>Company</h6>
-							<ul><li>About</li><li>Customers</li><li>Careers</li><li>Contact</li><li>Twitter / X</li></ul>
+							<ul>
+								<li><a href="https://github.com/pylonsync/pylon">GitHub</a></li>
+								<li><a href="https://github.com/pylonsync/pylon/discussions">Discussions</a></li>
+								<li><a href="https://github.com/pylonsync/pylon/blob/main/SECURITY.md">Security</a></li>
+							</ul>
 						</div>
 						<div className="foot-meta" style={{ gridColumn: "1 / -1" }}>
 							<span>© 2026 Pylon Labs, Inc · MIT / Apache-2.0 dual-licensed</span>
