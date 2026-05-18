@@ -291,10 +291,19 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .hero-layout .product-frame {
   margin-top: 0;
-  /* Let the mock breach the right side of the shell at wider widths —
-     the dashboard reads as a full-bleed surface anchored to the page
-     edge, not a small card inside the column. */
   max-width: none;
+  /* Let the mock bleed past the right edge of the shell so it anchors
+     to the viewport edge instead of sitting in a centered card. At a
+     1920px viewport this widens the mock by ~352px (the gap from the
+     shell's right edge to the viewport right edge, plus the shell's
+     own 32px padding). On narrower viewports the calc clamps at 0
+     and the mock stays inside the column.
+
+     The mock keeps its rounded-corner pill shape — overflow is hidden
+     and the right edge runs off the screen, which reads as "the
+     surface continues past the page" — same pattern Stripe, Linear,
+     Vercel use on their landing heroes. */
+  width: calc(100% + max(0px, (100vw - 1280px) / 2 + 32px));
 }
 /* Inside the hero column the mock has roughly half the viewport to
    work with — the default 220px sidebar + 1fr main + 360px aside grid
