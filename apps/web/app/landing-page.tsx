@@ -184,13 +184,17 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .hero-tag .arrow { color: var(--text-3); margin-left: 4px; }
 .pylon-landing h1.h1 {
-  font-size: clamp(48px, 6.6vw, 88px);
-  line-height: .98;
+  font-size: clamp(44px, 5.4vw, 76px);
+  line-height: 1.02;
   letter-spacing: -.045em;
   font-weight: 600;
   margin: 28px 0 24px;
   color: var(--ink);
-  max-width: 12ch;
+  /* Relaxed from 12ch — the new H1 ("TypeScript apps.") doesn't fit
+     in 12ch and forced an extra wrap that gave the hero column three
+     stacked text lines. Two-line wrap reads better next to the product
+     mock on the right. */
+  max-width: 16ch;
 }
 .pylon-landing h1.h1 .serif { color: var(--text-2); font-weight: 400; letter-spacing: -.02em; }
 .pylon-landing .hero p.lede {
@@ -269,15 +273,29 @@ html, body { background: #fafaf9; color: #18181b; }
   flex: 0 0 24px;
 }
 
-.pylon-landing .hero-text { text-align: left; position: relative; max-width: 880px; }
-.pylon-landing .hero-meta-row {
-  margin-top: 64px; padding: 20px 0;
-  border-top: 1px solid var(--line);
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px;
+.pylon-landing .hero-text { text-align: left; position: relative; }
+
+/* Hero layout — text column on the left, product mock on the right at
+   desktop widths. The mock extends past the right edge of the standard
+   shell so the dashboard's visible weight matches the text column's
+   typographic weight. Visitors see the artifact above the fold instead
+   of scrolling past empty whitespace to find it. Tightens the original
+   hero from "text → 64px gap → big stat row → 72px gap → mock" down to
+   "text and mock side by side, period." */
+.pylon-landing .hero-layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(540px, 1.15fr);
+  gap: 56px;
+  align-items: center;
+  padding-bottom: 96px;
 }
-.pylon-landing .hero-meta-row .item .k { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; }
-.pylon-landing .hero-meta-row .item .v { font-size: 17px; font-weight: 500; letter-spacing: -.01em; margin-top: 4px; color: var(--ink); }
-.pylon-landing .hero-meta-row .item .v .serif { color: var(--accent); font-size: 19px; }
+.pylon-landing .hero-layout .product-frame {
+  margin-top: 0;
+  /* Let the mock breach the right side of the shell at wider widths —
+     the dashboard reads as a full-bleed surface anchored to the page
+     edge, not a small card inside the column. */
+  max-width: none;
+}
 
 /* === HERO PRODUCT MOCK === */
 .pylon-landing .product-frame {
@@ -685,7 +703,14 @@ html, body { background: #fafaf9; color: #18181b; }
   .pylon-landing .foot-grid { grid-template-columns: 1fr 1fr; }
   .pylon-landing .nav-links { display: none; }
   .pylon-landing .nav-burger { display: inline-flex; }
-  .pylon-landing .hero-meta-row { grid-template-columns: 1fr 1fr; }
+  /* Hero stacks to one column below ~1100px so the product mock has
+     enough room to render its sidebar + main + code column. */
+  .pylon-landing .hero-layout {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    padding-bottom: 0;
+  }
+  .pylon-landing .hero-layout .product-frame { margin-top: 0; }
   .pylon-landing .logos .row { grid-template-columns: repeat(3, 1fr); }
 }
 
@@ -753,18 +778,8 @@ html, body { background: #fafaf9; color: #18181b; }
     padding-right: 10px;
   }
 
-  .pylon-landing .hero-meta-row {
-    margin-top: 44px;
-    gap: 18px 16px;
-    padding: 18px 0;
-  }
-
-  .pylon-landing .hero-meta-row .item .v {
-    font-size: 15px;
-  }
-
   .pylon-landing .product-frame {
-    margin-top: 44px;
+    margin-top: 8px;
     border-radius: 12px;
   }
 
@@ -1096,10 +1111,6 @@ html, body { background: #fafaf9; color: #18181b; }
     font-size: 40px;
   }
 
-  .pylon-landing .hero-meta-row {
-    grid-template-columns: 1fr;
-  }
-
   .pylon-landing h2.h2 {
     font-size: 32px;
   }
@@ -1288,7 +1299,7 @@ export function LandingPage({
 				{/* HERO */}
 				<header className="hero">
 					<div className="hero-grid-bg" />
-					<div className="shell">
+					<div className="shell hero-layout">
 						<div className="hero-text">
 							<h1 className="h1">
 								The realtime backend for{" "}
@@ -1328,13 +1339,6 @@ export function LandingPage({
 									<span className="arrow">→</span>
 								</a>
 							)}
-
-							<div className="hero-meta-row">
-								<div className="item"><div className="k">Single binary</div><div className="v">Rust, ~28&nbsp;<span className="serif">MB</span></div></div>
-								<div className="item"><div className="k">Read latency</div><div className="v">0.4&nbsp;<span className="serif">ms</span> from mirror</div></div>
-								<div className="item"><div className="k">OAuth providers</div><div className="v">25<span className="serif">+</span> · OIDC</div></div>
-								<div className="item"><div className="k">Deploys to</div><div className="v">Vercel + Pylon Cloud</div></div>
-							</div>
 						</div>
 
 						{/* PRODUCT MOCK */}
