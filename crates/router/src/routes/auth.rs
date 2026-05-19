@@ -2198,9 +2198,32 @@ pub(crate) fn handle(
             return Some((401, json_error(code, &msg)));
         }
         // Signature verified. Now we can trust the body.
+        //
+        // Helper: every rejection past this point gets a SignInFailed
+        // audit event with `method=trusted_mint`. Without this, an
+        // attacker who steals the secret can probe email enumeration
+        // (USER_NOT_FOUND vs ACCOUNT_LOCKED vs 200) silently —
+        // Tinybird/Loki alerts on `sign_in_failed` rate spikes won't
+        // fire. Codex review caught the gap.
+        let intent_for_audit =
+            |intent: &Option<String>| intent.clone().unwrap_or_else(|| "unspecified".into());
+        let audit_failed = |code: &str, user: Option<&str>, intent: &Option<String>| {
+            let mut b = audit(ctx, pylon_auth::audit::AuditAction::SignInFailed)
+                .failed(format!("trusted_mint:{code}"))
+                .meta("method", "trusted_mint")
+                .meta("intent", intent_for_audit(intent));
+            if let Some(uid) = user {
+                if !uid.is_empty() {
+                    b = b.user(uid.to_string());
+                }
+            }
+            ctx.audit.log(b.build());
+        };
+
         let data: serde_json::Value = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(e) => {
+                audit_failed("invalid_json", None, &None);
                 return Some((
                     400,
                     json_error_safe(
@@ -2211,13 +2234,21 @@ pub(crate) fn handle(
                 ));
             }
         };
+        // Read `intent` first so post-body audit events carry it even
+        // for downstream rejections.
+        let intent = data
+            .get("intent")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let email = match data.get("email").and_then(|v| v.as_str()) {
             Some(e) => e.trim().to_lowercase(),
             None => {
+                audit_failed("missing_email", None, &intent);
                 return Some((400, json_error("MISSING_EMAIL", "email is required")));
             }
         };
         if !email.contains('@') {
+            audit_failed("invalid_email", None, &intent);
             return Some((
                 400,
                 json_error("INVALID_EMAIL", "email must be well-formed"),
@@ -2227,23 +2258,25 @@ pub(crate) fn handle(
             .get("createIfMissing")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // Treat empty/whitespace-only displayName as absent so the
+        // email fallback fires. Otherwise `displayName=""` writes an
+        // empty string on the user row — visually broken in any UI
+        // that renders the name.
         let display_name = data
             .get("displayName")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let intent = data
-            .get("intent")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let user_entity = ctx.store.manifest().auth.user.entity.clone();
-        let now_iso = format!(
-            "{}Z",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
+        // ISO-8601 timestamp from the kernel helper. The earlier
+        // implementation used `format!("{}Z", unix_secs)` which is
+        // NOT valid ISO-8601 — `new Date("1716177600Z")` returns
+        // Invalid Date, and the storage adapter silently drops
+        // unparseable datetime values, leaving emailVerified null
+        // forever. Documented footgun (see auth/email-verification);
+        // Codex review caught the re-introduction here.
+        let now_iso = pylon_kernel::util::now_iso();
 
         let existing = ctx
             .store
@@ -2258,24 +2291,10 @@ pub(crate) fn handle(
                 // app sets them we honor them as a courtesy. Apps
                 // wanting stricter checks should layer their own
                 // policy in front of the endpoint.
+                let existing_id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 for column in ["disabledAt", "bannedAt", "lockedAt", "_deletedAt"] {
                     if !row.get(column).map_or(true, |v| v.is_null()) {
-                        ctx.audit.log(
-                            audit(ctx, pylon_auth::audit::AuditAction::SignInFailed)
-                                .user(
-                                    row.get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string(),
-                                )
-                                .failed(format!("trusted_mint:account_{column}"))
-                                .meta("method", "trusted_mint")
-                                .meta(
-                                    "intent",
-                                    intent.clone().unwrap_or_else(|| "unspecified".into()),
-                                )
-                                .build(),
-                        );
+                        audit_failed(&format!("account_{column}"), Some(existing_id), &intent);
                         return Some((
                             403,
                             json_error(
@@ -2285,8 +2304,8 @@ pub(crate) fn handle(
                         ));
                     }
                 }
-                let id = row["id"].as_str().unwrap_or("").to_string();
-                if id.is_empty() {
+                if existing_id.is_empty() {
+                    audit_failed("invalid_user_row", None, &intent);
                     return Some((
                         500,
                         json_error(
@@ -2295,6 +2314,7 @@ pub(crate) fn handle(
                         ),
                     ));
                 }
+                let id = existing_id.to_string();
                 // The caller has out-of-band proof of email control
                 // (Stripe / their own verified IDP). Stamp emailVerified
                 // if not already set, mirroring the magic-link flow.
@@ -2319,6 +2339,7 @@ pub(crate) fn handle(
             }
             None => {
                 if !create_if_missing {
+                    audit_failed("user_not_found", None, &intent);
                     return Some((
                         400,
                         json_error(
@@ -2368,6 +2389,7 @@ pub(crate) fn handle(
                 let id = match ctx.store.insert(&user_entity, &row) {
                     Ok(id) => id,
                     Err(e) => {
+                        audit_failed(&format!("user_insert_failed:{}", e.code), None, &intent);
                         return Some((
                             500,
                             json_error_safe(
@@ -2383,10 +2405,7 @@ pub(crate) fn handle(
                         .user(id.clone())
                         .actor(id.clone())
                         .meta("method", "trusted_mint")
-                        .meta(
-                            "intent",
-                            intent.clone().unwrap_or_else(|| "unspecified".into()),
-                        )
+                        .meta("intent", intent_for_audit(&intent))
                         .build(),
                 );
                 (id, true)
@@ -2394,13 +2413,20 @@ pub(crate) fn handle(
         };
 
         let session = create_session_with_device(ctx, user_id.clone());
-        ctx.maybe_set_session_cookie(&session.token);
+        // Always emit Set-Cookie — the canonical use case is a
+        // server-side proxy (Next.js route handler, Stripe success
+        // redirect) forwarding the response to a browser. Such a
+        // proxy doesn't carry an Origin header, so the gated
+        // `maybe_set_session_cookie` would silently skip the cookie,
+        // breaking the documented flow. Mirrors the OAuth-callback
+        // path which uses the same primitive for the same reason.
+        ctx.set_browser_session_cookie(&session.token);
         ctx.audit.log(
             audit(ctx, pylon_auth::audit::AuditAction::SignIn)
                 .user(user_id.clone())
                 .actor(user_id.clone())
                 .meta("method", "trusted_mint")
-                .meta("intent", intent.unwrap_or_else(|| "unspecified".into()))
+                .meta("intent", intent_for_audit(&intent))
                 .build(),
         );
         return Some((

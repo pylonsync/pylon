@@ -168,6 +168,23 @@ Every call writes one of three event shapes to the audit log:
 
 The `intent` field is the free-form string from the request body — use it to discriminate "Stripe checkout success" from "internal SSO bridge" from "BYOC migration backfill" without parsing audit reasons.
 
+## Replay window — be honest about what HMAC + timestamp buys
+
+The signature scheme protects against **tamper** (an attacker can't change the email in a captured request without invalidating the sig) and **stale replay** (a signature is dead after 5 minutes). It does NOT protect against **fresh replay**.
+
+A captured signed request, replayed within 5 minutes by anyone who can reach the Pylon ingress, mints another session for the same email — and the response body includes a long-lived `token`. So:
+
+- A TLS-MITM in the path (corporate proxy, "log everything" CDN that captures bodies) within the 5-min window can extract a usable session token.
+- An attacker who steals one signed request from server logs that capture the URL + headers (rare — sigs are headers, bodies aren't usually logged) can replay it once per minute for up to 5 minutes.
+
+Mitigations:
+
+- Don't log signed requests with their headers.
+- Use HTTPS end-to-end; the HMAC is not a substitute for TLS.
+- If your threat model requires single-use semantics, include a `nonce` in the request body and enforce uniqueness in your own backend before issuing the trusted-mint call. The trusted-mint endpoint itself does not de-duplicate; Pylon's audit log will show every replay.
+
+The trade-off is deliberate: a per-request nonce store would add complexity and a failure mode (nonce-store unavailable → endpoint fails). For Stripe-Checkout-style use cases, the 5-min window is fine — the user is actively in the flow, not someone else.
+
 ## Security checklist
 
 - [ ] `PYLON_TRUSTED_SECRET` is 32+ bytes of CSPRNG output (`openssl rand -hex 32`).
@@ -175,7 +192,8 @@ The `intent` field is the free-form string from the request body — use it to d
 - [ ] The endpoint is reachable only from your trusted server-side environments (most production Pylon deployments are public, so the secret is the only thing keeping attackers out — accept that).
 - [ ] Server clocks are within a few seconds of NTP. ±5 min sounds generous, but a 7-min clock skew bricks the endpoint.
 - [ ] Rotation playbook: set a new `PYLON_TRUSTED_SECRET`, redeploy the signing service, wait for in-flight signed requests to flush (~10 min), then rotate the Pylon side. Pylon currently accepts one active secret; multi-key rotation is on the roadmap.
-- [ ] Audit log shipped somewhere queryable (Tinybird, Loki, Datadog) so a `sign_in_failed` spike on the `trusted_mint` method is alertable.
+- [ ] Audit log shipped somewhere queryable (Tinybird, Loki, Datadog) so a `sign_in_failed` spike on the `trusted_mint` method is alertable. Every post-signature rejection (invalid JSON, missing/invalid email, USER_NOT_FOUND, INVALID_USER_ROW, USER_INSERT_FAILED, ACCOUNT_LOCKED) emits one with the matching `meta.reason`.
+- [ ] Signed-request payloads aren't logged at the TLS-terminator (Cloudflare, Fly proxy, etc.) — bodies are sensitive even though headers usually aren't.
 
 ## Why not service tokens?
 

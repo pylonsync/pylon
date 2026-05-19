@@ -473,6 +473,114 @@ fn trusted_mint_round_trip() {
         resp_body.contains("USER_NOT_FOUND"),
         "expected USER_NOT_FOUND error: {resp_body}",
     );
+
+    // 6) Missing X-Pylon-Trusted-Signature → 401 MISSING_SIGNATURE.
+    //    `signed_post_raw` with sig="" exercises the empty-header gate.
+    let (status, resp_body) = signed_post_raw(
+        &base,
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string(),
+        "",
+        r#"{"email":"x@y.z","createIfMissing":true}"#,
+    );
+    assert_eq!(status, 401, "missing sig should be 401: {resp_body}");
+    assert!(
+        resp_body.contains("MISSING_SIGNATURE"),
+        "expected MISSING_SIGNATURE error: {resp_body}",
+    );
+
+    // 7) INVALID_JSON after signature verifies — body is unparseable
+    //    but signed with the right secret. The handler must still
+    //    write a SignInFailed audit (verified separately by reading
+    //    the audit log via the `audit-` endpoint is out of scope for
+    //    this test; we just check the user-visible status here).
+    let bad_body = "not json at all";
+    let (status, resp_body) = signed_post(&base, SECRET, bad_body, 0);
+    assert_eq!(status, 400, "invalid json should be 400: {resp_body}");
+    assert!(
+        resp_body.contains("INVALID_JSON"),
+        "expected INVALID_JSON: {resp_body}",
+    );
+
+    // 8) Missing email field after sig verifies → 400 MISSING_EMAIL.
+    let no_email = r#"{"createIfMissing":true}"#;
+    let (status, resp_body) = signed_post(&base, SECRET, no_email, 0);
+    assert_eq!(status, 400, "missing email should be 400: {resp_body}");
+    assert!(
+        resp_body.contains("MISSING_EMAIL"),
+        "expected MISSING_EMAIL: {resp_body}",
+    );
+
+    // 9) Malformed email (no @) → 400 INVALID_EMAIL.
+    let bad_email = r#"{"email":"notanemail","createIfMissing":true}"#;
+    let (status, resp_body) = signed_post(&base, SECRET, bad_email, 0);
+    assert_eq!(status, 400, "bad email should be 400: {resp_body}");
+    assert!(
+        resp_body.contains("INVALID_EMAIL"),
+        "expected INVALID_EMAIL: {resp_body}",
+    );
+
+    // 10) Emitted Set-Cookie present even though the request carried
+    //     no Origin header. This is the critical Stripe-Checkout
+    //     fix from the Codex review — a server-to-server proxy
+    //     needs the cookie to forward to the browser, and the
+    //     previous `maybe_set_session_cookie` silently dropped it
+    //     when Origin was absent.
+    let body = r#"{"email":"cookie@example.com","createIfMissing":true}"#;
+    let url = format!("{base}/api/auth/sessions/trusted-mint");
+    let host = url.strip_prefix("http://").unwrap_or(&url);
+    let (host_port, path) = host
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let sig = pylon_auth::trusted_mint::sign(SECRET, now_secs, body.as_bytes());
+    // No Origin header — mimics Node-fetch from a Next.js server
+    // route. The CSRF plugin won't reject because the route is
+    // explicitly trusted via HMAC.
+    let request = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: {host_port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         X-Pylon-Trusted-Timestamp: {now_secs}\r\n\
+         X-Pylon-Trusted-Signature: {sig}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    );
+    let mut stream = TcpStream::connect(host_port).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.write_all(request.as_bytes()).expect("write");
+    let mut full_response = String::new();
+    stream.read_to_string(&mut full_response).ok();
+    // The full raw response — we want to inspect headers, not just
+    // status + body, so we read the whole thing.
+    let status: u16 = full_response
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    assert_eq!(
+        status, 200,
+        "no-origin mint should still succeed: {full_response}",
+    );
+    let has_set_cookie = full_response
+        .lines()
+        .any(|l| l.to_ascii_lowercase().starts_with("set-cookie:"));
+    assert!(
+        has_set_cookie,
+        "Set-Cookie must be emitted even without Origin header (Stripe-Checkout flow). \
+         Full response: {full_response}",
+    );
 }
 
 #[test]
