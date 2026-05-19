@@ -370,12 +370,7 @@ fn trusted_mint_round_trip() {
     }
     let base = start_test_server();
 
-    fn signed_post(
-        base: &str,
-        secret: &str,
-        body: &str,
-        ts_offset: i64,
-    ) -> (u16, String) {
+    fn signed_post(base: &str, secret: &str, body: &str, ts_offset: i64) -> (u16, String) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -388,7 +383,10 @@ fn trusted_mint_round_trip() {
     fn signed_post_raw(base: &str, ts: &str, sig: &str, body: &str) -> (u16, String) {
         let url = format!("{base}/api/auth/sessions/trusted-mint");
         let host = url.strip_prefix("http://").unwrap_or(&url);
-        let (host_port, path) = host.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap();
+        let (host_port, path) = host
+            .split_once('/')
+            .map(|(h, p)| (h, format!("/{p}")))
+            .unwrap();
         let request = format!(
             "POST {path} HTTP/1.1\r\n\
              Host: {host_port}\r\n\
@@ -403,9 +401,7 @@ fn trusted_mint_round_trip() {
             body.len(),
         );
         let mut stream = TcpStream::connect(host_port).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         stream.write_all(request.as_bytes()).expect("write");
         let mut response = String::new();
         stream.read_to_string(&mut response).ok();
@@ -420,8 +416,7 @@ fn trusted_mint_round_trip() {
     }
 
     // 1) Happy path: createIfMissing=true, brand-new email → 200, created=true.
-    let body =
-        r#"{"email":"buyer@example.com","createIfMissing":true,"intent":"stripe_checkout_success"}"#;
+    let body = r#"{"email":"buyer@example.com","createIfMissing":true,"intent":"stripe_checkout_success"}"#;
     let (status, resp_body) = signed_post(&base, SECRET, body, 0);
     assert_eq!(status, 200, "first mint should succeed: {resp_body}");
     let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
