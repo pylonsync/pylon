@@ -53,6 +53,7 @@
               "auth/password",
               "auth/oauth",
               "auth/sessions",
+              "auth/trusted-mint",
               "auth/rbac",
               "auth/api-keys",
               "auth/organizations",

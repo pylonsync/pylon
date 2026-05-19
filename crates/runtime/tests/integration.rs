@@ -358,6 +358,129 @@ fn auth_session_flow() {
 }
 
 #[test]
+fn trusted_mint_round_trip() {
+    // Trusted-mint endpoint is opt-in via PYLON_TRUSTED_SECRET. Set it
+    // BEFORE starting any server so the gate is active for this test.
+    // Safety: process-global env writes during test setup are
+    // single-threaded by virtue of `start_test_server`'s `INIT_ADMIN`
+    // pattern; no other test reads this var.
+    const SECRET: &str = "trusted_mint_integration_secret";
+    unsafe {
+        std::env::set_var("PYLON_TRUSTED_SECRET", SECRET);
+    }
+    let base = start_test_server();
+
+    fn signed_post(
+        base: &str,
+        secret: &str,
+        body: &str,
+        ts_offset: i64,
+    ) -> (u16, String) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let ts = (now + ts_offset) as u64;
+        let sig = pylon_auth::trusted_mint::sign(secret, ts, body.as_bytes());
+        signed_post_raw(base, &ts.to_string(), &sig, body)
+    }
+
+    fn signed_post_raw(base: &str, ts: &str, sig: &str, body: &str) -> (u16, String) {
+        let url = format!("{base}/api/auth/sessions/trusted-mint");
+        let host = url.strip_prefix("http://").unwrap_or(&url);
+        let (host_port, path) = host.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {host_port}\r\n\
+             Origin: http://{host_port}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             X-Pylon-Trusted-Timestamp: {ts}\r\n\
+             X-Pylon-Trusted-Signature: {sig}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            body.len(),
+        );
+        let mut stream = TcpStream::connect(host_port).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).ok();
+        let status: u16 = response
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    // 1) Happy path: createIfMissing=true, brand-new email → 200, created=true.
+    let body =
+        r#"{"email":"buyer@example.com","createIfMissing":true,"intent":"stripe_checkout_success"}"#;
+    let (status, resp_body) = signed_post(&base, SECRET, body, 0);
+    assert_eq!(status, 200, "first mint should succeed: {resp_body}");
+    let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+    assert!(resp["token"].as_str().is_some(), "no token: {resp_body}");
+    assert_eq!(resp["created"], serde_json::Value::Bool(true));
+    let first_user_id = resp["userId"].as_str().unwrap().to_string();
+    assert!(!first_user_id.is_empty());
+
+    // 2) Same email a second time → 200, created=false (existing user
+    //    re-signed-in). Different signed timestamp so the signature
+    //    differs even though the body is byte-identical.
+    let (status, resp_body) = signed_post(&base, SECRET, body, 1);
+    assert_eq!(status, 200, "second mint should re-sign-in: {resp_body}");
+    let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+    assert_eq!(resp["created"], serde_json::Value::Bool(false));
+    assert_eq!(
+        resp["userId"].as_str(),
+        Some(first_user_id.as_str()),
+        "re-sign-in should land on the same user row",
+    );
+
+    // 3) Bad signature → 401 BAD_SIGNATURE.
+    let (status, resp_body) = signed_post_raw(
+        &base,
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string(),
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        body,
+    );
+    assert_eq!(status, 401, "bad sig should be 401: {resp_body}");
+    assert!(
+        resp_body.contains("BAD_SIGNATURE"),
+        "expected BAD_SIGNATURE error: {resp_body}",
+    );
+
+    // 4) Stale timestamp (10 min in the past) → 401 STALE_TIMESTAMP.
+    //    Signature has to match the offset timestamp to isolate the
+    //    freshness check from the signature check.
+    let (status, resp_body) = signed_post(&base, SECRET, body, -10 * 60);
+    assert_eq!(status, 401, "stale ts should be 401: {resp_body}");
+    assert!(
+        resp_body.contains("STALE_TIMESTAMP"),
+        "expected STALE_TIMESTAMP error: {resp_body}",
+    );
+
+    // 5) Unknown email without createIfMissing → 400 USER_NOT_FOUND.
+    let body = r#"{"email":"ghost@example.com","createIfMissing":false}"#;
+    let (status, resp_body) = signed_post(&base, SECRET, body, 0);
+    assert_eq!(status, 400, "missing user should be 400: {resp_body}");
+    assert!(
+        resp_body.contains("USER_NOT_FOUND"),
+        "expected USER_NOT_FOUND error: {resp_body}",
+    );
+}
+
+#[test]
 fn health_and_metrics() {
     let base = start_test_server();
 

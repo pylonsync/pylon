@@ -497,6 +497,7 @@ This skill focused on the React/TS happy path. Pylon has more — fetch the docs
 - **Email + password** (`/api/auth/password/register` + `/login`) — Argon2id-hashed.
 - **OAuth** — Google + GitHub built in (`/api/auth/login/:provider` + `/callback/:provider`). CSRF-protected via state tokens.
 - **Sessions** — opaque 256-bit tokens, 30-day default. `/api/auth/refresh`, `/sessions` GET/DELETE for management.
+- **Trusted server-side mint** — `POST /api/auth/sessions/trusted-mint`. HMAC-signed (`X-Pylon-Trusted-Signature: hex(HMAC_SHA256(PYLON_TRUSTED_SECRET, ts + "." + body))`), ±5min freshness window. Reach for this when another trusted system (Stripe Checkout, custom IdP) has verified the email and you want to skip the magic-link roundtrip. Opt-in: 404 unless `PYLON_TRUSTED_SECRET` is set.
 - **RBAC** — roles on the session; `auth.hasRole('x')` in policies. `admin` role bypasses everything.
 - **Multi-tenant** — `auth.tenantId` from `/api/auth/select-org`; row-scoped policies via `data.orgId == auth.tenantId`.
 - **API keys** — via the `api_keys` plugin, scoped + rotatable + Argon2-hashed.

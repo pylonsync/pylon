@@ -2080,6 +2080,341 @@ pub(crate) fn handle(
         ));
     }
 
+    // POST /api/auth/sessions/trusted-mint
+    //
+    // Server-to-server "sign this email in" endpoint. The canonical use
+    // case is Stripe Checkout success: the buyer's email has been
+    // verified by Stripe (they paid + confirmed delivery), and forcing
+    // them through a password form or magic-link roundtrip between
+    // "paid" and "in the dashboard" measurably hurts conversion.
+    //
+    // Trust model: HMAC-SHA256 over `<timestamp>.<body>` with
+    // PYLON_TRUSTED_SECRET, hex-encoded in X-Pylon-Trusted-Signature.
+    // Timestamp must be within ±5 min of server clock (replay window).
+    // Same scheme as Stripe webhook signatures, deliberately.
+    //
+    // Opt-in: returns 404 when PYLON_TRUSTED_SECRET is unset, so plain
+    // Pylon installs don't accidentally ship a signing surface that
+    // does nothing. Operators have to opt in by setting the secret
+    // and that act is visible in env audits.
+    //
+    // What it does NOT do:
+    //   - Bypass auth-locked accounts. If the User row carries any of
+    //     `disabledAt`, `bannedAt`, `lockedAt`, or `_deletedAt` as a
+    //     non-null value, the endpoint returns 403 — same shape an
+    //     app's policy layer would enforce on a real sign-in.
+    //   - Auto-select an org / tenant. The minted session is exactly
+    //     what `/api/auth/magic/verify` would mint — apps drive
+    //     `/api/auth/select-org` after the user lands.
+    //   - Expose `pk.*` API key auth. The endpoint is HMAC-gated, not
+    //     session-gated; an API key context has no relevance here.
+    if url == "/api/auth/sessions/trusted-mint" && method == HttpMethod::Post {
+        // Opt-in env gate. The endpoint must not exist on installs
+        // that haven't deliberately configured it — 404 (not 501) so
+        // route scanners can't tell the difference between "feature
+        // unsupported" and "feature disabled here". Empty string is
+        // treated as unset so `PYLON_TRUSTED_SECRET=` in a .env file
+        // doesn't accidentally turn it on.
+        let secret = match std::env::var("PYLON_TRUSTED_SECRET").ok() {
+            Some(s) if !s.is_empty() => s,
+            _ => return None,
+        };
+        // Headers (case-insensitive). The runtime lowercases header
+        // names before populating `request_headers`, but other
+        // request_user_agent uses eq_ignore_ascii_case so we match
+        // that style here for resilience.
+        let header_value = |name: &str| -> Option<&str> {
+            ctx.request_headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        let timestamp =
+            match header_value("x-pylon-trusted-timestamp").and_then(|s| s.parse::<u64>().ok()) {
+                Some(t) => t,
+                None => {
+                    return Some((
+                        401,
+                        json_error(
+                            "MISSING_TIMESTAMP",
+                            "X-Pylon-Trusted-Timestamp header missing or not a unix timestamp",
+                        ),
+                    ));
+                }
+            };
+        let signature = match header_value("x-pylon-trusted-signature") {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Some((
+                    401,
+                    json_error(
+                        "MISSING_SIGNATURE",
+                        "X-Pylon-Trusted-Signature header missing",
+                    ),
+                ));
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Err(e) = pylon_auth::trusted_mint::verify_signature(
+            &secret,
+            timestamp,
+            body.as_bytes(),
+            &signature,
+            now,
+        ) {
+            // Audit the failed attempt before responding, so a leaked
+            // signing-secret attempt is forensically reconstructible.
+            // The actor is unknown (we don't trust the body until the
+            // sig is good) so this lands as an unattributed event.
+            ctx.audit.log(
+                audit(ctx, pylon_auth::audit::AuditAction::SignInFailed)
+                    .failed(format!("trusted_mint:{e}"))
+                    .meta("method", "trusted_mint")
+                    .build(),
+            );
+            let (code, msg) = match e {
+                pylon_auth::trusted_mint::TrustedMintError::MissingTimestamp => {
+                    ("MISSING_TIMESTAMP", e.to_string())
+                }
+                pylon_auth::trusted_mint::TrustedMintError::MissingSignature => {
+                    ("MISSING_SIGNATURE", e.to_string())
+                }
+                pylon_auth::trusted_mint::TrustedMintError::StaleTimestamp => {
+                    ("STALE_TIMESTAMP", e.to_string())
+                }
+                pylon_auth::trusted_mint::TrustedMintError::BadSignature => {
+                    ("BAD_SIGNATURE", e.to_string())
+                }
+                // Should be unreachable — we checked the secret above
+                // before calling verify_signature — but map it
+                // explicitly so a refactor can't silently regress.
+                pylon_auth::trusted_mint::TrustedMintError::SecretNotConfigured => {
+                    ("NOT_CONFIGURED", e.to_string())
+                }
+            };
+            return Some((401, json_error(code, &msg)));
+        }
+        // Signature verified. Now we can trust the body.
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let email = match data.get("email").and_then(|v| v.as_str()) {
+            Some(e) => e.trim().to_lowercase(),
+            None => {
+                return Some((400, json_error("MISSING_EMAIL", "email is required")));
+            }
+        };
+        if !email.contains('@') {
+            return Some((
+                400,
+                json_error("INVALID_EMAIL", "email must be well-formed"),
+            ));
+        }
+        let create_if_missing = data
+            .get("createIfMissing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let display_name = data
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let intent = data
+            .get("intent")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let user_entity = ctx.store.manifest().auth.user.entity.clone();
+        let now_iso = format!(
+            "{}Z",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+
+        let existing = ctx
+            .store
+            .lookup(&user_entity, "email", &email)
+            .ok()
+            .flatten();
+        let (user_id, created) = match existing {
+            Some(row) => {
+                // Refuse to mint a session for a user the app has
+                // marked inaccessible. The framework doesn't enforce
+                // these columns — they're conventional — but if the
+                // app sets them we honor them as a courtesy. Apps
+                // wanting stricter checks should layer their own
+                // policy in front of the endpoint.
+                for column in ["disabledAt", "bannedAt", "lockedAt", "_deletedAt"] {
+                    if !row.get(column).map_or(true, |v| v.is_null()) {
+                        ctx.audit.log(
+                            audit(ctx, pylon_auth::audit::AuditAction::SignInFailed)
+                                .user(
+                                    row.get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                )
+                                .failed(format!("trusted_mint:account_{column}"))
+                                .meta("method", "trusted_mint")
+                                .meta(
+                                    "intent",
+                                    intent.clone().unwrap_or_else(|| "unspecified".into()),
+                                )
+                                .build(),
+                        );
+                        return Some((
+                            403,
+                            json_error(
+                                "ACCOUNT_LOCKED",
+                                "User account is locked, disabled, banned, or deleted",
+                            ),
+                        ));
+                    }
+                }
+                let id = row["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    return Some((
+                        500,
+                        json_error(
+                            "INVALID_USER_ROW",
+                            "User row has no id — schema misconfiguration",
+                        ),
+                    ));
+                }
+                // The caller has out-of-band proof of email control
+                // (Stripe / their own verified IDP). Stamp emailVerified
+                // if not already set, mirroring the magic-link flow.
+                // Only attempt the update if the manifest actually
+                // declares the column — apps on stripped-down User
+                // schemas won't have it.
+                let has_email_verified = ctx
+                    .store
+                    .manifest()
+                    .entities
+                    .iter()
+                    .find(|e| e.name == user_entity)
+                    .is_some_and(|e| e.fields.iter().any(|f| f.name == "emailVerified"));
+                if has_email_verified && row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                    let _ = ctx.store.update(
+                        &user_entity,
+                        &id,
+                        &serde_json::json!({ "emailVerified": now_iso }),
+                    );
+                }
+                (id, false)
+            }
+            None => {
+                if !create_if_missing {
+                    return Some((
+                        400,
+                        json_error(
+                            "USER_NOT_FOUND",
+                            "No user with that email; pass createIfMissing=true to provision one",
+                        ),
+                    ));
+                }
+                // Only populate columns the manifest declares — apps
+                // may run on stripped-down User schemas (just email +
+                // id) or extended ones with our standard auth
+                // metadata. The magic-link verify path makes the same
+                // assumption implicitly; doing the field-set check
+                // explicitly avoids 500-on-extra-field errors on
+                // minimal schemas.
+                let user_fields: std::collections::HashSet<&str> = ctx
+                    .store
+                    .manifest()
+                    .entities
+                    .iter()
+                    .find(|e| e.name == user_entity)
+                    .map(|e| e.fields.iter().map(|f| f.name.as_str()).collect())
+                    .unwrap_or_default();
+                let mut row = serde_json::Map::new();
+                row.insert("email".into(), serde_json::Value::String(email.clone()));
+                if user_fields.contains("displayName") {
+                    row.insert(
+                        "displayName".into(),
+                        serde_json::Value::String(
+                            display_name.clone().unwrap_or_else(|| email.clone()),
+                        ),
+                    );
+                }
+                if user_fields.contains("emailVerified") {
+                    row.insert(
+                        "emailVerified".into(),
+                        serde_json::Value::String(now_iso.clone()),
+                    );
+                }
+                if user_fields.contains("createdAt") {
+                    row.insert(
+                        "createdAt".into(),
+                        serde_json::Value::String(now_iso.clone()),
+                    );
+                }
+                let row = serde_json::Value::Object(row);
+                let id = match ctx.store.insert(&user_entity, &row) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return Some((
+                            500,
+                            json_error_safe(
+                                "USER_INSERT_FAILED",
+                                "Could not provision user",
+                                &format!("insert {}: {}", user_entity, e.message),
+                            ),
+                        ));
+                    }
+                };
+                ctx.audit.log(
+                    audit(ctx, pylon_auth::audit::AuditAction::SignUp)
+                        .user(id.clone())
+                        .actor(id.clone())
+                        .meta("method", "trusted_mint")
+                        .meta(
+                            "intent",
+                            intent.clone().unwrap_or_else(|| "unspecified".into()),
+                        )
+                        .build(),
+                );
+                (id, true)
+            }
+        };
+
+        let session = create_session_with_device(ctx, user_id.clone());
+        ctx.maybe_set_session_cookie(&session.token);
+        ctx.audit.log(
+            audit(ctx, pylon_auth::audit::AuditAction::SignIn)
+                .user(user_id.clone())
+                .actor(user_id.clone())
+                .meta("method", "trusted_mint")
+                .meta("intent", intent.unwrap_or_else(|| "unspecified".into()))
+                .build(),
+        );
+        return Some((
+            200,
+            serde_json::json!({
+                "userId": user_id,
+                "created": created,
+                "token": session.token,
+                "expiresAt": session.expires_at,
+            })
+            .to_string(),
+        ));
+    }
+
     // POST /api/auth/jwt — exchange the current session for a JWT-shaped
     // token (HS256 signed with PYLON_JWT_SECRET). Useful for edge runtimes
     // that can't tolerate a session-store round-trip on every request.

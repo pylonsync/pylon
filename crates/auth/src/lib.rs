@@ -17,6 +17,7 @@ pub mod org;
 pub mod rate_limit;
 pub mod scim;
 pub mod trusted_device;
+pub mod trusted_mint;
 pub mod verification;
 
 #[cfg(not(target_arch = "wasm32"))]
