@@ -27,23 +27,29 @@ import {
 const Org = entity("Org", {
 	slug: field.string(),
 	name: field.string(),
-	ownerId: field.id("User"),
-	createdAt: field.datetime(),
+	// `.readonly()` blocks HTTP PATCH from rewriting ownership — closes
+	// the IDOR-via-update-payload shape where an attacker would
+	// `PATCH /api/entities/Org/<id>` with `{ownerId: <them>}` and the
+	// policy's `existing.ownerId == auth.userId` would already be true
+	// because they read the row. Server-side ctx.db.update still goes
+	// through, so admin migrations + transfers work.
+	ownerId: field.id("User").readonly(),
+	createdAt: field.datetime().readonly(),
 });
 
 const Membership = entity("Membership", {
-	orgId: field.id("Org"),
-	userId: field.id("User"),
+	orgId: field.id("Org").readonly(),
+	userId: field.id("User").readonly(),
 	role: field.enum_(["owner", "admin", "member"]),
-	createdAt: field.datetime(),
+	createdAt: field.datetime().readonly(),
 });
 
 const Project = entity("Project", {
-	orgId: field.id("Org"),
+	orgId: field.id("Org").readonly(),
 	name: field.string(),
-	createdBy: field.id("User"),
+	createdBy: field.id("User").readonly(),
 	archived: field.bool(),
-	createdAt: field.datetime(),
+	createdAt: field.datetime().readonly(),
 });
 
 // ---------------------------------------------------------------------------
@@ -108,11 +114,18 @@ const archiveProject = action("archiveProject", {
 const orgPolicy = policy({
 	name: "org_membership",
 	entity: "Org",
-	// Anyone can read an org if they're a member; only the owner can update.
+	// Anyone can read an org if they're a member; only the owner can
+	// update / delete. Update + delete pin `existing.ownerId` (the
+	// current row's value) rather than `data.ownerId` (the proposed
+	// payload) — without this pin, an attacker could PATCH with
+	// `{ownerId: <attacker>}` and the policy would happily compare
+	// the payload value to their own userId. `ownerId` is also marked
+	// `.readonly()` on the entity so updates never get to set it via
+	// HTTP regardless — belt + suspenders.
 	allowRead: "exists(Membership where orgId = data.id and userId = auth.userId)",
 	allowInsert: "auth.userId == data.ownerId",
-	allowUpdate: "data.ownerId == auth.userId",
-	allowDelete: "data.ownerId == auth.userId",
+	allowUpdate: "existing.ownerId == auth.userId",
+	allowDelete: "existing.ownerId == auth.userId",
 });
 
 const membershipPolicy = policy({
@@ -120,31 +133,40 @@ const membershipPolicy = policy({
 	entity: "Membership",
 	// You can see your own memberships, plus all memberships in any org
 	// where you're an owner/admin (so the admin UI can list everyone).
+	// Update/delete pin `existing.orgId` so an attacker can't move a
+	// membership to another org by PATCHing the payload. The entity
+	// also marks `orgId` + `userId` as `.readonly()` so HTTP PATCH
+	// rejects those fields outright — server actions like
+	// `setMemberRole` write only `role`.
 	allowRead:
 		"data.userId == auth.userId or exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 	allowInsert:
 		"exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 	allowUpdate:
-		"exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
+		"exists(Membership where orgId = existing.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 	allowDelete:
-		"exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
+		"exists(Membership where orgId = existing.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 });
 
 const projectPolicy = policy({
 	name: "project_org_scope",
 	entity: "Project",
 	// Tenant scope: you can only touch a project if you're a member of
-	// its org. Regardless of which `orgId` the client claims, the policy
-	// pulls the row's actual orgId and checks membership.
+	// its org. `existing.orgId` on update/delete pins the row's
+	// current org — without it, an attacker could PATCH with
+	// `{orgId: <my_org>}` to "import" a project from a foreign org
+	// into one they own. `orgId` is also `.readonly()` on the entity,
+	// so PATCH can't even set it. Insert uses `data.orgId` because
+	// there is no `existing` row yet.
 	allowRead:
 		"exists(Membership where orgId = data.orgId and userId = auth.userId)",
 	allowInsert:
 		"exists(Membership where orgId = data.orgId and userId = auth.userId)",
 	// Only owners/admins can rename or archive.
 	allowUpdate:
-		"exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
+		"exists(Membership where orgId = existing.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 	allowDelete:
-		"exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
+		"exists(Membership where orgId = existing.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 });
 
 // ---------------------------------------------------------------------------

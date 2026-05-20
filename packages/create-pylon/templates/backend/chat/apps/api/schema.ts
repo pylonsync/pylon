@@ -25,11 +25,14 @@ const Room = entity("Room", {
 });
 
 const Message = entity("Message", {
-	roomId: field.id("Room"),
-	authorId: field.id("User"),
+	// `.readonly()` on identity fields blocks HTTP PATCH from
+	// rewriting authorship / message location. Server-side
+	// ctx.db.update still goes through inside actions.
+	roomId: field.id("Room").readonly(),
+	authorId: field.id("User").readonly(),
 	authorName: field.string(),
 	body: field.string(),
-	createdAt: field.datetime(),
+	createdAt: field.datetime().readonly(),
 });
 
 // ---------------------------------------------------------------------------
