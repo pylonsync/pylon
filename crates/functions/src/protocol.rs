@@ -242,6 +242,27 @@ pub struct DbOpMessage {
     /// Cursor pagination — `paginate` op only. Requested page size.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// When `true`, this op was emitted by `ctx.db.unsafe.*` instead
+    /// of plain `ctx.db.*`. The framework's caller-aware policy gate
+    /// (gated by `PYLON_STRICT_FN_POLICIES=1`, currently in Phase 1)
+    /// skips enforcement on `unsafe` ops — the developer has
+    /// explicitly asserted that this call needs to bypass row-level
+    /// access control (admin tools, cron sweeps, cross-tenant
+    /// reads). Plain `ctx.db.*` is the safe default; the unsafe
+    /// path requires the keyword + an explicit comment per
+    /// codebase convention (`pylon lint` will flag bare
+    /// `ctx.db.unsafe.*` without a justification comment in a
+    /// future rule).
+    ///
+    /// Default `false` — old TS runtimes that don't send the field
+    /// keep the safe-default shape. Skipped on serialize when
+    /// `false` so the wire format stays compact.
+    #[serde(default, skip_serializing_if = "is_false_local")]
+    pub unsafe_op: bool,
+}
+
+fn is_false_local(b: &bool) -> bool {
+    !*b
 }
 
 /// Database operations available to TypeScript functions.

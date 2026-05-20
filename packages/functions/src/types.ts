@@ -84,6 +84,26 @@ export interface AuthInfo<R extends AuthRequirement = "optional"> {
 // ---------------------------------------------------------------------------
 
 export interface DbReader {
+  /**
+   * Escape hatch: same surface as `ctx.db` but operations bypass
+   * the framework's caller-aware policy gate (gated by
+   * `PYLON_STRICT_FN_POLICIES=1`, Phase 2). Use sparingly, only
+   * in code that runs from a trusted server-internal context —
+   * webhook receivers (after signature verification), scheduled
+   * cron sweeps, admin tooling. The plain `ctx.db.*` reads
+   * already work for the caller's-own-data case; `ctx.db.unsafe`
+   * is the answer when you genuinely need cross-tenant or
+   * cross-user reads.
+   *
+   * Every call should carry a justifying comment per codebase
+   * convention. A future `pylon lint` rule will flag bare
+   * `ctx.db.unsafe.*` without a comment immediately above.
+   *
+   * Optional on the type because old Pylon runtimes don't ship
+   * it; new code that targets v0.3.161+ can rely on the field.
+   */
+  unsafe?: DbReader;
+
   /** Get a single row by ID. Returns null if not found. */
   get(entity: string, id: string): Promise<Record<string, unknown> | null>;
 
@@ -176,6 +196,13 @@ export interface SearchResult<T = Record<string, unknown>> {
 // ---------------------------------------------------------------------------
 
 export interface DbWriter extends DbReader {
+  /**
+   * Escape hatch — same shape as [`DbReader.unsafe`] but with the
+   * write surface (insert/update/delete/link/unlink/advisoryLock).
+   * Overrides the inherited read-only `unsafe` from DbReader.
+   */
+  unsafe?: DbWriter;
+
   /** Insert a new row. Returns the generated ID. */
   insert(entity: string, data: Record<string, unknown>): Promise<string>;
 

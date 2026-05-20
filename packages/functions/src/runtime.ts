@@ -287,15 +287,32 @@ function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
 // Context builders
 // ---------------------------------------------------------------------------
 
-function buildDbReader(callId: string): DbReader {
+function buildDbReader(callId: string, unsafeOp = false): DbReader {
   // All DB ops use rpcDb so Promise.all over ctx.db reads can run in
   // parallel without colliding on the outer call_id key.
-  return {
+  //
+  // `unsafeOp` flag: when true, the emitted DbOp messages carry
+  // `unsafe_op: true` so the Rust side knows to skip the
+  // caller-aware policy gate (in Phase 2 — see
+  // pylon-functions/protocol.rs). Plain ctx.db.* leaves the flag
+  // off (the safe default); ctx.db.unsafe.* sets it.
+  const reader: DbReader = {
     async get(entity, id) {
-      return (await rpcDb(callId, { type: "db", op: "get", entity, id })) as any;
+      return (await rpcDb(callId, {
+        type: "db",
+        op: "get",
+        entity,
+        id,
+        unsafe_op: unsafeOp,
+      })) as any;
     },
     async list(entity) {
-      return (await rpcDb(callId, { type: "db", op: "list", entity })) as any;
+      return (await rpcDb(callId, {
+        type: "db",
+        op: "list",
+        entity,
+        unsafe_op: unsafeOp,
+      })) as any;
     },
     async lookup(entity, field, value) {
       return (await rpcDb(callId, {
@@ -304,6 +321,7 @@ function buildDbReader(callId: string): DbReader {
         entity,
         field,
         value,
+        unsafe_op: unsafeOp,
       })) as any;
     },
     async query(entity, filter) {
@@ -312,6 +330,7 @@ function buildDbReader(callId: string): DbReader {
         op: "query",
         entity,
         data: filter,
+        unsafe_op: unsafeOp,
       })) as any;
     },
     async queryGraph(query) {
@@ -320,6 +339,7 @@ function buildDbReader(callId: string): DbReader {
         op: "query_graph",
         entity: "",
         data: query,
+        unsafe_op: unsafeOp,
       })) as any;
     },
     async paginate(entity, opts) {
@@ -332,6 +352,7 @@ function buildDbReader(callId: string): DbReader {
         entity,
         after: opts.cursor ?? undefined,
         limit: numItems,
+        unsafe_op: unsafeOp,
       })) as any;
     },
     async search(entity, query) {
@@ -340,21 +361,34 @@ function buildDbReader(callId: string): DbReader {
         op: "search",
         entity,
         data: query,
+        unsafe_op: unsafeOp,
       })) as any;
     },
   };
+  if (!unsafeOp) {
+    (reader as DbReader & { unsafe: DbReader }).unsafe = buildDbReader(
+      callId,
+      true,
+    );
+  }
+  return reader;
 }
 
-function buildDbWriter(callId: string): DbWriter {
-  const reader = buildDbReader(callId);
-  return {
-    ...reader,
+function buildDbWriter(callId: string, unsafeOp = false): DbWriter {
+  // Drop the reader's `unsafe` shortcut before spreading — the
+  // writer needs its own (which we attach below). Without this
+  // strip, `writer.unsafe` would be a DbReader and the type
+  // narrows incorrectly.
+  const { unsafe: _ignored, ...readerOps } = buildDbReader(callId, unsafeOp);
+  const writer: DbWriter = {
+    ...readerOps,
     async insert(entity, data) {
       const r = (await rpcDb(callId, {
         type: "db",
         op: "insert",
         entity,
         data,
+        unsafe_op: unsafeOp,
       })) as { id: string };
       return r.id;
     },
@@ -365,6 +399,7 @@ function buildDbWriter(callId: string): DbWriter {
         entity,
         id,
         data,
+        unsafe_op: unsafeOp,
       })) as { updated: boolean };
       return r.updated;
     },
@@ -374,6 +409,7 @@ function buildDbWriter(callId: string): DbWriter {
         op: "delete",
         entity,
         id,
+        unsafe_op: unsafeOp,
       })) as { deleted: boolean };
       return r.deleted;
     },
@@ -385,6 +421,7 @@ function buildDbWriter(callId: string): DbWriter {
         id,
         relation,
         target_id: targetId,
+        unsafe_op: unsafeOp,
       })) as { linked: boolean };
       return r.linked;
     },
@@ -395,6 +432,7 @@ function buildDbWriter(callId: string): DbWriter {
         entity,
         id,
         relation,
+        unsafe_op: unsafeOp,
       })) as { unlinked: boolean };
       return r.unlinked;
     },
@@ -406,9 +444,27 @@ function buildDbWriter(callId: string): DbWriter {
         type: "db",
         op: "advisory_lock",
         entity: key,
+        unsafe_op: unsafeOp,
       });
     },
   };
+  // Top-level `ctx.db` is the safe path. `ctx.db.unsafe` is the
+  // escape hatch — same surface, every emitted op carries
+  // `unsafe_op: true` so the future caller-aware policy gate
+  // (PYLON_STRICT_FN_POLICIES) skips enforcement. Use sparingly,
+  // with a justifying comment, ideally in code that runs only
+  // from server-internal callers (webhooks, cron sweeps, admin
+  // tools).
+  //
+  // Self-reference would create an infinite loop on JSON
+  // serialization; only assign on the writer's `.unsafe` once.
+  if (!unsafeOp) {
+    (writer as DbWriter & { unsafe: DbWriter }).unsafe = buildDbWriter(
+      callId,
+      true,
+    );
+  }
+  return writer;
 }
 
 function buildStream(callId: string): Stream {
