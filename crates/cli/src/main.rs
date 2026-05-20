@@ -111,6 +111,7 @@ fn run() -> ExitCode {
         Some("seed") => commands::seed::run(&args, json_mode),
         Some("start") => commands::start::run(&args, json_mode),
         Some("test") => commands::test::run(&args, json_mode),
+        Some("test:security") => commands::test_security::run(&args, json_mode),
         Some("backup") => commands::backup::run_backup(&args, json_mode),
         Some("restore") => commands::backup::run_restore(&args, json_mode),
         Some("version") => commands::version::run(json_mode),
@@ -141,7 +142,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 31] = [
+const TOP_LEVEL_COMMANDS: [&str; 32] = [
     "backup",
     "build",
     "cache",
@@ -171,6 +172,7 @@ const TOP_LEVEL_COMMANDS: [&str; 31] = [
     "start",
     "status",
     "test",
+    "test:security",
     "version",
     "help",
 ];
