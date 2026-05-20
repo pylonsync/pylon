@@ -106,6 +106,46 @@ export default action({
 
 `internal: true` functions ignore `auth` — they're unreachable over HTTP and inherit the wrapping handler's context.
 
+## `ctx.db` honors policies (strict mode)
+
+By default, `ctx.db.*` inside a function bypasses entity policies — server code is trusted. That's the historical Pylon behavior and it's still the default.
+
+**Strict mode** flips the default: every `ctx.db.get/query/insert/update/delete/lookup/search` runs through the policy engine using the function's caller auth, exactly as if the same operation came in through `/api/entities/*`. Enable per deploy:
+
+```sh
+PYLON_STRICT_FN_POLICIES=1 pylon dev
+```
+
+When strict mode is on, the canonical Pylon-shaped IDOR — "I wrote `getRecording.ts` that does `ctx.db.get('Recording', args.id)` and forgot to check tenant ownership" — becomes impossible. The policy on Recording fires, sees that the caller isn't a member of the row's org, and the call returns `POLICY_DENIED` before the row leaves the database.
+
+For the legitimate cross-tenant cases (admin tools, webhook receivers post signature verification, scheduled cron sweeps), use the explicit escape hatch:
+
+```ts
+export default action({
+  auth: "public",  // webhook — provider doesn't sign in
+  async handler(ctx, args) {
+    const ok = verifyStripeSignature(secret, ctx.request!.rawBody, sig);
+    if (!ok) throw ctx.error("INVALID_SIGNATURE", "bad sig");
+    // Trust boundary crossed — the webhook is the trusted caller.
+    // Use ctx.db.unsafe to read any org's row regardless of who's
+    // calling. Comment justifies the bypass for code review.
+    const org = await ctx.db.unsafe.lookup("Org", "stripeCustomerId", customerId);
+    // ...
+  },
+});
+```
+
+Rules of thumb:
+
+- **Plain `ctx.db.*`** — the default. Acts as the caller. Use for anything that should reflect the user's view of the data.
+- **`ctx.db.unsafe.*`** — explicit bypass. Use for webhooks, cron sweeps, admin tooling, and anything that genuinely needs cross-tenant reads. Every call should have a justifying comment.
+- **Admin contexts bypass strict mode** — `auth.isAdmin === true` skips the gate the same way it bypasses entity-route policies. Ops scripts and the `ctx.auth.elevate({ admin: true })` path inside verified webhooks still work everywhere.
+
+Strict mode is **opt-in for now** (one minor cycle) so existing apps can migrate at their own pace. The rollout plan:
+
+1. **Now (v0.3.161+)** — `ctx.db.unsafe.*` is callable. Mark known cross-tenant paths with it. Plain `ctx.db.*` still bypasses policies (existing behavior); strict mode is opt-in via env.
+2. **v0.4** — strict mode default-on. Apps that didn't migrate get `POLICY_DENIED` on the calls that genuinely need cross-tenant access; the fix is to mark those `unsafe`.
+
 ## Validators
 
 `v.*` describes expected argument shapes:

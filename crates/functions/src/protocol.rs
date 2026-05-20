@@ -261,6 +261,9 @@ pub struct DbOpMessage {
     pub unsafe_op: bool,
 }
 
+// Used via `skip_serializing_if = "is_false_local"` — serde
+// resolves the path by string so rustc can't see the use.
+#[allow(dead_code)]
 fn is_false_local(b: &bool) -> bool {
     !*b
 }

@@ -99,6 +99,44 @@ pub type EmailHook = Box<dyn Fn(&str, &str, &str) -> Result<(), String> + Send +
 // Function runner
 // ---------------------------------------------------------------------------
 
+/// Decision interface for the caller-aware policy gate that
+/// runs on every `ctx.db.*` op inside a function handler. Set
+/// on a runner via [`FnRunner::set_policy_gate`]; consulted by
+/// [`execute_db_op`] when `PYLON_STRICT_FN_POLICIES=1` is set
+/// and the op didn't carry `unsafe_op: true`.
+///
+/// Decoupled from `pylon_policy` so this crate doesn't have to
+/// take that dep (which would form a cycle through router →
+/// functions → policy → router). Runtime supplies a small
+/// adapter that calls into `pylon_policy::PolicyEngine`.
+pub trait PolicyGate: Send + Sync {
+    /// Decide whether `op` on `entity` is allowed for the
+    /// caller described by `auth`. `data` carries the proposed
+    /// row payload for writes (None for reads). Returns
+    /// `Ok(())` to allow, or `Err((code, reason))` to deny.
+    /// The runner surfaces the denial as a `DataError` with the
+    /// supplied code; the TS handler sees it as a regular
+    /// thrown error from `ctx.db.*`.
+    fn check_op(
+        &self,
+        op: PolicyOp,
+        entity: &str,
+        auth: &crate::protocol::AuthInfo,
+        data: Option<&serde_json::Value>,
+    ) -> Result<(), (String, String)>;
+}
+
+/// Coarse action classification for the policy gate. Mirrors
+/// `pylon_policy::EntityAction` but lives here so this crate
+/// stays free of that dep — see [`PolicyGate`] rationale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyOp {
+    Read,
+    Insert,
+    Update,
+    Delete,
+}
+
 /// Manages the TypeScript process and executes function calls.
 pub struct FnRunner {
     process: Mutex<Option<Child>>,
@@ -130,6 +168,11 @@ pub struct FnRunner {
     /// The command and args that started the runtime. Stored so the supervisor
     /// can respawn on crash without the caller re-passing them.
     started_with: Mutex<Option<(String, Vec<String>)>>,
+    /// Caller-aware policy gate. Consulted on every `ctx.db.*` op
+    /// when set + `PYLON_STRICT_FN_POLICIES=1` + the op isn't
+    /// `unsafe_op`. None when the runtime hasn't wired it (older
+    /// embeddings / wasm). See [`PolicyGate`] for the contract.
+    policy_gate: Mutex<Option<std::sync::Arc<dyn PolicyGate>>>,
 }
 
 impl FnRunner {
@@ -147,7 +190,21 @@ impl FnRunner {
             email_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
+            policy_gate: Mutex::new(None),
         }
+    }
+
+    /// Install the caller-aware policy gate. The runtime crate
+    /// supplies the adapter to `pylon_policy::PolicyEngine`; this
+    /// crate stays free of that dep so the trait + indirection
+    /// is the public seam.
+    ///
+    /// Only consulted when `PYLON_STRICT_FN_POLICIES=1` is set in
+    /// the runner's environment. Without the env, the gate is a
+    /// no-op even if installed — letting operators opt in per
+    /// deploy without redeploying the binary.
+    pub fn set_policy_gate(&self, gate: std::sync::Arc<dyn PolicyGate>) {
+        *self.policy_gate.lock().unwrap() = Some(gate);
     }
 
     /// Override the per-call timeout. The default is 30s.
@@ -480,6 +537,11 @@ impl FnRunner {
             auth.tenant_id.clone(),
         );
 
+        // Keep an auth clone in this frame for the policy gate —
+        // CallMessage::new consumes the original. Cheap (small
+        // struct, mostly Option<String>).
+        let gate_auth = auth.clone();
+
         // Send the call message. Attach HTTP request metadata when the
         // caller provided it — this lets TypeScript actions invoked via
         // /api/webhooks/:name see raw headers + body for signature checks.
@@ -489,6 +551,16 @@ impl FnRunner {
             call_msg = call_msg.with_request(r);
         }
         self.send(&call_msg)?;
+
+        // Snapshot the policy gate + the strict-mode env flag for
+        // this call. Strict mode read once per call instead of per
+        // op to avoid the syscall in the per-op hot path; per-call
+        // is the right granularity anyway (operators flipping the
+        // flag mid-deploy expect the next request to see the new
+        // value, not the next ctx.db.get).
+        let policy_gate_snapshot = self.policy_gate.lock().unwrap().clone();
+        let strict_policies =
+            std::env::var("PYLON_STRICT_FN_POLICIES").ok().as_deref() == Some("1");
 
         // Process messages until we get a return or error.
         loop {
@@ -517,7 +589,25 @@ impl FnRunner {
             match msg {
                 TsMessage::Db(db_msg) if db_msg.call_id == call_id => {
                     let op_start = Instant::now();
-                    let (result, row_count) = execute_db_op(store, &db_msg);
+                    // Per-op auth = the call's auth context, mutated
+                    // mid-flight if the handler did
+                    // `ctx.auth.elevate({ admin: true })`. The elevate
+                    // flag flips `caller_is_admin` below; reconstruct
+                    // the AuthInfo here so the policy gate sees the
+                    // current (possibly elevated) state.
+                    let per_op_auth = AuthInfo {
+                        user_id: caller_user_id.clone(),
+                        is_admin: caller_is_admin,
+                        tenant_id: caller_tenant_id.clone(),
+                        roles: gate_auth.roles.clone(),
+                    };
+                    let (result, row_count) = execute_db_op(
+                        store,
+                        &db_msg,
+                        policy_gate_snapshot.as_deref(),
+                        &per_op_auth,
+                        strict_policies,
+                    );
                     let duration = op_start.elapsed();
                     let ok = result.is_ok();
 
@@ -875,13 +965,69 @@ impl TraceBuilder {
 /// keeps the entry points symmetric for any future "what does this
 /// handler touch" analysis. The recorder is a thread-local no-op
 /// when no reactive scope is active, so non-reactive paths pay nothing.
+/// Map a wire-level [`DbOp`] to the coarse policy action used by
+/// the gate. Returns `None` for ops the gate doesn't (yet) cover:
+///   - QueryGraph: spans multiple entities, can't be checked with
+///     a single-entity policy. Future work.
+///   - Link/Unlink: relation writes — the underlying row update
+///     gets checked when the relation field is touched via
+///     `ctx.db.update`. Skipping here avoids double-checks.
+///   - Search/Paginate/List/Query/Lookup: all read-shaped, all
+///     map to PolicyOp::Read.
+///   - AdvisoryLock: not a data op, no policy meaning.
+fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
+    match op {
+        DbOp::Get | DbOp::List | DbOp::Paginate | DbOp::Lookup | DbOp::Query | DbOp::Search => {
+            Some(PolicyOp::Read)
+        }
+        DbOp::Insert => Some(PolicyOp::Insert),
+        DbOp::Update => Some(PolicyOp::Update),
+        DbOp::Delete => Some(PolicyOp::Delete),
+        DbOp::QueryGraph | DbOp::Link | DbOp::Unlink | DbOp::AdvisoryLock => None,
+    }
+}
+
 fn execute_db_op(
     store: &dyn DataStore,
     msg: &DbOpMessage,
+    policy_gate: Option<&dyn PolicyGate>,
+    auth: &AuthInfo,
+    strict_policies: bool,
 ) -> (
     Result<serde_json::Value, pylon_http::DataError>,
     Option<usize>,
 ) {
+    // Caller-aware policy gate. Three guards before consulting:
+    //   1. Gate must be installed (runtime wires the adapter at
+    //      startup; older embeddings / wasm leave it None).
+    //   2. Strict mode must be on (PYLON_STRICT_FN_POLICIES=1).
+    //   3. The op must NOT carry unsafe_op — `ctx.db.unsafe.*`
+    //      explicitly opts out of the gate.
+    //
+    // Admin callers bypass too — same convention as policy
+    // engine + function-level auth gate. Ops scripts + the
+    // `auth.elevate({ admin: true })` path inside webhooks
+    // need the bypass to work everywhere without wildcard
+    // policy expressions on every entity.
+    if let Some(gate) = policy_gate {
+        if strict_policies && !msg.unsafe_op && !auth.is_admin {
+            if let Some(op) = policy_op_for(msg.op) {
+                let data_for_check = match msg.op {
+                    DbOp::Insert | DbOp::Update => msg.data.as_ref(),
+                    _ => None,
+                };
+                if let Err((code, reason)) = gate.check_op(op, &msg.entity, auth, data_for_check) {
+                    return (
+                        Err(pylon_http::DataError {
+                            code,
+                            message: reason,
+                        }),
+                        None,
+                    );
+                }
+            }
+        }
+    }
     match msg.op {
         DbOp::Get => {
             let id = msg.id.as_deref().unwrap_or("");
@@ -1068,6 +1214,9 @@ impl From<pylon_http::DataError> for FnCallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{AuthInfo, DbOp, DbOpMessage};
+    use pylon_http::DataError;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn fn_call_error_display() {
@@ -1076,5 +1225,235 @@ mod tests {
             message: "fail".into(),
         };
         assert_eq!(format!("{e}"), "[TEST] fail");
+    }
+
+    // ---------------------------------------------------------------
+    // Policy gate — Phase 2 of caller-aware ctx.db. The gate is
+    // installed by the runtime crate; here we drive it with a stub
+    // to lock in the wire-level semantics (env on/off, unsafe_op
+    // bypass, admin bypass, op-kind mapping, denial wrapping).
+    // ---------------------------------------------------------------
+
+    /// In-memory store that always returns Ok-but-empty for reads
+    /// and Ok-with-stub-id for writes. Fine for testing the gate —
+    /// we only care whether the op reached the store or got
+    /// short-circuited at the policy layer.
+    struct AlwaysOkStore;
+    impl pylon_http::DataStore for AlwaysOkStore {
+        fn manifest(&self) -> &pylon_kernel::AppManifest {
+            // The gate is store-agnostic; we never reach the manifest
+            // from execute_db_op. Returning a leaked default keeps
+            // the impl trivial.
+            static M: std::sync::OnceLock<pylon_kernel::AppManifest> = std::sync::OnceLock::new();
+            M.get_or_init(pylon_kernel::AppManifest::default)
+        }
+        fn insert(&self, _: &str, _: &serde_json::Value) -> Result<String, DataError> {
+            Ok("stub-id".into())
+        }
+        fn get_by_id(&self, _: &str, _: &str) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn list(&self, _: &str) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn list_after(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn update(&self, _: &str, _: &str, _: &serde_json::Value) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn delete(&self, _: &str, _: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn lookup(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<serde_json::Value>, DataError> {
+            Ok(None)
+        }
+        fn link(&self, _: &str, _: &str, _: &str, _: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn unlink(&self, _: &str, _: &str, _: &str) -> Result<bool, DataError> {
+            Ok(true)
+        }
+        fn query_filtered(
+            &self,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, DataError> {
+            Ok(vec![])
+        }
+        fn query_graph(&self, _: &serde_json::Value) -> Result<serde_json::Value, DataError> {
+            Ok(serde_json::json!({}))
+        }
+        fn transact(
+            &self,
+            _: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+            Ok((true, vec![]))
+        }
+    }
+
+    /// Stub gate that records every call and returns whatever the
+    /// test set up. Records calls so assertions can verify the gate
+    /// was reached (or wasn't) for each scenario.
+    struct StubGate {
+        calls: StdMutex<Vec<(PolicyOp, String, bool)>>,
+        result: Result<(), (String, String)>,
+    }
+    impl PolicyGate for StubGate {
+        fn check_op(
+            &self,
+            op: PolicyOp,
+            entity: &str,
+            auth: &AuthInfo,
+            _data: Option<&serde_json::Value>,
+        ) -> Result<(), (String, String)> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((op, entity.to_string(), auth.is_admin));
+            self.result.clone()
+        }
+    }
+
+    fn allow_gate() -> StubGate {
+        StubGate {
+            calls: StdMutex::new(vec![]),
+            result: Ok(()),
+        }
+    }
+
+    fn deny_gate() -> StubGate {
+        StubGate {
+            calls: StdMutex::new(vec![]),
+            result: Err(("POLICY_DENIED".to_string(), "stubbed deny".to_string())),
+        }
+    }
+
+    fn user_auth() -> AuthInfo {
+        AuthInfo {
+            user_id: Some("u1".into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: vec![],
+        }
+    }
+
+    fn admin_auth() -> AuthInfo {
+        AuthInfo {
+            user_id: Some("admin".into()),
+            is_admin: true,
+            tenant_id: None,
+            roles: vec![],
+        }
+    }
+
+    fn db_msg(op: DbOp, entity: &str, unsafe_op: bool) -> DbOpMessage {
+        DbOpMessage {
+            call_id: "c".into(),
+            op_id: None,
+            op,
+            entity: entity.into(),
+            id: Some("x".into()),
+            data: None,
+            field: None,
+            value: None,
+            relation: None,
+            target_id: None,
+            after: None,
+            limit: None,
+            unsafe_op,
+        }
+    }
+
+    #[test]
+    fn gate_skipped_when_strict_off() {
+        // Default (strict_policies=false): gate never consulted.
+        let store = AlwaysOkStore;
+        let gate = allow_gate();
+        let msg = db_msg(DbOp::Get, "Note", false);
+        let (result, _) = execute_db_op(&store, &msg, Some(&gate), &user_auth(), false);
+        assert!(result.is_ok());
+        assert!(gate.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gate_skipped_for_unsafe_op() {
+        // Strict ON but the op is `unsafe_op: true` (came from
+        // ctx.db.unsafe.*) — gate must skip.
+        let store = AlwaysOkStore;
+        let gate = allow_gate();
+        let msg = db_msg(DbOp::Get, "Note", true);
+        let (result, _) = execute_db_op(&store, &msg, Some(&gate), &user_auth(), true);
+        assert!(result.is_ok());
+        assert!(gate.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gate_skipped_for_admin() {
+        // Admin bypasses every policy gate by convention.
+        let store = AlwaysOkStore;
+        let gate = allow_gate();
+        let msg = db_msg(DbOp::Get, "Note", false);
+        let (result, _) = execute_db_op(&store, &msg, Some(&gate), &admin_auth(), true);
+        assert!(result.is_ok());
+        assert!(gate.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gate_consulted_on_normal_read() {
+        // Strict ON, not unsafe, not admin → gate fires.
+        let store = AlwaysOkStore;
+        let gate = allow_gate();
+        let msg = db_msg(DbOp::Get, "Note", false);
+        let (result, _) = execute_db_op(&store, &msg, Some(&gate), &user_auth(), true);
+        assert!(result.is_ok());
+        let calls = gate.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (PolicyOp::Read, "Note".to_string(), false));
+    }
+
+    #[test]
+    fn gate_denial_surfaces_as_data_error() {
+        // The gate returning Err should short-circuit the op with
+        // the supplied code + reason.
+        let store = AlwaysOkStore;
+        let gate = deny_gate();
+        let msg = db_msg(DbOp::Get, "Note", false);
+        let (result, count) = execute_db_op(&store, &msg, Some(&gate), &user_auth(), true);
+        let err = result.expect_err("expected deny");
+        assert_eq!(err.code, "POLICY_DENIED");
+        assert!(err.message.contains("stubbed deny"));
+        assert!(count.is_none());
+    }
+
+    #[test]
+    fn op_mapping_matches_db_op_variants() {
+        // Each DbOp maps to the right PolicyOp (or None for the
+        // ops the gate doesn't cover).
+        assert_eq!(policy_op_for(DbOp::Get), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::List), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::Paginate), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::Lookup), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::Query), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::Search), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::Insert), Some(PolicyOp::Insert));
+        assert_eq!(policy_op_for(DbOp::Update), Some(PolicyOp::Update));
+        assert_eq!(policy_op_for(DbOp::Delete), Some(PolicyOp::Delete));
+        // Unmapped ops — relations + advisory locks fall through
+        // to the existing store call without a gate check.
+        assert_eq!(policy_op_for(DbOp::QueryGraph), None);
+        assert_eq!(policy_op_for(DbOp::Link), None);
+        assert_eq!(policy_op_for(DbOp::Unlink), None);
+        assert_eq!(policy_op_for(DbOp::AdvisoryLock), None);
     }
 }

@@ -3586,6 +3586,82 @@ pub fn find_functions_runtime() -> Option<String> {
     None
 }
 
+/// Adapter that lets the function runner consult the runtime's
+/// `pylon_policy::PolicyEngine` through the abstract
+/// [`pylon_functions::runner::PolicyGate`] trait. Lives in the
+/// runtime crate (which already depends on both pylon-policy and
+/// pylon-functions) so the functions crate doesn't grow a policy
+/// dep — see PolicyGate's docs for why the indirection.
+///
+/// Stateless: the PolicyEngine reads the manifest and AuthContext
+/// per call. Cheap enough to allocate per-handler, but the runner
+/// caches an `Arc<dyn PolicyGate>` so cloning stays O(1).
+struct PolicyGateAdapter {
+    engine: Arc<pylon_policy::PolicyEngine>,
+}
+
+impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
+    fn check_op(
+        &self,
+        op: pylon_functions::runner::PolicyOp,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+        data: Option<&serde_json::Value>,
+    ) -> Result<(), (String, String)> {
+        let auth_ctx = pylon_auth::AuthContext {
+            user_id: auth.user_id.clone(),
+            is_admin: auth.is_admin,
+            is_guest: false,
+            roles: auth.roles.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            api_key_id: None,
+            api_key_scopes: None,
+            is_trusted_device: false,
+        };
+        let result = match op {
+            pylon_functions::runner::PolicyOp::Read => {
+                self.engine.check_entity_read(entity, &auth_ctx, data)
+            }
+            pylon_functions::runner::PolicyOp::Insert => {
+                self.engine.check_entity_insert(entity, &auth_ctx, data)
+            }
+            pylon_functions::runner::PolicyOp::Update => {
+                self.engine.check_entity_update(entity, &auth_ctx, data)
+            }
+            pylon_functions::runner::PolicyOp::Delete => {
+                self.engine.check_entity_delete(entity, &auth_ctx, data)
+            }
+        };
+        match result {
+            pylon_policy::PolicyResult::Allowed => Ok(()),
+            pylon_policy::PolicyResult::Denied {
+                policy_name,
+                reason,
+            } => Err((
+                "POLICY_DENIED".to_string(),
+                format!(
+                    "ctx.db.{} on \"{}\" denied by policy \"{}\": {}. Use `ctx.db.unsafe.{}` if this is a trusted server-internal lookup that intentionally bypasses RLS.",
+                    op_method(op),
+                    entity,
+                    policy_name,
+                    reason,
+                    op_method(op),
+                ),
+            )),
+        }
+    }
+}
+
+/// Name of the matching `ctx.db.*` method for error messages.
+fn op_method(op: pylon_functions::runner::PolicyOp) -> &'static str {
+    match op {
+        pylon_functions::runner::PolicyOp::Read => "get/query/lookup",
+        pylon_functions::runner::PolicyOp::Insert => "insert",
+        pylon_functions::runner::PolicyOp::Update => "update",
+        pylon_functions::runner::PolicyOp::Delete => "delete",
+    }
+}
+
 pub fn try_spawn_functions(
     runtime: Arc<Runtime>,
     job_queue: Arc<crate::jobs::JobQueue>,
@@ -3594,6 +3670,7 @@ pub fn try_spawn_functions(
     notifier: Arc<dyn pylon_router::ChangeNotifier>,
     email_adapter: Arc<EmailAdapter>,
     plugins: Arc<pylon_plugin::PluginRegistry>,
+    policy_engine: Arc<pylon_policy::PolicyEngine>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     if !std::path::Path::new(&fn_dir).exists() {
@@ -3687,9 +3764,19 @@ pub fn try_spawn_functions(
     // ctx.scheduler.runAfter or ctx.email.send with "no schedule
     // hook installed" — the protocol expects each runner to be
     // self-sufficient.
+    // Install the caller-aware policy gate on every runner. The
+    // gate is consulted on every ctx.db.* op when
+    // PYLON_STRICT_FN_POLICIES=1 + the op didn't carry
+    // unsafe_op=true. Cheap to share — one Arc, every runner
+    // points at the same adapter, the adapter holds an Arc to
+    // the shared PolicyEngine.
+    let policy_gate: Arc<dyn pylon_functions::runner::PolicyGate> = Arc::new(PolicyGateAdapter {
+        engine: Arc::clone(&policy_engine),
+    });
     for runner in &runners {
         install_schedule_hook(runner, &registry, Arc::clone(&job_queue));
         install_email_hook(runner, Arc::clone(&email_adapter));
+        runner.set_policy_gate(Arc::clone(&policy_gate));
     }
 
     let pool = Arc::new(pylon_functions::pool::FnRunnerPool::new(runners));

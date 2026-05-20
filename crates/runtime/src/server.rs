@@ -622,6 +622,11 @@ fn start_server(
         fn_notifier,
         Arc::clone(&fn_email_adapter),
         Arc::clone(&plugin_reg),
+        // Wire the caller-aware policy gate. Off-by-default
+        // (gated by PYLON_STRICT_FN_POLICIES=1 inside the runner);
+        // passing the engine here so the gate is reachable when
+        // operators flip the env.
+        Arc::clone(&policy_engine),
     );
 
     // Reactive registry needs FnOps to invoke handlers for initial
