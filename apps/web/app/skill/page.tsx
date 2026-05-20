@@ -7,6 +7,14 @@ export const metadata: Metadata = {
   title: "Pylon for Claude Code — drop-in skill",
   description:
     "Copy a single skill file into your Claude Code setup and Claude will know how to build Pylon apps correctly — schema, policies, functions, React client, deployment.",
+  alternates: { canonical: "/skill" },
+  openGraph: {
+    title: "Pylon for Claude Code — drop-in skill",
+    description:
+      "Drop a single file into Claude Code and Claude knows how to build Pylon apps — schema, policies, functions, deployment.",
+    url: "https://pylonsync.com/skill",
+    type: "article",
+  },
 };
 
 export default function SkillPage() {
