@@ -267,6 +267,8 @@ mod tests {
                 optional,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             }
         }
         AppManifest {

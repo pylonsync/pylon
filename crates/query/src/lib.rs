@@ -96,6 +96,8 @@ mod tests {
                 optional,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             }
         }
         AppManifest {
@@ -167,6 +169,8 @@ mod tests {
                 optional: false,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             }],
         };
         let desc = QueryDescriptor::from_manifest(&mq);

@@ -50,6 +50,52 @@ export interface FieldDefinition {
   /** CRDT container override. Omitted entirely for the default
    *  (LWW for scalars, LoroText for richtext). */
   crdt?: CrdtAnnotation;
+  /**
+   * When true, the field is **never serialized in HTTP responses**.
+   * Use for secrets / billing-side identity / hashes that the server
+   * needs to read internally but should never leak to clients.
+   *
+   * Stripped at every public read boundary:
+   * - `GET /api/entities/<entity>` (list)
+   * - `GET /api/entities/<entity>/<id>` (single row)
+   * - `GET /api/auth/session` (User row projection)
+   * - Sync push deltas
+   *
+   * Still readable from inside server functions via `ctx.db.*` —
+   * the framework trusts your handler logic to decide what to
+   * return. If you pass the row through unmodified to the client,
+   * the field IS still stripped at the function-response boundary,
+   * provided the value is a plain row from `ctx.db.get` (which
+   * tags it with the entity name so the boundary knows what to
+   * filter).
+   *
+   * `passwordHash` on every User entity is implicitly serverOnly
+   * even without this annotation, by the framework's hardcoded
+   * convention. New apps should still mark it explicitly so the
+   * intent shows up in the schema.
+   */
+  serverOnly?: boolean;
+  /**
+   * When true, the field is **set on insert but cannot be changed
+   * by client updates**. The framework rejects any `PATCH`/`PUT`
+   * payload that mentions the field with a `READONLY_FIELD` error,
+   * before policy evaluation. Admin contexts bypass this check (as
+   * with all other framework gates), so migrations + ops scripts
+   * can still rewrite owner-shaped fields.
+   *
+   * Use for identity-shaped columns that need to be settable at
+   * creation but immutable after — `authorId`, `orgId`,
+   * `createdBy`, `stripeCustomerId`. Closes the canonical IDOR
+   * shape where a policy gates on `data.authorId == auth.userId`
+   * but the attacker passes a different `authorId` in the update
+   * payload to flip the row's ownership.
+   *
+   * Server-side writes (via `ctx.db.update` inside a function)
+   * still go through — readonly only blocks the HTTP entity
+   * routes (`PATCH /api/entities/<entity>/<id>`) and `/api/transact`.
+   * Server code is trusted to enforce its own invariants.
+   */
+  readonly?: boolean;
 }
 
 interface FieldBuilder {
@@ -66,6 +112,25 @@ interface FieldBuilder {
    * concurrently merge cleanly instead of last-write-wins.
    */
   crdt(annotation: CrdtAnnotation): FieldBuilder;
+  /**
+   * Mark the field as never-returned in HTTP responses. See
+   * [`FieldDefinition.serverOnly`] for the full semantics.
+   *
+   * Example: `stripeCustomerId: field.string().serverOnly()` keeps
+   * the Stripe customer id out of `/api/entities/Org/<id>` responses
+   * while staying readable from `ctx.db.get` inside the
+   * stripeWebhook action.
+   */
+  serverOnly(): FieldBuilder;
+  /**
+   * Mark the field as set-on-insert-only. See [`FieldDefinition.readonly`]
+   * for the full semantics.
+   *
+   * Example: `authorId: field.id("User").readonly()` lets the framework
+   * reject any `PATCH` payload trying to rewrite the row's author —
+   * closes the IDOR-via-update-payload class.
+   */
+  readonly(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -83,6 +148,12 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     crdt(annotation) {
       return buildField({ ...def, crdt: annotation });
+    },
+    serverOnly() {
+      return buildField({ ...def, serverOnly: true });
+    },
+    readonly() {
+      return buildField({ ...def, readonly: true });
     },
   };
 }
@@ -312,6 +383,13 @@ export interface ManifestField {
   /** CRDT container override; matches `pylon_kernel::CrdtAnnotation` on
    *  the Rust side. Omitted entirely when the field uses the default. */
   crdt?: CrdtAnnotation;
+  /** Set when the field is `field.X().serverOnly()` — see
+   *  [`FieldDefinition.serverOnly`]. Omitted by default so JSON
+   *  manifests stay compact for unannotated apps. */
+  serverOnly?: boolean;
+  /** Set when the field is `field.X().readonly()` — see
+   *  [`FieldDefinition.readonly`]. Omitted by default. */
+  readonly?: boolean;
 }
 
 export interface ManifestIndex {
@@ -409,10 +487,17 @@ export function entitiesToManifest(
           optional: fb._def.optional,
           unique: fb._def.unique,
         };
-        // Emit `crdt` only when set — keeps default-shape manifests
-        // visually identical to pre-CRDT versions in JSON diffs.
+        // Emit optional modifiers only when set — keeps default-shape
+        // manifests visually identical to pre-modifier versions in
+        // JSON diffs.
         if (fb._def.crdt !== undefined) {
           f.crdt = fb._def.crdt;
+        }
+        if (fb._def.serverOnly) {
+          f.serverOnly = true;
+        }
+        if (fb._def.readonly) {
+          f.readonly = true;
         }
         return f;
       }),

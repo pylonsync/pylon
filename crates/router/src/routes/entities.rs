@@ -362,6 +362,26 @@ pub(crate) fn handle(
             _ => None,
         };
 
+        // Reject readonly-field writes BEFORE policy evaluation —
+        // closes the IDOR-via-update-payload shape (attacker rewrites
+        // `authorId` / `orgId` in the PATCH payload to flip
+        // ownership). Insert is allowed because readonly means
+        // "settable on creation, immutable after." Admin bypasses
+        // so migrations + ops scripts can still rewrite. See
+        // `reject_readonly_payload` for the field-level semantics.
+        if method == HttpMethod::Patch {
+            if let Some(payload) = parsed_body_for_policy.as_ref() {
+                if let Err((code, message)) = crate::reject_readonly_payload(
+                    ctx.store.manifest(),
+                    entity_name,
+                    payload,
+                    ctx.auth_ctx,
+                ) {
+                    return Some((400, crate::json_error(code, &message)));
+                }
+            }
+        }
+
         let policy_check = match method {
             HttpMethod::Get => ctx.policy_engine.check_entity_read(
                 entity_name,

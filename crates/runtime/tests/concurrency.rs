@@ -31,6 +31,8 @@ fn counter_manifest() -> AppManifest {
                 optional: false,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             }],
             indexes: vec![],
             relations: vec![],

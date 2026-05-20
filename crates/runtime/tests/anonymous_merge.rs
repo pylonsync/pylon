@@ -23,6 +23,8 @@ fn field(name: &str, ty: &str) -> ManifestField {
         optional: false,
         unique: false,
         crdt: None,
+        server_only: false,
+        readonly: false,
     }
 }
 

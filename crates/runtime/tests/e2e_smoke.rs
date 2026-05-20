@@ -33,6 +33,8 @@ fn test_manifest() -> AppManifest {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 },
                 ManifestField {
                     name: "done".into(),
@@ -40,6 +42,8 @@ fn test_manifest() -> AppManifest {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 },
             ],
             indexes: vec![],

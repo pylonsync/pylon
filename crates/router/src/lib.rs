@@ -1337,10 +1337,16 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
         }
     };
 
-    let auth_user = &store.manifest().auth.user;
+    let manifest = store.manifest();
+    let auth_user = &manifest.auth.user;
     let rows: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|r| maybe_project_user_row(entity, r, auth_user))
+        // Every other entity goes through the generic serverOnly
+        // strip — closes the "stripeCustomerId on Org leaked via
+        // /api/entities/Org" class. No-op on entities without any
+        // serverOnly fields.
+        .map(|r| strip_server_only_fields(manifest, entity, r))
         .collect();
 
     if paginated {
@@ -1443,7 +1449,13 @@ fn parse_query_value(s: &str) -> serde_json::Value {
 pub(crate) fn handle_get(store: &dyn DataStore, entity: &str, id: &str) -> (u16, String) {
     match store.get_by_id(entity, id) {
         Ok(Some(row)) => {
-            let projected = maybe_project_user_row(entity, row, &store.manifest().auth.user);
+            let manifest = store.manifest();
+            let projected = maybe_project_user_row(entity, row, &manifest.auth.user);
+            // Then strip generic serverOnly fields. Order matters:
+            // user-row projection first (handles passwordHash via the
+            // auth-config-driven path), then the field-modifier
+            // strip (handles any other serverOnly columns).
+            let projected = strip_server_only_fields(manifest, entity, projected);
             (
                 200,
                 serde_json::to_string(&projected).unwrap_or_else(|_| "{}".into()),
@@ -1959,6 +1971,96 @@ pub fn maybe_project_user_row(
     project_user_fields(row, auth_user)
 }
 
+/// Strip every field annotated `serverOnly` in the manifest from a
+/// row before serializing to an HTTP response. Identity for entities
+/// with no `serverOnly` fields (the common case), so the wrapper is
+/// safe to call unconditionally.
+///
+/// The User entity's `passwordHash` + `_*` fields are stripped by
+/// `maybe_project_user_row` separately — that's a stricter projection
+/// for the auth-shaped row. This function handles every OTHER entity
+/// that uses the `field.X().serverOnly()` modifier (Org's
+/// stripeCustomerId, BillingProfile's external ids, etc.).
+///
+/// Pylon never returns `serverOnly` fields over HTTP. They stay
+/// readable from inside server functions via `ctx.db.*` — apps that
+/// need the value at the server-side boundary read it there; apps
+/// that need to expose it intentionally must opt back in by
+/// re-serializing the field in their own function return.
+pub fn strip_server_only_fields(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    row: serde_json::Value,
+) -> serde_json::Value {
+    let entity_def = match manifest.entities.iter().find(|e| e.name == entity) {
+        Some(e) => e,
+        None => return row,
+    };
+    let server_only_fields: Vec<&str> = entity_def
+        .fields
+        .iter()
+        .filter(|f| f.server_only)
+        .map(|f| f.name.as_str())
+        .collect();
+    if server_only_fields.is_empty() {
+        return row;
+    }
+    let serde_json::Value::Object(mut obj) = row else {
+        return row;
+    };
+    for f in server_only_fields {
+        obj.remove(f);
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Reject HTTP write payloads that touch `readonly` fields. Returns
+/// `Ok(())` if the payload is clean, or `Err((code, message))` with a
+/// stable error code + a message naming the offending field. Admin
+/// callers bypass — the framework's `is_admin` convention lets ops
+/// scripts and migrations rewrite owner-shaped columns.
+///
+/// Pylon never blocks server-side writes (`ctx.db.update` inside a
+/// function). Readonly is an HTTP-boundary check ONLY — server code
+/// is trusted to enforce its own invariants.
+pub fn reject_readonly_payload(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    payload: &serde_json::Value,
+    auth: &pylon_auth::AuthContext,
+) -> Result<(), (&'static str, String)> {
+    if auth.is_admin {
+        return Ok(());
+    }
+    let entity_def = match manifest.entities.iter().find(|e| e.name == entity) {
+        Some(e) => e,
+        None => return Ok(()),
+    };
+    let readonly_fields: Vec<&str> = entity_def
+        .fields
+        .iter()
+        .filter(|f| f.readonly)
+        .map(|f| f.name.as_str())
+        .collect();
+    if readonly_fields.is_empty() {
+        return Ok(());
+    }
+    let serde_json::Value::Object(obj) = payload else {
+        return Ok(());
+    };
+    for f in readonly_fields {
+        if obj.contains_key(f) {
+            return Err((
+                "READONLY_FIELD",
+                format!(
+                    "Field \"{f}\" on \"{entity}\" is readonly — clients can't set it via the HTTP entity routes. Server code (inside an action / mutation) may still write it."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Same projection logic as `crate::routes::auth::project_user_row`,
 /// but lifted here so non-auth routes can use it. Callers must have
 /// already confirmed the row belongs to the User entity.
@@ -2115,6 +2217,194 @@ pub(crate) fn chrono_now_iso() -> String {
 // changes can't silently re-introduce them. Each test builds a minimal
 // RouterContext with stub implementations of the service traits and exercises
 // a previously-vulnerable route.
+
+#[cfg(test)]
+mod field_gate_tests {
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, MANIFEST_VERSION};
+
+    fn org_with_secret_field() -> AppManifest {
+        AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.0.1".into(),
+            entities: vec![ManifestEntity {
+                name: "Org".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "name".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "stripeCustomerId".into(),
+                        field_type: "string".into(),
+                        server_only: true,
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "authorId".into(),
+                        field_type: "id(User)".into(),
+                        readonly: true,
+                        ..Default::default()
+                    },
+                ],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        }
+    }
+
+    #[test]
+    fn strip_server_only_removes_marked_field() {
+        let manifest = org_with_secret_field();
+        let row = serde_json::json!({
+            "id": "org_1",
+            "name": "Acme",
+            "stripeCustomerId": "cus_secret",
+            "authorId": "usr_1",
+        });
+        let stripped = strip_server_only_fields(&manifest, "Org", row);
+        assert!(stripped.get("name").is_some());
+        assert!(stripped.get("authorId").is_some());
+        // Crucial: the secret never leaves.
+        assert!(stripped.get("stripeCustomerId").is_none());
+    }
+
+    #[test]
+    fn strip_server_only_no_op_when_no_marked_fields() {
+        // PublicPost has no serverOnly fields — every column passes through.
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.0.1".into(),
+            entities: vec![ManifestEntity {
+                name: "PublicPost".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "title".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "body".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                ],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let row = serde_json::json!({ "id": "p1", "title": "hi", "body": "there" });
+        let out = strip_server_only_fields(&manifest, "PublicPost", row.clone());
+        assert_eq!(out, row);
+    }
+
+    #[test]
+    fn strip_server_only_unknown_entity_is_identity() {
+        // Unknown entity → no manifest lookup match → pass through.
+        let manifest = org_with_secret_field();
+        let row = serde_json::json!({ "id": "x", "field": "value" });
+        let out = strip_server_only_fields(&manifest, "NotInManifest", row.clone());
+        assert_eq!(out, row);
+    }
+
+    #[test]
+    fn reject_readonly_blocks_update_touching_marked_field() {
+        let manifest = org_with_secret_field();
+        let payload = serde_json::json!({
+            "name": "Acme Renamed",
+            "authorId": "usr_attacker", // ← IDOR attempt
+        });
+        let result = reject_readonly_payload(
+            &manifest,
+            "Org",
+            &payload,
+            &pylon_auth::AuthContext::authenticated("usr_1".into()),
+        );
+        let (code, msg) = result.expect_err("expected reject");
+        assert_eq!(code, "READONLY_FIELD");
+        assert!(msg.contains("authorId"));
+    }
+
+    #[test]
+    fn reject_readonly_allows_payload_without_marked_field() {
+        let manifest = org_with_secret_field();
+        let payload = serde_json::json!({ "name": "Acme Renamed" });
+        assert!(reject_readonly_payload(
+            &manifest,
+            "Org",
+            &payload,
+            &pylon_auth::AuthContext::authenticated("usr_1".into()),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn reject_readonly_admin_bypass() {
+        // Admin can rewrite readonly fields — matches the
+        // policy-engine + fn-auth conventions where admin bypasses
+        // every framework gate. Ops scripts + migrations need it.
+        let manifest = org_with_secret_field();
+        let payload = serde_json::json!({ "authorId": "usr_new" });
+        assert!(reject_readonly_payload(
+            &manifest,
+            "Org",
+            &payload,
+            &pylon_auth::AuthContext::admin(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn reject_readonly_no_op_on_unmarked_entity() {
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.0.1".into(),
+            entities: vec![ManifestEntity {
+                name: "PublicPost".into(),
+                fields: vec![ManifestField {
+                    name: "title".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                }],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+        };
+        let payload = serde_json::json!({ "title": "new" });
+        assert!(reject_readonly_payload(
+            &manifest,
+            "PublicPost",
+            &payload,
+            &pylon_auth::AuthContext::authenticated("usr_1".into()),
+        )
+        .is_ok());
+    }
+}
 
 #[cfg(test)]
 mod auth_gate_tests {

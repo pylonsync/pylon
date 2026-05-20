@@ -616,6 +616,8 @@ mod tests {
                             optional: false,
                             unique: true,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "age".into(),
@@ -623,6 +625,8 @@ mod tests {
                             optional: true,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "score".into(),
@@ -630,6 +634,8 @@ mod tests {
                             optional: true,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "active".into(),
@@ -637,6 +643,8 @@ mod tests {
                             optional: false,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "createdAt".into(),
@@ -644,6 +652,8 @@ mod tests {
                             optional: true,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "bio".into(),
@@ -651,6 +661,8 @@ mod tests {
                             optional: true,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                     ],
                     indexes: vec![ManifestIndex {
@@ -672,6 +684,8 @@ mod tests {
                             optional: false,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -679,6 +693,8 @@ mod tests {
                             optional: false,
                             unique: false,
                             crdt: None,
+                            server_only: false,
+                            readonly: false,
                         },
                     ],
                     indexes: vec![],
@@ -698,6 +714,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "notify".into(),
@@ -705,6 +723,8 @@ mod tests {
                         optional: true,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
             }],

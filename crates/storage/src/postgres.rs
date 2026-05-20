@@ -2144,6 +2144,8 @@ mod tests {
             optional: opt,
             unique: uniq,
             crdt: None,
+            server_only: false,
+            readonly: false,
         };
         AppManifest {
             manifest_version: 1,

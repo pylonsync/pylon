@@ -421,6 +421,47 @@ pub struct ManifestField {
     /// hatch on the entity itself).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crdt: Option<CrdtAnnotation>,
+    /// `true` when the TS def used `field.X().serverOnly()`. The
+    /// framework strips this field from every public HTTP response —
+    /// entity list, entity get, session projection, sync push. Still
+    /// readable from inside server functions via `ctx.db.*` so
+    /// app code can use it (Stripe customer id, internal cache
+    /// columns) without leaking.
+    ///
+    /// Defaults to `false` for backwards compatibility — apps that
+    /// haven't annotated anything keep their pre-modifier shape.
+    #[serde(default, rename = "serverOnly", skip_serializing_if = "is_false_ref")]
+    pub server_only: bool,
+    /// `true` when the TS def used `field.X().readonly()`. The
+    /// framework rejects any HTTP update payload that mentions this
+    /// field with a `READONLY_FIELD` error, before policy
+    /// evaluation. Admin contexts bypass. Server-side writes via
+    /// `ctx.db.update` are always allowed — readonly is an HTTP
+    /// boundary check, not a hard write-lock.
+    #[serde(default, rename = "readonly", skip_serializing_if = "is_false_ref")]
+    pub readonly: bool,
+}
+
+fn is_false_ref(b: &bool) -> bool {
+    !*b
+}
+
+impl Default for ManifestField {
+    /// Convenience for test fixtures — `ManifestField { name: ..., field_type: ...,
+    /// ..Default::default() }`. The shipped manifest serialization
+    /// never emits a default field; every `ManifestField` in the runtime
+    /// path comes from `buildManifest` in @pylonsync/sdk.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            field_type: "string".to_string(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+        }
+    }
 }
 
 /// Per-field CRDT container override. Wire format is the lowercase

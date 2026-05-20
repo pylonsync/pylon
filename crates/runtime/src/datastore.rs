@@ -4371,6 +4371,8 @@ mod hook_enforcing_tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -4378,6 +4380,8 @@ mod hook_enforcing_tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 ..Default::default()
@@ -4730,6 +4734,8 @@ mod auto_broadcast_tests {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 ..Default::default()
             }],
@@ -5191,6 +5197,8 @@ mod user_projection_broadcast_tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "email".into(),
@@ -5198,6 +5206,8 @@ mod user_projection_broadcast_tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "passwordHash".into(),
@@ -5205,6 +5215,8 @@ mod user_projection_broadcast_tests {
                         optional: true,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 ..Default::default()

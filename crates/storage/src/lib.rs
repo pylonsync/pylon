@@ -735,6 +735,8 @@ mod tests {
                     optional: false,
                     unique: true,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -827,6 +829,8 @@ mod tests {
                 optional: false,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -868,6 +872,8 @@ mod tests {
             optional: false,
             unique: false,
             crdt: None,
+            server_only: false,
+            readonly: false,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -1094,6 +1100,8 @@ mod tests {
                         optional: false,
                         unique: true,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "name".into(),
@@ -1101,6 +1109,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 indexes: vec![],
@@ -1152,6 +1162,8 @@ mod tests {
                     optional: false,
                     unique: true,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 indexes: vec![ManifestIndex {
                     name: "by_email".into(),
@@ -1235,6 +1247,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "plan".into(),
@@ -1242,6 +1256,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -1329,6 +1345,8 @@ mod tests {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 // Manifest dropped the old_idx entry.
                 indexes: vec![],

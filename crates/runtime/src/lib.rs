@@ -2677,6 +2677,8 @@ mod tests {
                         optional: false,
                         unique: true,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -2684,6 +2686,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -2834,6 +2838,8 @@ mod tests {
                 optional: false,
                 unique: true,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             },
             ManifestField {
                 name: "displayName".into(),
@@ -2841,6 +2847,8 @@ mod tests {
                 optional: false,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             },
             ManifestField {
                 name: "avatarColor".into(),
@@ -2848,6 +2856,8 @@ mod tests {
                 optional: true,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             },
             ManifestField {
                 name: "createdAt".into(),
@@ -2855,6 +2865,8 @@ mod tests {
                 optional: true,
                 unique: false,
                 crdt: None,
+                server_only: false,
+                readonly: false,
             },
         ];
         // Important: turn off CRDT mode for this test — CRDT mode writes

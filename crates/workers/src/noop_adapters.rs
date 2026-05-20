@@ -444,6 +444,8 @@ mod tests {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 ..Default::default()
             }],

@@ -1579,6 +1579,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -1586,6 +1588,8 @@ mod tests {
                         optional: false,
                         unique: false,
                         crdt: None,
+                        server_only: false,
+                        readonly: false,
                     },
                 ],
                 ..Default::default()

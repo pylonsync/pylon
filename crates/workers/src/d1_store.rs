@@ -513,6 +513,8 @@ mod tests {
                     optional: false,
                     unique: false,
                     crdt: None,
+                    server_only: false,
+                    readonly: false,
                 }],
                 indexes: vec![],
                 relations: vec![],

@@ -85,6 +85,40 @@ implemented end-to-end as of v0.3.100 — broadcasts ship the full Loro snapshot
 on first write per row, then incremental deltas (v0.3.105 SQLite, v0.3.107
 Postgres) keyed off the last-broadcast version vector.
 
+## Field gates: serverOnly & readonly
+
+Two modifiers control how a field flows through the HTTP boundary. They're additive — the field type, optionality, and indexes still work the same.
+
+```ts
+const Org = entity("Org", {
+  name: field.string(),
+  stripeCustomerId: field.string().serverOnly(),   // never returned in HTTP responses
+  authorId: field.id("User").readonly(),           // set on insert, immutable via HTTP after
+});
+```
+
+**`.serverOnly()`** — the field is stripped from every public response shape: `GET /api/entities/<entity>`, `GET /api/entities/<entity>/<id>`, the session-projection `/api/auth/session`, and sync push deltas. It stays readable from inside server functions via `ctx.db.*` so your handler can do internal work with it (e.g. webhook receivers look up `stripeCustomerId` from the Stripe customer id without leaking the value to clients).
+
+If you want the field exposed to a specific client, re-serialize it inside a function return — `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
+
+**`.readonly()`** — the field is settable on insert but rejected on update. Any `PATCH /api/entities/<entity>/<id>` payload that mentions the field returns `400 READONLY_FIELD` before the policy even runs. Closes the canonical IDOR-via-update-payload shape:
+
+```ts
+// Policy says: "you can update a Note if you own it."
+allowUpdate: "data.authorId == auth.userId"
+
+// Without readonly: attacker PATCHes { authorId: <attacker_id> } to flip ownership.
+//
+// With readonly() on authorId: framework refuses the update before
+// policy evaluation — attacker can never get the payload to include
+// their own id without hitting READONLY_FIELD.
+authorId: field.id("User").readonly()
+```
+
+Admin contexts bypass both gates — ops scripts and migrations still rewrite the columns.
+
+Server-side writes via `ctx.db.update` inside a mutation/action are **not** blocked by `.readonly()`. Server code is trusted to enforce its own invariants; readonly is an HTTP-boundary defense, not a hard write-lock.
+
 ## Indexes
 
 Declare composite or non-unique indexes in the options block:
