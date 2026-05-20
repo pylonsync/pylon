@@ -72,6 +72,7 @@ fn run() -> ExitCode {
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
+        Some("lint") => commands::lint::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
         Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
@@ -140,7 +141,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 30] = [
+const TOP_LEVEL_COMMANDS: [&str; 31] = [
     "backup",
     "build",
     "cache",
@@ -155,6 +156,7 @@ const TOP_LEVEL_COMMANDS: [&str; 30] = [
     "env",
     "explain",
     "init",
+    "lint",
     "login",
     "logout",
     "logs",
