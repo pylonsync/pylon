@@ -20,12 +20,14 @@ Create a file in `functions/`:
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
+  // Every function declares an auth mode. "user" is the default;
+  // see the Auth section below. The framework enforces this before
+  // the handler runs, so `ctx.auth.userId` is `string` here.
   args: {
     roomId: v.id("Room"),
     body: v.string(),
   },
   async handler(ctx, args) {
-    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
     const id = await ctx.db.insert("Message", {
       roomId: args.roomId,
       authorId: ctx.auth.userId,
@@ -44,7 +46,7 @@ The filename becomes the RPC name — `createMessage` is callable at `POST /api/
 `ctx` gives you:
 
 ```ts
-ctx.auth.userId   // string | null
+ctx.auth.userId   // string (when auth: "user" | "admin") OR string | null (when auth: "public" | "guest")
 ctx.auth.email    // string | null
 ctx.auth.roles    // string[]
 
@@ -61,6 +63,48 @@ ctx.scheduler.runAfter(delayMs, ...)  // schedule (deferred until COMMIT)
 ```
 
 > A mutation handler IS the transaction — every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
+
+## Auth (secure by default)
+
+Every function declares **who can call it**. The framework enforces this *before* the handler runs — a missing `if (!ctx.auth.userId)` check no longer leaks data, because the runtime made the check first.
+
+```ts
+export default mutation({
+  auth: "user",   // default — signed-in user required
+  args: { ... },
+  async handler(ctx, args) {
+    // ctx.auth.userId is `string`, not `string | null`. The
+    // redundant null check is gone.
+    await ctx.db.insert("Note", { authorId: ctx.auth.userId, ... });
+  },
+});
+```
+
+Four modes:
+
+| Mode | Reaches the handler when… | Use it for |
+| --- | --- | --- |
+| `"user"` (**default**) | Real signed-in user. Guest sessions rejected. | Almost everything. |
+| `"public"` | Anyone, including unauthenticated callers. | Healthchecks, landing-form submits, webhook receivers that verify their own signature. |
+| `"guest"` | Guest session OR real user. | Cart-style pre-login state. |
+| `"admin"` | `ctx.auth.isAdmin === true`. | Ops endpoints, dangerous helpers exposed via `/api/fn/...`. |
+
+When the mode doesn't match the caller, the request is rejected before the handler runs — `401 AUTH_REQUIRED` for `"user"` / `"guest"`, `403 FORBIDDEN` for `"admin"`. Admin sessions bypass every mode (same convention as policies).
+
+```ts
+// Public endpoint — has to be explicit, never the default.
+export default action({
+  auth: "public",
+  async handler(ctx) {
+    // ctx.auth.userId is `string | null`. Check it if you need it.
+    return { ok: true };
+  },
+});
+```
+
+**Why this matters for actions specifically:** policies gate `ctx.db.*` reads and writes, but **policies don't gate `action` handlers**. An action that charges Stripe, sends email, or hits a private API has no default protection — except `auth`. Forgetting this single field is the canonical action-shaped vulnerability in any TypeScript backend. Pylon makes it the secure default.
+
+`internal: true` functions ignore `auth` — they're unreachable over HTTP and inherit the wrapping handler's context.
 
 ## Validators
 

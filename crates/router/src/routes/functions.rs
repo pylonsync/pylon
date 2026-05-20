@@ -8,7 +8,168 @@
 //! attacker could starve all anon traffic.
 
 use crate::{json_error, parse_json, query_param, require_admin, RouterContext};
+use pylon_auth::AuthContext;
+use pylon_functions::registry::FnAuthMode;
 use pylon_http::HttpMethod;
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn public_allows_anyone() {
+        // Anonymous, guest, user, admin — all four pass `public`.
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Public, &AuthContext::anonymous()),
+            FnAuthGate::Allowed
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Public, &AuthContext::guest("g1".into())),
+            FnAuthGate::Allowed
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Public, &AuthContext::authenticated("u1".into())),
+            FnAuthGate::Allowed
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Public, &AuthContext::admin()),
+            FnAuthGate::Allowed
+        );
+    }
+
+    #[test]
+    fn guest_rejects_anonymous_but_allows_session_holders() {
+        // Anonymous has no user_id at all — bounce with NeedsGuest.
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Guest, &AuthContext::anonymous()),
+            FnAuthGate::NeedsGuest
+        );
+        // Guest session — user_id present, is_guest=true → allowed.
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Guest, &AuthContext::guest("g1".into())),
+            FnAuthGate::Allowed
+        );
+        // Real user — also allowed (superset).
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Guest, &AuthContext::authenticated("u1".into())),
+            FnAuthGate::Allowed
+        );
+    }
+
+    #[test]
+    fn user_rejects_anonymous_and_guest_but_allows_real_users() {
+        assert_eq!(
+            check_fn_auth(FnAuthMode::User, &AuthContext::anonymous()),
+            FnAuthGate::NeedsAuth
+        );
+        // Crucial: a guest session is NOT a real user. This is the
+        // exact bug `auth: "user"` is meant to prevent — handlers
+        // that assumed user_id meant "real user" but accepted guest
+        // ids. Default-deny + guest-rejects closes the gap.
+        assert_eq!(
+            check_fn_auth(FnAuthMode::User, &AuthContext::guest("g1".into())),
+            FnAuthGate::NeedsAuth
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::User, &AuthContext::authenticated("u1".into())),
+            FnAuthGate::Allowed
+        );
+    }
+
+    #[test]
+    fn admin_rejects_everyone_but_admins() {
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Admin, &AuthContext::anonymous()),
+            FnAuthGate::NeedsAdmin
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Admin, &AuthContext::guest("g1".into())),
+            FnAuthGate::NeedsAdmin
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Admin, &AuthContext::authenticated("u1".into())),
+            FnAuthGate::NeedsAdmin
+        );
+        assert_eq!(
+            check_fn_auth(FnAuthMode::Admin, &AuthContext::admin()),
+            FnAuthGate::Allowed
+        );
+    }
+
+    #[test]
+    fn admin_bypasses_every_mode() {
+        // Mirrors the policy-engine convention — operators must be
+        // able to invoke any function from ops scripts without
+        // wildcard checks on every def.
+        for mode in [
+            FnAuthMode::Public,
+            FnAuthMode::Guest,
+            FnAuthMode::User,
+            FnAuthMode::Admin,
+        ] {
+            assert_eq!(
+                check_fn_auth(mode, &AuthContext::admin()),
+                FnAuthGate::Allowed,
+                "admin should bypass mode {:?}",
+                mode,
+            );
+        }
+    }
+}
+
+/// Outcome of the function-level auth gate. Mirrors the four
+/// possible bodies the route handler will emit if the gate fires.
+///
+/// Extracted into a pure function so the gate is testable without
+/// the full RouterContext / TCP harness — the route handler
+/// translates `GateOutcome` into `(status, body)` after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FnAuthGate {
+    /// Caller satisfies the declared auth mode; proceed to invoke.
+    Allowed,
+    /// Caller is anonymous; function requires a real signed-in user.
+    /// Status 401, code `AUTH_REQUIRED`.
+    NeedsAuth,
+    /// Caller has no session at all; function allows guests but
+    /// the request didn't even carry a guest cookie. Status 401,
+    /// code `AUTH_REQUIRED`, hint mentions /api/auth/guest.
+    NeedsGuest,
+    /// Caller is authenticated but not admin; function is admin-gated.
+    /// Status 403, code `FORBIDDEN`.
+    NeedsAdmin,
+}
+
+/// Pure auth-mode gate. Admin context bypasses every mode
+/// (matches the policy-engine convention — admin bypasses
+/// policies too, so ops scripts work everywhere without
+/// wildcard rules).
+pub(crate) fn check_fn_auth(mode: FnAuthMode, auth_ctx: &AuthContext) -> FnAuthGate {
+    if auth_ctx.is_admin {
+        return FnAuthGate::Allowed;
+    }
+    match mode {
+        FnAuthMode::Public => FnAuthGate::Allowed,
+        FnAuthMode::Guest => {
+            // Guest sessions OR real users both pass. The discriminator
+            // is "did the request carry a session at all" — represented
+            // by `user_id.is_some()` (a guest session has user_id =
+            // guest_id, not None).
+            if auth_ctx.user_id.is_some() {
+                FnAuthGate::Allowed
+            } else {
+                FnAuthGate::NeedsGuest
+            }
+        }
+        FnAuthMode::User => {
+            if auth_ctx.is_authenticated() {
+                FnAuthGate::Allowed
+            } else {
+                FnAuthGate::NeedsAuth
+            }
+        }
+        FnAuthMode::Admin => FnAuthGate::NeedsAdmin,
+    }
+}
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -180,7 +341,7 @@ pub(crate) fn handle(
             // sessions, or the Studio admin cookie) bypass the gate so
             // operators can manually kick crons + debug helper functions
             // from Studio without round-tripping through the scheduler.
-            match fn_ops.get_fn(fn_name) {
+            let fn_def = match fn_ops.get_fn(fn_name) {
                 Some(def) if def.internal && !ctx.auth_ctx.is_admin => {
                     return Some((
                         404,
@@ -199,7 +360,49 @@ pub(crate) fn handle(
                         ),
                     ));
                 }
-                _ => {}
+                Some(def) => def,
+            };
+
+            // Declarative auth gate, enforced BEFORE the TS handler
+            // runs. Forgetting an `if (!ctx.auth.userId) throw …`
+            // check no longer leaks data — when the def declared
+            // `auth: "user"` (the default), an anonymous request
+            // never reaches the handler in the first place.
+            //
+            // Admin sessions bypass every mode (see `check_fn_auth`)
+            // so ops scripts and Studio can invoke functions without
+            // wildcard "admin can call this" checks on every def.
+            match check_fn_auth(fn_def.auth, ctx.auth_ctx) {
+                FnAuthGate::Allowed => {}
+                FnAuthGate::NeedsAuth => {
+                    return Some((
+                        401,
+                        json_error(
+                            "AUTH_REQUIRED",
+                            &format!("Function \"{fn_name}\" requires a signed-in user"),
+                        ),
+                    ));
+                }
+                FnAuthGate::NeedsGuest => {
+                    return Some((
+                        401,
+                        json_error(
+                            "AUTH_REQUIRED",
+                            &format!(
+                                "Function \"{fn_name}\" requires a session — sign in or POST /api/auth/guest first"
+                            ),
+                        ),
+                    ));
+                }
+                FnAuthGate::NeedsAdmin => {
+                    return Some((
+                        403,
+                        json_error(
+                            "FORBIDDEN",
+                            &format!("Function \"{fn_name}\" requires admin authentication"),
+                        ),
+                    ));
+                }
             }
 
             let args: serde_json::Value = if body.trim().is_empty() {

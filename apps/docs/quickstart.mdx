@@ -125,13 +125,14 @@ Create `apps/api/functions/createNote.ts`:
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
+  // `auth: "user"` is the default — the framework rejects
+  // anonymous callers with 401 before the handler runs. So
+  // `ctx.auth.userId` is `string`, not nullable, here.
   args: {
     title: v.string(),
     body: v.string(),
   },
   async handler(ctx, args) {
-    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-
     const id = await ctx.db.insert("Note", {
       title: args.title,
       body: args.body,

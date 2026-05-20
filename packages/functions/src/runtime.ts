@@ -758,6 +758,11 @@ async function main() {
     // requests for internal fns; the Bun runtime here doesn't gate
     // (nested calls go through the same dispatcher).
     internal: def.internal === true,
+    // Declarative auth gate, enforced by the Rust router before the
+    // handler is invoked. Defaults to "user" when the TS def omits
+    // it — secure by default. See `packages/functions/src/define.ts`
+    // for the developer-facing AuthMode docs.
+    auth: def.auth ?? "user",
   }));
   send({ type: "ready", functions });
 

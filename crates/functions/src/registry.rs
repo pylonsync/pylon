@@ -11,6 +11,49 @@ use crate::protocol::FnType;
 // Function definition
 // ---------------------------------------------------------------------------
 
+/// Declarative auth requirement set by the TS define API.
+/// The router enforces this BEFORE the handler runs, so a handler
+/// that forgets to check `ctx.auth.userId` doesn't leak data —
+/// the request never reaches the handler in the first place.
+///
+/// Defaults to [`FnAuthMode::User`] in [`FnDef::default`]. The TS
+/// runtime also emits `"user"` for any def that omits `auth`, so
+/// the default-secure shape is enforced on both sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FnAuthMode {
+    /// Open to anyone, including unauthenticated callers. Must be
+    /// explicit on the TS side — never inferred.
+    Public,
+    /// Guest sessions or authenticated users. For pre-login state
+    /// (cart, preferences) carried by `/api/auth/guest` sessions.
+    Guest,
+    /// Real signed-in user required. The default for every
+    /// declaration that omits `auth`. Guests are rejected.
+    User,
+    /// `is_admin == true` required. Use for ops endpoints exposed
+    /// via `/api/fn/...`.
+    Admin,
+}
+
+impl Default for FnAuthMode {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
+impl FnAuthMode {
+    /// Stable wire-format string, matching the TS-side enum literals.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Guest => "guest",
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 /// Metadata about a registered TypeScript function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FnDef {
@@ -30,6 +73,19 @@ pub struct FnDef {
     /// (see Pylon Cloud's deleteMachineRecord pattern for the rationale).
     #[serde(default, skip_serializing_if = "is_false")]
     pub internal: bool,
+    /// Declarative auth gate. The router enforces this on every
+    /// external `/api/fn/<name>` call BEFORE invoking the handler.
+    /// Defaults to [`FnAuthMode::User`] — every function is
+    /// signed-in-only unless explicitly opted out via
+    /// `auth: "public"` in the TS define.
+    ///
+    /// The default applies in two places at once: the TS runtime
+    /// emits `"user"` when the def omits `auth`, and this field
+    /// also defaults to `User` if an older TS runtime doesn't
+    /// emit the field at all. Both belts make sure existing
+    /// deployments stay safe across a framework upgrade.
+    #[serde(default)]
+    pub auth: FnAuthMode,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -131,12 +187,14 @@ mod tests {
             fn_type: FnType::Mutation,
             args_schema: None,
             internal: false,
+            auth: FnAuthMode::User,
         });
         reg.register(FnDef {
             name: "getLots".into(),
             fn_type: FnType::Query,
             args_schema: None,
             internal: false,
+            auth: FnAuthMode::User,
         });
 
         assert_eq!(reg.count(), 2);
@@ -156,24 +214,28 @@ mod tests {
                 fn_type: FnType::Mutation,
                 args_schema: None,
                 internal: false,
+                auth: FnAuthMode::User,
             },
             FnDef {
                 name: "b".into(),
                 fn_type: FnType::Query,
                 args_schema: None,
                 internal: false,
+                auth: FnAuthMode::User,
             },
             FnDef {
                 name: "c".into(),
                 fn_type: FnType::Mutation,
                 args_schema: None,
                 internal: false,
+                auth: FnAuthMode::User,
             },
             FnDef {
                 name: "d".into(),
                 fn_type: FnType::Action,
                 args_schema: None,
                 internal: false,
+                auth: FnAuthMode::User,
             },
         ]);
 

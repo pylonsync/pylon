@@ -2,6 +2,23 @@
  * Function definition constructors.
  *
  * These are the primary API for defining server-side functions.
+ *
+ * Each constructor (query / mutation / action) has two overloads:
+ *
+ *   1. `auth` omitted, or `auth: "user" | "admin"` →  the framework
+ *      enforces a real signed-in user, so the handler's
+ *      `ctx.auth.userId` is narrowed from `string | null` to
+ *      `string`. The redundant `if (!ctx.auth.userId) throw …`
+ *      check disappears from app code.
+ *
+ *   2. `auth: "public" | "guest"` →  the function is reachable by
+ *      anonymous callers, so `ctx.auth.userId` stays `string | null`
+ *      and the handler must check it manually if relevant.
+ *
+ * The framework gate happens BEFORE the handler runs (in Rust,
+ * inside the router). A handler can't accidentally leak data by
+ * forgetting an auth check — when `auth: "user"` is in effect,
+ * an anonymous request never reaches the handler at all.
  */
 
 import type {
@@ -10,37 +27,80 @@ import type {
   MutationCtx,
   ActionCtx,
   Validator,
+  AuthMode,
 } from "./types";
 
-interface QueryDef<TArgs, TReturn> {
+/** Default auth mode applied when a definition omits `auth`. */
+const DEFAULT_AUTH: AuthMode = "user";
+
+interface CommonDef {
   args?: Record<string, Validator>;
-  handler: (ctx: QueryCtx, args: TArgs) => Promise<TReturn>;
   /**
-   * When true, the function is callable only via `ctx.runQuery()`
-   * from another function — never via the public `/api/fn/<name>`
-   * HTTP endpoint. The router refuses external calls with
-   * `404 FN_NOT_FOUND` so probing can't even confirm the name exists.
+   * When true, the function is callable only via `ctx.runQuery()` /
+   * `ctx.runMutation()` / `ctx.runAction()` from another function
+   * — never via the public `/api/fn/<name>` HTTP endpoint. The
+   * router refuses external calls with `404 FN_NOT_FOUND` so
+   * probing can't even confirm the name exists.
    *
-   * Use for queries that are meant as helpers for trusted action /
-   * mutation flows but would be unsafe if any caller could invoke
-   * them directly (e.g. they trust args without re-checking caller
-   * authority).
+   * Use for helper functions that are safe inside trusted
+   * wrappers but unsafe if any caller could invoke them directly
+   * (e.g. they trust args without re-checking caller authority).
+   *
+   * Internal functions inherit the wrapping handler's auth — the
+   * `auth` field has no effect when `internal: true`. The router
+   * isn't reachable anyway, and the caller has already passed its
+   * own gate.
    */
   internal?: boolean;
 }
 
-interface MutationDef<TArgs, TReturn> {
-  args?: Record<string, Validator>;
-  handler: (ctx: MutationCtx, args: TArgs) => Promise<TReturn>;
-  /** See QueryDef.internal — applies the same way to mutations. */
-  internal?: boolean;
+interface QueryDefRequired<TArgs, TReturn> extends CommonDef {
+  /** Defaults to `"user"`. See [`AuthMode`] for the full surface. */
+  auth?: "user" | "admin";
+  handler: (
+    ctx: QueryCtx<"required">,
+    args: TArgs,
+  ) => Promise<TReturn>;
 }
 
-interface ActionDef<TArgs, TReturn> {
-  args?: Record<string, Validator>;
-  handler: (ctx: ActionCtx, args: TArgs) => Promise<TReturn>;
-  /** See QueryDef.internal — applies the same way to actions. */
-  internal?: boolean;
+interface QueryDefOptional<TArgs, TReturn> extends CommonDef {
+  auth: "public" | "guest";
+  handler: (
+    ctx: QueryCtx<"optional">,
+    args: TArgs,
+  ) => Promise<TReturn>;
+}
+
+interface MutationDefRequired<TArgs, TReturn> extends CommonDef {
+  auth?: "user" | "admin";
+  handler: (
+    ctx: MutationCtx<"required">,
+    args: TArgs,
+  ) => Promise<TReturn>;
+}
+
+interface MutationDefOptional<TArgs, TReturn> extends CommonDef {
+  auth: "public" | "guest";
+  handler: (
+    ctx: MutationCtx<"optional">,
+    args: TArgs,
+  ) => Promise<TReturn>;
+}
+
+interface ActionDefRequired<TArgs, TReturn> extends CommonDef {
+  auth?: "user" | "admin";
+  handler: (
+    ctx: ActionCtx<"required">,
+    args: TArgs,
+  ) => Promise<TReturn>;
+}
+
+interface ActionDefOptional<TArgs, TReturn> extends CommonDef {
+  auth: "public" | "guest";
+  handler: (
+    ctx: ActionCtx<"optional">,
+    args: TArgs,
+  ) => Promise<TReturn>;
 }
 
 /**
@@ -52,24 +112,46 @@ interface ActionDef<TArgs, TReturn> {
  * @example
  * ```typescript
  * export default query({
+ *   // auth: "user" is the default — ctx.auth.userId is `string`,
+ *   // not `string | null`, inside the handler.
  *   args: { auctionId: v.string() },
  *   async handler(ctx, args) {
  *     return ctx.db.query("Lot", {
  *       auctionId: args.auctionId,
- *       $order: { closesAt: "asc" },
+ *       authorId: ctx.auth.userId,
  *     });
+ *   },
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Explicitly public — landing-page count, never auth-shaped.
+ * export default query({
+ *   auth: "public",
+ *   async handler(ctx) {
+ *     return ctx.db.query("PublicPost", { published: true });
  *   },
  * });
  * ```
  */
 export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
-  def: QueryDef<TArgs, TReturn>
+  def: QueryDefRequired<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
+  def: QueryDefOptional<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function query<TArgs, TReturn>(
+  def:
+    | QueryDefRequired<TArgs, TReturn>
+    | QueryDefOptional<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn> {
   return {
     type: "query",
     args: def.args,
-    handler: def.handler,
+    handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
+    auth: def.auth ?? DEFAULT_AUTH,
   };
 }
 
@@ -88,22 +170,37 @@ export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
  * export default mutation({
  *   args: { lotId: v.string(), amount: v.number() },
  *   async handler(ctx, args) {
+ *     // ctx.auth.userId is `string` (not nullable) — the runtime
+ *     // already enforced `auth: "user"` (default) before reaching here.
  *     const lot = await ctx.db.get("Lot", args.lotId);
  *     if (!lot) throw ctx.error("NOT_FOUND", "Lot not found");
- *     await ctx.db.insert("Bid", { lotId: args.lotId, amount: args.amount });
+ *     await ctx.db.insert("Bid", {
+ *       lotId: args.lotId,
+ *       amount: args.amount,
+ *       bidderId: ctx.auth.userId,
+ *     });
  *     return { accepted: true };
  *   },
  * });
  * ```
  */
 export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
-  def: MutationDef<TArgs, TReturn>
+  def: MutationDefRequired<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
+  def: MutationDefOptional<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function mutation<TArgs, TReturn>(
+  def:
+    | MutationDefRequired<TArgs, TReturn>
+    | MutationDefOptional<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn> {
   return {
     type: "mutation",
     args: def.args,
-    handler: def.handler,
+    handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
+    auth: def.auth ?? DEFAULT_AUTH,
   };
 }
 
@@ -116,6 +213,13 @@ export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
  *
  * Actions are NOT automatically retried because they may have side effects.
  *
+ * **Important:** policies don't gate actions — `auth: "user"` (the
+ * default) is the only thing protecting an action from anonymous calls.
+ * An action that charges Stripe, hits a private API, or reads a
+ * secret will respond happily to anonymous POSTs unless this gate
+ * fires. Pick `auth: "public"` explicitly only when the endpoint is
+ * meant to be open (a webhook receiver, a public form submit, …).
+ *
  * @example
  * ```typescript
  * export default action({
@@ -127,14 +231,39 @@ export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
  *   },
  * });
  * ```
+ *
+ * @example
+ * ```typescript
+ * // GitHub webhook receiver — public because GitHub doesn't sign
+ * // in, the handler verifies the signature itself, then optionally
+ * // elevates.
+ * export default action({
+ *   auth: "public",
+ *   async handler(ctx) {
+ *     const ok = verifyGithubSignature(secret, ctx.request!.rawBody, sig);
+ *     if (!ok) throw ctx.error("INVALID_SIGNATURE", "bad sig");
+ *     await ctx.auth.elevate({ admin: true, reason: "github webhook hmac" });
+ *     // …
+ *   },
+ * });
+ * ```
  */
 export function action<TArgs = Record<string, unknown>, TReturn = unknown>(
-  def: ActionDef<TArgs, TReturn>
+  def: ActionDefRequired<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function action<TArgs = Record<string, unknown>, TReturn = unknown>(
+  def: ActionDefOptional<TArgs, TReturn>,
+): FnDefinition<TArgs, TReturn>;
+export function action<TArgs, TReturn>(
+  def:
+    | ActionDefRequired<TArgs, TReturn>
+    | ActionDefOptional<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn> {
   return {
     type: "action",
     args: def.args,
-    handler: def.handler,
+    handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
+    auth: def.auth ?? DEFAULT_AUTH,
   };
 }

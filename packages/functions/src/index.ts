@@ -31,5 +31,7 @@ export type {
   Stream,
   Scheduler,
   AuthInfo,
+  AuthMode,
+  AuthRequirement,
   FnDefinition,
 } from "./types";

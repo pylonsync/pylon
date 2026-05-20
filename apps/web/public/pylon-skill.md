@@ -242,9 +242,10 @@ export default mutation({
     description: v.optional(v.string()),
     priority: v.optional(v.int()),
   },
+  // `auth: "user"` is the default — framework rejects anon callers
+  // BEFORE the handler runs, so `ctx.auth.userId` is `string`
+  // (not nullable) here. Use `auth: "public"` only when intentional.
   async handler(ctx, args) {
-    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-
     const id = await ctx.db.insert("Issue", {
       teamId: args.teamId,
       title: args.title,
@@ -282,9 +283,12 @@ Queries are **live** when called from the React hook — the client subscribes a
 import { action, v } from "@pylonsync/functions";
 
 export default action({
+  // Default `auth: "user"` — anon POSTs to this endpoint never reach
+  // the handler. CRITICAL for actions: policies don't gate them, so
+  // a forgotten auth check on an action that calls Stripe/Resend/etc.
+  // = open vulnerability. `auth: "public"` for webhook receivers only.
   args: { email: v.string(), orgId: v.id("Org") },
   async handler(ctx, args) {
-    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
     await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.RESEND_KEY}` },
@@ -476,7 +480,7 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 | A new table | New `entity(...)` in `app.ts` + matching `policy(...)` + `buildManifest({ entities: [...], policies: [...] })` |
 | A list in the UI | `db.useQuery("Entity", { filter })` — make sure `filter` keys are indexed |
 | A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component |
-| Auth-gated writes | `if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "...")` at top of mutation handler |
+| Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "public"` to opt out (webhooks, healthchecks). CRITICAL on actions — policies don't gate them. |
 | Access rules | `policy({ allowRead: "...", allowInsert: "..." })` — not middleware, not function guards |
 | Email / external API | `action()` (not `mutation()`) |
 | A scheduled job | `ctx.schedule(delayMs, "fnName", args)` inside a mutation |

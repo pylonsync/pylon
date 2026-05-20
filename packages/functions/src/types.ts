@@ -6,8 +6,43 @@
 // Auth
 // ---------------------------------------------------------------------------
 
-export interface AuthInfo {
-  userId: string | null;
+/**
+ * Declarative auth requirement for a function. The framework
+ * enforces this BEFORE the handler runs — if the caller doesn't
+ * meet the bar, the request rejects with a typed error and the
+ * handler is never invoked.
+ *
+ * Functions default to `"user"` (signed-in required) when this
+ * field is omitted. That's the secure-by-default position: a
+ * forgotten `if (!ctx.auth.userId)` check never leaks data,
+ * because the runtime made the check before the handler ran.
+ *
+ * Modes:
+ * - `"public"` — anyone, including unauthenticated callers. Use
+ *   for healthchecks, landing-page form submits, intentionally-open
+ *   webhooks. Must be explicit; never the default.
+ * - `"guest"` — anonymous-with-stable-id sessions count, plus
+ *   any authenticated user. Use for cart-style pre-login state.
+ * - `"user"` — a real signed-in user (default). Guest sessions
+ *   are rejected. Inside the handler, `ctx.auth.userId` is
+ *   narrowed from `string | null` to `string` so the redundant
+ *   null check can be dropped.
+ * - `"admin"` — `ctx.auth.isAdmin === true`. Use for ops
+ *   endpoints exposed via `/api/fn/...`.
+ */
+export type AuthMode = "public" | "guest" | "user" | "admin";
+
+/**
+ * `userId` shape narrows based on the function's declared auth
+ * requirement. `auth: "user"` and `auth: "admin"` both guarantee
+ * a real signed-in user, so the handler sees a non-null string.
+ * `auth: "public"` and `auth: "guest"` allow anonymous callers,
+ * so the handler must keep checking.
+ */
+export type AuthRequirement = "required" | "optional";
+
+export interface AuthInfo<R extends AuthRequirement = "optional"> {
+  userId: R extends "required" ? string : string | null;
   isAdmin: boolean;
   /** Active tenant id (selected organization) for multi-tenant apps.
    *  Null when the session hasn't selected one. */
@@ -248,17 +283,17 @@ export interface EmailSender {
 // ---------------------------------------------------------------------------
 
 /** Context for query handlers (read-only). */
-export interface QueryCtx {
+export interface QueryCtx<R extends AuthRequirement = "optional"> {
   db: DbReader;
-  auth: AuthInfo;
+  auth: AuthInfo<R>;
   /** Environment variables / secrets. */
   env: Record<string, string>;
 }
 
 /** Context for mutation handlers (read + write, transactional). */
-export interface MutationCtx {
+export interface MutationCtx<R extends AuthRequirement = "optional"> {
   db: DbWriter;
-  auth: AuthInfo;
+  auth: AuthInfo<R>;
   stream: Stream;
   scheduler: Scheduler;
   /** Environment variables / secrets. */
@@ -268,8 +303,8 @@ export interface MutationCtx {
 }
 
 /** Context for action handlers (external I/O, non-transactional). */
-export interface ActionCtx {
-  auth: AuthInfo;
+export interface ActionCtx<R extends AuthRequirement = "optional"> {
+  auth: AuthInfo<R>;
   stream: Stream;
   scheduler: Scheduler;
   /** Send transactional email via the runtime's configured provider. */
@@ -336,6 +371,12 @@ export interface FnDefinition<TArgs = unknown, TReturn = unknown> {
    * for execution.
    */
   internal?: boolean;
+  /**
+   * Auth requirement enforced by the runtime before the handler is
+   * invoked. Defaults to `"user"` — every function is signed-in only
+   * unless explicitly opted out via `auth: "public"`. See [`AuthMode`].
+   */
+  auth?: AuthMode;
 }
 
 // ---------------------------------------------------------------------------
