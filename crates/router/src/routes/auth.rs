@@ -263,6 +263,11 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
             );
         }
     };
+    // Canonicalize the IdP-supplied email so lookups intersect with
+    // the user's password-signup row. See pylon_auth::normalize_email
+    // for the rationale — without this, "Jane@x.com" via SSO and
+    // "jane@x.com" via password create two rows.
+    let email = pylon_auth::normalize_email(&email);
     let display_name = name.unwrap_or_else(|| email.clone());
     // Look up or create the User row by email — same pattern as the
     // magic-code verify path.
@@ -563,8 +568,12 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             .unwrap_or_default()
             .as_secs()
     );
+    // Canonicalize the SAML-supplied email so lookups intersect with
+    // the user's password-signup / OAuth row. See
+    // pylon_auth::normalize_email for the rationale.
+    let canonical_email = pylon_auth::normalize_email(&assertion.email);
     let user_entity = ctx.store.manifest().auth.user.entity.clone();
-    let user_id = match ctx.store.lookup(&user_entity, "email", &assertion.email) {
+    let user_id = match ctx.store.lookup(&user_entity, "email", &canonical_email) {
         Ok(Some(row)) => {
             let id = row["id"].as_str().unwrap_or("").to_string();
             if row.get("emailVerified").map_or(true, |v| v.is_null()) {
@@ -579,8 +588,8 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
         _ => match ctx.store.insert(
             &user_entity,
             &serde_json::json!({
-                "email": &assertion.email,
-                "displayName": assertion.name.clone().unwrap_or_else(|| assertion.email.clone()),
+                "email": &canonical_email,
+                "displayName": assertion.name.clone().unwrap_or_else(|| canonical_email.clone()),
                 "emailVerified": now,
                 "createdAt": now,
             }),
@@ -988,7 +997,11 @@ pub(crate) fn handle(
             }
         };
         let email = match data.get("email").and_then(|v| v.as_str()) {
-            Some(e) => e.to_string(),
+            // Canonicalize the same way password/register does so a
+            // user who alternates between "Jane@x.com" and "jane@x.com"
+            // gets the same magic code (and lookup later hits the same
+            // row). See pylon_auth::normalize_email rationale.
+            Some(e) => pylon_auth::normalize_email(e),
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
         // Rate limit FIRST so an attacker who lacks a valid CAPTCHA
@@ -1092,8 +1105,16 @@ pub(crate) fn handle(
                 ));
             }
         };
+        let email_owned;
         let email = match data.get("email").and_then(|v| v.as_str()) {
-            Some(e) => e,
+            // Canonicalize so the verify path looks up the same row
+            // the send path stamped — without this, a user who typed
+            // "Jane@x.com" on send + "jane@x.com" on verify hit two
+            // different magic-code buckets.
+            Some(e) => {
+                email_owned = pylon_auth::normalize_email(e);
+                email_owned.as_str()
+            }
             None => return Some((400, json_error("MISSING_EMAIL", "email is required"))),
         };
         let code = match data.get("code").and_then(|v| v.as_str()) {

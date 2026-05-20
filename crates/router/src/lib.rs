@@ -778,12 +778,23 @@ pub(crate) fn complete_oauth_login_pkce(
         });
     };
 
+    // Canonicalize the provider-supplied email BEFORE any lookup or
+    // insert. Different auth paths previously took different casing
+    // (password/register lowercased, OAuth used Google's casing
+    // verbatim), so signing up via password as `user@example.com`
+    // and later signing in with Google as `User@example.com` created
+    // a second User row — leaving the first one perpetually
+    // unverified because the OAuth flow stamped `emailVerified` on
+    // the new (wrong) row. Normalize once, here, so every downstream
+    // op (lookup, insert, account upsert) hits the canonical address.
+    let canonical_email = pylon_auth::normalize_email(&userinfo.email);
+
     // Disposable email blocker. The provider vouched for the address,
     // but if it's still a known throwaway domain we don't want to
     // create the User row — the abuse signal is the same regardless
     // of which provider rubber-stamped it. PYLON_EMAIL_BLOCKLIST_DISABLED=1
     // turns this off.
-    if pylon_auth::email_blocklist::is_disposable_email(&userinfo.email) {
+    if pylon_auth::email_blocklist::is_disposable_email(&canonical_email) {
         return Err(OAuthError {
             status: 400,
             code: "DISPOSABLE_EMAIL",
@@ -825,7 +836,7 @@ pub(crate) fn complete_oauth_login_pkce(
     } else if let Ok(Some(row)) = ctx.store.lookup(
         &ctx.store.manifest().auth.user.entity,
         "email",
-        &userinfo.email,
+        &canonical_email,
     ) {
         // First-time link of this provider to an existing user (matched
         // by email). Stamp emailVerified opportunistically since the
@@ -855,14 +866,14 @@ pub(crate) fn complete_oauth_login_pkce(
         // Brand-new user. Create the User row + the Account link. Both
         // fail loudly — a silent failure here is what produced the
         // "session for nonexistent user" bug.
-        let display_name = userinfo.name.as_deref().unwrap_or(&userinfo.email);
+        let display_name = userinfo.name.as_deref().unwrap_or(canonical_email.as_str());
         let user_entity = ctx.store.manifest().auth.user.entity.clone();
         let id = ctx
             .store
             .insert(
                 &user_entity,
                 &serde_json::json!({
-                    "email": userinfo.email,
+                    "email": canonical_email,
                     "displayName": display_name,
                     "emailVerified": now,
                     "createdAt": now,

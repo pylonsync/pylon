@@ -238,6 +238,34 @@ impl AuthContext {
 // Constant-time comparison
 // ---------------------------------------------------------------------------
 
+/// Normalize an email address into the canonical storage form
+/// every auth path uses: trim surrounding whitespace, lowercase
+/// the whole string.
+///
+/// **Why this matters:** different auth paths used to do their
+/// own thing — `/api/auth/password/register` lowercased, OAuth
+/// callbacks took the provider's casing as-is, magic verify
+/// trusted the client's body. So a user who signed up with
+/// `user@example.com` and later signed in with Google as
+/// `User@example.com` got TWO User rows (Postgres TEXT
+/// comparison is case-sensitive; SQLite is too without
+/// `COLLATE NOCASE`). The Google flow then stamped
+/// `emailVerified` on the new row, leaving the original
+/// password-signup row perpetually unverified.
+///
+/// Every auth path that looks up or stores an email MUST run
+/// it through this helper. The disposable-email blocker honors
+/// whatever casing it gets, so normalize first.
+///
+/// Lowercase-only is deliberate. RFC 5321 allows mixed-case
+/// localparts, but every real mail server treats them as
+/// equivalent in practice, and case-sensitive storage produces
+/// the multi-row bug above. Domains are always
+/// case-insensitive per RFC 5321 §2.3.11.
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
 /// Constant-time byte comparison to prevent timing attacks.
 ///
 /// The length check leaks whether the two slices are the same length, but the
@@ -2891,6 +2919,53 @@ impl RefreshError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------
+    // Email normalization — lock in the lower/trim shape every auth
+    // path now uses. The yapless "signed up with email/password, then
+    // signed in with Google → emailVerified stayed null" bug was a
+    // case-mismatch between paths that lowercased and paths that
+    // didn't; these tests prevent the next regression.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn normalize_email_lowercases_localpart_and_domain() {
+        assert_eq!(normalize_email("Jane@Example.COM"), "jane@example.com");
+    }
+
+    #[test]
+    fn normalize_email_trims_surrounding_whitespace() {
+        assert_eq!(normalize_email("  jane@example.com  "), "jane@example.com");
+        // Tab + newline both trim.
+        assert_eq!(normalize_email("\tjane@example.com\n"), "jane@example.com");
+    }
+
+    #[test]
+    fn normalize_email_is_idempotent() {
+        // The canonical case must equal itself when re-normalized.
+        let canonical = normalize_email("Jane@Example.COM");
+        assert_eq!(normalize_email(&canonical), canonical);
+    }
+
+    #[test]
+    fn normalize_email_handles_empty_input() {
+        // No panic, just an empty string back. Validation lives at
+        // call sites (contains '@', non-empty, etc.); the normalizer
+        // does only the canonicalization.
+        assert_eq!(normalize_email(""), "");
+        assert_eq!(normalize_email("   "), "");
+    }
+
+    #[test]
+    fn normalize_email_does_not_strip_plus_subaddressing() {
+        // RFC 5233 `local+tag@domain` is a normal email; the
+        // normalizer must not strip the +tag (some apps actively use
+        // it for inbox-side categorization).
+        assert_eq!(
+            normalize_email("Jane+Filter@Example.COM"),
+            "jane+filter@example.com"
+        );
+    }
 
     #[test]
     fn anonymous_context() {
