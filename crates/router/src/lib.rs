@@ -823,24 +823,106 @@ pub(crate) fn complete_oauth_login_pkce(
     // That swallow caused the "session for nonexistent user" bug — the
     // OAuth flow looked successful but the User row was never created
     // and /api/auth/me would resolve to a phantom identity.
+    let user_entity_name = ctx.store.manifest().auth.user.entity.clone();
     let user_id = if let Some(existing) = ctx
         .account_store
         .find_by_provider(provider, &userinfo.provider_account_id)
     {
-        // Returning user via the same provider — refresh the token
-        // bundle and reuse the linked user_id.
-        let mut refreshed = pylon_auth::Account::new(existing.user_id.clone(), &userinfo, &tokens);
-        refreshed.created_at = existing.created_at;
-        ctx.account_store.upsert(&refreshed);
-        existing.user_id
-    } else if let Ok(Some(row)) = ctx.store.lookup(
-        &ctx.store.manifest().auth.user.entity,
-        "email",
-        &canonical_email,
-    ) {
-        // First-time link of this provider to an existing user (matched
-        // by email). Stamp emailVerified opportunistically since the
-        // provider just vouched for the address.
+        // Returning user via the same provider. BUT: the User row
+        // may have been deleted out from under the Account link
+        // (Studio's "delete row" + cascade-not-implemented being
+        // the canonical case). If we reuse `existing.user_id`
+        // blindly, we mint a session for a phantom user — every
+        // downstream `/api/auth/me` / `/api/entities/*` lookup
+        // returns nothing and the app breaks in confusing ways.
+        //
+        // Defensive: confirm the User row still exists. If it
+        // doesn't, treat the orphan Account link as garbage,
+        // delete it, and fall through to the email-lookup branch
+        // (which will either find a freshly-recreated User by
+        // email or create one).
+        let user_exists = matches!(
+            ctx.store.get_by_id(&user_entity_name, &existing.user_id),
+            Ok(Some(_))
+        );
+        if !user_exists {
+            tracing::warn!(
+                "[oauth] dropping stale Account link for provider={provider} account_id={} — User row \"{}\" no longer exists",
+                userinfo.provider_account_id,
+                existing.user_id
+            );
+            // Drop the stale link before falling through. Without
+            // this, the lookup-by-email branch creates a new User
+            // row but the old Account link still points at the
+            // deleted id, so the NEXT sign-in hits this same
+            // branch again. delete_for_user is keyed on user_id,
+            // which matches the dangling link.
+            ctx.account_store.delete_for_user(&existing.user_id);
+            // Fall through to the email-lookup branch below by
+            // shadowing `existing` to None. Rust doesn't have a
+            // direct fallthrough; the cleanest expression is a
+            // block returning Option, then matching on it.
+            handle_oauth_user_lookup_or_create(
+                ctx,
+                &user_entity_name,
+                &canonical_email,
+                &userinfo,
+                &tokens,
+                &now,
+            )?
+        } else {
+            // User row exists — refresh the token bundle and
+            // reuse the linked id.
+            let mut refreshed =
+                pylon_auth::Account::new(existing.user_id.clone(), &userinfo, &tokens);
+            refreshed.created_at = existing.created_at;
+            ctx.account_store.upsert(&refreshed);
+            existing.user_id
+        }
+    } else {
+        // No Account link existed at all for (provider, account_id) —
+        // standard "first time the user signed in with this
+        // provider" path. Try email match → fall through to fresh
+        // create. Same helper the stale-link recovery uses.
+        handle_oauth_user_lookup_or_create(
+            ctx,
+            &user_entity_name,
+            &canonical_email,
+            &userinfo,
+            &tokens,
+            &now,
+        )?
+    };
+    let session = ctx.session_store.create(user_id.clone());
+    Ok((user_id, session))
+}
+
+/// Common path for OAuth callbacks that need to either match an
+/// existing User by email and link the provider, OR create a fresh
+/// User row. Called from two places:
+///
+///   1. The "no Account link found" branch in
+///      `complete_oauth_login_pkce` (standard first-time signin).
+///   2. The "stale Account link — User row was deleted" recovery
+///      branch (yapless's reported bug: Studio deleted the User
+///      row but the Account link survived, so the next OAuth
+///      sign-in minted a session for a nonexistent user).
+///
+/// Returns the resolved/created user_id. Errors map to OAuthError
+/// with the same status codes the original inline branches used,
+/// so the caller's error-response path stays uniform.
+fn handle_oauth_user_lookup_or_create(
+    ctx: &RouterContext,
+    user_entity_name: &str,
+    canonical_email: &str,
+    userinfo: &pylon_auth::UserInfo,
+    tokens: &pylon_auth::TokenSet,
+    now: &str,
+) -> Result<String, OAuthError> {
+    if let Ok(Some(row)) = ctx.store.lookup(user_entity_name, "email", canonical_email) {
+        // First-time link of this provider to an existing user
+        // (matched by email). Stamp emailVerified opportunistically
+        // since the provider just vouched for the address.
         let id = row["id"].as_str().unwrap_or("").to_string();
         if id.is_empty() {
             return Err(OAuthError {
@@ -850,54 +932,50 @@ pub(crate) fn complete_oauth_login_pkce(
             });
         }
         if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-            // Best-effort — schemas without the field silently drop the
-            // update. We do NOT bail on this error since the user
-            // already existed and OAuth still succeeded.
+            // Best-effort — schemas without the field silently
+            // drop the update. We do NOT bail on this error since
+            // the user already existed and OAuth still succeeded.
             let _ = ctx.store.update(
-                &ctx.store.manifest().auth.user.entity,
+                user_entity_name,
                 &id,
                 &serde_json::json!({ "emailVerified": now }),
             );
         }
         ctx.account_store
-            .upsert(&pylon_auth::Account::new(id.clone(), &userinfo, &tokens));
-        id
-    } else {
-        // Brand-new user. Create the User row + the Account link. Both
-        // fail loudly — a silent failure here is what produced the
-        // "session for nonexistent user" bug.
-        let display_name = userinfo.name.as_deref().unwrap_or(canonical_email.as_str());
-        let user_entity = ctx.store.manifest().auth.user.entity.clone();
-        let id = ctx
-            .store
-            .insert(
-                &user_entity,
-                &serde_json::json!({
-                    "email": canonical_email,
-                    "displayName": display_name,
-                    "emailVerified": now,
-                    "createdAt": now,
-                }),
-            )
-            .map_err(|e| OAuthError {
-                status: 500,
-                code: "USER_CREATE_FAILED",
-                // Preserve the full upstream code/message — a failed insert
-                // is almost always "the User entity in your manifest has
-                // a field this OAuth handler doesn't set" (NOT NULL
-                // violation), and the operator needs to see exactly which
-                // column.
-                message: format!(
-                    "failed to create User row for OAuth signup ({}): {}",
-                    e.code, e.message
-                ),
-            })?;
-        ctx.account_store
-            .upsert(&pylon_auth::Account::new(id.clone(), &userinfo, &tokens));
-        id
-    };
-    let session = ctx.session_store.create(user_id.clone());
-    Ok((user_id, session))
+            .upsert(&pylon_auth::Account::new(id.clone(), userinfo, tokens));
+        return Ok(id);
+    }
+    // Brand-new user. Create the User row + the Account link.
+    // Both fail loudly — a silent failure here is what produced
+    // the "session for nonexistent user" bug.
+    let display_name = userinfo.name.as_deref().unwrap_or(canonical_email);
+    let id = ctx
+        .store
+        .insert(
+            user_entity_name,
+            &serde_json::json!({
+                "email": canonical_email,
+                "displayName": display_name,
+                "emailVerified": now,
+                "createdAt": now,
+            }),
+        )
+        .map_err(|e| OAuthError {
+            status: 500,
+            code: "USER_CREATE_FAILED",
+            // Preserve the full upstream code/message — a failed
+            // insert is almost always "the User entity in your
+            // manifest has a field this OAuth handler doesn't set"
+            // (NOT NULL violation), and the operator needs to see
+            // exactly which column.
+            message: format!(
+                "failed to create User row for OAuth signup ({}): {}",
+                e.code, e.message
+            ),
+        })?;
+    ctx.account_store
+        .upsert(&pylon_auth::Account::new(id.clone(), userinfo, tokens));
+    Ok(id)
 }
 
 /// Parse a `key=value&key=value` query string into a map. Uses
@@ -1651,6 +1729,23 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
             emit_change_seq_header(ctx, seq);
             broadcast_change(ctx.notifier, seq, entity, id, ChangeKind::Delete, None);
             ctx.plugin_hooks.after_delete(entity, id, ctx.auth_ctx);
+            // Cascade-clean auth-related stores when the deleted
+            // row is the auth User. Without this, deleting from
+            // Studio (or `DELETE /api/entities/User/<id>` from any
+            // admin client) left stale Account links, sessions,
+            // API keys, and trusted-device rows behind. The
+            // canonical surface bug: OAuth's `find_by_provider`
+            // returns the orphan Account link, the next sign-in
+            // mints a session for a deleted user_id, and every
+            // downstream lookup of that id returns nothing —
+            // breaking the dashboard in confusing ways.
+            //
+            // Same cascade the self-service `/api/auth/account`
+            // DELETE handler runs; lifting it here means deletion
+            // semantics match across both surfaces.
+            if entity == ctx.store.manifest().auth.user.entity {
+                cascade_clean_user_auth_stores(ctx, id);
+            }
             (200, serde_json::json!({"deleted": true}).to_string())
         }
         Ok(false) => (
@@ -1659,6 +1754,39 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
         ),
         Err(e) => (400, json_error(&e.code, &e.message)),
     }
+}
+
+/// Wipe every auth-side row keyed on `user_id`. Called after a
+/// User row is deleted via `/api/entities/<User>/<id>`. The
+/// self-service `/api/auth/account` DELETE handler runs the same
+/// sequence — keeping the two in sync prevents the bug shape
+/// where an operator-driven delete (Studio, admin script) leaves
+/// orphan auth rows that survive into the next sign-in attempt.
+///
+/// Best-effort across stores — each step logs but never fails the
+/// whole delete. The User row is already gone by this point;
+/// rolling back here doesn't make sense.
+fn cascade_clean_user_auth_stores(ctx: &RouterContext, user_id: &str) {
+    let revoked_sessions = ctx.session_store.revoke_all_for_user(user_id);
+    let mut revoked_keys = 0usize;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for key in ctx.api_keys.list_for_user(user_id) {
+            if ctx.api_keys.revoke(&key.id) {
+                revoked_keys += 1;
+            }
+        }
+    }
+    let revoked_accounts = ctx.account_store.delete_for_user(user_id);
+    let revoked_trust = ctx.trusted_devices.revoke_all_for_user(user_id);
+    tracing::info!(
+        "[auth] cascade-cleaned auth stores for deleted user \"{}\": sessions={}, api_keys={}, accounts={}, trusted_devices={}",
+        user_id,
+        revoked_sessions,
+        revoked_keys,
+        revoked_accounts,
+        revoked_trust
+    );
 }
 
 // ---------------------------------------------------------------------------
