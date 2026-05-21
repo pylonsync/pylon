@@ -222,43 +222,50 @@ html, body { background: #fafaf9; color: #18181b; }
   max-width: 16ch;
 }
 
-/* Rotating language slot inside the H1, rendered as an accent
-   pill. The pill sits inline with the rest of the heading and
-   each tick animates the inner word in with a fade-up — the
-   pill chrome itself stays still so only the text moves, which
-   reads cleaner than animating the whole capsule.
-   The key=langIdx prop on the inner span makes React replace
-   the node on each tick, re-running the entry animation. */
+/* Rotating language slot inside the H1, rendered as a per-language
+   tinted pill. Two-layer markup:
+     .lang-ghost — invisible, holds the longest entry's text so
+                   the pill's width stays fixed.
+     .lang-word  — the visible word, stacked over the ghost in
+                   the same grid cell, animated on each tick.
+   The bg + fg + border-color come from inline style (set per
+   tick from the LANGS table) so the chrome itself cross-fades
+   when the language changes. */
 .pylon-landing .lang-rotator {
-  display: inline-flex;
-  align-items: baseline;
+  display: inline-grid;
+  /* Single named cell — both .lang-ghost and .lang-word claim
+     grid-area: stack, so they overlap perfectly without
+     position: absolute math. */
+  grid-template-areas: "stack";
+  align-items: center;
   justify-content: center;
-  background: var(--accent-soft);
-  color: var(--accent-deep);
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid transparent;  /* color set inline per tick */
   border-radius: 999px;
   /* Compress the pill vertically vs. the surrounding text — em
      units track the heading's clamp() so the pill stays
      proportional from mobile to desktop. */
   padding: 0.08em 0.42em 0.12em;
-  /* Hint at the longest entry ("React Native") so the rest of
-     the line ("apps.") doesn't visibly jump when the word
-     shortens. Letting the actual longest entry set the floor
-     keeps the value in sync with LANGS — see the constant in
-     this file. */
-  min-width: 6.8ch;
   font-weight: 600;
   letter-spacing: -.02em;
-  /* Slight tonal lift so the pill reads as a deliberate accent
-     against the cream background, not a stray UI control. */
-  box-shadow: 0 1px 0 rgba(124, 58, 237, .04), 0 4px 12px -8px rgba(124, 58, 237, .25);
-  /* The whole capsule transitions smoothly when min-width
-     re-flows — happens once on mount when the JS hydrates and
-     React swaps in shorter words. */
-  transition: width .25s cubic-bezier(.32, .08, .24, 1);
+  /* Smooth crossfade of the chrome (bg + text + border) when
+     the language changes. The inner word fade-up is a separate
+     keyframe so the two compositions don't fight. */
+  transition: background-color .42s cubic-bezier(.32, .08, .24, 1),
+              color .42s cubic-bezier(.32, .08, .24, 1),
+              border-color .42s cubic-bezier(.32, .08, .24, 1);
+}
+.pylon-landing .lang-ghost {
+  grid-area: stack;
+  visibility: hidden;
+  pointer-events: none;
+  /* Whitespace shouldn't collapse to zero in the ghost — the
+     pill needs its full intrinsic width even though the
+     content is invisible. */
+  white-space: nowrap;
 }
 .pylon-landing .lang-word {
-  display: inline-block;
+  grid-area: stack;
+  white-space: nowrap;
   animation: lang-rotate .42s cubic-bezier(.32, .08, .24, 1);
 }
 @keyframes lang-rotate {
@@ -266,9 +273,10 @@ html, body { background: #fafaf9; color: #18181b; }
   100% { opacity: 1; transform: translateY(0); }
 }
 @media (prefers-reduced-motion: reduce) {
-  /* Skip the animation but still swap the text — same value, no
-     visual motion. */
+  /* Skip the animations but still swap the text — same value,
+     no visual motion. Chrome transition also disabled. */
   .pylon-landing .lang-word { animation: none; }
+  .pylon-landing .lang-rotator { transition: none; }
 }
 .pylon-landing .hero p.lede {
   font-size: 18px; line-height: 1.45;
@@ -1272,12 +1280,38 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 `;
 
-/// Languages the H1 cycles through. Order matters — `TypeScript`
-/// is the SSR default (most landing visitors expect TS first),
-/// then we rotate to the other platforms Pylon ships first-class
-/// SDKs for. Keep entries short — anything longer than
-/// "React Native" forces an awkward wrap in the H1's `max-width: 16ch`.
-const LANGS = ["TypeScript", "Swift", "React", "React Native", "Next.js"] as const;
+/// Languages the H1 cycles through, paired with a brand-tinted
+/// color scheme for the rotating pill. Soft tints (not the full
+/// brand color) so the H1 still reads as "pill highlight" not
+/// "loud ad". Each entry sets:
+///   bg — the pill's fill, ~7% saturation of the brand color
+///   fg — the text + border, the punchy brand value
+///
+/// Order matters — `TypeScript` is the SSR default (most landing
+/// visitors expect TS first), then we rotate through the other
+/// platforms Pylon ships first-class SDKs for.
+const LANGS: ReadonlyArray<{ name: string; bg: string; fg: string }> = [
+	// TypeScript — deep blue (#3178c6)
+	{ name: "TypeScript", bg: "#e7eef9", fg: "#1f54a8" },
+	// Swift — Apple orange (#f05138)
+	{ name: "Swift", bg: "#fdece4", fg: "#b8431a" },
+	// React — atom cyan (#149eca, a deeper take on the brand cyan
+	// so it doesn't wash out on the cream bg)
+	{ name: "React", bg: "#e0f1f8", fg: "#0c7aa5" },
+	// React Native — purple-blue, distinct from React proper
+	{ name: "React Native", bg: "#ebe6f9", fg: "#5a3fc0" },
+	// Next.js — graphite black; tone it down with a near-white
+	// pill so it doesn't read as a CTA button
+	{ name: "Next.js", bg: "#ececec", fg: "#0a0a0a" },
+] as const;
+
+/// "React Native" is the longest entry — used as the ghost
+/// element that pins the pill's width so shorter languages don't
+/// make the surrounding text ("apps.") visibly jump. Kept as a
+/// derived constant so the source of truth stays LANGS above.
+const LONGEST_LANG = LANGS.reduce((a, b) =>
+	b.name.length > a.name.length ? b : a,
+).name;
 
 const TABLE_ROWS = [
 	{ initials: "JM", name: "Jordan Moss", email: "jordan@kindly.io", total: "$89.00", status: "paid" as const, age: "3s ago" },
@@ -1500,9 +1534,32 @@ export function LandingPage({
 							)}
 							<h1 className="h1">
 								The realtime backend for{" "}
-								<span className="lang-rotator">
+								<span
+									className="lang-rotator"
+									style={{
+										// Inline because each tick varies — kept on the
+										// host so the chrome itself (bg + border) cross-fades
+										// when the language changes, separately from the
+										// word fade-up below. CSS transition on the pill
+										// smooths the color swap.
+										background: LANGS[langIdx]!.bg,
+										color: LANGS[langIdx]!.fg,
+										borderColor: `${LANGS[langIdx]!.fg}33`,
+									}}
+								>
+									{/* Ghost: claims the pill's width based on the
+									    longest entry. Always present, always invisible.
+									    Without this, the pill would resize per word and
+									    "apps." would visibly slide left/right. */}
+									<span aria-hidden="true" className="lang-ghost">
+										{LONGEST_LANG}
+									</span>
+									{/* Visible word: stacked over the ghost in the same
+									    grid cell. `key={langIdx}` makes React replace
+									    the node on each tick, re-running the entry
+									    animation. */}
 									<span key={langIdx} className="lang-word">
-										{LANGS[langIdx]}
+										{LANGS[langIdx]!.name}
 									</span>
 								</span>{" "}
 								apps.
