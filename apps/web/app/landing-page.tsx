@@ -9,11 +9,13 @@ import { PylonMark } from "@/components/pylon-logo";
 // global selectors were scoped to `.pylon-landing` so it doesn't fight
 // any other styles that load with this Next app.
 //
-// Fonts (Geist / Geist Mono / Instrument Serif) are loaded via
-// next/font from `layout.tsx`, exposed as CSS variables
-// `--font-geist-sans`, `--font-geist-mono`,
-// `--font-instrument-serif`. Self-hosted, no Google Fonts
-// roundtrip, no double-load of the same WOFF2 files.
+// Fonts (Geist + Geist Mono) are loaded via next/font from
+// `layout.tsx`, exposed as CSS variables `--font-geist-sans`
+// and `--font-geist-mono`. Self-hosted WOFF2, no Google Fonts
+// roundtrip. The page is uniform Geist — earlier iterations
+// had an Instrument Serif italic accent on headings, dropped
+// 2026-05-21 in favor of a single typeface across the whole
+// surface.
 
 const DESIGN_CSS = `
 /* The marketing app's globals.css paints the page dark by default for
@@ -61,7 +63,6 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing * { box-sizing: border-box; }
 .pylon-landing .mono { font-family: var(--font-geist-mono), ui-monospace, monospace; }
-.pylon-landing .serif { font-family: var(--font-instrument-serif), "Times New Roman", serif; font-style: italic; }
 .pylon-landing a { color: inherit; text-decoration: none; }
 .pylon-landing button { font-family: inherit; cursor: pointer; }
 .pylon-landing a, .pylon-landing button { touch-action: manipulation; }
@@ -215,13 +216,60 @@ html, body { background: #fafaf9; color: #18181b; }
   font-weight: 600;
   margin: 0 0 18px;
   color: var(--ink);
-  /* Relaxed from 12ch — the new H1 ("TypeScript apps.") doesn't fit
-     in 12ch and forced an extra wrap that gave the hero column three
-     stacked text lines. Two-line wrap reads better next to the product
-     mock on the right. */
+  /* Relaxed from 12ch — the new H1 doesn't fit in 12ch and forced
+     an extra wrap that gave the hero column three stacked text
+     lines. Two-line wrap reads better next to the product mock. */
   max-width: 16ch;
 }
-.pylon-landing h1.h1 .serif { color: var(--text-2); font-weight: 400; letter-spacing: -.02em; }
+
+/* Rotating language slot inside the H1, rendered as an accent
+   pill. The pill sits inline with the rest of the heading and
+   each tick animates the inner word in with a fade-up — the
+   pill chrome itself stays still so only the text moves, which
+   reads cleaner than animating the whole capsule.
+   The key=langIdx prop on the inner span makes React replace
+   the node on each tick, re-running the entry animation. */
+.pylon-landing .lang-rotator {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 999px;
+  /* Compress the pill vertically vs. the surrounding text — em
+     units track the heading's clamp() so the pill stays
+     proportional from mobile to desktop. */
+  padding: 0.08em 0.42em 0.12em;
+  /* Hint at the longest entry ("React Native") so the rest of
+     the line ("apps.") doesn't visibly jump when the word
+     shortens. Letting the actual longest entry set the floor
+     keeps the value in sync with LANGS — see the constant in
+     this file. */
+  min-width: 6.8ch;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  /* Slight tonal lift so the pill reads as a deliberate accent
+     against the cream background, not a stray UI control. */
+  box-shadow: 0 1px 0 rgba(124, 58, 237, .04), 0 4px 12px -8px rgba(124, 58, 237, .25);
+  /* The whole capsule transitions smoothly when min-width
+     re-flows — happens once on mount when the JS hydrates and
+     React swaps in shorter words. */
+  transition: width .25s cubic-bezier(.32, .08, .24, 1);
+}
+.pylon-landing .lang-word {
+  display: inline-block;
+  animation: lang-rotate .42s cubic-bezier(.32, .08, .24, 1);
+}
+@keyframes lang-rotate {
+  0%   { opacity: 0; transform: translateY(-6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Skip the animation but still swap the text — same value, no
+     visual motion. */
+  .pylon-landing .lang-word { animation: none; }
+}
 .pylon-landing .hero p.lede {
   font-size: 18px; line-height: 1.45;
   max-width: 560px; color: var(--text-2);
@@ -591,7 +639,6 @@ html, body { background: #fafaf9; color: #18181b; }
   font-weight: 600; color: var(--ink);
   margin: 12px 0 14px; max-width: 22ch;
 }
-.pylon-landing h2.h2 .serif { color: var(--text-2); font-weight: 400; }
 .pylon-landing .section-lede { font-size: 17px; color: var(--text-2); line-height: 1.5; max-width: 620px; letter-spacing: -.005em; }
 
 /* === FEATURES === */
@@ -716,7 +763,6 @@ html, body { background: #fafaf9; color: #18181b; }
 /* === BIG QUOTE / PHILOSOPHY === */
 .pylon-landing .philo { padding: 144px 0; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--bg), var(--bg-alt)); }
 .pylon-landing .philo .quote { font-size: clamp(28px, 3vw, 42px); line-height: 1.14; letter-spacing: -.025em; font-weight: 500; max-width: 18ch; color: var(--ink); }
-.pylon-landing .philo .quote .serif { color: var(--accent); }
 .pylon-landing .philo .who { margin-top: 36px; display: flex; align-items: center; gap: 14px; font-size: 14px; color: var(--text-2); }
 .pylon-landing .philo .who .ava { width: 40px; height: 40px; border-radius: 50%; background: var(--ink); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; letter-spacing: -.01em; }
 .pylon-landing .philo .who b { color: var(--ink); font-weight: 500; }
@@ -764,7 +810,6 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .cta-block .eyebrow { color: var(--accent); }
 .pylon-landing .cta-block .eyebrow::before { background: var(--accent); }
 .pylon-landing .cta-block h2 { font-size: clamp(36px, 4.2vw, 56px); letter-spacing: -.035em; line-height: 1.02; font-weight: 600; margin: 12px 0; color: #fff; }
-.pylon-landing .cta-block h2 .serif { color: rgba(255,255,255,.55); }
 .pylon-landing .cta-block p { font-size: 18px; color: rgba(255,255,255,.65); max-width: 560px; line-height: 1.5; margin: 0 0 32px; }
 .pylon-landing .cta-block .ctas { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .pylon-landing .cta-block .ctas .term-pill { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.1); color: #f3f3f4; }
@@ -1227,6 +1272,13 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 `;
 
+/// Languages the H1 cycles through. Order matters — `TypeScript`
+/// is the SSR default (most landing visitors expect TS first),
+/// then we rotate to the other platforms Pylon ships first-class
+/// SDKs for. Keep entries short — anything longer than
+/// "React Native" forces an awkward wrap in the H1's `max-width: 16ch`.
+const LANGS = ["TypeScript", "Swift", "React", "React Native", "Next.js"] as const;
+
 const TABLE_ROWS = [
 	{ initials: "JM", name: "Jordan Moss", email: "jordan@kindly.io", total: "$89.00", status: "paid" as const, age: "3s ago" },
 	{ initials: "RP", name: "Rhea Patel", email: "rhea@northbeam.co", total: "$145.00", status: "paid" as const, age: "22s ago" },
@@ -1308,6 +1360,10 @@ export function LandingPage({
 	const [clientCount, setClientCount] = useState(47);
 	const [flashIdx, setFlashIdx] = useState<number | null>(null);
 	const [menuOpen, setMenuOpen] = useState(false);
+	// Rotating language slot in the H1. Server-renders the first
+	// entry so initial paint shows "TypeScript apps." (the most
+	// common landing intent), then cycles client-side.
+	const [langIdx, setLangIdx] = useState(0);
 	const [events, setEvents] = useState<Array<{ k: string; v: string }>>([
 		{ k: "db.insert <em>Order</em>", v: "+1" },
 		{ k: "policy.check", v: "ok" },
@@ -1329,10 +1385,17 @@ export function LandingPage({
 			const [k, v] = EVENT_TPL[Math.floor(Math.random() * EVENT_TPL.length)]!;
 			setEvents((prev) => [{ k, v }, ...prev].slice(0, 5));
 		}, 3200);
+		// H1 language rotation. Slower cadence than the metrics so
+		// the heading doesn't compete with the product mock for
+		// attention.
+		const tickLang = setInterval(() => {
+			setLangIdx((i) => (i + 1) % LANGS.length);
+		}, 2200);
 		return () => {
 			clearInterval(tickMetrics);
 			clearInterval(tickFlash);
 			clearInterval(tickEvents);
+			clearInterval(tickLang);
 		};
 	}, []);
 
@@ -1437,7 +1500,12 @@ export function LandingPage({
 							)}
 							<h1 className="h1">
 								The realtime backend for{" "}
-								<span className="serif">TypeScript apps.</span>
+								<span className="lang-rotator">
+									<span key={langIdx} className="lang-word">
+										{LANGS[langIdx]}
+									</span>
+								</span>{" "}
+								apps.
 							</h1>
 							<p className="lede">
 								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
@@ -1592,7 +1660,7 @@ export function LandingPage({
 				<section className="block" id="features">
 					<div className="shell">
 						<div className="eyebrow">The model</div>
-						<h2 className="h2">One framework. <span className="serif">Three lines of code.</span></h2>
+						<h2 className="h2">One framework. Three lines of code.</h2>
 						<p className="section-lede">
 							Most realtime backends are three systems glued together — a database, an API server, and a pub/sub layer. Pylon collapses the stack: the handler is the transaction, the query is the subscription.
 						</p>
@@ -1739,7 +1807,7 @@ export function LandingPage({
 				<section className="block" id="primitives" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Twelve primitives</div>
-						<h2 className="h2">Everything you&apos;d reach for, <span className="serif">already in the box.</span></h2>
+						<h2 className="h2">Everything you&apos;d reach for, already in the box.</h2>
 						<p className="section-lede">The pieces you usually stitch together ship as one system. Use the app side alone, or layer on realtime, workflows, search, and game-shaped primitives when the product needs them.</p>
 
 						<div className="prims">
@@ -1761,7 +1829,7 @@ export function LandingPage({
 				<section className="block" id="clients">
 					<div className="shell">
 						<div className="eyebrow">Client bindings</div>
-						<h2 className="h2">Plug in from React, <span className="serif">Swift, or whatever you ship.</span></h2>
+						<h2 className="h2">Plug in from React, Swift, or whatever you ship.</h2>
 						<p className="section-lede">Real-time subscriptions, optimistic mutations, and a typed client — across the runtimes you already use. One Pylon backend serves them all.</p>
 
 						<div className="lanes">
@@ -1801,7 +1869,7 @@ export function LandingPage({
 				<section className="block" id="compare">
 					<div className="shell">
 						<div className="eyebrow">How it compares</div>
-						<h2 className="h2">Rails-like productivity. <span className="serif">None of the lock-in.</span></h2>
+						<h2 className="h2">Rails-like productivity. None of the lock-in.</h2>
 						<p className="section-lede">Pick a managed backend and you inherit its boundaries. Pick raw infrastructure and you rebuild the framework. Pylon keeps one product model across both.</p>
 
 						<div className="compare-wrap">
@@ -1877,7 +1945,7 @@ export function LandingPage({
 				<section className="block" id="deploy" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Deploy</div>
-						<h2 className="h2">Start managed. <span className="serif">Keep the escape hatch.</span></h2>
+						<h2 className="h2">Start managed. Keep the escape hatch.</h2>
 						<p className="section-lede">Pylon is not a hosting bet. One app model running locally, on Pylon Cloud, on a VPS, or inside your AWS account — without rewriting handlers.</p>
 
 						<div className="lanes">
@@ -1917,7 +1985,7 @@ export function LandingPage({
 				<section className="block">
 					<div className="shell">
 						<div className="eyebrow">Quickstart</div>
-						<h2 className="h2">Four commands to a <span className="serif">running backend.</span></h2>
+						<h2 className="h2">Four commands to a running backend.</h2>
 						<p className="section-lede">Local app in minutes. Move to Pylon Cloud or your own infrastructure later — without changing a line of programming model.</p>
 
 						<div className="qs-wrap">
@@ -1955,7 +2023,7 @@ export function LandingPage({
 				<section className="block" id="examples">
 					<div className="shell">
 						<div className="eyebrow">Built with Pylon</div>
-						<h2 className="h2">Real apps you can clone <span className="serif">and break.</span></h2>
+						<h2 className="h2">Real apps you can clone and break.</h2>
 						<p className="section-lede">Every primitive shows up in a working example, MIT-licensed in the monorepo. Fork one, change the schema, and you have a head start.</p>
 
 						<div className="prims" style={{ marginTop: 56 }}>
@@ -2001,7 +2069,7 @@ export function LandingPage({
 				<section className="block" id="skill" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Claude Code skill</div>
-						<h2 className="h2">Your coding agent <span className="serif">already knows Pylon.</span></h2>
+						<h2 className="h2">Your coding agent already knows Pylon.</h2>
 						<p className="section-lede">One markdown file teaches Claude Code the schema model, the policy DSL, the server-function runtime, and the React client. Drop it into <code>~/.claude/skills/pylon/</code> and Claude generates code that compiles instead of code that looks like it should.</p>
 
 						<div className="qs-wrap" style={{ marginTop: 64 }}>
@@ -2040,7 +2108,7 @@ export function LandingPage({
 					<div className="shell">
 						<div className="inner">
 							<div className="eyebrow">Ship something live</div>
-							<h2>Build the thing <span className="serif">you&apos;ve been putting off.</span></h2>
+							<h2>Build the thing you&apos;ve been putting off.</h2>
 							<p>Open source, MIT/Apache. Free tier on Pylon Cloud — pay when you outgrow it, or take the binary and run it yourself.</p>
 							<div className="ctas">
 								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free →</Link>

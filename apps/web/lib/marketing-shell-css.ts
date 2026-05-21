@@ -41,12 +41,6 @@ export const MARKETING_SHELL_CSS = `
 }
 .pylon-landing * { box-sizing: border-box; }
 .pylon-landing a { color: inherit; text-decoration: none; }
-.pylon-landing .serif {
-  font-family: "Instrument Serif", Georgia, serif;
-  font-style: italic;
-  font-weight: 400;
-  letter-spacing: -0.01em;
-}
 
 .pylon-landing .shell { max-width: 1280px; margin: 0 auto; padding: 0 32px; }
 .pylon-landing .shell-narrow { max-width: 880px; margin: 0 auto; padding: 0 32px; }
