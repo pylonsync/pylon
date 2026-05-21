@@ -1624,17 +1624,17 @@ export function LandingPage({
 								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
 								Build on SQLite locally. Ship the same app to Postgres, your VPS, or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
 							</p>
+							{/* Primary CTA: actually start building. The fastest
+							    path from "landed on the site" to "running app on
+							    localhost" is `npm create`. Promoted from the prior
+							    "secondary" slot — the old hero pushed "Start free
+							    on Pylon Cloud" first, which was the wrong frame:
+							    visitors here are evaluating the framework, not the
+							    managed product. Cloud signup still lives in the
+							    final CTA section + nav. */}
 							<div className="hero-ctas">
-								<Link className="btn accent" href="https://cloud.pylonsync.com">Start free on Pylon Cloud →</Link>
-								<a className="btn ghost" href="https://docs.pylonsync.com">Read the docs →</a>
-							</div>
-							{/* Secondary path — visually demoted from the primary CTA above so
-							    the eye lands on one action, not two competing ones. The npm
-							    command still has copy-to-clipboard so power-users who came for
-							    it can grab it in one click. */}
-							<div className="hero-secondary">
-								<span className="hero-secondary-lede">Prefer to try locally?</span>
 								<CopyCommand command="npm create @pylonsync/pylon@latest" />
+								<a className="btn ghost" href="https://docs.pylonsync.com">Read the docs →</a>
 							</div>
 						</div>
 
