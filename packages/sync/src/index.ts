@@ -1746,12 +1746,20 @@ export class SyncEngine {
       };
       const tenantNow = next.tenantId;
       // First observation seeds lastSeenTenant without a reset — we have
-      // nothing to invalidate yet. Subsequent changes flip the replica.
+      // nothing to invalidate yet. Subsequent changes flip the replica
+      // AND immediately re-pull so subscribers see the new tenant's
+      // rows. Without the re-pull, resetReplica() leaves the store
+      // empty until the next periodic poll, and `db.useQuery` returns
+      // [] for the entire interval — exactly the "I switched orgs
+      // but the dashboard is empty" symptom the cloud team reported.
+      // The 410 RESYNC_REQUIRED path (see ~line 1499) does the same
+      // dance for the same reason.
       if (
         this.lastSeenTenant !== undefined &&
         this.lastSeenTenant !== tenantNow
       ) {
         await this.resetReplica();
+        await this.pull();
       }
       this.lastSeenTenant = tenantNow;
       const prev = this._resolvedSession;

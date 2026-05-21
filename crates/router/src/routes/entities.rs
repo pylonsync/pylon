@@ -27,12 +27,20 @@ pub(crate) fn handle(
         let rest_no_qs = rest.split('?').next().unwrap_or(rest);
         if let Some(entity_name) = rest_no_qs.strip_suffix("/cursor") {
             if method == HttpMethod::Get {
+                // Scan-aware pre-check: hard-deny policies (`"false"`
+                // or default-deny) still 403 here. Data-dependent
+                // predicates (anything referencing `data.X`) are
+                // deferred to per-row filtering below — without this
+                // deferral, `auth.tenantId == data.orgId` evaluates
+                // `data.orgId` to Null at pre-check time, the
+                // comparison resolves to false, and every tenant-
+                // scoped cursor returns 403 to legitimate members.
                 if let pylon_policy::PolicyResult::Denied {
                     policy_name,
                     reason,
                 } = ctx
                     .policy_engine
-                    .check_entity_read(entity_name, ctx.auth_ctx, None)
+                    .check_entity_scan(entity_name, ctx.auth_ctx)
                 {
                     tracing::warn!(
                         "[policy] cursor {entity_name} denied by \"{policy_name}\": {reason}"

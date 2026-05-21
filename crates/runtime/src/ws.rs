@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -200,15 +200,24 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// client instead of per-shard.
 ///
 /// Auth context is captured at registration time (post-handshake auth
-/// resolution) and lives for the connection's lifetime. It feeds the
-/// per-client tenant filter on every change-event broadcast — the
-/// hub evaluates `policy.check_entity_read(entity, &client.auth, &row)`
-/// before pushing each event. Without this, every connected client
-/// received every change event from every tenant. Caught in the
-/// 2026-05-10 codex pass-3 audit (P0).
+/// resolution). It's wrapped in `RwLock` so the runtime can refresh
+/// the tenant slot in place when the user's session mutates (POST
+/// /api/auth/select-org, /api/auth/clear-org, session revoke) without
+/// forcing the client to reconnect. Without the in-place refresh, the
+/// per-client filter on every change-event broadcast would keep
+/// running against the pre-select-org tenant for the connection's
+/// lifetime — silently dropping rows the user just gained access to,
+/// or worse, leaking rows from the org they switched away from.
+///
+/// Read lock is held briefly during `broadcast_change`'s policy check
+/// + `send_text_to_user`'s user-id filter — both fast field reads,
+/// not socket I/O. Write lock is held only by `update_auth_for_user`
+/// at session-change time (rare). RwLock vs Mutex chosen because the
+/// hot path is read-only and N clients per shard fan out to the same
+/// lock pattern.
 pub struct WsClient {
     pub socket: Mutex<WebSocket<Box<dyn WsStream>>>,
-    pub auth: AuthContext,
+    pub auth: RwLock<AuthContext>,
 }
 
 type ClientSocket = Arc<WsClient>;
@@ -231,7 +240,7 @@ impl Shard {
     fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>, auth: AuthContext) -> ClientSocket {
         let handle = Arc::new(WsClient {
             socket: Mutex::new(ws),
-            auth,
+            auth: RwLock::new(auth),
         });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -291,13 +300,22 @@ impl Shard {
             // evaluates against entity-level rules). `is_admin`
             // bypasses everything (admins legitimately see all
             // tenants). All other clients run through the engine.
-            if !handle.auth.is_admin {
+            //
+            // Read-lock the per-client auth so a concurrent
+            // session-changed update doesn't tear the AuthContext
+            // mid-check. The lock is held only across the policy call.
+            let auth = match handle.auth.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if !auth.is_admin {
                 let row = event.data.as_ref();
-                match policy.check_entity_read(&event.entity, &handle.auth, row) {
+                match policy.check_entity_read(&event.entity, &auth, row) {
                     PolicyResult::Allowed => {}
                     PolicyResult::Denied { .. } => continue,
                 }
             }
+            drop(auth);
             let mut guard = match handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -417,7 +435,13 @@ impl Shard {
             let clients = self.clients.lock().unwrap();
             clients
                 .iter()
-                .filter(|(_, h)| h.auth.user_id.as_deref() == Some(user_id))
+                .filter(|(_, h)| {
+                    let auth = match h.auth.read() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    auth.user_id.as_deref() == Some(user_id)
+                })
                 .map(|(id, h)| (*id, Arc::clone(h)))
                 .collect()
         };
@@ -441,6 +465,42 @@ impl Shard {
 
     fn count(&self) -> usize {
         self.clients.lock().unwrap().len()
+    }
+
+    /// Refresh the `tenant_id` on every connection in this shard whose
+    /// authenticated `user_id` matches. Returns the number of clients
+    /// updated so the hub-level aggregator can log + emit metrics.
+    ///
+    /// Called from the runtime's session-changed hook so the per-WS
+    /// `AuthContext` tracks the user's freshly-selected org without
+    /// requiring a reconnect. Read paths (`broadcast_change`,
+    /// `send_text_to_user`) acquire read locks, so a concurrent
+    /// update is a brief write-lock contention — no tearing.
+    fn update_tenant_for_user(&self, user_id: &str, new_tenant: Option<&str>) -> usize {
+        let handles: Vec<ClientSocket> = {
+            let clients = self.clients.lock().unwrap();
+            clients
+                .values()
+                .filter(|h| {
+                    let auth = match h.auth.read() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    auth.user_id.as_deref() == Some(user_id)
+                })
+                .map(Arc::clone)
+                .collect()
+        };
+        let mut updated = 0usize;
+        for handle in handles {
+            let mut auth = match handle.auth.write() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            auth.tenant_id = new_tenant.map(|t| t.to_string());
+            updated += 1;
+        }
+        updated
     }
 }
 
@@ -704,6 +764,39 @@ impl WsHub {
                 msg: Arc::clone(&msg),
             });
         }
+    }
+
+    /// Refresh the `tenant_id` on every active WS connection
+    /// authenticated as `user_id`. Called by the runtime's
+    /// session-changed hook (after `/api/auth/select-org`,
+    /// `/api/auth/clear-org`, or a cluster-bus envelope from a peer)
+    /// so the per-client `AuthContext` carried into subsequent
+    /// `broadcast_change` / `handle_crdt_control` /
+    /// `handle_reactive_control` invocations reflects the user's
+    /// freshly-selected org.
+    ///
+    /// Without this refresh, the WS retained the `AuthContext`
+    /// captured at handshake time for its whole lifetime: a user who
+    /// switched orgs mid-session kept subscribing under the *previous*
+    /// tenant and saw no rows from the org they just landed on. The
+    /// `session-changed` client envelope alone wasn't enough — the
+    /// client SDK refreshed its local session view but the server's
+    /// per-socket auth stayed stale until reconnect.
+    ///
+    /// Runs synchronously across shards. The update path is
+    /// write-locked but trivially fast (one struct-field swap per
+    /// connection) and rare (session mutations only). Read paths
+    /// (`broadcast_change`, `send_text_to_user`) wait at most one
+    /// write release.
+    ///
+    /// Returns the total number of connections touched, primarily
+    /// for telemetry — a session-change with zero matching sockets
+    /// means the user has no open tabs on this machine.
+    pub fn update_tenant_for_user(&self, user_id: &str, new_tenant: Option<&str>) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.update_tenant_for_user(user_id, new_tenant))
+            .sum()
     }
 
     pub fn send_text_to(&self, client_id: u64, text: &str) {
@@ -1029,6 +1122,21 @@ fn run_authenticated_session(
                     Err(_) => continue,
                 };
                 let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                // Refresh the per-message auth view from the
+                // shard-stored RwLock. `update_tenant_for_user`
+                // mutates this slot when the user's session flips
+                // tenants (POST /api/auth/select-org); without
+                // re-reading per message, control handlers below
+                // (crdt-subscribe, reactive-subscribe) would keep
+                // running against the auth captured at handshake
+                // time and miss the new tenant's rows.
+                let auth_ctx = {
+                    let guard = match socket_handle.auth.read() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    guard.clone()
+                };
                 match kind {
                     "presence" | "topic" => {
                         // Stamp the authenticated sender server-side,

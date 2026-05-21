@@ -1,9 +1,39 @@
+use std::sync::{Arc, OnceLock};
+
 use pylon_auth::AuthContext;
 use pylon_kernel::{AppManifest, ManifestPolicy};
 
 // ---------------------------------------------------------------------------
 // Policy evaluation
 // ---------------------------------------------------------------------------
+
+/// Adapter the policy engine uses to evaluate `exists(...)` predicates.
+///
+/// `exists()` lets a policy assert that some related row is present
+/// before allowing access — the canonical use case is multi-tenant
+/// membership checks:
+///
+/// ```text
+/// allowRead: "exists(OrgMember where orgId == data.orgId and userId == auth.userId)"
+/// ```
+///
+/// Implementing this requires the engine to actually query a row store
+/// — which lives in the runtime / router crates, outside `pylon-policy`.
+/// We define a narrow trait here so the policy crate stays a leaf
+/// dependency and the runtime can wire its `DataStore` into evaluation
+/// without dragging the whole storage layer into this crate's tree.
+///
+/// `entity_exists` returns `true` iff at least one row of `entity`
+/// matches every `(field_path, value)` pair. The path is a dotted
+/// path resolved against the row (e.g. `["orgId"]`, `["nested", "id"]`).
+/// Values are JSON literals or strings/nulls.
+///
+/// Implementations should bound the lookup at a single row (existence
+/// only), and SHOULD support both top-level fields and one-level nested
+/// paths. Multi-level nesting is YAGNI right now.
+pub trait PolicyDataResolver: Send + Sync {
+    fn entity_exists(&self, entity: &str, conditions: &[(Vec<String>, serde_json::Value)]) -> bool;
+}
 
 /// Result of a policy check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +83,12 @@ impl PolicyResult {
 pub struct PolicyEngine {
     entity_policies: Vec<ManifestPolicy>,
     action_policies: Vec<ManifestPolicy>,
+    /// Set by the runtime after the row store comes up. None during
+    /// boot + in unit tests that don't need `exists(...)` evaluation.
+    /// `OnceLock` so set-once semantics are enforced (engine is shared
+    /// via Arc across worker threads and a second `set_resolver` call
+    /// would silently win the race).
+    resolver: OnceLock<Arc<dyn PolicyDataResolver + Send + Sync>>,
 }
 
 impl PolicyEngine {
@@ -73,7 +109,23 @@ impl PolicyEngine {
         Self {
             entity_policies,
             action_policies,
+            resolver: OnceLock::new(),
         }
+    }
+
+    /// Wire a `PolicyDataResolver` into the engine so `exists(...)`
+    /// predicates can hit the row store. Call once after the store
+    /// has been constructed at runtime boot. Subsequent calls are
+    /// silently no-op'd (OnceLock semantics) so a re-init in a hot-
+    /// reload scenario doesn't tear down the existing resolver.
+    pub fn set_resolver(&self, resolver: Arc<dyn PolicyDataResolver + Send + Sync>) {
+        let _ = self.resolver.set(resolver);
+    }
+
+    fn resolver(&self) -> Option<&dyn PolicyDataResolver> {
+        self.resolver
+            .get()
+            .map(|a| a.as_ref() as &dyn PolicyDataResolver)
     }
 
     /// Which kind of entity access is being checked. Lets the engine pick
@@ -166,7 +218,7 @@ impl PolicyEngine {
                 continue;
             }
             any_rule_for_action = true;
-            match evaluate_allow(expr, auth, data, None) {
+            match evaluate_allow_inner(expr, auth, data, None, self.resolver()) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
@@ -210,6 +262,92 @@ impl PolicyEngine {
         data: Option<&serde_json::Value>,
     ) -> PolicyResult {
         self.check_entity(entity_name, EntityAction::Read, auth, data)
+    }
+
+    /// Pre-check for bulk scans (cursor pagination, filtered queries)
+    /// where the handler will apply per-row filtering downstream and
+    /// only needs to know whether the policy hard-denies the whole
+    /// entity for this caller.
+    ///
+    /// Semantics:
+    ///   - Hard-deny (`allow: "false"`, default-deny for missing rule)
+    ///     → Denied. Handler returns 403; row filtering is skipped.
+    ///   - Data-independent expressions (e.g. `auth.userId != null`)
+    ///     → evaluated normally with `data: None` — if false, Denied.
+    ///   - Data-dependent expressions (anything referencing `data.X`)
+    ///     → Allowed. Handler scans the entity and per-row filtering
+    ///     drops rows the caller can't read. Without this special
+    ///     case, the data-less evaluation would treat `data.X` as
+    ///     Null, `auth.Y == Null` resolves to false, and EVERY tenant-
+    ///     scoped read policy hard-denied the whole cursor — every
+    ///     dashboard using `db.useQuery("TenantThing")` got 403 +
+    ///     empty replica. The per-row filter inside the cursor
+    ///     handler is the real security boundary; this pre-check
+    ///     just lets us short-circuit when no policy could possibly
+    ///     permit a row regardless of its contents.
+    ///
+    /// Admin bypasses everything (same as `check_entity_read`).
+    pub fn check_entity_scan(&self, entity_name: &str, auth: &AuthContext) -> PolicyResult {
+        if auth.is_admin {
+            return PolicyResult::Allowed;
+        }
+
+        let policies: Vec<&ManifestPolicy> = self
+            .entity_policies
+            .iter()
+            .filter(|p| p.entity.as_deref() == Some(entity_name))
+            .collect();
+
+        // Default-deny / framework-internal handling mirrors
+        // check_entity (kept in sync with that method's branch).
+        if policies.is_empty() {
+            if entity_name.starts_with('_') {
+                return PolicyResult::Allowed;
+            }
+            return PolicyResult::Denied {
+                policy_name: "_default_deny".into(),
+                reason: format!(
+                    "No policy registered for entity \"{entity_name}\" — default-deny refuses access. Register a policy via policy({{entity: \"{entity_name}\", ...}}) or `policy({{entity: \"{entity_name}\", allow: \"true\"}})` for an intentionally-public entity."
+                ),
+            };
+        }
+
+        let mut any_rule_for_action = false;
+        for policy in &policies {
+            let expr = Self::expr_for(policy, EntityAction::Read);
+            if expr.is_empty() {
+                continue;
+            }
+            any_rule_for_action = true;
+            // Skip per-row predicates at scan-time. If the rule
+            // references `data.`, it's filterable — the caller will
+            // run the full check per row. Otherwise evaluate now and
+            // surface the result, so `allow: "false"` and missing-
+            // auth gates (`auth.userId != null`) still 403 early.
+            if expr.contains("data.") {
+                continue;
+            }
+            match evaluate_allow_inner(expr, auth, None, None, self.resolver()) {
+                PolicyResult::Denied { .. } => {
+                    return PolicyResult::Denied {
+                        policy_name: policy.name.clone(),
+                        reason: format!("Policy \"{}\" denied (read scan): {}", policy.name, expr),
+                    };
+                }
+                PolicyResult::Allowed => {}
+            }
+        }
+
+        if !any_rule_for_action {
+            return PolicyResult::Denied {
+                policy_name: "_default_deny".into(),
+                reason: format!(
+                    "Entity \"{entity_name}\" has policies but no rule covering action \"read\" — default-deny refuses access. Add allowRead (or a wildcard `allow`) to one of the entity's policies."
+                ),
+            };
+        }
+
+        PolicyResult::Allowed
     }
 
     /// Check if an entity write (insert/update/delete) is allowed.
@@ -283,7 +421,7 @@ impl PolicyEngine {
         }
 
         for policy in &policies {
-            match evaluate_allow(&policy.allow, auth, None, input) {
+            match evaluate_allow_inner(&policy.allow, auth, None, input, self.resolver()) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
@@ -360,11 +498,24 @@ fn parse_quoted_string_list(s: &str) -> Result<Vec<String>, String> {
 /// Existing primitives (`auth.userId != null`, `auth.isAdmin`,
 /// `auth.hasRole(...)`, `auth.hasAnyRole(...)`, `auth.userId == data.<path>`)
 /// are special cases of the grammar; old schemas keep working unchanged.
+/// Back-compat wrapper used by call sites that don't have a resolver.
+/// New code should call `evaluate_allow_inner` directly.
+#[cfg(test)]
 fn evaluate_allow(
     expr: &str,
     auth: &AuthContext,
     data: Option<&serde_json::Value>,
     input: Option<&serde_json::Value>,
+) -> PolicyResult {
+    evaluate_allow_inner(expr, auth, data, input, None)
+}
+
+fn evaluate_allow_inner(
+    expr: &str,
+    auth: &AuthContext,
+    data: Option<&serde_json::Value>,
+    input: Option<&serde_json::Value>,
+    resolver: Option<&dyn PolicyDataResolver>,
 ) -> PolicyResult {
     let tokens = match tokenize(expr) {
         Ok(t) => t,
@@ -391,7 +542,12 @@ fn evaluate_allow(
             reason: format!("Trailing tokens in expression: {expr:?}"),
         };
     }
-    let env = EvalEnv { auth, data, input };
+    let env = EvalEnv {
+        auth,
+        data,
+        input,
+        resolver,
+    };
     match env.eval(&ast) {
         EvalResult::True => PolicyResult::Allowed,
         EvalResult::False(reason) => PolicyResult::Denied {
@@ -560,6 +716,16 @@ enum Ast {
     HasRole(String),
     /// `auth.hasAnyRole("a", "b", ...)`
     HasAnyRole(Vec<String>),
+    /// `exists(Entity where field == path/literal [and field == path/literal]*)`
+    ///
+    /// Each condition compares a field on rows of `entity` against an
+    /// expression resolved in the current `EvalEnv` (so `auth.userId`,
+    /// `data.orgId`, etc. all work as RHS). True iff the policy data
+    /// resolver finds at least one matching row.
+    Exists {
+        entity: String,
+        conditions: Vec<(Vec<String>, Ast)>,
+    },
     /// A path like `auth.userId` or `data.author.id`.
     Path(Vec<String>),
     /// A string literal.
@@ -713,10 +879,14 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Ident(name)) => {
                 self.bump();
-                // Two cases: path, or function call.
+                // Three cases: bare path, builtin function call
+                // (`auth.hasRole(...)`), or the special `exists(...)`
+                // form with its own internal grammar.
                 if matches!(self.peek(), Some(Token::LParen)) {
-                    // Function call. Only two functions are built in.
                     self.bump();
+                    if name == "exists" {
+                        return self.parse_exists_body();
+                    }
                     let args = self.parse_string_args()?;
                     match self.peek() {
                         Some(Token::RParen) => {
@@ -779,6 +949,104 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse the inside of `exists(<entity> where <cond> [and <cond>]* )`.
+    /// Caller has already consumed the `exists` ident and the opening
+    /// `(`. We finish at the matching `)`.
+    ///
+    /// Grammar is intentionally narrower than the outer expression: only
+    /// `==` comparisons, only `and` between them (no `or`, no `!`, no
+    /// nested `exists`). That keeps the storage-side cost predictable
+    /// (one indexed lookup with all clauses ANDed) and avoids the
+    /// recursion-pit a full sub-expression would open up. Wider grammars
+    /// can grow in once we see a real use case.
+    fn parse_exists_body(&mut self) -> Result<Ast, String> {
+        // <entity>
+        let entity = match self.peek().cloned() {
+            Some(Token::Ident(name)) => {
+                self.bump();
+                name
+            }
+            other => {
+                return Err(format!("exists(): expected entity name, got {other:?}"));
+            }
+        };
+
+        // `where`
+        match self.peek().cloned() {
+            Some(Token::Ident(kw)) if kw == "where" => {
+                self.bump();
+            }
+            other => {
+                return Err(format!(
+                    "exists({entity} ...): expected `where`, got {other:?}"
+                ));
+            }
+        }
+
+        // One or more `<path> == <expr>` clauses joined by `and`.
+        let mut conditions: Vec<(Vec<String>, Ast)> = Vec::new();
+        loop {
+            let path = match self.peek().cloned() {
+                Some(Token::Ident(name)) => {
+                    self.bump();
+                    split_path(&name)
+                }
+                other => {
+                    return Err(format!(
+                        "exists({entity} where ...): expected field path, got {other:?}"
+                    ));
+                }
+            };
+            match self.peek() {
+                Some(Token::Eq) => {
+                    self.bump();
+                }
+                other => {
+                    return Err(format!(
+                        "exists({entity} where {path:?} ...): expected `==`, got {other:?}"
+                    ));
+                }
+            }
+            // RHS uses the full atom grammar — strings, nulls, bare
+            // paths into auth/data/input. We DON'T allow nested
+            // `exists` or function calls here (caught downstream when
+            // the parser sees unexpected tokens).
+            self.enter()?;
+            let rhs = self.parse_or()?;
+            self.leave();
+            conditions.push((path, rhs));
+
+            match self.peek().cloned() {
+                Some(Token::And) => {
+                    self.bump();
+                    // Continue to next condition.
+                }
+                Some(Token::RParen) => {
+                    self.bump();
+                    break;
+                }
+                Some(Token::Ident(kw)) if kw == "and" => {
+                    // Bare "and" ident — accept for ergonomic parity
+                    // with `&&` (Yapless app.ts uses this form).
+                    self.bump();
+                }
+                other => {
+                    return Err(format!(
+                        "exists({entity} where ...): expected `and` or `)`, got {other:?}"
+                    ));
+                }
+            }
+        }
+
+        if conditions.is_empty() {
+            return Err(format!(
+                "exists({entity} where ...): at least one condition required"
+            ));
+        }
+
+        Ok(Ast::Exists { entity, conditions })
+    }
+
     fn parse_atom(&mut self) -> Result<Ast, String> {
         match self.peek().cloned() {
             Some(Token::Null) => {
@@ -815,6 +1083,11 @@ struct EvalEnv<'a> {
     auth: &'a AuthContext,
     data: Option<&'a serde_json::Value>,
     input: Option<&'a serde_json::Value>,
+    /// Set when the policy engine has been given a resolver so
+    /// `exists(...)` can hit the row store. None for callers that
+    /// don't supply one (most unit tests, scan-mode pre-checks);
+    /// `Ast::Exists` then evaluates to Denied with a clear reason.
+    resolver: Option<&'a dyn PolicyDataResolver>,
 }
 
 #[derive(Debug)]
@@ -883,6 +1156,36 @@ impl<'a> EvalEnv<'a> {
                     EvalResult::True
                 } else {
                     EvalResult::False(format!("Missing any of required roles: {refs:?}"))
+                }
+            }
+            Ast::Exists { entity, conditions } => {
+                let resolver = match self.resolver {
+                    Some(r) => r,
+                    None => {
+                        return EvalResult::False(format!(
+                            "exists({entity} ...) not evaluable: no data resolver wired \
+                             (this evaluation path doesn't have row-store access — \
+                             call check_entity_*_with_resolver from the route handler)"
+                        ));
+                    }
+                };
+                // Resolve each RHS in the current env, package as
+                // (path, json_value) pairs, hand to the resolver.
+                let mut packed: Vec<(Vec<String>, serde_json::Value)> =
+                    Vec::with_capacity(conditions.len());
+                for (path, rhs_ast) in conditions {
+                    let v = self.value_of(rhs_ast);
+                    let json = match v {
+                        Value::Str(s) => serde_json::Value::String(s),
+                        Value::Bool(b) => serde_json::Value::Bool(b),
+                        Value::Null => serde_json::Value::Null,
+                    };
+                    packed.push((path.clone(), json));
+                }
+                if resolver.entity_exists(entity, &packed) {
+                    EvalResult::True
+                } else {
+                    EvalResult::False(format!("exists({entity} ...) matched no rows"))
                 }
             }
             Ast::Path(_) | Ast::Str(_) | Ast::Null | Ast::Bool(_) => {
@@ -1567,5 +1870,174 @@ mod tests {
             None,
         );
         assert!(!result.is_allowed());
+    }
+
+    // -----------------------------------------------------------------------
+    // exists() syntax — parser, evaluation, resolver wiring
+    // -----------------------------------------------------------------------
+
+    struct StubResolver {
+        /// Captures each call so tests can assert on the conditions
+        /// that were sent to the underlying store.
+        calls: std::sync::Mutex<Vec<(String, Vec<(Vec<String>, serde_json::Value)>)>>,
+        verdict: bool,
+    }
+
+    impl StubResolver {
+        fn new(verdict: bool) -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                verdict,
+            }
+        }
+    }
+
+    impl PolicyDataResolver for StubResolver {
+        fn entity_exists(
+            &self,
+            entity: &str,
+            conditions: &[(Vec<String>, serde_json::Value)],
+        ) -> bool {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((entity.to_string(), conditions.to_vec()));
+            self.verdict
+        }
+    }
+
+    #[test]
+    fn exists_parses_single_condition() {
+        // Smoke test: parse error would surface as `Policy parse error: …`
+        // in the Denied reason. Allowed/Denied is determined by the
+        // stub resolver. With verdict=true the policy passes.
+        let resolver = StubResolver::new(true);
+        let r = evaluate_allow_inner(
+            "exists(OrgMember where userId == auth.userId)",
+            &AuthContext::authenticated("alice".into()),
+            None,
+            None,
+            Some(&resolver),
+        );
+        assert!(matches!(r, PolicyResult::Allowed), "got {r:?}");
+
+        let calls = resolver.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "OrgMember");
+        assert_eq!(
+            calls[0].1,
+            vec![(
+                vec!["userId".to_string()],
+                serde_json::Value::String("alice".into())
+            )]
+        );
+    }
+
+    #[test]
+    fn exists_parses_multiple_conditions() {
+        let resolver = StubResolver::new(true);
+        let data = serde_json::json!({"orgId": "org-1"});
+        let r = evaluate_allow_inner(
+            "exists(OrgMember where orgId == data.orgId and userId == auth.userId)",
+            &AuthContext::authenticated("alice".into()),
+            Some(&data),
+            None,
+            Some(&resolver),
+        );
+        assert!(matches!(r, PolicyResult::Allowed), "got {r:?}");
+
+        let calls = resolver.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (entity, conditions) = &calls[0];
+        assert_eq!(entity, "OrgMember");
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(
+            conditions[0],
+            (
+                vec!["orgId".to_string()],
+                serde_json::Value::String("org-1".into())
+            )
+        );
+        assert_eq!(
+            conditions[1],
+            (
+                vec!["userId".to_string()],
+                serde_json::Value::String("alice".into())
+            )
+        );
+    }
+
+    #[test]
+    fn exists_denies_when_resolver_says_no_match() {
+        let resolver = StubResolver::new(false);
+        let r = evaluate_allow_inner(
+            "exists(OrgMember where userId == auth.userId)",
+            &AuthContext::authenticated("alice".into()),
+            None,
+            None,
+            Some(&resolver),
+        );
+        assert!(matches!(r, PolicyResult::Denied { .. }));
+    }
+
+    #[test]
+    fn exists_without_resolver_denies_with_clear_reason() {
+        // If a runtime forgets to wire a resolver but the policy
+        // still uses `exists()`, we must NOT silently allow — fail
+        // closed with a reason that points the operator at the
+        // missing wire-up.
+        let r = evaluate_allow_inner(
+            "exists(OrgMember where userId == auth.userId)",
+            &AuthContext::authenticated("alice".into()),
+            None,
+            None,
+            None,
+        );
+        match r {
+            PolicyResult::Denied { reason, .. } => {
+                assert!(
+                    reason.contains("no data resolver wired"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected Denied, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_composes_with_outer_and() {
+        // The intended dashboard pattern: outer auth gate AND a
+        // membership check. Both must pass. Outer grammar uses
+        // `&&` (the bare keyword `and` is reserved for inside
+        // `exists(...)`).
+        let resolver = StubResolver::new(true);
+        let r = evaluate_allow_inner(
+            "auth.userId != null && exists(OrgMember where userId == auth.userId)",
+            &AuthContext::authenticated("alice".into()),
+            None,
+            None,
+            Some(&resolver),
+        );
+        assert!(matches!(r, PolicyResult::Allowed), "got {r:?}");
+    }
+
+    #[test]
+    fn exists_rejects_empty_body() {
+        let resolver = StubResolver::new(true);
+        let r = evaluate_allow_inner(
+            "exists(OrgMember where)",
+            &AuthContext::authenticated("alice".into()),
+            None,
+            None,
+            Some(&resolver),
+        );
+        // Parse error → Denied with a parse-error reason.
+        match r {
+            PolicyResult::Denied { reason, .. } => assert!(
+                reason.contains("Policy parse error"),
+                "unexpected reason: {reason}"
+            ),
+            _ => panic!("expected Denied, got {r:?}"),
+        }
     }
 }

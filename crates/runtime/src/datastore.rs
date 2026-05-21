@@ -315,6 +315,68 @@ impl Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Policy data resolver
+// ---------------------------------------------------------------------------
+
+/// Glue between `PolicyEngine`'s `exists(...)` predicates and the
+/// runtime's `DataStore`. Wired once at server boot
+/// (`crate::server::serve_runtime` → `policy_engine.set_resolver(...)`)
+/// so policies like
+///
+///     allowRead: "exists(OrgMember where orgId == data.orgId and userId == auth.userId)"
+///
+/// resolve to a real row-existence check instead of failing closed.
+///
+/// Translation strategy: every condition becomes a `field == value`
+/// clause in a `DataStore::query_filtered` call, with a `$limit: 1`
+/// to bound the lookup. Path resolution is currently top-level only
+/// (`["userId"]`), nested paths get dot-joined and handed to the
+/// store as-is — Postgres mode supports JSON-path indexing, SQLite
+/// mode will throw an unknown-column error which we turn into a
+/// `false` so a misconfigured policy fails closed instead of bringing
+/// down the request.
+pub struct DataStoreResolver {
+    store: std::sync::Arc<dyn DataStore>,
+}
+
+impl DataStoreResolver {
+    pub fn new(store: std::sync::Arc<dyn DataStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl pylon_policy::PolicyDataResolver for DataStoreResolver {
+    fn entity_exists(&self, entity: &str, conditions: &[(Vec<String>, serde_json::Value)]) -> bool {
+        let mut filter = serde_json::Map::with_capacity(conditions.len() + 1);
+        for (path, value) in conditions {
+            // Skip conditions whose RHS is Null — they're almost
+            // certainly a misconfiguration (the policy referenced a
+            // field that wasn't on `auth`/`data`/`input` in this
+            // call's context). Letting them through would silently
+            // match every row where the column IS null, which is
+            // the worst-of-both-worlds: it leaks reads on a typo.
+            if value.is_null() {
+                return false;
+            }
+            filter.insert(path.join("."), value.clone());
+        }
+        filter.insert("$limit".to_string(), serde_json::json!(1));
+        match self
+            .store
+            .query_filtered(entity, &serde_json::Value::Object(filter))
+        {
+            Ok(rows) => !rows.is_empty(),
+            // Any error (unknown entity, bad column, DB hiccup) →
+            // fail closed. The policy framework treats false as
+            // Denied; callers that wanted permissive behavior need
+            // to fix the policy expression instead of relying on a
+            // misconfiguration accidentally allowing access.
+            Err(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DataStore → Runtime bridge
 // ---------------------------------------------------------------------------
 
@@ -1136,18 +1198,33 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     /// as this user. Fires when the auth surface mutates the session
     /// (POST /api/auth/select-org, DELETE /api/auth/session, etc.).
     ///
-    /// SDK contract: receiving clients call refreshResolvedSession()
-    /// which re-reads /api/auth/me and — on a tenant flip — resets
-    /// the local replica. The envelope's `tenant_id` field is
-    /// informational; the SDK doesn't trust it (the auth surface is
-    /// the source of truth) but ships it so consumers that want a
-    /// low-latency optimistic tenant readout can use it.
+    /// Two things happen, in order:
+    ///   1. Refresh the per-WS `AuthContext.tenant_id` on every open
+    ///      socket for this user. Without this, the hub keeps
+    ///      evaluating policies against the auth captured at
+    ///      handshake time and the user sees no rows from the org
+    ///      they just selected (or worse, leaks rows from the org
+    ///      they switched away from).
+    ///   2. Push the `session-changed` envelope to the client SDK so
+    ///      it refreshes its locally-cached `/api/auth/me` view +
+    ///      resets the replica on a tenant flip.
+    ///
+    /// Order matters: the auth refresh must land before the client
+    /// gets the envelope, otherwise the SDK's immediate
+    /// re-subscription can race ahead of the server-side auth flip
+    /// and run against the stale tenant once more.
     ///
     /// Cluster: also published over the bus so a session mutation on
     /// machine A reaches the same user's WS connections on machine B.
     /// Without this, a user with two tabs landed on different machines
-    /// would only see one tab refresh after a tenant switch.
+    /// would only see one tab refresh after a tenant switch. The
+    /// cluster subscriber on the peer machine performs the same
+    /// auth-refresh-then-envelope dance locally.
     fn notify_session_changed(&self, user_id: &str, tenant_id: Option<&str>) {
+        // (1) Local WS auth refresh — see method-level docs for why
+        // this has to happen before the envelope.
+        self.ws.update_tenant_for_user(user_id, tenant_id);
+        // (2) Client-facing envelope.
         let envelope = serde_json::json!({
             "type": "session-changed",
             "tenant_id": tenant_id,
@@ -1261,7 +1338,14 @@ pub fn install_cluster_bus_subscriber(
         // tabs landed on the originating machine. The local-mutation
         // path goes through `notify_session_changed` directly; this
         // closes the cross-machine leg of the same surface.
+        //
+        // Mirrors the same two-step `notify_session_changed` does on
+        // the origin: refresh per-WS auth FIRST, then push the
+        // client envelope. Skipping (1) here would mean cross-machine
+        // tabs receive the envelope but keep running policy checks
+        // against the stale handshake-time tenant.
         if let Some((user_id, tenant_id)) = envelope.as_session_changed() {
+            ws_handler.update_tenant_for_user(&user_id, tenant_id.as_deref());
             let payload = serde_json::json!({
                 "type": "session-changed",
                 "tenant_id": tenant_id,

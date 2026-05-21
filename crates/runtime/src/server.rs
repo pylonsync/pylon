@@ -339,6 +339,16 @@ fn start_server(
     let org_sso = auth_stores.org_sso;
     let saml = auth_stores.saml;
     let policy_engine = Arc::new(PolicyEngine::from_manifest(runtime.manifest()));
+    // Wire the row-store-backed `PolicyDataResolver` so `exists(...)`
+    // predicates in app policies can hit the database. Without this
+    // call, any `exists(Entity where ...)` policy expression
+    // unconditionally denies — useful as a fail-closed default but
+    // useless for the actual use case (membership checks). The
+    // resolver wraps the same `Runtime` we're already using as the
+    // app-facing `DataStore`.
+    policy_engine.set_resolver(Arc::new(crate::datastore::DataStoreResolver::new(
+        Arc::clone(&runtime) as Arc<dyn pylon_http::DataStore>,
+    )));
     let change_log = Arc::new(ChangeLog::new());
 
     // Seed the change log with one synthetic insert per extant row so that
