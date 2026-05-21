@@ -766,7 +766,10 @@ html, body { background: #0a0a0c; color: #ededee; }
   position: relative;
   transition: background .15s ease;
 }
-.pylon-landing .prim:hover { background: #fdfcfa; }
+/* Hover bg uses --bg-alt so it follows whichever theme is in
+   effect. Was hardcoded #fdfcfa (warm cream) — a stale leftover
+   from light mode that flashed bright on the dark page. */
+.pylon-landing .prim:hover { background: var(--bg-alt); }
 .pylon-landing .prim .top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
 .pylon-landing .prim .icon {
   width: 36px; height: 36px; border-radius: 8px;
@@ -785,7 +788,8 @@ html, body { background: #0a0a0c; color: #ededee; }
 .pylon-landing .lanes { margin-top: 64px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-card); }
 .pylon-landing .lane { padding: 28px 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; position: relative; transition: background .2s ease; }
 .pylon-landing .lane:last-child { border-right: none; }
-.pylon-landing .lane:hover { background: #fdfcfa; }
+/* Same theme-fix as .prim:hover above. */
+.pylon-landing .lane:hover { background: var(--bg-alt); }
 .pylon-landing .lane .top { display: flex; justify-content: space-between; align-items: center; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; }
 .pylon-landing .lane .top .num { color: var(--accent); font-weight: 500; }
 .pylon-landing .lane h4 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; margin: 6px 0 4px; }
