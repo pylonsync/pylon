@@ -281,20 +281,27 @@ function ColorAvatar({
         : size === "lg"
           ? "size-14 text-lg"
           : "size-8 text-xs";
+  // Subtle top-light gradient gives the flat brand color a touch
+  // of dimension — reads as "applied finish" instead of "tag
+  // sticker". 14% white at the top fades to 8% black at the
+  // bottom over the same hue, then a ring + inner highlight pin
+  // it visually to the surface.
+  const baseColor = color || "#8b5cf6";
+  const gradient = `linear-gradient(180deg, rgba(255,255,255,.14) 0%, transparent 45%, rgba(0,0,0,.10) 100%), ${baseColor}`;
   return (
     <Avatar
       className={cn(
         sizeCls,
-        "font-semibold text-white shrink-0",
-        onClick && "cursor-pointer",
+        "font-semibold text-white shrink-0 ring-1 ring-black/5 shadow-[inset_0_1px_0_rgba(255,255,255,.18)]",
+        onClick && "cursor-pointer transition-transform hover:scale-[1.04]",
         className,
       )}
       onClick={onClick}
-      style={{ backgroundColor: color || "#8b5cf6" }}
+      style={{ background: gradient }}
     >
       <AvatarFallback
         className="bg-transparent text-white"
-        style={{ backgroundColor: color || "#8b5cf6" }}
+        style={{ background: "transparent" }}
       >
         {initials(name)}
       </AvatarFallback>
@@ -735,7 +742,12 @@ function Sidebar({
 
   return (
     <>
-      <aside className="flex min-h-0 flex-col border-r border-border bg-card/40">
+      {/* Sidebar surface — gradient from the lighter card color
+          at the top (where the user card sits) down to the
+          muted background at the bottom keeps the panel from
+          reading as a flat slab and visually anchors the
+          channel list against the main panel. */}
+      <aside className="flex min-h-0 flex-col border-r border-border bg-gradient-to-b from-card/60 via-card/30 to-muted/30">
         <div
           role="button"
           tabIndex={0}
@@ -746,14 +758,19 @@ function Sidebar({
               ui.openProfile(currentUser.id);
             }
           }}
-          className="flex shrink-0 cursor-pointer items-center gap-2.5 border-b border-border px-3 py-2.5 hover:bg-accent/40"
+          className="flex shrink-0 cursor-pointer items-center gap-2.5 border-b border-border px-3 py-3 transition-colors hover:bg-accent/40"
         >
           <div className="relative">
             <ColorAvatar name={currentUser.displayName} color={currentUser.avatarColor} />
-            <span className="absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full bg-emerald-500 ring-2 ring-card" />
+            {/* Online-state dot with a faint outer pulse so it
+                reads as "live" rather than "decoration." */}
+            <span className="absolute -right-0.5 -bottom-0.5 flex size-2.5">
+              <span className="absolute inset-0 animate-ping rounded-full bg-emerald-500 opacity-50" />
+              <span className="relative size-2.5 rounded-full bg-emerald-500 ring-2 ring-card" />
+            </span>
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{currentUser.displayName}</div>
+            <div className="truncate text-[13.5px] font-semibold tracking-tight">{currentUser.displayName}</div>
             <div className="text-[11px] text-muted-foreground">Online</div>
           </div>
           <Button
@@ -889,10 +906,19 @@ function SidebarSection({
   label: React.ReactNode;
   action?: React.ReactNode;
 }) {
+  // Slightly more breathing room above the label (pt-1.5),
+  // softer weight (medium instead of semibold), and a hover-
+  // gated action button so the [+] doesn't pop visually unless
+  // the user is in this section. The eye sees a rhythm:
+  // section label → channels → next label.
   return (
-    <div className="mb-0.5 flex items-center justify-between px-2.5 pt-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className="group/section mb-0.5 flex items-center justify-between px-2.5 pt-1.5 pb-1 text-[10.5px] font-medium uppercase tracking-[.06em] text-muted-foreground/80">
       <span>{label}</span>
-      {action}
+      {action && (
+        <span className="opacity-60 transition-opacity group-hover/section:opacity-100">
+          {action}
+        </span>
+      )}
     </div>
   );
 }
@@ -924,12 +950,25 @@ function ChannelRow({
         }
       }}
       className={cn(
-        "group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-        active && "bg-primary/15 text-foreground hover:bg-primary/20",
+        "group relative flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-[5px] text-[13.5px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground",
+        active && "bg-primary/10 text-foreground hover:bg-primary/12",
         unread > 0 && !active && "font-semibold text-foreground",
       )}
     >
-      <span className="flex size-4 items-center justify-center text-muted-foreground/70">
+      {/* Active row gets a 2px accent rail on the left — a
+          quieter cue than flooding the whole pill with color. */}
+      {active && (
+        <span
+          aria-hidden="true"
+          className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-primary"
+        />
+      )}
+      <span
+        className={cn(
+          "flex size-4 items-center justify-center text-muted-foreground/70",
+          active && "text-primary",
+        )}
+      >
         {channel.isPrivate ? <Lock className="size-3" /> : <Hash className="size-3.5" />}
       </span>
       <span className="flex-1 truncate">{channel.name}</span>
@@ -986,12 +1025,18 @@ function DmRow({
         }
       }}
       className={cn(
-        "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-        active && "bg-primary/15 text-foreground hover:bg-primary/20",
+        "group relative flex cursor-pointer items-center gap-2 rounded-md px-2 py-[5px] text-[13.5px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground",
+        active && "bg-primary/10 text-foreground hover:bg-primary/12",
         unread > 0 && !active && "font-semibold text-foreground",
       )}
     >
-      <span className="size-2 rounded-full bg-emerald-500" />
+      {active && (
+        <span
+          aria-hidden="true"
+          className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-primary"
+        />
+      )}
+      <span className="size-2 rounded-full bg-emerald-500 ring-2 ring-card" />
       <span className="flex-1 truncate">{label}</span>
       {unread > 0 && (
         <Badge variant="default" className="h-4 min-w-4 rounded-full px-1.5 text-[10px] leading-none">
@@ -1244,14 +1289,19 @@ function ChannelView({
 
   return (
     <main className="flex min-h-0 flex-col bg-background">
-      <header className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
-        <div className="flex min-w-0 items-center gap-2">
+      {/* Channel header: cleaner two-column layout with a thin
+          vertical separator between the channel name and the
+          topic input. The topic gets more horizontal room
+          because it's the part that benefits most from space
+          (the placeholder + collaborative-text demo). */}
+      <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
           {isDm ? (
             <DmHeader channel={channel} currentUser={currentUser} />
           ) : (
             <>
               <button
-                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[15px] font-semibold hover:bg-accent"
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[14.5px] font-semibold tracking-tight hover:bg-accent"
                 onClick={() => ui.openChannelDetails(channel.id)}
                 title="Channel details"
               >
@@ -1262,7 +1312,10 @@ function ChannelView({
                 )}
                 <span className="truncate">{channel.name}</span>
               </button>
-              <span className="text-muted-foreground">·</span>
+              <div
+                aria-hidden="true"
+                className="h-4 w-px shrink-0 bg-border"
+              />
               <CollabTopic channelId={channel.id} />
             </>
           )}
@@ -1298,12 +1351,17 @@ function ChannelView({
  */
 function CollabTopic({ channelId }: { channelId: string }) {
   const [value, setValue] = useCollabText("Channel", channelId, "topic");
+  // Tightened placeholder copy so it fits in the available
+  // horizontal space without truncation, plus a subtle hover
+  // background to telegraph "this is editable" — the topic
+  // looked like static text before. Padding x to keep the
+  // hover-bg from hugging the next-door separator pixel-tight.
   return (
     <input
       value={value}
       onChange={(e) => setValue(e.target.value)}
-      placeholder="Set a topic — try editing this in two browser tabs"
-      className="min-w-0 flex-1 truncate bg-transparent text-sm text-muted-foreground outline-none placeholder:text-muted-foreground/60 focus:text-foreground"
+      placeholder="Set a topic"
+      className="min-w-0 flex-1 truncate rounded-md bg-transparent px-2 py-1 text-[13.5px] text-muted-foreground outline-none transition-colors placeholder:text-muted-foreground/60 hover:bg-accent/40 focus:bg-accent/30 focus:text-foreground"
     />
   );
 }
@@ -1362,13 +1420,19 @@ function ChannelPresenceCount({
 
   return (
     <div className="relative" ref={wrapRef}>
+      {/* Presence pill — slightly more vertical room and a
+          subtle emerald glow on the live dot, so the "this is
+          presence, not metadata" cue lands at a glance. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         title="Who's here"
-        className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 rounded-full border border-border bg-card/80 px-2.5 py-1 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-card hover:text-foreground"
       >
-        <span className="size-1.5 rounded-full bg-emerald-500" />
+        <span className="relative flex size-1.5">
+          <span className="absolute inset-0 animate-ping rounded-full bg-emerald-500 opacity-60" />
+          <span className="relative size-1.5 rounded-full bg-emerald-500" />
+        </span>
         <span>{others.length === 0 ? "Just you" : `${total} here`}</span>
       </button>
       {open && (
@@ -1502,16 +1566,20 @@ function MessageList({
     const thisDate = new Date(m.createdAt);
     const needsDivider = !prev || !prevDate || !sameDay(prevDate, thisDate);
     if (needsDivider) {
+      // Hairline divider with floating date text. The label
+      // sits on a transparent ground so the line beneath it
+      // shows through the kerning — reads as "marker" rather
+      // than "pill button." Tracking is tightened from
+      // `tracking-wider` to `tracking-[.04em]` because heavy
+      // tracking on a UI label fights the message text below.
       rows.push(
         <div
           key={`day-${m.id}`}
-          className="my-3 flex items-center gap-3 px-5 text-[11px] uppercase tracking-wider text-muted-foreground"
+          className="my-5 flex items-center gap-3 px-6 text-[10.5px] font-medium uppercase tracking-[.04em] text-muted-foreground/80"
         >
-          <div className="h-px flex-1 bg-border" />
-          <div className="rounded-full border border-border bg-card px-3 py-0.5 font-semibold">
-            {formatDateHeading(m.createdAt)}
-          </div>
-          <div className="h-px flex-1 bg-border" />
+          <div className="h-px flex-1 bg-border/70" />
+          <span>{formatDateHeading(m.createdAt)}</span>
+          <div className="h-px flex-1 bg-border/70" />
         </div>,
       );
     }
@@ -1599,15 +1667,20 @@ function MessageRow({
   const ui = React.useContext(UIContext);
   const openAuthor = () => ui.openProfile(message.authorId);
 
+  // Message row: tighter horizontal padding pairs with the wider
+  // header below, hover bg uses /50 so the row pops a bit more
+  // on mouseover (was /30, almost invisible). Spacing between
+  // groups (`mt-3`) is up from `mt-2` so consecutive senders
+  // feel like distinct messages, not a wall of text.
   return (
     <div
       className={cn(
-        "group relative flex items-start gap-3 px-5 py-0.5 hover:bg-accent/30",
-        !compact && "mt-2 pt-1.5",
+        "group relative flex items-start gap-3 px-6 py-px transition-colors hover:bg-accent/50",
+        !compact && "mt-3 pt-1.5",
       )}
     >
       {compact ? (
-        <div className="w-8 shrink-0 pt-1 text-right text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100">
+        <div className="w-8 shrink-0 pt-1 text-right font-mono text-[10px] tabular-nums text-muted-foreground/70 opacity-0 group-hover:opacity-100">
           {formatTime(message.createdAt)}
         </div>
       ) : (
@@ -1624,12 +1697,12 @@ function MessageRow({
           <div className="mb-0.5 flex items-baseline gap-2">
             <button
               onClick={openAuthor}
-              className="text-sm font-semibold hover:underline"
+              className="text-[13.5px] font-semibold tracking-tight hover:underline"
               title="View profile"
             >
               {author?.displayName ?? "…"}
             </button>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-[11px] text-muted-foreground/80">
               {formatTime(message.createdAt)}
             </span>
           </div>
@@ -2029,15 +2102,20 @@ function ComposerInner({
   onSubmit: () => void;
   ariaLabel: string;
 }) {
+  // Single-ring focus state — was previously a thick 2px accent
+  // ring + border change that read as a heavy "selected"
+  // affordance. Softer 1px border that lifts to the foreground
+  // color, paired with a faint accent glow only on actual focus,
+  // reads cleaner.
   return (
-    <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-3 py-2 shadow-sm focus-within:border-ring/80 focus-within:ring-2 focus-within:ring-ring/20">
+    <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 transition-all focus-within:border-foreground/30 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-ring)_12%,transparent)]">
       <Textarea
         ref={textareaRef}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         rows={1}
-        className="min-h-0 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0"
+        className="min-h-0 resize-none border-0 bg-transparent p-0 text-[14px] leading-6 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -2045,11 +2123,17 @@ function ComposerInner({
           }
         }}
       />
+      {/* Send button fades in only when the input has content —
+          empty-state composer reads as a writing surface, not a
+          form-with-action. */}
       <Button
         type="submit"
         size="icon"
         disabled={!canSend}
-        className="size-8 shrink-0 rounded-lg"
+        className={cn(
+          "size-8 shrink-0 rounded-lg transition-all",
+          !canSend && "scale-90 opacity-50",
+        )}
         aria-label={ariaLabel}
         title="Send (Enter)"
       >

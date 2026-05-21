@@ -1642,7 +1642,7 @@ export function LandingPage({
 						<div className="product-frame">
 							<div className="product-chrome">
 								<div className="dots"><i /><i /><i /></div>
-								<div className="url"><span>cloud.pylonsync.com/acme/orders</span></div>
+								<div className="url"><span>yourapp.com/acme/orders</span></div>
 								<div className="right">
 									<span className="badge">live · {clientCount} connected</span>
 									<span className="kbd">⌘</span><span style={{ color: "var(--text-3)", fontSize: 12 }}>K</span>
