@@ -84,7 +84,7 @@ const STRUCTURED_DATA = {
         "@type": "Offer",
         price: "0",
         priceCurrency: "USD",
-        url: "https://cloud.pylonsync.com/signup",
+        url: "https://cloud.pylonsync.com",
         description:
           "Free Hobby tier on Pylon Cloud — managed hosting included.",
       },

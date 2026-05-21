@@ -1540,7 +1540,7 @@ export function LandingPage({
 								)}
 							</a>
 							<Link className="btn ghost" href="https://cloud.pylonsync.com/login">Sign in</Link>
-							<Link className="btn dark" href="https://cloud.pylonsync.com/signup">Start building →</Link>
+							<Link className="btn dark" href="https://cloud.pylonsync.com">Start building →</Link>
 							<button
 								type="button"
 								className="nav-burger"
@@ -1625,7 +1625,7 @@ export function LandingPage({
 								Build on SQLite locally. Ship the same app to Postgres, your VPS, or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
 							</p>
 							<div className="hero-ctas">
-								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free on Pylon Cloud →</Link>
+								<Link className="btn accent" href="https://cloud.pylonsync.com">Start free on Pylon Cloud →</Link>
 								<a className="btn ghost" href="https://docs.pylonsync.com">Read the docs →</a>
 							</div>
 							{/* Secondary path — visually demoted from the primary CTA above so
@@ -2224,7 +2224,7 @@ export function LandingPage({
 							<h2>Build the thing you&apos;ve been putting off.</h2>
 							<p>Open source, MIT/Apache. Free tier on Pylon Cloud — pay when you outgrow it, or take the binary and run it yourself.</p>
 							<div className="ctas">
-								<Link className="btn accent" href="https://cloud.pylonsync.com/signup">Start free →</Link>
+								<Link className="btn accent" href="https://cloud.pylonsync.com">Start free →</Link>
 								<a className="btn ghost" style={{ color: "rgba(255,255,255,.7)" }} href="https://docs.pylonsync.com">Read the docs</a>
 							</div>
 							<div className="cta-secondary">

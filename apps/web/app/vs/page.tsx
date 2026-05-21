@@ -64,7 +64,7 @@ export default async function VsIndexPage() {
 						<div className="cmp-ctas">
 							<Link
 								className="btn accent"
-								href="https://cloud.pylonsync.com/signup"
+								href="https://cloud.pylonsync.com"
 							>
 								Start free on Pylon Cloud →
 							</Link>

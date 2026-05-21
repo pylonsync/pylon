@@ -85,7 +85,7 @@ function MarketingNav({ stars }: { stars: number | null }) {
 					</Link>
 					<Link
 						className="btn dark"
-						href="https://cloud.pylonsync.com/signup"
+						href="https://cloud.pylonsync.com"
 					>
 						Start building →
 					</Link>
