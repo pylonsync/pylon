@@ -463,11 +463,36 @@ html, body { background: #0a0a0c; color: #ededee; }
 
 /* === HERO PRODUCT MOCK === */
 .pylon-landing .product-frame {
+  /* The product mock stays light-mode regardless of the page's
+     theme — it's a screenshot-style demo of Pylon Cloud, which
+     itself ships light. Re-declaring the design tokens locally
+     overrides the inherited dark ones for every descendant
+     (CSS variable cascade), so .metric, .tbl-row, .app-main,
+     etc. all read against the light palette without needing
+     per-rule overrides. */
+  --bg: #fafaf9;
+  --bg-alt: #f4f3f0;
+  --bg-card: #ffffff;
+  --ink: #0a0a0b;
+  --ink-2: #1a1a1d;
+  --text: #18181b;
+  --text-2: #52525b;
+  --text-3: #a1a1aa;
+  --line: #e7e5e2;
+  --line-2: #d4d4d0;
+  --pos: #16a34a;
+  --pos-soft: #e7f6ec;
+  --shadow-sm: 0 1px 2px rgba(15,15,20,.04), 0 1px 1px rgba(15,15,20,.02);
+  --shadow-md: 0 8px 24px -8px rgba(15,15,20,.10), 0 2px 6px rgba(15,15,20,.04);
+  /* The drop shadow that ties the mock to the page needs to be
+     visible against the dark canvas — use a deeper black drop
+     instead of the page-level light shadow tokens. */
   margin-top: 72px; position: relative;
   border-radius: 16px;
   background: var(--bg-card);
   border: 1px solid var(--line-2);
-  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  box-shadow: 0 24px 48px -16px rgba(0,0,0,.65), 0 8px 20px rgba(0,0,0,.45);
   overflow: hidden;
 }
 .pylon-landing .product-frame::before {
