@@ -9,9 +9,11 @@ import { PylonMark } from "@/components/pylon-logo";
 // global selectors were scoped to `.pylon-landing` so it doesn't fight
 // any other styles that load with this Next app.
 //
-// Fonts (Geist / Geist Mono / Instrument Serif) are loaded via a
-// hoisted <link> rather than next/font so the design's literal
-// `font-family: "Geist"` references still resolve.
+// Fonts (Geist / Geist Mono / Instrument Serif) are loaded via
+// next/font from `layout.tsx`, exposed as CSS variables
+// `--font-geist-sans`, `--font-geist-mono`,
+// `--font-instrument-serif`. Self-hosted, no Google Fonts
+// roundtrip, no double-load of the same WOFF2 files.
 
 const DESIGN_CSS = `
 /* The marketing app's globals.css paints the page dark by default for
@@ -49,7 +51,7 @@ html, body { background: #fafaf9; color: #18181b; }
   --shadow-lg: 0 24px 48px -16px rgba(15,15,20,.18), 0 4px 12px rgba(15,15,20,.06);
   background: var(--bg);
   color: var(--text);
-  font-family: "Geist", -apple-system, system-ui, sans-serif;
+  font-family: var(--font-geist-sans), -apple-system, system-ui, sans-serif;
   font-feature-settings: "ss01","cv11";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -58,8 +60,8 @@ html, body { background: #fafaf9; color: #18181b; }
   -webkit-tap-highlight-color: rgba(139, 92, 246, .18);
 }
 .pylon-landing * { box-sizing: border-box; }
-.pylon-landing .mono { font-family: "Geist Mono", ui-monospace, monospace; }
-.pylon-landing .serif { font-family: "Instrument Serif", "Times New Roman", serif; font-style: italic; }
+.pylon-landing .mono { font-family: var(--font-geist-mono), ui-monospace, monospace; }
+.pylon-landing .serif { font-family: var(--font-instrument-serif), "Times New Roman", serif; font-style: italic; }
 .pylon-landing a { color: inherit; text-decoration: none; }
 .pylon-landing button { font-family: inherit; cursor: pointer; }
 .pylon-landing a, .pylon-landing button { touch-action: manipulation; }
@@ -107,7 +109,7 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .nav-github svg { display: block; }
 .pylon-landing .nav-github .nav-github-stars {
-  font-family: "Geist Mono", monospace;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 12px;
   letter-spacing: -.01em;
 }
@@ -133,7 +135,7 @@ html, body { background: #fafaf9; color: #18181b; }
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 4px;
   background: var(--bg-alt); color: var(--text-3); font-size: 11px;
-  font-family: "Geist Mono", monospace; border: 1px solid var(--line-2);
+  font-family: var(--font-geist-mono), ui-monospace, monospace; border: 1px solid var(--line-2);
   box-shadow: 0 1px 0 var(--line-2);
 }
 
@@ -178,7 +180,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .nav.menu-open .nav-sheet { display: flex; }
 
 /* === HERO === */
-.pylon-landing .hero { padding: 96px 0 0; position: relative; overflow: hidden; }
+.pylon-landing .hero { padding: 64px 0 0; position: relative; overflow: hidden; }
 .pylon-landing .hero-grid-bg {
   position: absolute; inset: 0;
   background-image:
@@ -207,11 +209,11 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .hero-tag .arrow { color: var(--text-3); margin-left: 4px; }
 .pylon-landing h1.h1 {
-  font-size: clamp(44px, 5.4vw, 76px);
-  line-height: 1.02;
-  letter-spacing: -.045em;
+  font-size: clamp(40px, 4.8vw, 64px);
+  line-height: 1.04;
+  letter-spacing: -.04em;
   font-weight: 600;
-  margin: 0 0 24px;
+  margin: 0 0 18px;
   color: var(--ink);
   /* Relaxed from 12ch — the new H1 ("TypeScript apps.") doesn't fit
      in 12ch and forced an extra wrap that gave the hero column three
@@ -221,9 +223,9 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing h1.h1 .serif { color: var(--text-2); font-weight: 400; letter-spacing: -.02em; }
 .pylon-landing .hero p.lede {
-  font-size: 20px; line-height: 1.45;
+  font-size: 18px; line-height: 1.45;
   max-width: 560px; color: var(--text-2);
-  margin: 0 0 36px;
+  margin: 0 0 28px;
   letter-spacing: -.005em;
 }
 .pylon-landing .hero p.lede b { color: var(--ink); font-weight: 500; }
@@ -291,7 +293,7 @@ html, body { background: #fafaf9; color: #18181b; }
   box-shadow: 0 0 0 3px rgba(22,163,74,.18);
 }
 .pylon-landing .hero-ship-badge .ver {
-  font-family: "Geist Mono", monospace;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 12px; color: var(--ink); font-weight: 500;
 }
 .pylon-landing .hero-ship-badge .sep { color: var(--text-3); }
@@ -301,7 +303,7 @@ html, body { background: #fafaf9; color: #18181b; }
   display: inline-flex; align-items: center; gap: 10px;
   background: var(--bg-card); border: 1px solid var(--line-2);
   padding: 7px 12px 7px 14px; border-radius: 8px;
-  font-family: "Geist Mono", monospace; font-size: 13px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 13px;
   color: var(--text); box-shadow: var(--shadow-sm);
   max-width: 100%;
   min-width: 0;
@@ -413,7 +415,7 @@ html, body { background: #fafaf9; color: #18181b; }
   flex: 1; max-width: 460px; height: 28px; border-radius: 6px;
   background: var(--bg-alt); border: 1px solid var(--line);
   display: flex; align-items: center; gap: 8px; padding: 0 12px;
-  font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2);
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; color: var(--text-2);
 }
 .pylon-landing .product-chrome .url::before {
   content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--pos); flex-shrink: 0; box-shadow: 0 0 0 3px var(--pos-soft);
@@ -422,7 +424,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .product-chrome .right .badge {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 8px; border-radius: 999px; background: var(--pos-soft); color: var(--pos);
-  font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; font-weight: 500;
 }
 .pylon-landing .product-chrome .right .badge::before {
   content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pos); animation: pylon-pulse 1.4s ease-in-out infinite;
@@ -437,7 +439,7 @@ html, body { background: #fafaf9; color: #18181b; }
 }
 .pylon-landing .app-side .group { margin-bottom: 18px; }
 .pylon-landing .app-side h6 {
-  font-family: "Geist Mono", monospace; font-size: 10.5px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 10.5px;
   text-transform: uppercase; letter-spacing: .12em;
   color: var(--text-3); margin: 0 6px 8px; font-weight: 500;
 }
@@ -453,11 +455,11 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .app-side li.active .dot { background: var(--accent); }
 .pylon-landing .app-side li .glyph { width: 14px; height: 14px; flex-shrink: 0; opacity: .6; background: currentColor; border-radius: 3px; }
 .pylon-landing .app-side li.active .glyph { opacity: 1; }
-.pylon-landing .app-side li .count { margin-left: auto; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); }
+.pylon-landing .app-side li .count { margin-left: auto; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); }
 .pylon-landing .app-side li.active .count { color: rgba(255,255,255,.5); }
 
 .pylon-landing .app-main { padding: 22px 26px; min-width: 0; }
-.pylon-landing .app-main .crumb { font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--text-3); display: flex; align-items: center; gap: 6px; }
+.pylon-landing .app-main .crumb { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11.5px; color: var(--text-3); display: flex; align-items: center; gap: 6px; }
 .pylon-landing .app-main .crumb b { color: var(--text); font-weight: 500; }
 .pylon-landing .app-main h2.app-title {
   font-size: 22px; letter-spacing: -.02em; font-weight: 600;
@@ -467,7 +469,7 @@ html, body { background: #fafaf9; color: #18181b; }
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--pos-soft); color: var(--pos);
   padding: 3px 9px; border-radius: 999px;
-  font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; font-weight: 500;
   letter-spacing: .02em;
 }
 .pylon-landing .app-main h2.app-title .live::before {
@@ -480,16 +482,16 @@ html, body { background: #fafaf9; color: #18181b; }
   padding: 14px 14px 12px; background: var(--bg-card);
   position: relative; overflow: hidden;
 }
-.pylon-landing .metric .label { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; }
+.pylon-landing .metric .label { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; }
 .pylon-landing .metric .num { font-size: 26px; font-weight: 600; letter-spacing: -.02em; margin-top: 6px; }
-.pylon-landing .metric .delta { font-size: 11.5px; color: var(--pos); margin-top: 2px; font-family: "Geist Mono", monospace; }
+.pylon-landing .metric .delta { font-size: 11.5px; color: var(--pos); margin-top: 2px; font-family: var(--font-geist-mono), ui-monospace, monospace; }
 .pylon-landing .metric .spark { position: absolute; right: 10px; bottom: 10px; width: 64px; height: 22px; }
 
 .pylon-landing .tbl { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--bg-card); }
 .pylon-landing .tbl-head {
   display: grid; grid-template-columns: 1.4fr 1.2fr .8fr .8fr .8fr;
   padding: 10px 14px; background: var(--bg-alt);
-  font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3);
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3);
   text-transform: uppercase; letter-spacing: .08em;
   border-bottom: 1px solid var(--line);
 }
@@ -507,13 +509,13 @@ html, body { background: #fafaf9; color: #18181b; }
   100% { background: transparent; }
 }
 .pylon-landing .tbl-head > *, .pylon-landing .tbl-row > * { min-width: 0; }
-.pylon-landing .tbl-row .id { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pylon-landing .tbl-row .id { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pylon-landing .tbl-row .name { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pylon-landing .tbl-row .avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-alt); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-2); font-weight: 500; }
 .pylon-landing .status-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 2px 8px; border-radius: 999px;
-  font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; font-weight: 500;
 }
 .pylon-landing .status-pill.paid { background: var(--pos-soft); color: var(--pos); }
 .pylon-landing .status-pill.pending { background: #fff7e6; color: #b45309; }
@@ -526,11 +528,11 @@ html, body { background: #fafaf9; color: #18181b; }
   display: flex; flex-direction: column; gap: 16px;
 }
 .pylon-landing .aside-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
-.pylon-landing .aside-title .ws { font-family: "Geist Mono", monospace; font-size: 10.5px; color: var(--text-3); margin-left: auto; background: var(--bg-alt); padding: 2px 7px; border-radius: 4px; }
+.pylon-landing .aside-title .ws { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 10.5px; color: var(--text-3); margin-left: auto; background: var(--bg-alt); padding: 2px 7px; border-radius: 4px; }
 .pylon-landing .code-mini {
   background: var(--code-bg); color: var(--code-text);
   border-radius: 10px; padding: 14px;
-  font-family: "Geist Mono", monospace; font-size: 12px; line-height: 1.65;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; line-height: 1.65;
   border: 1px solid #1c1c22;
   position: relative; overflow: hidden;
 }
@@ -552,14 +554,14 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .events-panel { border: 1px solid var(--line); border-radius: 10px; background: var(--bg-card); padding: 12px 14px; }
 .pylon-landing .events-panel .head {
   display: flex; justify-content: space-between; align-items: center;
-  font-family: "Geist Mono", monospace; font-size: 11px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px;
   color: var(--text-3); text-transform: uppercase; letter-spacing: .08em;
   margin-bottom: 10px;
 }
 .pylon-landing .events-panel .head b { color: var(--text); font-weight: 500; }
 .pylon-landing .event {
   display: grid; grid-template-columns: 56px 1fr auto;
-  font-family: "Geist Mono", monospace; font-size: 11.5px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11.5px;
   padding: 4px 0; gap: 10px; align-items: baseline;
   border-bottom: 1px dashed var(--line);
 }
@@ -570,36 +572,36 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .event .v { color: var(--text); font-weight: 500; }
 
 .pylon-landing .logos { margin-top: 96px; padding: 36px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.pylon-landing .logos .label { text-align: center; font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: .12em; color: var(--text-3); text-transform: uppercase; margin-bottom: 28px; }
+.pylon-landing .logos .label { text-align: center; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; letter-spacing: .12em; color: var(--text-3); text-transform: uppercase; margin-bottom: 28px; }
 .pylon-landing .logos .row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 36px; align-items: center; }
 .pylon-landing .logo-faux { text-align: center; font-weight: 600; font-size: 16px; color: var(--text-3); letter-spacing: -.02em; opacity: .85; display: flex; align-items: center; justify-content: center; gap: 8px; }
 .pylon-landing .logo-faux .glyph { width: 18px; height: 18px; border-radius: 4px; background: currentColor; opacity: .35; }
 
 /* === SECTIONS === */
-.pylon-landing section.block { padding: 128px 0; position: relative; border-bottom: 1px solid var(--line); }
+.pylon-landing section.block { padding: 88px 0; position: relative; border-bottom: 1px solid var(--line); }
 .pylon-landing .eyebrow {
   display: inline-flex; align-items: center; gap: 8px;
-  font-family: "Geist Mono", monospace; font-size: 11.5px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11.5px;
   color: var(--accent); text-transform: uppercase; letter-spacing: .14em; font-weight: 500;
 }
 .pylon-landing .eyebrow::before { content: ""; width: 14px; height: 1px; background: var(--accent); }
 .pylon-landing h2.h2 {
-  font-size: clamp(38px, 4.4vw, 60px);
-  letter-spacing: -.035em; line-height: 1.02;
+  font-size: clamp(32px, 3.6vw, 48px);
+  letter-spacing: -.03em; line-height: 1.04;
   font-weight: 600; color: var(--ink);
-  margin: 16px 0 18px; max-width: 22ch;
+  margin: 12px 0 14px; max-width: 22ch;
 }
 .pylon-landing h2.h2 .serif { color: var(--text-2); font-weight: 400; }
-.pylon-landing .section-lede { font-size: 18.5px; color: var(--text-2); line-height: 1.5; max-width: 620px; letter-spacing: -.005em; }
+.pylon-landing .section-lede { font-size: 17px; color: var(--text-2); line-height: 1.5; max-width: 620px; letter-spacing: -.005em; }
 
 /* === FEATURES === */
-.pylon-landing .feature-row { display: grid; grid-template-columns: 1fr 1.2fr; gap: 80px; align-items: center; margin-top: 88px; }
+.pylon-landing .feature-row { display: grid; grid-template-columns: 1fr 1.2fr; gap: 56px; align-items: center; margin-top: 56px; }
 .pylon-landing .feature-row.flip { grid-template-columns: 1.2fr 1fr; }
 .pylon-landing .feature-row.flip .feature-copy { order: 2; }
 .pylon-landing .feature-row.flip .feature-art { order: 1; }
 .pylon-landing .feature-copy h3 {
-  font-size: 32px; letter-spacing: -.025em; font-weight: 600;
-  margin: 14px 0 16px; color: var(--ink); line-height: 1.08;
+  font-size: 26px; letter-spacing: -.025em; font-weight: 600;
+  margin: 10px 0 12px; color: var(--ink); line-height: 1.1;
 }
 .pylon-landing .feature-copy p { font-size: 16px; line-height: 1.55; color: var(--text-2); margin: 0 0 24px; }
 .pylon-landing .feature-bullets { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 14px; }
@@ -613,18 +615,18 @@ html, body { background: #fafaf9; color: #18181b; }
   position: relative;
   margin-top: 2px;
 }
-.pylon-landing .tiny-tag { display: inline-flex; align-items: center; gap: 6px; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
+.pylon-landing .tiny-tag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
 
 .pylon-landing .art { border: 1px solid var(--line-2); border-radius: 14px; background: var(--bg-card); box-shadow: var(--shadow-md); overflow: hidden; position: relative; }
 
 /* schema editor art */
 .pylon-landing .schema-art { padding: 0; }
 .pylon-landing .schema-tabs { display: flex; border-bottom: 1px solid var(--line); background: var(--bg-alt); padding: 0 12px; }
-.pylon-landing .schema-tabs .tab { padding: 10px 14px; font-size: 12px; font-family: "Geist Mono", monospace; color: var(--text-3); border-bottom: 2px solid transparent; }
+.pylon-landing .schema-tabs .tab { padding: 10px 14px; font-size: 12px; font-family: var(--font-geist-mono), ui-monospace, monospace; color: var(--text-3); border-bottom: 2px solid transparent; }
 .pylon-landing .schema-tabs .tab.on { color: var(--text); border-color: var(--accent); background: var(--bg-card); position: relative; top: 1px; }
 .pylon-landing .schema-body { display: grid; grid-template-columns: 36px 1fr; min-height: 360px; }
-.pylon-landing .schema-gutter { background: var(--bg-alt); border-right: 1px solid var(--line); font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); padding: 14px 8px; text-align: right; line-height: 1.65; }
-.pylon-landing .schema-code { font-family: "Geist Mono", monospace; font-size: 12.5px; line-height: 1.65; padding: 14px 16px; color: var(--text); background: var(--bg-card); }
+.pylon-landing .schema-gutter { background: var(--bg-alt); border-right: 1px solid var(--line); font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); padding: 14px 8px; text-align: right; line-height: 1.65; }
+.pylon-landing .schema-code { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12.5px; line-height: 1.65; padding: 14px 16px; color: var(--text); background: var(--bg-card); }
 .pylon-landing .schema-code pre { overflow-x: auto; }
 .pylon-landing .schema-code .k { color: #a155b9; }
 .pylon-landing .schema-code .s { color: #2e7d32; }
@@ -635,7 +637,7 @@ html, body { background: #fafaf9; color: #18181b; }
 
 /* live query art */
 .pylon-landing .live-art { padding: 22px 22px 24px; }
-.pylon-landing .live-art h5 { margin: 0 0 12px; font-size: 12px; font-family: "Geist Mono", monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); display: flex; align-items: center; gap: 8px; }
+.pylon-landing .live-art h5 { margin: 0 0 12px; font-size: 12px; font-family: var(--font-geist-mono), ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); display: flex; align-items: center; gap: 8px; }
 .pylon-landing .live-art h5 .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--pos); box-shadow: 0 0 0 3px var(--pos-soft); animation: pylon-pulse 1.4s infinite; }
 .pylon-landing .live-art .chart {
   height: 160px; border-bottom: 1px solid var(--line);
@@ -643,9 +645,9 @@ html, body { background: #fafaf9; color: #18181b; }
   background: linear-gradient(transparent 49.5%, rgba(231,229,226,.6) 50%, transparent 50.5%) 0 0/100% 25%;
 }
 .pylon-landing .live-art .chart svg { width: 100%; height: 100%; }
-.pylon-landing .live-art .legend { display: flex; justify-content: space-between; padding: 10px 0 0; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); }
+.pylon-landing .live-art .legend { display: flex; justify-content: space-between; padding: 10px 0 0; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); }
 .pylon-landing .live-art .row-set { margin-top: 14px; display: grid; gap: 6px; }
-.pylon-landing .live-art .row-set .r { display: grid; grid-template-columns: 80px 1fr 70px; font-family: "Geist Mono", monospace; font-size: 12px; padding: 6px 10px; border-radius: 6px; background: var(--bg-alt); align-items: center; }
+.pylon-landing .live-art .row-set .r { display: grid; grid-template-columns: 80px 1fr 70px; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; padding: 6px 10px; border-radius: 6px; background: var(--bg-alt); align-items: center; }
 .pylon-landing .live-art .row-set .r .id { color: var(--text-2); }
 .pylon-landing .live-art .row-set .r .lbl { color: var(--text); }
 .pylon-landing .live-art .row-set .r .v { color: var(--accent); text-align: right; font-weight: 500; }
@@ -653,11 +655,11 @@ html, body { background: #fafaf9; color: #18181b; }
 /* policies art */
 .pylon-landing .policy-art { padding: 22px; }
 .pylon-landing .policy-art .pcard { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; display: grid; grid-template-columns: 22px 1fr auto; gap: 12px; align-items: center; background: var(--bg-card); }
-.pylon-landing .policy-art .pcard .ic { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-deep); display: inline-flex; align-items: center; justify-content: center; font-family: "Geist Mono", monospace; font-size: 12px; font-weight: 600; }
+.pylon-landing .policy-art .pcard .ic { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-deep); display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; font-weight: 600; }
 .pylon-landing .policy-art .pcard .name { font-weight: 500; font-size: 14px; }
-.pylon-landing .policy-art .pcard .rule { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.pylon-landing .policy-art .pcard .rule { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; color: var(--text-2); margin-top: 2px; }
 .pylon-landing .policy-art .pcard .rule em { color: var(--accent); font-style: normal; background: var(--accent-soft); padding: 0 4px; border-radius: 3px; }
-.pylon-landing .policy-art .pcard .badge { font-family: "Geist Mono", monospace; font-size: 11px; padding: 3px 7px; border-radius: 999px; background: var(--pos-soft); color: var(--pos); font-weight: 500; }
+.pylon-landing .policy-art .pcard .badge { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; padding: 3px 7px; border-radius: 999px; background: var(--pos-soft); color: var(--pos); font-weight: 500; }
 
 /* === PRIMITIVES GRID === */
 .pylon-landing .prims { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 72px; border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
@@ -675,45 +677,45 @@ html, body { background: #fafaf9; color: #18181b; }
   width: 36px; height: 36px; border-radius: 8px;
   background: var(--bg-alt); border: 1px solid var(--line-2);
   display: flex; align-items: center; justify-content: center;
-  font-family: "Geist Mono", monospace; font-size: 13px; color: var(--text);
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 13px; color: var(--text);
   font-weight: 500;
 }
-.pylon-landing .prim .tag { font-family: "Geist Mono", monospace; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--bg-alt); }
+.pylon-landing .prim .tag { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--bg-alt); }
 .pylon-landing .prim .tag.game { color: var(--accent); background: var(--accent-soft); }
 .pylon-landing .prim h4 { font-size: 18px; letter-spacing: -.015em; font-weight: 600; margin: 0 0 6px; }
 .pylon-landing .prim p { font-size: 13.5px; color: var(--text-2); line-height: 1.5; margin: 0; }
-.pylon-landing .prim p code { font-family: "Geist Mono", monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
+.pylon-landing .prim p code { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
 
 /* === DEPLOY LANES === */
 .pylon-landing .lanes { margin-top: 64px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-card); }
 .pylon-landing .lane { padding: 28px 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; position: relative; transition: background .2s ease; }
 .pylon-landing .lane:last-child { border-right: none; }
 .pylon-landing .lane:hover { background: #fdfcfa; }
-.pylon-landing .lane .top { display: flex; justify-content: space-between; align-items: center; font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; }
+.pylon-landing .lane .top { display: flex; justify-content: space-between; align-items: center; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; }
 .pylon-landing .lane .top .num { color: var(--accent); font-weight: 500; }
 .pylon-landing .lane h4 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; margin: 6px 0 4px; }
-.pylon-landing .lane .cmd { font-family: "Geist Mono", monospace; font-size: 12.5px; background: var(--code-bg); color: var(--code-green); padding: 7px 11px; border-radius: 6px; align-self: flex-start; margin: 4px 0; }
+.pylon-landing .lane .cmd { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12.5px; background: var(--code-bg); color: var(--code-green); padding: 7px 11px; border-radius: 6px; align-self: flex-start; margin: 4px 0; }
 .pylon-landing .lane p { font-size: 13.5px; color: var(--text-2); line-height: 1.5; margin: 0; }
-.pylon-landing .lane .footer-line { margin-top: auto; padding-top: 18px; border-top: 1px dashed var(--line); font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; align-items: center; letter-spacing: .04em; }
+.pylon-landing .lane .footer-line { margin-top: auto; padding-top: 18px; border-top: 1px dashed var(--line); font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); display: flex; justify-content: space-between; align-items: center; letter-spacing: .04em; }
 
 /* === COMPARE === */
 .pylon-landing .compare-wrap { margin-top: 64px; }
 .pylon-landing .compare { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--bg-card); }
 .pylon-landing .compare table { width: 100%; border-collapse: collapse; }
 .pylon-landing .compare th, .pylon-landing .compare td { padding: 16px 20px; text-align: left; font-size: 14px; border-bottom: 1px solid var(--line); }
-.pylon-landing .compare thead th { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; font-weight: 500; background: var(--bg-alt); }
+.pylon-landing .compare thead th { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; font-weight: 500; background: var(--bg-alt); }
 .pylon-landing .compare th.us, .pylon-landing .compare td.us { background: linear-gradient(180deg, #faf8ff, #f1edff); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); }
 .pylon-landing .compare thead th.us { color: var(--accent-deep); font-weight: 600; border-top: 2px solid var(--accent); }
 .pylon-landing .compare tbody tr:last-child td { border-bottom: none; }
 .pylon-landing .compare td.label { color: var(--ink); font-weight: 500; }
-.pylon-landing .compare td .ind { display: inline-flex; align-items: center; gap: 6px; font-family: "Geist Mono", monospace; font-size: 12px; color: var(--text-2); }
+.pylon-landing .compare td .ind { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; color: var(--text-2); }
 .pylon-landing .dot-yes { width: 8px; height: 8px; border-radius: 50%; background: var(--pos); }
 .pylon-landing .dot-part { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(90deg, var(--pos) 50%, var(--line) 50%); border: 1px solid var(--line-2); }
 .pylon-landing .dot-no { width: 8px; height: 8px; border-radius: 50%; background: transparent; border: 1px solid var(--line-2); }
 
 /* === BIG QUOTE / PHILOSOPHY === */
 .pylon-landing .philo { padding: 144px 0; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--bg), var(--bg-alt)); }
-.pylon-landing .philo .quote { font-size: clamp(34px, 3.6vw, 52px); line-height: 1.12; letter-spacing: -.025em; font-weight: 500; max-width: 18ch; color: var(--ink); }
+.pylon-landing .philo .quote { font-size: clamp(28px, 3vw, 42px); line-height: 1.14; letter-spacing: -.025em; font-weight: 500; max-width: 18ch; color: var(--ink); }
 .pylon-landing .philo .quote .serif { color: var(--accent); }
 .pylon-landing .philo .who { margin-top: 36px; display: flex; align-items: center; gap: 14px; font-size: 14px; color: var(--text-2); }
 .pylon-landing .philo .who .ava { width: 40px; height: 40px; border-radius: 50%; background: var(--ink); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; letter-spacing: -.01em; }
@@ -724,7 +726,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .qs-term {
   background: var(--code-bg); color: var(--code-text);
   border-radius: 14px; overflow: hidden; border: 1px solid #1c1c22;
-  font-family: "Geist Mono", monospace; font-size: 13px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 13px;
   position: relative;
   box-shadow: var(--shadow-md);
 }
@@ -741,13 +743,13 @@ html, body { background: #fafaf9; color: #18181b; }
 
 .pylon-landing .qs-steps { display: flex; flex-direction: column; gap: 14px; }
 .pylon-landing .qs-step { border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; background: var(--bg-card); display: grid; grid-template-columns: 28px 1fr; gap: 14px; align-items: flex-start; }
-.pylon-landing .qs-step .n { font-family: "Geist Mono", monospace; font-size: 12px; color: var(--accent); margin-top: 2px; }
+.pylon-landing .qs-step .n { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; color: var(--accent); margin-top: 2px; }
 .pylon-landing .qs-step h5 { margin: 0 0 6px; font-size: 16px; font-weight: 600; letter-spacing: -.015em; }
 .pylon-landing .qs-step p { margin: 0; font-size: 13.5px; color: var(--text-2); line-height: 1.5; }
-.pylon-landing .qs-step p code { font-family: "Geist Mono", monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
+.pylon-landing .qs-step p code { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
 
 /* === BIG CTA === */
-.pylon-landing .cta-block { position: relative; padding: 96px 0 112px; text-align: left; overflow: hidden; background: var(--ink); color: #f3f3f4; }
+.pylon-landing .cta-block { position: relative; padding: 64px 0 80px; text-align: left; overflow: hidden; background: var(--ink); color: #f3f3f4; }
 .pylon-landing .cta-block .bg-grid {
   position: absolute; inset: 0;
   background-image:
@@ -761,7 +763,7 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .cta-block .inner { position: relative; max-width: 900px; }
 .pylon-landing .cta-block .eyebrow { color: var(--accent); }
 .pylon-landing .cta-block .eyebrow::before { background: var(--accent); }
-.pylon-landing .cta-block h2 { font-size: clamp(44px, 5.2vw, 72px); letter-spacing: -.04em; line-height: 1; font-weight: 600; margin: 18px 0; color: #fff; }
+.pylon-landing .cta-block h2 { font-size: clamp(36px, 4.2vw, 56px); letter-spacing: -.035em; line-height: 1.02; font-weight: 600; margin: 12px 0; color: #fff; }
 .pylon-landing .cta-block h2 .serif { color: rgba(255,255,255,.55); }
 .pylon-landing .cta-block p { font-size: 18px; color: rgba(255,255,255,.65); max-width: 560px; line-height: 1.5; margin: 0 0 32px; }
 .pylon-landing .cta-block .ctas { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -774,12 +776,12 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .foot-grid { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 40px; }
 .pylon-landing .foot-grid .brand-col { padding-right: 40px; }
 .pylon-landing .foot-grid .brand-col p { font-size: 13.5px; color: var(--text-2); line-height: 1.55; margin: 12px 0 0; max-width: 320px; }
-.pylon-landing .foot-grid h6 { font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 0 0 14px; font-weight: 500; }
+.pylon-landing .foot-grid h6 { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 0 0 14px; font-weight: 500; }
 .pylon-landing .foot-grid ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 9px; }
 .pylon-landing .foot-grid li { font-size: 13.5px; }
 .pylon-landing .foot-grid li a { color: var(--text-2); transition: color .15s ease; }
 .pylon-landing .foot-grid li a:hover { color: var(--accent); }
-.pylon-landing .foot-meta { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--text-3); }
+.pylon-landing .foot-meta { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11.5px; color: var(--text-3); }
 .pylon-landing .foot-meta .status { display: inline-flex; align-items: center; gap: 8px; }
 .pylon-landing .foot-meta .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--pos); box-shadow: 0 0 0 3px var(--pos-soft); }
 
@@ -1354,12 +1356,6 @@ export function LandingPage({
 
 	return (
 		<>
-			<link rel="preconnect" href="https://fonts.googleapis.com" />
-			<link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-			<link
-				href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap"
-				rel="stylesheet"
-			/>
 			<style dangerouslySetInnerHTML={{ __html: DESIGN_CSS }} />
 			<div className="pylon-landing">
 				{/* NAV */}
