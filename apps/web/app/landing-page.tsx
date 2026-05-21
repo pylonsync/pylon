@@ -18,27 +18,32 @@ import { PylonMark } from "@/components/pylon-logo";
 // surface.
 
 const DESIGN_CSS = `
-/* The marketing app's globals.css paints the page dark by default for
-   the rest of the site. The landing is the bright outlier — pin html
-   and body to the warm paper bg so the canvas matches the design. */
-html, body { background: #fafaf9; color: #18181b; }
+/* Dark-mode landing. Pin html + body to the page bg so the
+   canvas doesn't flash white on initial paint. */
+html, body { background: #0a0a0c; color: #ededee; }
 
 .pylon-landing {
-  --bg: #fafaf9;
-  --bg-alt: #f4f3f0;
-  --bg-card: #ffffff;
-  --ink: #0a0a0b;
-  --ink-2: #1a1a1d;
-  --text: #18181b;
-  --text-2: #52525b;
-  --text-3: #a1a1aa;
-  --line: #e7e5e2;
-  --line-2: #d4d4d0;
-  --accent: #8B5CF6;
-  --accent-soft: #f5f3ff;
-  --accent-deep: #7C3AED;
-  --pos: #16a34a;
-  --pos-soft: #e7f6ec;
+  /* Dark-mode token set. The previous light tokens are inverted
+     point-for-point: --bg goes near-black, --ink (the strongest
+     text color, originally near-black) goes near-white, etc.
+     The accent (purple) shifts ~one step brighter so it reads
+     with enough contrast on the dark canvas — same hue, more
+     luminance. The brand stays recognizable. */
+  --bg: #0a0a0c;
+  --bg-alt: #131318;
+  --bg-card: #16161c;
+  --ink: #fafafa;
+  --ink-2: #ededee;
+  --text: #ededee;
+  --text-2: #a1a1aa;
+  --text-3: #71717a;
+  --line: rgba(255,255,255,.08);
+  --line-2: rgba(255,255,255,.14);
+  --accent: #a78bfa;
+  --accent-soft: rgba(167,139,250,.12);
+  --accent-deep: #c4b5fd;
+  --pos: #4ade80;
+  --pos-soft: rgba(74,222,128,.14);
   --code-bg: #0c0c0f;
   --code-text: #ededee;
   --code-mute: #71717a;
@@ -48,9 +53,13 @@ html, body { background: #fafaf9; color: #18181b; }
   --code-orange: #ffb86b;
   --code-red: #ff7b8a;
   --code-yellow: #ffd76b;
-  --shadow-sm: 0 1px 2px rgba(15,15,20,.04), 0 1px 1px rgba(15,15,20,.02);
-  --shadow-md: 0 8px 24px -8px rgba(15,15,20,.10), 0 2px 6px rgba(15,15,20,.04);
-  --shadow-lg: 0 24px 48px -16px rgba(15,15,20,.18), 0 4px 12px rgba(15,15,20,.06);
+  /* Shadows in dark mode are mostly subtle highlights — a dark
+     drop shadow on a dark surface disappears, so we use a
+     near-black with low alpha + an inner highlight via the
+     box-shadow second value. */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.40), 0 0 0 1px rgba(255,255,255,.02);
+  --shadow-md: 0 8px 24px -8px rgba(0,0,0,.50), 0 2px 6px rgba(0,0,0,.30);
+  --shadow-lg: 0 24px 48px -16px rgba(0,0,0,.60), 0 4px 12px rgba(0,0,0,.30);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-geist-sans), -apple-system, system-ui, sans-serif;
@@ -78,9 +87,9 @@ html, body { background: #fafaf9; color: #18181b; }
 /* === NAV === */
 .pylon-landing .nav {
   position: sticky; top: 0; z-index: 50;
-  background: rgba(250, 250, 249, .82);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  background: rgba(10, 10, 12, .72);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
   border-bottom: 1px solid var(--line);
 }
 .pylon-landing .nav-inner { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; }
@@ -128,8 +137,14 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .btn.ghost:hover { color: var(--text); background: var(--bg-alt); }
 .pylon-landing .btn.line { border-color: var(--line-2); color: var(--text); background: var(--bg-card); }
 .pylon-landing .btn.line:hover { border-color: var(--ink); box-shadow: var(--shadow-sm); }
-.pylon-landing .btn.dark { background: var(--ink); color: #fff; border-color: var(--ink); }
-.pylon-landing .btn.dark:hover { background: #000; box-shadow: 0 4px 14px rgba(0,0,0,.20); }
+/* "dark" used to mean "high-contrast button vs. the cream
+   canvas." In dark-mode --ink is now near-white, so the bg is
+   right but the text needs to flip dark for legibility. The
+   hover state pumps the bg toward pure white + adds the
+   accent's purple ambient glow rather than a black shadow
+   (which is invisible on dark anyway). */
+.pylon-landing .btn.dark { background: var(--ink); color: #0a0a0c; border-color: var(--ink); }
+.pylon-landing .btn.dark:hover { background: #fff; box-shadow: 0 4px 14px rgba(167,139,250,.22); }
 .pylon-landing .btn.accent { background: var(--accent); color: #fff; border-color: var(--accent); }
 .pylon-landing .btn.accent:hover { background: var(--accent-deep); border-color: var(--accent-deep); box-shadow: 0 4px 14px rgba(139,92,246,.28); }
 .pylon-landing .kbd {
@@ -803,7 +818,13 @@ html, body { background: #fafaf9; color: #18181b; }
 .pylon-landing .qs-step p code { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
 
 /* === BIG CTA === */
-.pylon-landing .cta-block { position: relative; padding: 64px 0 80px; text-align: left; overflow: hidden; background: var(--ink); color: #f3f3f4; }
+/* In dark mode this is a deeper well rather than the inverse
+   surface it was in light mode — page bg is #0a0a0c, the CTA
+   block drops one notch to #050507 so it reads as the final
+   "step down" before the footer. The accent-glow + grid mask
+   keep the section visually distinct without needing a color
+   inversion. */
+.pylon-landing .cta-block { position: relative; padding: 64px 0 80px; text-align: left; overflow: hidden; background: #050507; color: #f3f3f4; border-top: 1px solid var(--line); }
 .pylon-landing .cta-block .bg-grid {
   position: absolute; inset: 0;
   background-image:
@@ -1291,18 +1312,21 @@ html, body { background: #fafaf9; color: #18181b; }
 /// visitors expect TS first), then we rotate through the other
 /// platforms Pylon ships first-class SDKs for.
 const LANGS: ReadonlyArray<{ name: string; bg: string; fg: string }> = [
-	// TypeScript — deep blue (#3178c6)
-	{ name: "TypeScript", bg: "#e7eef9", fg: "#1f54a8" },
-	// Swift — Apple orange (#f05138)
-	{ name: "Swift", bg: "#fdece4", fg: "#b8431a" },
-	// React — atom cyan (#149eca, a deeper take on the brand cyan
-	// so it doesn't wash out on the cream bg)
-	{ name: "React", bg: "#e0f1f8", fg: "#0c7aa5" },
+	// Pill colors for dark-mode bg (#0a0a0c). Pattern: each pill's
+	// `bg` is a low-alpha tint of the brand hue (reads as soft
+	// glow on the canvas), `fg` is a high-luminance step on the
+	// same hue so the text remains crisp.
+	// TypeScript — TS blue
+	{ name: "TypeScript", bg: "rgba(49,120,198,.18)", fg: "#7eb6ff" },
+	// Swift — Apple orange
+	{ name: "Swift", bg: "rgba(240,81,56,.20)", fg: "#ff9b78" },
+	// React — atom cyan
+	{ name: "React", bg: "rgba(97,218,251,.16)", fg: "#7adcf0" },
 	// React Native — purple-blue, distinct from React proper
-	{ name: "React Native", bg: "#ebe6f9", fg: "#5a3fc0" },
-	// Next.js — graphite black; tone it down with a near-white
-	// pill so it doesn't read as a CTA button
-	{ name: "Next.js", bg: "#ececec", fg: "#0a0a0a" },
+	{ name: "React Native", bg: "rgba(167,139,250,.20)", fg: "#cdbafe" },
+	// Next.js — graphite; soft-white pill so it doesn't read as
+	// a CTA button against the dark canvas.
+	{ name: "Next.js", bg: "rgba(255,255,255,.10)", fg: "#fafafa" },
 ] as const;
 
 /// "React Native" is the longest entry — used as the ghost
@@ -1541,10 +1565,13 @@ export function LandingPage({
 										// host so the chrome itself (bg + border) cross-fades
 										// when the language changes, separately from the
 										// word fade-up below. CSS transition on the pill
-										// smooths the color swap.
+										// smooths the color swap. Border color reuses the
+										// pill's bg (which is already low-alpha brand tint),
+										// giving a 1px halo without needing to derive
+										// alpha math from the fg.
 										background: LANGS[langIdx]!.bg,
 										color: LANGS[langIdx]!.fg,
-										borderColor: `${LANGS[langIdx]!.fg}33`,
+										borderColor: LANGS[langIdx]!.bg,
 									}}
 								>
 									{/* Ghost: claims the pill's width based on the
