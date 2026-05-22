@@ -1009,11 +1009,21 @@ impl<'a> Parser<'a> {
             }
             // RHS uses the full atom grammar — strings, nulls, bare
             // paths into auth/data/input. We DON'T allow nested
-            // `exists` or function calls here (caught downstream when
-            // the parser sees unexpected tokens).
+            // `exists` here: a nested exists() would fire one
+            // additional DB query per evaluation, and the codex
+            // Wave-3 review (Wave-3 #2) found that the MAX_PARSE_DEPTH
+            // cap of 64 multiplied by per-row evaluation in
+            // check_entity_scan could land a malicious schema's
+            // policy doing 64 * <page_size> DB roundtrips per scan.
+            // Explicit reject here closes that amplifier.
             self.enter()?;
             let rhs = self.parse_or()?;
             self.leave();
+            if ast_contains_exists(&rhs) {
+                return Err(format!(
+                    "exists({entity} where ...): nested exists() in RHS is not supported"
+                ));
+            }
             conditions.push((path, rhs));
 
             match self.peek().cloned() {
@@ -1072,6 +1082,28 @@ impl<'a> Parser<'a> {
             Some(other) => Err(format!("expected atom, got {other:?}")),
             None => Err("unexpected end of expression in atom".into()),
         }
+    }
+}
+
+/// Walk an Ast and return true iff any node is `Ast::Exists`. Used
+/// by `parse_exists_body` to reject nested `exists(...)` in the
+/// RHS of a condition — otherwise a single policy could fan out to
+/// MAX_PARSE_DEPTH × page_size DB queries (codex Wave-3 #2).
+fn ast_contains_exists(ast: &Ast) -> bool {
+    match ast {
+        Ast::Exists { .. } => true,
+        Ast::Not(inner) => ast_contains_exists(inner),
+        Ast::And(l, r) | Ast::Or(l, r) | Ast::Eq(l, r) | Ast::Neq(l, r) => {
+            ast_contains_exists(l) || ast_contains_exists(r)
+        }
+        Ast::True
+        | Ast::False
+        | Ast::HasRole(_)
+        | Ast::HasAnyRole(_)
+        | Ast::Path(_)
+        | Ast::Str(_)
+        | Ast::Null
+        | Ast::Bool(_) => false,
     }
 }
 

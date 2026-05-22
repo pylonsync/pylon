@@ -325,7 +325,12 @@ export function action(
 // ---------------------------------------------------------------------------
 
 export interface PolicyDefinition {
-  name: string;
+  /** Optional — `buildManifest` auto-generates a name from the entity
+   *  + a counter when the fluent `.policies(policy({...}))` chain
+   *  omits one. Explicit names are still recommended for the
+   *  procedural API since they appear in policy-denied error
+   *  messages. */
+  name?: string;
   entity?: string;
   action?: string;
   /**
@@ -580,8 +585,18 @@ export function actionsToManifest(
 export function policiesToManifest(
   policies: PolicyDefinition[]
 ): ManifestPolicy[] {
-  return policies.map((p) => {
-    const result: ManifestPolicy = { name: p.name };
+  return policies.map((p, i) => {
+    const result: ManifestPolicy = {
+      // Final-resort name autogen. `buildManifest` upstream already
+      // names every attached-via-fluent policy, but a caller passing
+      // `policies: [policy({ allowRead: "..." })]` to a custom
+      // manifest builder would slip through with `name: undefined`.
+      // Stamp a unique fallback so the runtime never sees a blank.
+      name:
+        p.name && p.name.length > 0
+          ? p.name
+          : `${(p.entity ?? p.action ?? "unnamed").toLowerCase()}_p${i}`,
+    };
     if (p.allow) result.allow = p.allow;
     if (p.allowRead) result.allowRead = p.allowRead;
     if (p.allowInsert) result.allowInsert = p.allowInsert;
@@ -759,6 +774,33 @@ export function buildManifest(options: {
   policies?: PolicyDefinition[];
   auth?: ManifestAuthConfig;
 }): AppManifest {
+  // Pull policies attached via the fluent `e.entity().policies(...)`
+  // chain onto the top-level policies list. Without this, fluent
+  // apps would register entities without policies and every read
+  // would default-deny. Existing apps using the procedural API
+  // (`entity()` + separate `policy({...})` exports) are unaffected
+  // because `extractAttachedPolicies` returns an empty array for
+  // them. Concat order: top-level policies first (explicit beats
+  // attached), then anything pulled off entities.
+  //
+  // Stamp a name if the fluent caller omitted it — `name` is
+  // technically required on PolicyDefinition but the docs imply you
+  // can `.policies(policy({ allowRead: "..." }))` without one. Auto-
+  // derive from the entity + a counter so two attached policies
+  // don't collide.
+  const attached: PolicyDefinition[] = [];
+  for (const ent of options.entities) {
+    const extracted = extractAttachedPolicies(ent);
+    extracted.forEach((p, i) => {
+      attached.push({
+        ...p,
+        name: p.name && p.name.length > 0
+          ? p.name
+          : `${(p.entity ?? ent.name).toLowerCase()}_attached_${i}`,
+      });
+    });
+  }
+  const allPolicies = [...(options.policies ?? []), ...attached];
   return {
     manifest_version: MANIFEST_VERSION,
     name: options.name,
@@ -767,7 +809,7 @@ export function buildManifest(options: {
     routes: routesToManifest(options.routes),
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),
-    policies: policiesToManifest(options.policies ?? []),
+    policies: policiesToManifest(allPolicies),
     auth: options.auth ?? auth(),
   };
 }
@@ -943,19 +985,47 @@ declare module "./index" {
   // surface declared above.)
 }
 
-// Patch the existing buildField to add default markers. Apps reach
-// the chainables through any returned FieldBuilder — `.default(val)`
-// records a literal, `.defaultNow()` records the `now` marker.
-const __originalBuildField = buildField;
-function buildFieldWithDefaults(def: FieldDefinition & { default?: DefaultMarker }): FieldBuilder & {
-  default(value: unknown): FieldBuilder;
-  defaultNow(): FieldBuilder;
+// Field builder with chainable `.default()` / `.defaultNow()`. All
+// other chainables (`optional`, `unique`, `crdt`, `serverOnly`,
+// `readonly`) are reimplemented here to return another
+// `buildFieldWithDefaults` — without this, calling `.optional()`
+// after `.default()` would drop the default markers off the chain
+// (codex Wave-3 review: the previous `{ ...base, default, defaultNow }`
+// pattern delegated optional/unique to the original buildField which
+// returned a builder lacking `.default()`). Recursion through the
+// same constructor keeps the surface stable regardless of chain
+// order.
+function buildFieldWithDefaults(
+  def: FieldDefinition & {
+    default?: DefaultMarker;
+    enumValues?: readonly string[];
+  },
+): FieldBuilder & {
+  default(value: unknown): ReturnType<typeof buildFieldWithDefaults>;
+  defaultNow(): ReturnType<typeof buildFieldWithDefaults>;
 } {
-  const base = __originalBuildField(def);
   return {
-    ...base,
+    _def: def,
+    optional() {
+      return buildFieldWithDefaults({ ...def, optional: true });
+    },
+    unique() {
+      return buildFieldWithDefaults({ ...def, unique: true });
+    },
+    crdt(annotation) {
+      return buildFieldWithDefaults({ ...def, crdt: annotation });
+    },
+    serverOnly() {
+      return buildFieldWithDefaults({ ...def, serverOnly: true });
+    },
+    readonly() {
+      return buildFieldWithDefaults({ ...def, readonly: true });
+    },
     default(value: unknown) {
-      return buildFieldWithDefaults({ ...def, default: { kind: "value", value } });
+      return buildFieldWithDefaults({
+        ...def,
+        default: { kind: "value", value },
+      });
     },
     defaultNow() {
       return buildFieldWithDefaults({ ...def, default: { kind: "now" } });

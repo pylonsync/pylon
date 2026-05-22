@@ -1224,7 +1224,15 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         // (1) Local WS auth refresh — see method-level docs for why
         // this has to happen before the envelope.
         self.ws.update_tenant_for_user(user_id, tenant_id);
-        // (2) Client-facing envelope.
+        // (2) Reactive subscriptions — they snapshot AuthInfo at
+        // subscribe time and the re-runner reuses that snapshot.
+        // Without this refresh, the codex Wave-3 review caught that
+        // post-flip re-runs keep computing under the OLD tenant
+        // (silently surfacing rows from the org the user just left).
+        if let Some(reactive) = self.reactive.as_ref() {
+            reactive.update_tenant_for_user(user_id, tenant_id);
+        }
+        // (3) Client-facing envelope.
         let envelope = serde_json::json!({
             "type": "session-changed",
             "tenant_id": tenant_id,
@@ -1346,6 +1354,13 @@ pub fn install_cluster_bus_subscriber(
         // against the stale handshake-time tenant.
         if let Some((user_id, tenant_id)) = envelope.as_session_changed() {
             ws_handler.update_tenant_for_user(&user_id, tenant_id.as_deref());
+            // Mirror local-path step (2): reactive subs on this
+            // machine carrying the affected user need their captured
+            // AuthInfo refreshed too. See `notify_session_changed`'s
+            // call site for the security rationale.
+            if let Some(reactive) = reactive_handler.as_ref() {
+                reactive.update_tenant_for_user(&user_id, tenant_id.as_deref());
+            }
             let payload = serde_json::json!({
                 "type": "session-changed",
                 "tenant_id": tenant_id,

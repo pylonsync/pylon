@@ -187,6 +187,50 @@ impl ReactiveRegistry {
         })
     }
 
+    /// Refresh `tenant_id` on every active reactive subscription whose
+    /// captured `auth.user_id` matches. Called by the runtime's
+    /// session-changed hook so re-runs after a /api/auth/select-org
+    /// don't keep executing handlers under the user's pre-flip
+    /// tenant.
+    ///
+    /// Without this, the codex Wave-3 review caught a real security
+    /// gap: `handle_reactive_control` snapshots `AuthInfo` into the
+    /// Subscription struct at subscribe time; the re-runner re-uses
+    /// that snapshot indefinitely. A user who switched orgs would
+    /// keep receiving reactive results computed against the OLD
+    /// tenant — leaking rows from the org they left.
+    ///
+    /// Also dirties every touched sub so the re-runner re-evaluates
+    /// the handler under the new identity on the next tick — without
+    /// the explicit dirty, the cached `last_hash` would short-circuit
+    /// the next change-driven re-run if the result happened to hash
+    /// the same as before.
+    pub fn update_tenant_for_user(&self, user_id: &str, new_tenant: Option<&str>) -> usize {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let new_tenant = new_tenant.map(|s| s.to_string());
+        let mut updated_keys: Vec<SubKey> = Vec::new();
+        for (key, sub) in inner.subs.iter_mut() {
+            if sub.auth.user_id.as_deref() != Some(user_id) {
+                continue;
+            }
+            sub.auth.tenant_id = new_tenant.clone();
+            updated_keys.push(key.clone());
+        }
+        let count = updated_keys.len();
+        for key in updated_keys {
+            if inner.pending.insert(key.clone()) {
+                inner.dirty.push_back(key);
+            }
+        }
+        if count > 0 {
+            self.dirty_notify.notify_all();
+        }
+        count
+    }
+
     /// Late-binding for `FnOps` — the function runtime is started
     /// after the registry (the registry feeds into the notifier which
     /// the runtime constructs). Caller wires this once at boot.
