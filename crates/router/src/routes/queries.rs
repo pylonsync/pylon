@@ -34,6 +34,26 @@ pub(crate) fn handle(
                 ));
             }
         };
+        // Pre-snapshot delete targets BEFORE the transact runs, so we
+        // can attach the row payload to the per-op broadcast below.
+        // Without this, delete broadcasts go out with `data: None` and
+        // every tenant-scoped read policy denies the owner — ghost
+        // rows in their replicas (codex P1 — same class as the normal
+        // DELETE path, missed for /api/transact).
+        let mut delete_snapshots: std::collections::HashMap<(String, String), serde_json::Value> =
+            std::collections::HashMap::new();
+        for op in &ops {
+            if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
+                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if entity.is_empty() || id.is_empty() {
+                    continue;
+                }
+                if let Ok(Some(row)) = ctx.store.get_by_id(entity, id) {
+                    delete_snapshots.insert((entity.to_string(), id.to_string()), row);
+                }
+            }
+        }
         return Some(match ctx.store.transact(&ops) {
             Ok((committed, results)) => {
                 // Broadcast per-op change events after the atomic
@@ -131,11 +151,13 @@ pub(crate) fn handle(
                                 if delete_id.is_empty() {
                                     continue;
                                 }
+                                let snapshot = delete_snapshots
+                                    .remove(&(entity.to_string(), delete_id.to_string()));
                                 let seq = ctx.change_log.append(
                                     entity,
                                     delete_id,
                                     ChangeKind::Delete,
-                                    None,
+                                    snapshot.clone(),
                                 );
                                 broadcast_change_with_crdt(
                                     ctx.notifier,
@@ -144,7 +166,7 @@ pub(crate) fn handle(
                                     entity,
                                     delete_id,
                                     ChangeKind::Delete,
-                                    None,
+                                    snapshot.as_ref(),
                                 );
                             }
                             _ => {}

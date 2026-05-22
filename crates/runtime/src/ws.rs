@@ -1552,10 +1552,34 @@ fn handle_crdt_control(
             // caller and register without the auth gate. Production
             // server.rs always wires one, so this loophole is
             // unreachable in deployed configurations.
-            let snapshot = snapshot_fetcher.and_then(|f| f(auth_ctx, entity, row_id));
-            let allow_subscribe = snapshot_fetcher.is_none() || snapshot.is_some();
+            // Codex P1 fix: SUBSCRIBE first, then FETCH the snapshot.
+            // Pre-fix ordering (fetch then subscribe) had a race window
+            // where an update arriving between the two lines was lost
+            // — the snapshot was taken before the update, the
+            // subscription started after the update's broadcast fanout
+            // had already completed. The client applied a stale
+            // snapshot and never observed the missing update until
+            // reconcile.
+            //
+            // Authorize FIRST (peek-fetch under auth) so an
+            // unauthorized client can't subscribe and observe future
+            // updates they shouldn't see. Then subscribe, then fetch
+            // the snapshot a second time AFTER subscribe — if an
+            // update lands in between, the broadcast includes us, and
+            // sending the post-subscribe snapshot afterwards gives the
+            // client a consistent post-update view.
+            let allow_subscribe = match snapshot_fetcher {
+                Some(f) => f(auth_ctx, entity, row_id).is_some(),
+                None => true,
+            };
             if allow_subscribe {
                 hub.subscriptions.subscribe(client_id, entity, row_id);
+                // Refetch AFTER subscribing so any concurrent update
+                // is observable by the client either via the broadcast
+                // (because it ran after subscribe) or via the snapshot
+                // (because it ran before this refetch). Both cases
+                // converge — no update is silently lost.
+                let snapshot = snapshot_fetcher.and_then(|f| f(auth_ctx, entity, row_id));
                 if let Some(bytes) = snapshot {
                     hub.send_binary_to_one(client_id, bytes);
                 }

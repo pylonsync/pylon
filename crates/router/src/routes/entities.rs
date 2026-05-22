@@ -319,18 +319,31 @@ pub(crate) fn handle(
                 }
                 "delete" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    // Snapshot pre-delete so the WS/pull read-policy
+                    // filter can evaluate row-scoped predicates against
+                    // actual data. Without this the broadcast goes out
+                    // with `data: None`, every tenant-scoped policy
+                    // denies the owner, and the row sits as a ghost in
+                    // their replica. Same fix the normal DELETE handler
+                    // already has; admin /api/batch was missed in the
+                    // first pass (codex P1).
+                    let snapshot = ctx.store.get_by_id(entity, id).ok().flatten();
                     match ctx.store.delete(entity, id) {
                         Ok(deleted) => {
                             if deleted {
-                                let seq =
-                                    ctx.change_log.append(entity, id, ChangeKind::Delete, None);
+                                let seq = ctx.change_log.append(
+                                    entity,
+                                    id,
+                                    ChangeKind::Delete,
+                                    snapshot.clone(),
+                                );
                                 broadcast_change(
                                     ctx.notifier,
                                     seq,
                                     entity,
                                     id,
                                     ChangeKind::Delete,
-                                    None,
+                                    snapshot.as_ref(),
                                 );
                             }
                             results.push(serde_json::json!({"op": "delete", "id": id, "ok": true}));

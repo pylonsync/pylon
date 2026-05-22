@@ -33,10 +33,28 @@ pub(crate) fn handle(
         let target_id = data.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
 
         // A link is a mutation: it sets a foreign key on the source row.
-        // Apply the same write policy as PATCH /api/entities/:name/:id.
+        // Apply the same write policy as PATCH /api/entities/:name/:id —
+        // but evaluate it against the EXISTING source row, never the
+        // caller's body. Codex P0: pre-fix, `check_entity_write` got
+        // `Some(&data)` (the request body), so a caller could include
+        // fake `ownerId`/`tenantId` fields that satisfy a row-scoped
+        // write policy like `auth.userId == data.ownerId` even though
+        // they don't own the actual row. They'd then proceed to
+        // mutate someone else's row's FK. The fix: load the source
+        // row server-side first and authorize against THAT.
+        let source_row = match ctx.store.get_by_id(entity, id) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return Some((
+                    404,
+                    json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
+                ));
+            }
+            Err(e) => return Some((500, json_error(&e.code, &e.message))),
+        };
         let check = ctx
             .policy_engine
-            .check_entity_write(entity, ctx.auth_ctx, Some(&data));
+            .check_entity_write(entity, ctx.auth_ctx, Some(&source_row));
         if let pylon_policy::PolicyResult::Denied {
             policy_name,
             reason,
@@ -125,9 +143,23 @@ pub(crate) fn handle(
         let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let relation = data.get("relation").and_then(|v| v.as_str()).unwrap_or("");
 
+        // Authorize against the existing source row, NOT the caller's
+        // body. Same P0 hole as the link path above: row-scoped write
+        // predicates evaluated against attacker-controlled body data
+        // let any caller unlink someone else's relation.
+        let source_row = match ctx.store.get_by_id(entity, id) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return Some((
+                    404,
+                    json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
+                ));
+            }
+            Err(e) => return Some((500, json_error(&e.code, &e.message))),
+        };
         let check = ctx
             .policy_engine
-            .check_entity_write(entity, ctx.auth_ctx, Some(&data));
+            .check_entity_write(entity, ctx.auth_ctx, Some(&source_row));
         if let pylon_policy::PolicyResult::Denied {
             policy_name,
             reason,

@@ -1735,6 +1735,13 @@ export class SyncEngine {
     // bypass the tombstone — re-creation server-side still propagates.
     const tombstoneSeq = this.cursor.last_seq;
     for (const entity of names) {
+      // Capture cursor BEFORE the fetch so we can detect drift mid-
+      // reconcile. If a WS event lands while this entity is being
+      // pulled, our snapshot is already stale — applying it would
+      // overwrite a newer authoritative row. Skip apply in that case
+      // and rely on the WS event (which has the correct seq) plus the
+      // next reconcile trigger to converge. Codex P1.
+      const cursorBeforeFetch = this.cursor.last_seq;
       let serverRows: Row[];
       try {
         serverRows = await this.fetchEntityRows(entity);
@@ -1748,6 +1755,15 @@ export class SyncEngine {
           // them around just leaks invisible state.
           await this.dropEntity(entity, tombstoneSeq);
         }
+        continue;
+      }
+      if (this.cursor.last_seq !== cursorBeforeFetch) {
+        // Cursor moved during fetch — at least one WS event for this
+        // (or another) entity landed and might have a fresher value
+        // for a row our snapshot just captured. Bail out for this
+        // entity; reconcile() is triggered again on visibility-change
+        // and reconnect, and the WS event already carried the latest
+        // state for the affected row.
         continue;
       }
       await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);

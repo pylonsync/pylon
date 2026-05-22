@@ -137,6 +137,31 @@ pub(crate) fn handle(
                 ctx.plugin_hooks
                     .after_update(entity, row_id, &hook_data, ctx.auth_ctx);
                 ctx.notifier.notify_crdt(entity, row_id, &snapshot);
+                // ALSO emit a JSON change event so non-CRDT subscribers
+                // (the regular `db.useQuery` path, `/api/sync/pull`
+                // callers) observe the materialized-column projection
+                // that `crdt_apply_update` writes. Without this, normal
+                // JSON sync clients see only the binary CRDT frame
+                // (which they don't decode) and miss the projected
+                // fields the SQL row now reflects — they'd be stale
+                // until reconcile (codex P1).
+                if let Ok(Some(row)) = ctx.store.get_by_id(entity, row_id) {
+                    let seq = ctx.change_log.append(
+                        entity,
+                        row_id,
+                        pylon_sync::ChangeKind::Update,
+                        Some(row.clone()),
+                    );
+                    crate::emit_change_seq_header(ctx, seq);
+                    crate::broadcast_change(
+                        ctx.notifier,
+                        seq,
+                        entity,
+                        row_id,
+                        pylon_sync::ChangeKind::Update,
+                        Some(&row),
+                    );
+                }
                 (200, serde_json::json!({"ok": true}).to_string())
             }
             Err(e) => {

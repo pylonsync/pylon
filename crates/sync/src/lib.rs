@@ -172,6 +172,49 @@ impl ChangeLog {
         }
     }
 
+    /// Atomic check-and-claim: returns true if THIS caller is the first
+    /// to claim the op_id (and it's now marked seen), false if another
+    /// caller already claimed it. Use this instead of the
+    /// `has_seen_op_id` + `remember_op_id` pair when two concurrent
+    /// pushes carrying the same op_id arrive — the pair has a race
+    /// where both check `has_seen_op_id`, both see false, and both
+    /// apply the same change. Codex P1.
+    ///
+    /// The caller MUST roll back the claim via `forget_op_id` if the
+    /// downstream write fails, otherwise a real retry by the client
+    /// would be silently swallowed as a duplicate.
+    pub fn claim_op_id(&self, op_id: &str) -> bool {
+        let mut set = self.seen_op_id_set.lock().unwrap();
+        if set.contains(op_id) {
+            return false;
+        }
+        set.insert(op_id.to_string());
+        drop(set);
+        let mut q = self.seen_op_ids.lock().unwrap();
+        q.push_back(op_id.to_string());
+        while q.len() > self.op_id_capacity {
+            if let Some(evicted) = q.pop_front() {
+                self.seen_op_id_set.lock().unwrap().remove(&evicted);
+            }
+        }
+        true
+    }
+
+    /// Roll back a `claim_op_id`. Called by push handlers when the
+    /// downstream write failed — without this, the client's legitimate
+    /// retry would be deduped away by the still-cached claim.
+    pub fn forget_op_id(&self, op_id: &str) {
+        let mut set = self.seen_op_id_set.lock().unwrap();
+        set.remove(op_id);
+        drop(set);
+        let mut q = self.seen_op_ids.lock().unwrap();
+        // Cheap O(n) here; op_id_capacity is small (1024 default) and
+        // rollback is a slow path.
+        if let Some(pos) = q.iter().position(|s| s == op_id) {
+            q.remove(pos);
+        }
+    }
+
     /// Current highest assigned sequence number. Reads the seq counter
     /// without consulting the events deque, so it's correct even when
     /// the oldest events have been evicted under capacity pressure.

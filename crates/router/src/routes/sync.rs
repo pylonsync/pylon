@@ -206,15 +206,26 @@ pub(crate) fn handle(
         // diverges from truth as retention evicts old events.
         let mut max_seq: u64 = 0;
 
+        // Track which op_ids we successfully claimed AND applied, so
+        // we know which to keep cached vs roll back if a downstream
+        // write fails.
+        let mut claimed_op_ids: Vec<String> = Vec::new();
+        let mut errored_op_ids: Vec<String> = Vec::new();
         for change in &push_req.changes {
-            // Idempotency: skip if op_id already processed. Makes
-            // at-least-once delivery from the client safe.
+            // Atomic check-and-claim: if another concurrent push raced
+            // us to the same op_id, claim_op_id returns false and we
+            // dedupe. The previous (has_seen_op_id → apply → remember)
+            // sequence had a race window where both racers passed the
+            // has-seen check, both applied, and the row got
+            // double-mutated. Codex P1.
             if let Some(ref op_id) = change.op_id {
-                if ctx.change_log.has_seen_op_id(op_id) {
+                if !ctx.change_log.claim_op_id(op_id) {
                     deduped += 1;
                     continue;
                 }
+                claimed_op_ids.push(op_id.clone());
             }
+            let mut op_errored = false;
             match change.kind {
                 ChangeKind::Insert => {
                     if let Some(ref data) = change.data {
@@ -240,6 +251,7 @@ pub(crate) fn handle(
                                 applied += 1;
                             }
                             Err(e) => {
+                                op_errored = true;
                                 errors.push(format!("insert {}: {}", change.entity, e.message))
                             }
                         }
@@ -268,10 +280,13 @@ pub(crate) fn handle(
                                 }
                                 applied += 1;
                             }
-                            Err(e) => errors.push(format!(
-                                "update {}/{}: {}",
-                                change.entity, change.row_id, e.message
-                            )),
+                            Err(e) => {
+                                op_errored = true;
+                                errors.push(format!(
+                                    "update {}/{}: {}",
+                                    change.entity, change.row_id, e.message
+                                ));
+                            }
                         }
                     }
                 }
@@ -306,29 +321,35 @@ pub(crate) fn handle(
                             }
                             applied += 1;
                         }
-                        Err(e) => errors.push(format!(
-                            "delete {}/{}: {}",
-                            change.entity, change.row_id, e.message
-                        )),
+                        Err(e) => {
+                            op_errored = true;
+                            errors.push(format!(
+                                "delete {}/{}: {}",
+                                change.entity, change.row_id, e.message
+                            ));
+                        }
                     }
                 }
             }
-        }
-
-        // Register processed op_ids only for changes that didn't error.
-        // Failed applies must NOT be marked seen or a retry is falsely
-        // treated as a replay and skipped forever.
-        for change in &push_req.changes {
-            if let Some(ref op_id) = change.op_id {
-                let mention = format!(" {}", change.row_id);
-                if !errors
-                    .iter()
-                    .any(|e| e.contains(&change.entity) && e.contains(&mention))
-                {
-                    ctx.change_log.remember_op_id(op_id);
+            // Roll back the op_id claim on failure so the client's
+            // retry can succeed. Previously failed inserts were
+            // un-deduped via string-matching on the row_id in the
+            // error message — but the insert error path didn't
+            // include the row_id at all, so the claim got silently
+            // kept and the retry was dropped. Codex P1.
+            if op_errored {
+                if let Some(ref op_id) = change.op_id {
+                    ctx.change_log.forget_op_id(op_id);
+                    errored_op_ids.push(op_id.clone());
                 }
             }
         }
+        // `claimed_op_ids` was populated at claim time; the loop above
+        // already called `forget_op_id` for any op that errored, so the
+        // remaining claims correctly reflect successful applies. No
+        // further bookkeeping needed — drop the previous string-match
+        // post-pass.
+        let _ = (&claimed_op_ids, &errored_op_ids);
 
         // `current_seq()` is the authoritative position even when
         // retention has evicted older entries; `len()` would drift
