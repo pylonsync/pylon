@@ -1160,18 +1160,22 @@ export class SyncEngine {
         this.reconnectAttempts = 0;
         this.wsStableTimer = null;
       }, 5_000);
-      // Client-side keepalive ping. The server's per-client reader
-      // thread blocks on a synchronous WS read for as long as no client
-      // message arrives. On the HTTP-multiplexed `/api/sync/ws` path
-      // tiny_http doesn't expose stream-level read timeouts, so the
-      // reader's mutex hold is bounded only by client activity. Without
-      // these pings the broadcaster contends for the same mutex and
-      // wedges — Insert events never reach the tab. A 1s cadence makes
-      // worst-case broadcast latency ~1s even when the user is idle.
-      // Browsers don't expose WebSocket-level PING frames; a JSON
-      // payload with type:"ping" achieves the same effect (the server
-      // reads, looks up an unknown "ping" type, loops back releasing
-      // the mutex; broadcaster grabs it during the gap).
+      // Client-side keepalive ping at 200ms. The server's per-client
+      // reader thread blocks synchronously on `ws.read()` and holds the
+      // per-client mutex for the duration of the call. On the dedicated
+      // `:port+1` listener that block is bounded by a 200ms TCP read
+      // timeout (`stream.set_read_timeout`), so the broadcaster gets a
+      // window every 200ms. The HTTP-multiplexed `/api/sync/ws` path
+      // goes through tiny_http's `CustomStream`, which doesn't expose
+      // the underlying TcpStream, so we can't set a timeout there.
+      // These periodic JSON pings give the broadcaster the same 200ms
+      // window by causing the read to return (the server treats
+      // unknown `type` values as no-ops; the side effect is releasing
+      // the mutex between iterations). Browsers don't expose WS-level
+      // PING frames at the application layer, so we send a Text frame.
+      // Tradeoff: ~5 inbound frames/sec/client of background traffic
+      // for sub-second broadcast latency — worth it for the demo
+      // experience and idle tabs alike.
       if (this.pingTimer) clearInterval(this.pingTimer);
       this.pingTimer = setInterval(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
@@ -1180,7 +1184,7 @@ export class SyncEngine {
         } catch {
           // ignore — onclose will trigger reconnect
         }
-      }, 1_000);
+      }, 200);
       // Re-send any active CRDT subscriptions across the new socket.
       // The server purged them on disconnect (`unsubscribe_all`), so
       // without this resync a tab that was subscribed before a network

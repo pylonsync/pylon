@@ -215,8 +215,33 @@ const WS_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// at session-change time (rare). RwLock vs Mutex chosen because the
 /// hot path is read-only and N clients per shard fan out to the same
 /// lock pattern.
+/// Per-client outbound queue depth. When the queue fills, the
+/// broadcaster's `try_send` fails for this client and the event is
+/// dropped (logged at error level). The client's next pull catches
+/// it back up via the cursor protocol. 256 events / client is enough
+/// for any realistic burst — broadcasters that overrun a single client
+/// at this rate are probably misconfigured.
+const PER_CLIENT_OUTBOUND_DEPTH: usize = 256;
+
 pub struct WsClient {
+    /// The WebSocket struct itself, behind a per-client mutex. Reader
+    /// thread holds this during `ws.read()`. Direct-send paths that
+    /// don't go through the broadcast queue (e.g. the auto-pong reply
+    /// inside the read loop) still take the mutex briefly — they're
+    /// already holding it from the reader's context anyway.
     pub socket: Mutex<WebSocket<Box<dyn WsStream>>>,
+    /// Outbound queue used by broadcasters. Pushing here via `try_send`
+    /// never blocks on the socket mutex, so a wedged reader (waiting on
+    /// `ws.read()` with no client traffic) can't starve broadcasts the
+    /// way it did pre-refactor. The reader drains this queue between
+    /// reads under the same lock it already holds.
+    pub outbound_tx: mpsc::SyncSender<Message>,
+    /// Receiver half of the outbound queue, parked here so the reader
+    /// thread can take ownership during `run_authenticated_session`.
+    /// `mpsc::Receiver` is `!Sync`, so we hand it out once via `take()`
+    /// rather than try to share it. After the reader takes the Receiver
+    /// this slot is `None`; broadcasters only use `outbound_tx`.
+    pub outbound_rx: Mutex<Option<mpsc::Receiver<Message>>>,
     pub auth: RwLock<AuthContext>,
 }
 
@@ -238,8 +263,11 @@ impl Shard {
     }
 
     fn add(&self, id: u64, ws: WebSocket<Box<dyn WsStream>>, auth: AuthContext) -> ClientSocket {
+        let (outbound_tx, outbound_rx) = mpsc::sync_channel(PER_CLIENT_OUTBOUND_DEPTH);
         let handle = Arc::new(WsClient {
             socket: Mutex::new(ws),
+            outbound_tx,
+            outbound_rx: Mutex::new(Some(outbound_rx)),
             auth: RwLock::new(auth),
         });
         self.clients.lock().unwrap().insert(id, Arc::clone(&handle));
@@ -267,12 +295,18 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.socket.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.send(Message::Text((**msg).to_string())).is_err() {
-                dead.push(id);
+            match handle
+                .outbound_tx
+                .try_send(Message::Text((**msg).to_string()))
+            {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        "[ws] per-client outbound queue full — dropping presence/topic message"
+                    );
+                }
             }
         }
         if !dead.is_empty() {
@@ -350,29 +384,24 @@ impl Shard {
                 }
             }
             drop(auth);
-            tracing::debug!(
-                client_id = id,
-                "[ws.broadcast_change] policy passed — acquiring socket lock"
-            );
-            let mut guard = match handle.socket.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            tracing::debug!(
-                client_id = id,
-                "[ws.broadcast_change] socket locked — calling send"
-            );
-            let send_result = guard.send(Message::Text((**json).to_string()));
-            tracing::debug!(
-                client_id = id,
-                send_ok = send_result.is_ok(),
-                send_err = ?send_result.as_ref().err().map(|e| format!("{e:?}")),
-                "[ws.broadcast_change] send returned"
-            );
-            if send_result.is_err() {
-                dead.push(id);
-            } else {
-                delivered += 1;
+            // Push to the per-client outbound channel rather than
+            // grabbing the socket mutex. The reader thread drains the
+            // channel under its own lock between reads — broadcasters
+            // never contend.
+            match handle
+                .outbound_tx
+                .try_send(Message::Text((**json).to_string()))
+            {
+                Ok(()) => delivered += 1,
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        entity = %event.entity,
+                        seq = event.seq,
+                        "[ws.broadcast_change] per-client outbound full — dropping change event; client will catch up on next pull"
+                    );
+                }
             }
         }
         tracing::debug!(
@@ -412,12 +441,15 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.socket.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.send(Message::Binary(msg.to_vec())).is_err() {
-                dead.push(id);
+            match handle.outbound_tx.try_send(Message::Binary(msg.to_vec())) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        "[ws] per-client outbound full — dropping targeted binary frame"
+                    );
+                }
             }
         }
         if !dead.is_empty() {
@@ -441,24 +473,26 @@ impl Shard {
         let Some(handle) = handle else {
             return;
         };
-        let mut guard = match handle.socket.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if guard.send(Message::Text(text.to_string())).is_err() {
-            // Drop guard before re-locking clients (avoid lock
-            // inversion vs other paths that take clients lock first).
-            drop(guard);
-            let mut clients = self.clients.lock().unwrap();
-            clients.remove(&client_id);
+        match handle.outbound_tx.try_send(Message::Text(text.to_string())) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                let mut clients = self.clients.lock().unwrap();
+                clients.remove(&client_id);
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::error!(
+                    client_id,
+                    "[ws] per-client outbound full — dropping targeted text frame (reactive result)"
+                );
+            }
         }
     }
 
-    /// Binary fanout for CRDT updates. Same per-client lock pattern as
-    /// `broadcast` above; the only difference is `Message::Binary` and
-    /// the payload is `Arc<[u8]>` so a single Loro snapshot allocates
-    /// once and the per-client send pays a refcount bump + the
-    /// tungstenite-required Vec clone.
+    /// Binary fanout for CRDT updates. Same per-client outbound-queue
+    /// pattern as `broadcast` above; the only difference is
+    /// `Message::Binary` and the payload is `Arc<[u8]>` so a single
+    /// Loro snapshot allocates once and the per-client send pays a
+    /// refcount bump + the tungstenite-required Vec clone.
     fn broadcast_binary(&self, msg: &Arc<[u8]>) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
@@ -466,12 +500,15 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.socket.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.send(Message::Binary(msg.to_vec())).is_err() {
-                dead.push(id);
+            match handle.outbound_tx.try_send(Message::Binary(msg.to_vec())) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        "[ws] per-client outbound full — dropping CRDT binary frame"
+                    );
+                }
             }
         }
         if !dead.is_empty() {
@@ -505,12 +542,19 @@ impl Shard {
         };
         let mut dead: Vec<u64> = Vec::new();
         for (id, handle) in handles {
-            let mut guard = match handle.socket.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if guard.send(Message::Text((**msg).to_string())).is_err() {
-                dead.push(id);
+            match handle
+                .outbound_tx
+                .try_send(Message::Text((**msg).to_string()))
+            {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        client_id = id,
+                        user_id = %user_id,
+                        "[ws] per-client outbound full — dropping per-user text frame"
+                    );
+                }
             }
         }
         if !dead.is_empty() {
@@ -1174,7 +1218,44 @@ fn run_authenticated_session(
     // sync demo silently fall back to no-broadcasts.
     let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone());
 
+    // Take exclusive ownership of the outbound receiver. Broadcasters
+    // push to `outbound_tx`; this reader is the sole drainer. Without
+    // this, the channel half stays parked in WsClient and outbound
+    // never flows out.
+    let outbound_rx = socket_handle
+        .outbound_rx
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .expect("outbound_rx already taken — should be exactly one reader per client");
+
     loop {
+        // Drain queued outbound BEFORE blocking on read. This is the
+        // hot path that fixes the broadcast wedge: broadcasters
+        // `try_send` to `outbound_tx` without contending for the
+        // socket mutex, and the reader writes them out whenever it
+        // loops back through here (between blocking reads). With
+        // client-side keepalive pings every 200ms, that's the
+        // worst-case broadcast latency on the HTTP-upgrade path
+        // where the underlying stream timeout can't be set.
+        {
+            let mut guard = match socket_handle.socket.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            while let Ok(out_msg) = outbound_rx.try_recv() {
+                if guard.send(out_msg).is_err() {
+                    // Socket dead. Drop the guard, sweep the client,
+                    // and exit the session. The remaining queued
+                    // messages will be discarded when the channel
+                    // half is dropped.
+                    drop(guard);
+                    hub.remove_client(client_id);
+                    return;
+                }
+            }
+        }
+
         // Lock this client's socket mutex only for the duration of the
         // read. With a 5s read timeout, broadcasters waiting to send to
         // THIS client wait at most 5s. Other clients are never blocked
