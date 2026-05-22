@@ -603,6 +603,19 @@ export interface SyncEngineConfig {
    * becomes visible).
    */
   reconcileOnVisibility?: boolean;
+  /**
+   * Client → server keepalive interval (ms). The Pylon dev server's
+   * dedicated :port+1 WS listener uses a dual-thread design where the
+   * writer thread wakes on every broadcast — pings are pure liveness,
+   * 25_000 (25s) is the right default. The HTTP-multiplexed
+   * `/api/sync/ws` fallback path uses a single-thread design where
+   * the reader's mutex unlocks only between reads; on THAT path,
+   * broadcast latency is bounded by this interval, so set it lower
+   * (e.g. 200) to trade traffic for delivery latency. Most production
+   * deployments should leave this at the default and configure their
+   * edge proxy to forward to the dual-thread listener instead.
+   */
+  pingIntervalMs?: number;
 }
 
 /**
@@ -1160,22 +1173,18 @@ export class SyncEngine {
         this.reconnectAttempts = 0;
         this.wsStableTimer = null;
       }, 5_000);
-      // Client-side keepalive ping at 200ms. The server's per-client
-      // reader thread blocks synchronously on `ws.read()` and holds the
-      // per-client mutex for the duration of the call. On the dedicated
-      // `:port+1` listener that block is bounded by a 200ms TCP read
-      // timeout (`stream.set_read_timeout`), so the broadcaster gets a
-      // window every 200ms. The HTTP-multiplexed `/api/sync/ws` path
-      // goes through tiny_http's `CustomStream`, which doesn't expose
-      // the underlying TcpStream, so we can't set a timeout there.
-      // These periodic JSON pings give the broadcaster the same 200ms
-      // window by causing the read to return (the server treats
-      // unknown `type` values as no-ops; the side effect is releasing
-      // the mutex between iterations). Browsers don't expose WS-level
-      // PING frames at the application layer, so we send a Text frame.
-      // Tradeoff: ~5 inbound frames/sec/client of background traffic
-      // for sub-second broadcast latency — worth it for the demo
-      // experience and idle tabs alike.
+      // Client-side keepalive ping. Default 25s — pure liveness, since
+      // the dedicated :port+1 server uses a dual-thread design that
+      // wakes the writer instantly on every broadcast (no mutex
+      // contention with the reader, no ping-bounded latency).
+      //
+      // The HTTP-multiplexed `/api/sync/ws` fallback path is still
+      // single-threaded (tiny_http's CustomStream hides the TcpStream
+      // so we can't set a kernel-level read timeout). On that path,
+      // broadcast latency IS bounded by this interval — apps that
+      // can't route to the :port+1 listener can pass
+      // `init({ pingIntervalMs: 200 })` to trade traffic for latency.
+      const pingIntervalMs = this.config.pingIntervalMs ?? 25_000;
       if (this.pingTimer) clearInterval(this.pingTimer);
       this.pingTimer = setInterval(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
@@ -1184,7 +1193,7 @@ export class SyncEngine {
         } catch {
           // ignore — onclose will trigger reconnect
         }
-      }, 200);
+      }, pingIntervalMs);
       // Re-send any active CRDT subscriptions across the new socket.
       // The server purged them on disconnect (`unsubscribe_all`), so
       // without this resync a tab that was subscribed before a network
