@@ -703,7 +703,24 @@ impl WsHub {
             match tx.try_send(job) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
-                    tracing::warn!("[ws] broadcast queue full — dropping event for one shard");
+                    // Codex P2: silently dropping a shard's event meant
+                    // every client in that shard missed the row update
+                    // until a future incidental pull (visibility-change,
+                    // mutation, reconnect). In WS-only mode that could
+                    // be never. Log at error so operators see it in the
+                    // hot path; the client SDK's pull-on-WS-message-gap
+                    // is the recovery channel (a future `{"type":"gap"}`
+                    // synthetic broadcast would force it, but that path
+                    // hits the same per-client mutex contention we're
+                    // already trying to relieve — file follow-up to add
+                    // a non-blocking gap signal via a dedicated lane).
+                    // Operators can tune BROADCAST_QUEUE_DEPTH if this
+                    // is frequent.
+                    tracing::error!(
+                        entity = %event.entity,
+                        seq = event.seq,
+                        "[ws] broadcast queue full — event dropped for one shard; affected clients will catch up on the next pull"
+                    );
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {}
             }

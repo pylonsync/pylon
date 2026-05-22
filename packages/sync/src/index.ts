@@ -717,6 +717,17 @@ export class SyncEngine {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
+   * Serialized apply queue. Every change-event apply — from WS onmessage,
+   * pull(), or session-changed catchup — chains onto this promise so
+   * applies execute in arrival order. Without this, two WS messages or
+   * two concurrent pull()s race: seq 3's persistence can land before
+   * seq 2's, leaving the row at the older value AND the cursor briefly
+   * regressing if writes complete out of order. The queue also gates
+   * the cursor advance so `last_seq` only moves forward.
+   */
+  private applyQueue: Promise<void> = Promise.resolve();
+
+  /**
    * Registered consumers for binary WebSocket frames. SyncEngine itself
    * doesn't decode binary — it just owns the WS connection and routes
    * frames to whoever signed up via [`onBinaryFrame`]. The first
@@ -965,6 +976,53 @@ export class SyncEngine {
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * Serialize a batch of change applies behind any in-flight applies, and
+   * advance the cursor monotonically when the batch lands. Both the WS
+   * onmessage path and pull() funnel through here so seq 3's persistence
+   * can't race ahead of seq 2's. The returned promise resolves after
+   * THIS batch is applied (not after later batches), so a caller awaiting
+   * pull() still completes deterministically.
+   *
+   * Per-event monotonic filter: re-applies of an already-seen seq are
+   * skipped before touching the store. Without that, a retransmit
+   * (WS + pull window overlap) would have us run applyChange twice
+   * against the local store.
+   */
+  private enqueueApply(
+    changes: ChangeEvent[],
+    targetCursor?: SyncCursor,
+  ): Promise<void> {
+    const prev = this.applyQueue;
+    const next = prev.then(async () => {
+      const filtered = changes.filter(
+        (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
+      );
+      if (filtered.length > 0) {
+        await this.store.applyChangesAsync(filtered);
+      }
+      // Pick the cursor target. Explicit `targetCursor` (from pull) wins
+      // — pull's response carries the server's authoritative current_seq
+      // even when no changes landed in this window. Otherwise derive
+      // from the last applied seq.
+      const candidate =
+        targetCursor ??
+        (filtered.length > 0
+          ? { last_seq: filtered[filtered.length - 1].seq }
+          : null);
+      if (candidate && candidate.last_seq > this.cursor.last_seq) {
+        this.cursor = candidate;
+        if (this.persistence) {
+          await this.persistence.saveCursor(this.cursor);
+        }
+      }
+    });
+    // Errors stay scoped to this batch — don't poison the chain for
+    // future applies.
+    this.applyQueue = next.catch(() => {});
+    return next;
+  }
+
   private startPolling(): void {
     const interval = this.config.pollInterval ?? 1000;
     this.pollTimer = setInterval(() => {
@@ -1118,18 +1176,14 @@ export class SyncEngine {
       try {
         const msg = JSON.parse(event.data as string);
 
-        // Sync change event. Persist BEFORE advancing the cursor so a crash
-        // can't leave `last_seq` ahead of the replica on disk.
+        // Sync change event. Persist BEFORE advancing the cursor so a
+        // crash can't leave `last_seq` ahead of the replica on disk.
+        // The shared apply queue serializes WS messages with each other
+        // AND with concurrent pull() calls, so seq order is preserved
+        // and the cursor only advances monotonically.
         if (msg.seq && msg.entity && msg.kind) {
           const change = msg as ChangeEvent;
-          if (change.seq > this.cursor.last_seq) {
-            void this.store.applyChangesAsync([change]).then(async () => {
-              this.cursor = { last_seq: change.seq };
-              if (this.persistence) {
-                await this.persistence.saveCursor(this.cursor);
-              }
-            });
-          }
+          void this.enqueueApply([change]);
           return;
         }
 
@@ -1259,14 +1313,7 @@ export class SyncEngine {
           const msg = JSON.parse(event.data);
           if (msg.seq && msg.entity && msg.kind) {
             const change = msg as ChangeEvent;
-            if (change.seq > this.cursor.last_seq) {
-              void this.store.applyChangesAsync([change]).then(async () => {
-                this.cursor = { last_seq: change.seq };
-                if (this.persistence) {
-                  await this.persistence.saveCursor(this.cursor);
-                }
-              });
-            }
+            void this.enqueueApply([change]);
           }
         } catch {
           // Ignore malformed events.
@@ -1480,22 +1527,14 @@ export class SyncEngine {
       );
       // Successful response — clear the 410 circuit breaker.
       this.consecutive_410s = 0;
-      if (resp.changes.length > 0) {
-        // Await disk writes before touching the cursor so a crash here can't
-        // persist a cursor that's ahead of what actually landed in IndexedDB.
-        await this.store.applyChangesAsync(resp.changes);
-      }
-      // Always advance the cursor to whatever the server reports, not just
-      // when changes land. If a read policy filters out every event in a
-      // window the server still moves its last_seq forward; clamping to only
-      // "non-empty" responses pins the client at `since=0` forever and turns
-      // every reconnect into another pull for the same empty window.
-      if (resp.cursor && resp.cursor.last_seq > this.cursor.last_seq) {
-        this.cursor = resp.cursor;
-        if (this.persistence) {
-          await this.persistence.saveCursor(this.cursor);
-        }
-      }
+      // Route through the apply queue so concurrent WS messages and
+      // pull responses don't race. The queue's monotonic guard skips
+      // any seq we've already applied (e.g. WS already landed the
+      // events that pull is now redelivering) and only advances the
+      // cursor forward. We still advance even when no changes land,
+      // because the server's last_seq may have moved past us due to
+      // policy-filtered events.
+      await this.enqueueApply(resp.changes, resp.cursor);
       // If there are more, pull again immediately.
       if (resp.has_more) {
         await this.pull();

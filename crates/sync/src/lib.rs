@@ -186,6 +186,11 @@ impl ChangeLog {
     }
 
     /// Append a change event. Returns the assigned sequence number.
+    ///
+    /// Lock order: `events` then `seq`. `pull()` takes the same order
+    /// (codex P1: previously this method took seq-then-events while
+    /// pull took events-then-seq, a classic lock-order inversion that
+    /// could deadlock under concurrent append + pull).
     pub fn append(
         &self,
         entity: &str,
@@ -193,6 +198,7 @@ impl ChangeLog {
         kind: ChangeKind,
         data: Option<serde_json::Value>,
     ) -> u64 {
+        let mut events = self.events.lock().unwrap();
         let mut seq = self.seq.lock().unwrap();
         *seq += 1;
         let event = ChangeEvent {
@@ -203,7 +209,6 @@ impl ChangeLog {
             data,
             timestamp: now_iso8601(),
         };
-        let mut events = self.events.lock().unwrap();
         events.push_back(event);
         while events.len() > self.capacity {
             events.pop_front();

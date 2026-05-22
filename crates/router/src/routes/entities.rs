@@ -67,45 +67,82 @@ pub(crate) fn handle(
                     .unwrap_or(20)
                     .min(100);
 
-                // Fetch one extra so we can detect has_more even after
-                // row-filtering drops some entries.
-                return Some(match ctx.store.list_after(entity_name, after, limit + 1) {
-                    Ok(rows) => {
-                        let auth_user = &ctx.store.manifest().auth.user;
-                        let filtered: Vec<serde_json::Value> = rows
-                            .into_iter()
-                            .filter(|row| {
-                                matches!(
-                                    ctx.policy_engine.check_entity_read(
-                                        entity_name,
-                                        ctx.auth_ctx,
-                                        Some(row),
-                                    ),
-                                    pylon_policy::PolicyResult::Allowed
-                                )
-                            })
-                            .map(|row| crate::maybe_project_user_row(entity_name, row, auth_user))
-                            .collect();
-                        let has_more = filtered.len() > limit;
-                        let page: Vec<serde_json::Value> =
-                            filtered.into_iter().take(limit).collect();
-                        let next_cursor = page
-                            .last()
-                            .and_then(|r| r.get("id"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        (
-                            200,
-                            serde_json::json!({
-                                "data": page,
-                                "next_cursor": next_cursor,
-                                "has_more": has_more,
-                            })
-                            .to_string(),
-                        )
+                // Scan raw pages until we accumulate enough visible rows
+                // after the read-policy filter or exhaust the source.
+                // Previously this fetched `limit + 1` raw rows once and
+                // declared `has_more` from the filtered count — codex
+                // P1: if hidden rows dominate a page, the caller saw an
+                // early `has_more: false` even though more visible rows
+                // existed further down the source order. The internal
+                // scan cursor advances by the last RAW id processed so
+                // we don't re-fetch the same hidden tail; the external
+                // `next_cursor` returned to the client is the last
+                // visible id (the contract callers depend on).
+                const RAW_BATCH: usize = 200;
+                let auth_user = &ctx.store.manifest().auth.user;
+                let mut visible: Vec<serde_json::Value> = Vec::new();
+                let mut current_after: Option<String> = after.map(String::from);
+                let mut source_exhausted = false;
+                let mut fetch_error: Option<pylon_http::DataError> = None;
+                while visible.len() <= limit && !source_exhausted {
+                    let raw =
+                        match ctx
+                            .store
+                            .list_after(entity_name, current_after.as_deref(), RAW_BATCH)
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                fetch_error = Some(e);
+                                break;
+                            }
+                        };
+                    if raw.len() < RAW_BATCH {
+                        source_exhausted = true;
                     }
-                    Err(e) => (400, json_error(&e.code, &e.message)),
-                });
+                    for row in raw {
+                        let row_id = row.get("id").and_then(|v| v.as_str()).map(String::from);
+                        // Always advance the internal scan cursor — even
+                        // for filtered-out rows, so the NEXT raw fetch
+                        // starts strictly past everything we've seen.
+                        if row_id.is_some() {
+                            current_after = row_id;
+                        }
+                        let allowed = matches!(
+                            ctx.policy_engine.check_entity_read(
+                                entity_name,
+                                ctx.auth_ctx,
+                                Some(&row),
+                            ),
+                            pylon_policy::PolicyResult::Allowed
+                        );
+                        if !allowed {
+                            continue;
+                        }
+                        visible.push(crate::maybe_project_user_row(entity_name, row, auth_user));
+                        if visible.len() > limit {
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = fetch_error {
+                    return Some((400, json_error(&e.code, &e.message)));
+                }
+                let has_more = visible.len() > limit;
+                let page: Vec<serde_json::Value> = visible.into_iter().take(limit).collect();
+                let next_cursor = page
+                    .last()
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                return Some((
+                    200,
+                    serde_json::json!({
+                        "data": page,
+                        "next_cursor": next_cursor,
+                        "has_more": has_more,
+                    })
+                    .to_string(),
+                ));
             }
         }
     }

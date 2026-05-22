@@ -2155,12 +2155,31 @@ impl<'a> DataStore for TxStore<'a> {
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+        // Snapshot the row BEFORE delete so the per-client read-policy
+        // filter can evaluate row-scoped predicates (e.g. `auth.userId ==
+        // data.userId`) against the actual deleted row. Otherwise the
+        // policy gets `data: None`, fails on every `data.X` comparison,
+        // and suppresses the broadcast — even to the owner. The owner's
+        // tab keeps the ghost row until a manual reconcile, sometimes
+        // forever. The snapshot is gated by the same read policy that
+        // gated the row originally, so any client receiving this delete
+        // has already had read access to that row.
+        let snapshot = self
+            .runtime
+            .get_by_id_with_conn(self.conn, entity, id)
+            .ok()
+            .flatten();
         let deleted = self
             .runtime
             .delete_with_conn(self.conn, entity, id)
             .map_err(into_data_error)?;
         if deleted {
-            self.record(entity, id, pylon_sync::ChangeKind::Delete, None);
+            self.record(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Delete,
+                snapshot.as_ref(),
+            );
         }
         Ok(deleted)
     }
@@ -3051,9 +3070,20 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+        // Snapshot pre-delete so row-scoped read policies can evaluate
+        // against the actual row. See TxStore::delete for the longer
+        // commentary on why the previous `data: None` broadcast was
+        // silently denied by tenant-scoped read filters and left ghost
+        // rows in owner replicas.
+        let snapshot = self.inner.get_by_id(entity, id).ok().flatten();
         let deleted = self.inner.delete(entity, id)?;
         if deleted {
-            self.emit(entity, id, pylon_sync::ChangeKind::Delete, None);
+            self.emit(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Delete,
+                snapshot.as_ref(),
+            );
         }
         Ok(deleted)
     }

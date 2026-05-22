@@ -1723,11 +1723,27 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
     if let Err((status, code, msg)) = ctx.plugin_hooks.before_delete(entity, id, ctx.auth_ctx) {
         return (status, json_error(&code, &msg));
     }
+    // Snapshot the row BEFORE deletion so the WS/pull policy filter can
+    // evaluate row-scoped read predicates (e.g. `auth.userId ==
+    // data.userId`) against the deleted row. The previous `data: None`
+    // broadcast was being denied by every tenant-scoped policy, so
+    // owners never observed their own delete and the row sat orphaned
+    // in their replica until manual reconcile.
+    let snapshot = ctx.store.get_by_id(entity, id).ok().flatten();
     match ctx.store.delete(entity, id) {
         Ok(true) => {
-            let seq = ctx.change_log.append(entity, id, ChangeKind::Delete, None);
+            let seq = ctx
+                .change_log
+                .append(entity, id, ChangeKind::Delete, snapshot.clone());
             emit_change_seq_header(ctx, seq);
-            broadcast_change(ctx.notifier, seq, entity, id, ChangeKind::Delete, None);
+            broadcast_change(
+                ctx.notifier,
+                seq,
+                entity,
+                id,
+                ChangeKind::Delete,
+                snapshot.as_ref(),
+            );
             ctx.plugin_hooks.after_delete(entity, id, ctx.auth_ctx);
             // Cascade-clean auth-related stores when the deleted
             // row is the auth User. Without this, deleting from
