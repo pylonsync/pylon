@@ -1265,12 +1265,14 @@ pub fn install_cluster_bus_subscriber(
     bus: &Arc<dyn pylon_cluster::ClusterBus>,
     ws: Arc<WsHub>,
     sse: Arc<SseHub>,
+    change_log: Arc<pylon_sync::ChangeLog>,
     auth_user: pylon_kernel::ManifestAuthUserConfig,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
 ) {
     use std::sync::Arc as StdArc;
     let ws_handler = StdArc::clone(&ws);
     let sse_handler = StdArc::clone(&sse);
+    let change_log_handler = StdArc::clone(&change_log);
     let auth_user_handler = auth_user;
     let reactive_handler = reactive;
     bus.subscribe(StdArc::new(move |envelope: pylon_cluster::Envelope| {
@@ -1280,6 +1282,13 @@ pub fn install_cluster_bus_subscriber(
         // defends against an older peer that hasn't been upgraded
         // yet and ships unprojected rows.
         if let Some(event) = envelope.as_change() {
+            // Mirror the peer's seq into the local change log so
+            // `current_seq` and the pull endpoint stay consistent with
+            // what we've broadcast to local clients. Otherwise a client
+            // that observes a peer-issued seq via WS and then pulls
+            // from this instance trips the `cursor > current_seq`
+            // RESYNC branch.
+            change_log_handler.append_peer(event.clone());
             if let Some(r) = &reactive_handler {
                 r.on_change(&event);
             }

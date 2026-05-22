@@ -614,6 +614,7 @@ fn start_server(
         &cluster_bus,
         Arc::clone(&ws_hub),
         Arc::clone(&sse_hub),
+        Arc::clone(&change_log),
         runtime.manifest().auth.user.clone(),
         Some(Arc::clone(&reactive_registry)),
     );

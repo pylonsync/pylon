@@ -493,11 +493,23 @@ export function useMutation<TArgs = Record<string, unknown>, TResult = unknown>(
       }
 
       try {
-        const result = await callFn<TResult>(
-          fnName,
-          serverArgs as Record<string, unknown>,
-          { token: tokenRef.current }
-        );
+        // Route through SyncEngine.fn when one is wired so the response's
+        // X-Pylon-Change-Seq triggers a fallback pull if the WS broadcast
+        // hasn't landed yet. Falling back to the free callFn for hooks
+        // wired without a sync engine (rare — only legacy non-React-init
+        // callers) keeps backwards compatibility, but apps using
+        // useMutation in the normal `init()` flow now match db.fn's
+        // change-seq behavior.
+        const result = sync
+          ? await sync.fn<TResult>(
+              fnName,
+              serverArgs as Record<string, unknown>,
+            )
+          : await callFn<TResult>(
+              fnName,
+              serverArgs as Record<string, unknown>,
+              { token: tokenRef.current },
+            );
         if (mounted.current) setData(result);
         return result;
       } catch (e) {

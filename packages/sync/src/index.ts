@@ -114,6 +114,19 @@ export class LocalStore {
    * dominate anything a concurrent pull could replay.
    */
   private tombstones: Map<string, Map<string, number>> = new Map();
+  /**
+   * Pending optimistic deletes — `(entity, row_id)` pairs the local
+   * client has dropped but the server hasn't yet confirmed. Stored
+   * separately from `tombstones` because the optimistic "block any
+   * incoming insert/update for this row" guard runs at infinite
+   * seq, but the real server delete seq (typically 4–6 digits)
+   * would never max-merge past `Number.MAX_SAFE_INTEGER`. The old
+   * design left MAX_SAFE_INTEGER permanently in `tombstones` for
+   * any optimistically-deleted id, so a future server-issued insert
+   * with seq=N could never pass the `seq < tombstoneSeq` check —
+   * the row id was blocked for the lifetime of the replica.
+   */
+  private optimisticTombstones: Map<string, Set<string>> = new Map();
   private listeners: Set<() => void> = new Set();
 
   /** Get all rows for an entity. */
@@ -163,6 +176,9 @@ export class LocalStore {
 
   /** Check if `(entity, id)` has a tombstone. */
   private isTombstoned(entity: string, id: string, at_seq?: number): boolean {
+    // Pending optimistic delete — block everything until the server's
+    // real delete arrives and supersedes us.
+    if (this.optimisticTombstones.get(entity)?.has(id)) return true;
     const tombSeq = this.tombstones.get(entity)?.get(id);
     if (tombSeq === undefined) return false;
     // If the caller didn't tell us when their change happened, treat as
@@ -172,6 +188,11 @@ export class LocalStore {
   }
 
   private recordTombstone(entity: string, id: string, seq: number): void {
+    // A real (server-issued) tombstone supersedes any pending optimistic
+    // entry for this id. Without this drop, the optimistic
+    // MAX_SAFE_INTEGER entry would persist forever and block future
+    // re-creations of the same id (the case codex flagged P1).
+    this.optimisticTombstones.get(entity)?.delete(id);
     if (!this.tombstones.has(entity)) {
       this.tombstones.set(entity, new Map());
     }
@@ -264,8 +285,20 @@ export class LocalStore {
     }
     this.notify();
     if (this._persistFn) {
-      const results = changes.map((c) => this._persistFn!(this.hydrateFromMemory(c)));
-      await Promise.all(results.map((r) => (r instanceof Promise ? r : Promise.resolve())));
+      // Persist sequentially in arrival order — `Promise.all` would
+      // fire every IndexedDB write concurrently and the IDB scheduler
+      // can resolve them out of order. An `update → delete` pair on
+      // the same row would race the delete behind the update on disk,
+      // leaving a stale row in the persisted replica while the cursor
+      // advanced past the delete. Sequencing here matches the in-memory
+      // apply order, which itself is sequenced by the engine's
+      // `applyQueue`.
+      for (const change of changes) {
+        const result = this._persistFn(this.hydrateFromMemory(change));
+        if (result instanceof Promise) {
+          await result;
+        }
+      }
     }
   }
 
@@ -364,11 +397,17 @@ export class LocalStore {
   /** Apply an optimistic delete. */
   optimisticDelete(entity: string, id: string): void {
     this.tables.get(entity)?.delete(id);
-    // Client-side deletes dominate any concurrent server replay until the
-    // server confirms; use MAX_SAFE_INTEGER as the tombstone seq. When the
-    // server's real delete event arrives it will refresh the tombstone with
-    // the authoritative seq (via `recordTombstone`'s max-of).
-    this.recordTombstone(entity, id, Number.MAX_SAFE_INTEGER);
+    // Optimistic delete: block any incoming insert/update for this id
+    // until the server's authoritative delete arrives. Tracked in
+    // `optimisticTombstones` rather than `tombstones` so the real
+    // server seq can supersede it cleanly — the previous design wrote
+    // MAX_SAFE_INTEGER into `tombstones` and `recordTombstone`'s
+    // max-merge would never replace it with the smaller real seq,
+    // leaving the id permanently quarantined.
+    if (!this.optimisticTombstones.has(entity)) {
+      this.optimisticTombstones.set(entity, new Set());
+    }
+    this.optimisticTombstones.get(entity)!.add(id);
     this.notify();
   }
 
@@ -381,6 +420,7 @@ export class LocalStore {
   clearAll(): void {
     this.tables.clear();
     this.tombstones.clear();
+    this.optimisticTombstones.clear();
     this.notify();
   }
 }
@@ -991,16 +1031,40 @@ export class SyncEngine {
    */
   private enqueueApply(
     changes: ChangeEvent[],
-    targetCursor?: SyncCursor,
+    options:
+      | SyncCursor
+      | { targetCursor?: SyncCursor; skipSeqGuard?: boolean; advanceCursor?: boolean } = {},
   ): Promise<void> {
+    // Back-compat: callers that pass a SyncCursor positional arg get
+    // the same semantics as before. New callers can pass an options
+    // object — `skipSeqGuard` lets reconcile bypass the seq filter
+    // (its synthetic events fabricate seqs that don't fit the natural
+    // monotonic order), and `advanceCursor: false` keeps the cursor
+    // pinned where it was so reconcile doesn't fake-advance past the
+    // server's real position.
+    const opts: { targetCursor?: SyncCursor; skipSeqGuard?: boolean; advanceCursor?: boolean } =
+      options && typeof options === "object" && "last_seq" in options
+        ? { targetCursor: options as SyncCursor }
+        : (options as {
+            targetCursor?: SyncCursor;
+            skipSeqGuard?: boolean;
+            advanceCursor?: boolean;
+          });
+    const skipSeqGuard = opts.skipSeqGuard ?? false;
+    const advanceCursor = opts.advanceCursor ?? true;
+    const targetCursor = opts.targetCursor;
+
     const prev = this.applyQueue;
     const next = prev.then(async () => {
-      const filtered = changes.filter(
-        (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
-      );
+      const filtered = skipSeqGuard
+        ? changes
+        : changes.filter(
+            (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
+          );
       if (filtered.length > 0) {
         await this.store.applyChangesAsync(filtered);
       }
+      if (!advanceCursor) return;
       // Pick the cursor target. Explicit `targetCursor` (from pull) wins
       // — pull's response carries the server's authoritative current_seq
       // even when no changes landed in this window. Otherwise derive
@@ -1734,30 +1798,47 @@ export class SyncEngine {
       }
     }
     if (changes.length > 0) {
-      await this.store.applyChangesAsync(changes);
+      // Reconcile applies route through the same serialized queue as
+      // WS/pull so a stale reconcile response can't interleave with a
+      // newer WS/pull update mid-batch. The synthetic seqs reconcile
+      // fabricates (tombstoneSeq + 1) collide with WS-issued seqs so
+      // we skip the monotonic guard and don't advance the cursor —
+      // the cursor still reflects the server's last_seq, not our
+      // fabricated reconcile seqs.
+      await this.enqueueApply(changes, {
+        skipSeqGuard: true,
+        advanceCursor: false,
+      });
     }
     // Removals: every local row whose id isn't in the server set is
     // stale. Tombstone with the current cursor so future legitimate
-    // re-creations still flow through.
+    // re-creations still flow through. Synthesize Delete events for
+    // each removal and route through the apply queue so the order
+    // relative to WS/pull updates is preserved — a removal here is
+    // really "server says this row is gone as of tombstoneSeq", which
+    // matters if a later WS update reinstates it on the same row id.
     const locals = this.store.list(entity);
-    let removed = false;
+    const removalChanges: ChangeEvent[] = [];
     for (const local of locals) {
       const id = (local as { id?: unknown }).id;
       if (typeof id !== "string") continue;
       if (!serverIds.has(id)) {
-        if (this.store.reconcileRemove(entity, id, tombstoneSeq)) {
-          removed = true;
-          if (this.persistence) {
-            try {
-              await this.persistence.deleteRow(entity, id);
-            } catch {
-              /* best-effort */
-            }
-          }
-        }
+        removalChanges.push({
+          seq: tombstoneSeq,
+          entity,
+          row_id: id,
+          kind: "delete",
+          data: undefined,
+          timestamp: "",
+        });
       }
     }
-    if (removed) this.store.notify();
+    if (removalChanges.length > 0) {
+      await this.enqueueApply(removalChanges, {
+        skipSeqGuard: true,
+        advanceCursor: false,
+      });
+    }
   }
 
   private async dropEntity(

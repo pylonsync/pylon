@@ -216,6 +216,38 @@ impl ChangeLog {
         *seq
     }
 
+    /// Append a change event RECEIVED FROM A PEER over the cluster bus,
+    /// preserving its original seq. The local seq counter advances to
+    /// max(local_seq, event.seq) so `current_seq()` reflects the most
+    /// recent globally-observed seq across all instances.
+    ///
+    /// Codex P1: pre-fix, peer events were rebroadcast to local WS/SSE
+    /// clients without touching the local log. A client connected to
+    /// machine B would advance its cursor to a seq machine A had
+    /// assigned (say 1000) and then re-pulling from B (whose local
+    /// counter was at 200) hit `cursor.last_seq > current_seq` and
+    /// resync-required'd. Mirroring the peer's seq into the local log
+    /// closes that gap: B's `current_seq` now reflects A's seq=1000
+    /// once it's observed, and pulls return the correct tail.
+    ///
+    /// This is NOT a substitute for a truly globally-monotonic seq
+    /// (Postgres SERIAL or similar) — concurrent appends on A and B
+    /// can still produce duplicate seqs locally on each instance. But
+    /// for the common case (cluster bus delivers in order, instances
+    /// only write to their own log), it converges the visible seq
+    /// space across nodes.
+    pub fn append_peer(&self, event: ChangeEvent) {
+        let mut events = self.events.lock().unwrap();
+        let mut seq = self.seq.lock().unwrap();
+        if event.seq > *seq {
+            *seq = event.seq;
+        }
+        events.push_back(event);
+        while events.len() > self.capacity {
+            events.pop_front();
+        }
+    }
+
     /// Pull changes since a cursor, up to a limit.
     ///
     /// Returns `Err(PullError::ResyncRequired)` when the caller's cursor has
