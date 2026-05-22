@@ -57,8 +57,20 @@ export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) 
   _started = false;
   // Keep the React-side helpers in sync — a single init() should fully
   // namespace this app's storage without a separate configureClient call.
+  // Match createSyncEngine's resolution: when init({ appName }) omits
+  // baseUrl, fall back to window.location.origin so callFn / fetchList /
+  // session helpers go through the same dev-server proxy as the sync
+  // engine. Otherwise callFn hits the hard-coded http://localhost:4321
+  // default and trips CORS preflights in any Vite/Next setup where the
+  // page origin doesn't equal the API origin.
+  const resolvedBaseUrl =
+    config?.baseUrl && config.baseUrl.length > 0
+      ? config.baseUrl
+      : typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : undefined;
   configureClient({
-    baseUrl: config?.baseUrl,
+    baseUrl: resolvedBaseUrl,
     appName: config?.appName,
   });
 }
@@ -248,12 +260,17 @@ export const db = {
   /**
    * Call a server-side function (query, mutation, or action).
    *
+   * Routes through `SyncEngine.fn` (not the free `callFn`) so the response's
+   * `X-Pylon-Change-Seq` header triggers a fallback pull when the WS
+   * broadcast for the same event hasn't landed yet — closes the gap where
+   * a mutation succeeds but the cached query doesn't observe the new row.
+   *
    * ```ts
    * const result = await db.fn("placeBid", { lotId: "x", amount: 150 });
    * ```
    */
   fn<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T> {
-    return callFn<T>(name, args);
+    return getSync().fn<T>(name, args);
   },
 
   /**

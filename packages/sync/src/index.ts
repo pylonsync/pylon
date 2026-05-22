@@ -714,6 +714,7 @@ export class SyncEngine {
    * the client can't hammer the server on auth failures.
    */
   private wsStableTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Registered consumers for binary WebSocket frames. SyncEngine itself
@@ -986,6 +987,10 @@ export class SyncEngine {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
     if (this.visibilityHandler && typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.visibilityHandler);
       this.visibilityHandler = null;
@@ -1033,6 +1038,27 @@ export class SyncEngine {
         this.reconnectAttempts = 0;
         this.wsStableTimer = null;
       }, 5_000);
+      // Client-side keepalive ping. The server's per-client reader
+      // thread blocks on a synchronous WS read for as long as no client
+      // message arrives. On the HTTP-multiplexed `/api/sync/ws` path
+      // tiny_http doesn't expose stream-level read timeouts, so the
+      // reader's mutex hold is bounded only by client activity. Without
+      // these pings the broadcaster contends for the same mutex and
+      // wedges — Insert events never reach the tab. A 1s cadence makes
+      // worst-case broadcast latency ~1s even when the user is idle.
+      // Browsers don't expose WebSocket-level PING frames; a JSON
+      // payload with type:"ping" achieves the same effect (the server
+      // reads, looks up an unknown "ping" type, loops back releasing
+      // the mutex; broadcaster grabs it during the gap).
+      if (this.pingTimer) clearInterval(this.pingTimer);
+      this.pingTimer = setInterval(() => {
+        if (this.ws?.readyState !== WebSocket.OPEN) return;
+        try {
+          this.ws.send('{"type":"ping"}');
+        } catch {
+          // ignore — onclose will trigger reconnect
+        }
+      }, 1_000);
       // Re-send any active CRDT subscriptions across the new socket.
       // The server purged them on disconnect (`unsubscribe_all`), so
       // without this resync a tab that was subscribed before a network
@@ -1161,6 +1187,10 @@ export class SyncEngine {
       if (this.wsStableTimer) {
         clearTimeout(this.wsStableTimer);
         this.wsStableTimer = null;
+      }
+      if (this.pingTimer) {
+        clearInterval(this.pingTimer);
+        this.pingTimer = null;
       }
       // Surface the disconnect to UI consumers immediately. If
       // `running` flipped to false (engine stopped), `stop()` already

@@ -293,7 +293,7 @@ impl Shard {
             let clients = self.clients.lock().unwrap();
             clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
         };
-        tracing::info!(
+        tracing::debug!(
             entity = %event.entity,
             kind = ?event.kind,
             seq = event.seq,
@@ -304,7 +304,7 @@ impl Shard {
         let mut delivered = 0u32;
         let mut denied = 0u32;
         for (id, handle) in handles {
-            tracing::info!(
+            tracing::debug!(
                 client_id = id,
                 entity = %event.entity,
                 "[ws.broadcast_change] entering loop body for client"
@@ -322,7 +322,7 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tracing::info!(
+            tracing::debug!(
                 client_id = id,
                 auth_user = ?auth.user_id,
                 is_admin = auth.is_admin,
@@ -336,7 +336,7 @@ impl Shard {
                         policy_name,
                         reason,
                     } => {
-                        tracing::info!(
+                        tracing::debug!(
                             client_id = id,
                             auth_user = ?auth.user_id,
                             policy = %policy_name,
@@ -350,7 +350,7 @@ impl Shard {
                 }
             }
             drop(auth);
-            tracing::info!(
+            tracing::debug!(
                 client_id = id,
                 "[ws.broadcast_change] policy passed — acquiring socket lock"
             );
@@ -358,12 +358,12 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tracing::info!(
+            tracing::debug!(
                 client_id = id,
                 "[ws.broadcast_change] socket locked — calling send"
             );
             let send_result = guard.send(Message::Text((**json).to_string()));
-            tracing::info!(
+            tracing::debug!(
                 client_id = id,
                 send_ok = send_result.is_ok(),
                 send_err = ?send_result.as_ref().err().map(|e| format!("{e:?}")),
@@ -375,7 +375,7 @@ impl Shard {
                 delivered += 1;
             }
         }
-        tracing::info!(
+        tracing::debug!(
             entity = %event.entity,
             delivered,
             denied,
