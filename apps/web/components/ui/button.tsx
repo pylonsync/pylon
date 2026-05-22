@@ -36,9 +36,27 @@ export interface ButtonProps
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
+    // Radix's `Slot` types its rest-props against the generic
+    // `HTMLElement`. Our ButtonProps narrows to HTMLButtonElement,
+    // which means handlers like `onSubmit` carry the more-specific
+    // `SubmitEventHandler<HTMLButtonElement>` shape. Under Next 16's
+    // stricter TS check the variance flips — Slot accepts a SUPER-
+    // type of handler, but a narrower handler isn't assignable. Cast
+    // the rest-props to the relaxed shape so the type checker stops
+    // complaining; the runtime behaviour is unchanged (Slot just
+    // forwards everything to whatever child the caller passes via
+    // `asChild`, and the child decides what to do with the event).
+    if (asChild) {
+      return (
+        <Slot
+          className={cn(buttonVariants({ variant, size, className }))}
+          ref={ref}
+          {...(props as React.HTMLAttributes<HTMLElement>)}
+        />
+      );
+    }
     return (
-      <Comp
+      <button
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
         {...props}
