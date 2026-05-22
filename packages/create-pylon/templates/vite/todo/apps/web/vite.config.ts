@@ -2,22 +2,37 @@ import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Backend origin. `pylon dev` defaults to :4321 — override via the
-// PYLON_TARGET env if you're running it elsewhere. In a production
-// build (`vite build` → static hosting + a separate API origin),
-// configure your reverse proxy / CDN to route /api/* to the same
-// place this proxy points at.
-const PYLON_TARGET = process.env.PYLON_TARGET ?? "http://localhost:4321";
+// Pylon dev exposes TWO ports:
+//   :4321  → HTTP (functions, entity CRUD, /api/sync/pull, /api/auth/*)
+//   :4322  → dedicated WebSocket listener with TCP read timeouts set
+//            on the raw socket. Broadcasts flow immediately because
+//            the reader thread's mutex is released every 200ms by the
+//            kernel-level read timeout — no client keepalive ping
+//            needed to break the wedge.
+//
+// We route the WS upgrade to :4322 and everything else to :4321. The
+// HTTP-multiplexed `/api/sync/ws` on :4321 also works (and is the
+// production fallback for proxies that can't forward to a secondary
+// port), but it can't set stream-level timeouts because tiny_http's
+// `CustomStream` hides the underlying TcpStream — so broadcasts there
+// are latency-bounded by the client SDK's 200ms keepalive ping.
+const PYLON_HTTP_TARGET = process.env.PYLON_TARGET ?? "http://localhost:4321";
+const PYLON_WS_TARGET = process.env.PYLON_WS_TARGET ?? "ws://localhost:4322";
 
 const proxyConfig: Record<string, string | ProxyOptions> = {
-	// HTTP — /api/auth/*, /api/fn/*, /api/sync/pull, etc.
-	"/api": {
-		target: PYLON_TARGET,
-		changeOrigin: true,
-		// Vite's http-proxy needs ws:true for the WebSocket upgrade
-		// to propagate. Without it `/api/sync/ws` 404s and db.useQuery
-		// hangs in a "connecting" state forever.
+	// WebSocket sync: forward upgrade to the dedicated :4322 listener.
+	// Must come BEFORE the catch-all /api entry so this more-specific
+	// path wins for WS connections. The dedicated listener handshakes
+	// on any path so we don't bother rewriting.
+	"/api/sync/ws": {
+		target: PYLON_WS_TARGET,
 		ws: true,
+		changeOrigin: true,
+	},
+	// HTTP — /api/auth/*, /api/fn/*, /api/sync/pull, /api/entities/*, etc.
+	"/api": {
+		target: PYLON_HTTP_TARGET,
+		changeOrigin: true,
 	},
 };
 
