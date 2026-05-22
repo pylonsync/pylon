@@ -6,6 +6,10 @@ import { mutation, v } from "@pylonsync/functions";
  * follow-up read.
  */
 export default mutation({
+	// `public` matches the wide-open Widget policy in schema.ts so this
+	// demo works without sign-in. When you wire auth, switch to "user"
+	// (the framework default) and add a session flow.
+	auth: "public",
 	args: { name: v.string() },
 	async handler(ctx, args: { name: string }) {
 		const trimmed = args.name.trim();

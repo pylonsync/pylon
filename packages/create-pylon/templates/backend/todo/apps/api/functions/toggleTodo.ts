@@ -5,6 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * `ctx.db.update` which is only on writable ctx variants.
  */
 export default mutation({
+	auth: "public",
 	args: { id: v.id("Todo"), done: v.bool() },
 	async handler(ctx, args: { id: string; done: boolean }) {
 		await ctx.db.update("Todo", args.id, { done: args.done });

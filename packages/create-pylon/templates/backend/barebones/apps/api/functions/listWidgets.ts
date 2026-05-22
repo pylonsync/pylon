@@ -6,6 +6,7 @@ import { query } from "@pylonsync/functions";
  * whenever a row is inserted, updated, or deleted.
  */
 export default query({
+	auth: "public",
 	args: {},
 	async handler(ctx) {
 		const rows = await ctx.db.query("Widget", {});

@@ -5,6 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * the client can show a "todo removed" toast or animate it out.
  */
 export default mutation({
+	auth: "public",
 	args: { id: v.id("Todo") },
 	async handler(ctx, args: { id: string }) {
 		const snapshot = await ctx.db.get("Todo", args.id);

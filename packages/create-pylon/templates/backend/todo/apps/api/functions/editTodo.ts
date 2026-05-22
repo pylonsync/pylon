@@ -4,6 +4,7 @@ import { mutation, v } from "@pylonsync/functions";
  * Rename a Todo. Trims whitespace; rejects empty titles.
  */
 export default mutation({
+	auth: "public",
 	args: { id: v.id("Todo"), title: v.string() },
 	async handler(ctx, args: { id: string; title: string }) {
 		const trimmed = args.title.trim();

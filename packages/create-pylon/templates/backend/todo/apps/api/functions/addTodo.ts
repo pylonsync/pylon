@@ -6,6 +6,10 @@ import { mutation, v } from "@pylonsync/functions";
  * room for inserts-between without needing global renumber.
  */
 export default mutation({
+	// `public` matches the wide-open Todo policy in schema.ts so this
+	// demo works without sign-in. When you wire auth, switch to "user"
+	// (the framework default) and add a session flow.
+	auth: "public",
 	args: { title: v.string() },
 	async handler(ctx, args: { title: string }) {
 		const existing = await ctx.db.query("Todo", {});

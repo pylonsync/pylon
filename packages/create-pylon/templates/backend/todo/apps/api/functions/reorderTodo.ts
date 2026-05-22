@@ -6,6 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * between any two rows before precision matters.
  */
 export default mutation({
+	auth: "public",
 	args: { id: v.id("Todo"), position: v.number() },
 	async handler(ctx, args: { id: string; position: number }) {
 		await ctx.db.update("Todo", args.id, { position: args.position });

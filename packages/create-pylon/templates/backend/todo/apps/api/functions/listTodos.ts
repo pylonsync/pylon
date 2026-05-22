@@ -6,6 +6,7 @@ import { query } from "@pylonsync/functions";
  * a fallback so the list stays deterministic.
  */
 export default query({
+	auth: "public",
 	args: {},
 	async handler(ctx) {
 		const rows = await ctx.db.query("Todo", {});
