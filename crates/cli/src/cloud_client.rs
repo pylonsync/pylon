@@ -139,11 +139,22 @@ where
     O: for<'de> Deserialize<'de>,
 {
     let url = format!("{}{}", creds.cloud_url.trim_end_matches('/'), path);
+    // Coerce a `null` body to `{}`. Several no-arg endpoints
+    // (`listMyProjectsForCli`, etc.) are invoked with the unit type
+    // `&()`, which `serde_json` serializes as JSON `null`. Pylon's
+    // function dispatcher then rejects with
+    // `INVALID_ARGS: args must be an object` — every call from the
+    // CLI dies with that error. Callers shouldn't have to remember to
+    // pass `&json!({})` for the empty case; normalize here.
+    let mut payload = serde_json::to_value(body).map_err(|e| e.to_string())?;
+    if payload.is_null() {
+        payload = serde_json::Value::Object(Default::default());
+    }
     let res = agent()
         .post(&url)
         .set("Authorization", &format!("Bearer {}", creds.token))
         .set("Content-Type", "application/json")
-        .send_json(serde_json::to_value(body).map_err(|e| e.to_string())?);
+        .send_json(payload);
     match res {
         Ok(resp) => resp
             .into_json::<O>()

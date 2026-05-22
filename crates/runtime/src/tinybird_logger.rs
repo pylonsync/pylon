@@ -47,51 +47,101 @@ pub struct RequestLogEvent {
 
 /// Config resolved from env at startup. `None` here means the shipper
 /// is disabled — the most common case (any non-cloud deploy).
+/// Where the shipper sends request-log events. Two backends today:
+///
+///   - Cloud: POST `${PYLON_CLOUD_URL}/api/cloud/request-log` with
+///     `Bearer ${PYLON_METRICS_TOKEN}` and a JSON array body. Pylon
+///     Cloud's control plane aggregates server-side and writes
+///     UsageWindow rows — no external Tinybird account required. This
+///     is the path Pylon Cloud uses; preferred when both PYLON_CLOUD_URL
+///     and PYLON_METRICS_TOKEN are set on the machine env.
+///
+///   - Tinybird: POST `${PYLON_TINYBIRD_HOST}/v0/events?name=<datasource>`
+///     with `Bearer ${PYLON_TINYBIRD_TOKEN}` and NDJSON body.
+///     Self-hosted Pylons can still wire this up if they want columnar
+///     analytics — it's not deprecated, just no longer Pylon Cloud's
+///     default.
+///
+/// from_env() prefers Cloud when configured. Apps with neither set
+/// run with shipper disabled (the metrics counters still increment
+/// in-process; they just don't go anywhere).
+#[derive(Debug, Clone)]
+enum Backend {
+    Cloud { url: String, token: String },
+    Tinybird { url: String, token: String },
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedConfig {
-    host: String,
-    token: String,
+    backend: Backend,
     project_id: String,
     deployment_id: String,
     region: String,
-    datasource: String,
 }
 
 impl ResolvedConfig {
     fn from_env() -> Option<Self> {
-        let token = env::var("PYLON_TINYBIRD_TOKEN").ok()?;
-        if token.is_empty() {
-            return None;
-        }
         // Project id is required — without it every row would land in
         // the same bucket and the dashboard couldn't filter per
         // tenant. Refuse to start the shipper rather than ship rows
         // that the dashboard can't index.
-        let project_id = env::var("PYLON_PROJECT_ID").ok()?;
-        if project_id.is_empty() {
-            tracing::warn!(
-                "[tinybird] PYLON_TINYBIRD_TOKEN set but PYLON_PROJECT_ID is empty — shipper disabled"
-            );
-            return None;
-        }
-        let host = env::var("PYLON_TINYBIRD_HOST")
-            .unwrap_or_else(|_| "https://api.tinybird.co".to_string());
+        let project_id = env::var("PYLON_PROJECT_ID").ok().filter(|s| !s.is_empty());
+
+        // Prefer cloud transport. Pylon Cloud customer machines have
+        // PYLON_CLOUD_URL + PYLON_METRICS_TOKEN stamped at deploy time;
+        // self-hosters who want Tinybird set PYLON_TINYBIRD_TOKEN
+        // instead.
+        let cloud_url = env::var("PYLON_CLOUD_URL").ok().filter(|s| !s.is_empty());
+        let metrics_token = env::var("PYLON_METRICS_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let backend = if let (Some(url), Some(token)) = (&cloud_url, &metrics_token) {
+            // Pylon Cloud exposes the receiver as an action at
+            // /api/fn/receiveRequestLog. (Path-based routing would
+            // be cleaner long-term but Pylon's action-router only
+            // exposes /api/fn/<name>; matching that.)
+            Backend::Cloud {
+                url: format!("{}/api/fn/receiveRequestLog", url.trim_end_matches('/')),
+                token: token.clone(),
+            }
+        } else {
+            let token = env::var("PYLON_TINYBIRD_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())?;
+            let host = env::var("PYLON_TINYBIRD_HOST")
+                .unwrap_or_else(|_| "https://api.tinybird.co".to_string());
+            let datasource =
+                env::var("PYLON_TINYBIRD_DATASOURCE").unwrap_or_else(|_| "request_log".to_string());
+            Backend::Tinybird {
+                url: format!("{}/v0/events?name={}", host, datasource),
+                token,
+            }
+        };
+
+        let project_id = match project_id {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    "[request-logger] backend configured but PYLON_PROJECT_ID is empty — shipper disabled"
+                );
+                return None;
+            }
+        };
+
         let deployment_id = env::var("PYLON_DEPLOYMENT_ID").unwrap_or_default();
         // Prefer the explicit PYLON_REGION override; fall back to
         // FLY_REGION which is auto-set on Fly machines. Empty string
-        // is fine — Tinybird's `LowCardinality(String)` accepts it.
+        // is fine — Tinybird's `LowCardinality(String)` accepts it and
+        // the cloud receiver doesn't require it.
         let region = env::var("PYLON_REGION")
             .or_else(|_| env::var("FLY_REGION"))
             .unwrap_or_default();
-        let datasource =
-            env::var("PYLON_TINYBIRD_DATASOURCE").unwrap_or_else(|_| "request_log".to_string());
         Some(Self {
-            host,
-            token,
+            backend,
             project_id,
             deployment_id,
             region,
-            datasource,
         })
     }
 }
@@ -133,10 +183,14 @@ impl TinybirdLogger {
             .spawn(move || run_flusher(rx, cfg_clone, flushed_clone, failed_clone))
             .expect("spawn pylon-tinybird-logger thread");
 
+        let (backend_label, backend_url) = match &cfg.backend {
+            Backend::Cloud { url, .. } => ("cloud", url.clone()),
+            Backend::Tinybird { url, .. } => ("tinybird", url.clone()),
+        };
         tracing::info!(
-            "[tinybird] request-log shipper started → {} / {} (project_id={})",
-            cfg.host,
-            cfg.datasource,
+            "[request-logger] shipper started → {} via {} (project_id={})",
+            backend_url,
+            backend_label,
             cfg.project_id
         );
         Some(Arc::new(Self {
@@ -196,8 +250,6 @@ fn run_flusher(
     flushed: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
 ) {
-    let url = format!("{}/v0/events?name={}", cfg.host, cfg.datasource);
-    let auth_header = format!("Bearer {}", cfg.token);
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
         .build();
@@ -221,21 +273,21 @@ fn run_flusher(
             Ok(event) => {
                 buf.push(event);
                 if buf.len() >= BATCH_MAX {
-                    flush_batch(&agent, &url, &auth_header, &mut buf, &flushed, &failed);
+                    flush_batch(&agent, &cfg.backend, &mut buf, &flushed, &failed);
                     last_flush = Instant::now();
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if !buf.is_empty() {
-                    flush_batch(&agent, &url, &auth_header, &mut buf, &flushed, &failed);
+                    flush_batch(&agent, &cfg.backend, &mut buf, &flushed, &failed);
                     last_flush = Instant::now();
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 if !buf.is_empty() {
-                    flush_batch(&agent, &url, &auth_header, &mut buf, &flushed, &failed);
+                    flush_batch(&agent, &cfg.backend, &mut buf, &flushed, &failed);
                 }
-                tracing::info!("[tinybird] sender disconnected, shipper exiting");
+                tracing::info!("[request-logger] sender disconnected, shipper exiting");
                 return;
             }
         }
@@ -244,8 +296,7 @@ fn run_flusher(
 
 fn flush_batch(
     agent: &ureq::Agent,
-    url: &str,
-    auth_header: &str,
+    backend: &Backend,
     buf: &mut Vec<RequestLogEvent>,
     flushed: &AtomicU64,
     failed: &AtomicU64,
@@ -253,34 +304,61 @@ fn flush_batch(
     if buf.is_empty() {
         return;
     }
-    // NDJSON: one JSON object per line, no trailing comma. Tinybird's
-    // /v0/events endpoint expects this exact format.
-    let mut body = String::with_capacity(buf.len() * 256);
-    for ev in buf.iter() {
-        match serde_json::to_string(ev) {
-            Ok(line) => {
-                body.push_str(&line);
-                body.push('\n');
-            }
-            Err(e) => {
-                tracing::warn!("[tinybird] dropping event: serialize failed: {e}");
-            }
-        }
-    }
     let n = buf.len();
-    buf.clear();
-    let result = agent
-        .post(url)
-        .set("Authorization", auth_header)
-        .set("Content-Type", "application/x-ndjson")
-        .send_string(&body);
+    let result = match backend {
+        Backend::Cloud { url, token } => {
+            // The cloud receiver is a Pylon action, so args come in
+            // wrapped at the top level: `{ events: [...] }`. The
+            // action's handler reads `args.events` and aggregates
+            // server-side into UsageWindow rows. No external
+            // analytics dep.
+            let body = match serde_json::to_string(&serde_json::json!({ "events": &*buf })) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("[request-logger] serialize failed: {e}");
+                    buf.clear();
+                    failed.fetch_add(n as u64, Ordering::Relaxed);
+                    return;
+                }
+            };
+            buf.clear();
+            agent
+                .post(url)
+                .set("Authorization", &format!("Bearer {}", token))
+                .set("Content-Type", "application/json")
+                .send_string(&body)
+        }
+        Backend::Tinybird { url, token } => {
+            // NDJSON: one JSON object per line, no trailing comma.
+            // Tinybird's /v0/events endpoint expects this exact
+            // format.
+            let mut body = String::with_capacity(buf.len() * 256);
+            for ev in buf.iter() {
+                match serde_json::to_string(ev) {
+                    Ok(line) => {
+                        body.push_str(&line);
+                        body.push('\n');
+                    }
+                    Err(e) => {
+                        tracing::warn!("[request-logger] dropping event: serialize failed: {e}");
+                    }
+                }
+            }
+            buf.clear();
+            agent
+                .post(url)
+                .set("Authorization", &format!("Bearer {}", token))
+                .set("Content-Type", "application/x-ndjson")
+                .send_string(&body)
+        }
+    };
     match result {
         Ok(_) => {
             flushed.fetch_add(n as u64, Ordering::Relaxed);
         }
         Err(e) => {
             failed.fetch_add(n as u64, Ordering::Relaxed);
-            tracing::warn!("[tinybird] flush failed ({n} events dropped): {e}");
+            tracing::warn!("[request-logger] flush failed ({n} events dropped): {e}");
         }
     }
 }
