@@ -293,7 +293,16 @@ impl Shard {
             let clients = self.clients.lock().unwrap();
             clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
         };
+        tracing::info!(
+            entity = %event.entity,
+            kind = ?event.kind,
+            seq = event.seq,
+            clients_in_shard = handles.len(),
+            "[ws.broadcast_change] starting fanout"
+        );
         let mut dead: Vec<u64> = Vec::new();
+        let mut delivered = 0u32;
+        let mut denied = 0u32;
         for (id, handle) in handles {
             // Per-client policy check. The event's `data` field carries
             // the row payload (or None for deletes — policy still
@@ -312,7 +321,21 @@ impl Shard {
                 let row = event.data.as_ref();
                 match policy.check_entity_read(&event.entity, &auth, row) {
                     PolicyResult::Allowed => {}
-                    PolicyResult::Denied { .. } => continue,
+                    PolicyResult::Denied {
+                        policy_name,
+                        reason,
+                    } => {
+                        tracing::info!(
+                            client_id = id,
+                            auth_user = ?auth.user_id,
+                            policy = %policy_name,
+                            reason = %reason,
+                            entity = %event.entity,
+                            "[ws.broadcast_change] policy denied — skipping client"
+                        );
+                        denied += 1;
+                        continue;
+                    }
                 }
             }
             drop(auth);
@@ -322,8 +345,17 @@ impl Shard {
             };
             if guard.send(Message::Text((**json).to_string())).is_err() {
                 dead.push(id);
+            } else {
+                delivered += 1;
             }
         }
+        tracing::info!(
+            entity = %event.entity,
+            delivered,
+            denied,
+            dead = dead.len(),
+            "[ws.broadcast_change] fanout complete"
+        );
         if !dead.is_empty() {
             let mut clients = self.clients.lock().unwrap();
             for id in &dead {
