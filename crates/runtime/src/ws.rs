@@ -304,6 +304,11 @@ impl Shard {
         let mut delivered = 0u32;
         let mut denied = 0u32;
         for (id, handle) in handles {
+            tracing::info!(
+                client_id = id,
+                entity = %event.entity,
+                "[ws.broadcast_change] entering loop body for client"
+            );
             // Per-client policy check. The event's `data` field carries
             // the row payload (or None for deletes — policy still
             // evaluates against entity-level rules). `is_admin`
@@ -317,6 +322,12 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            tracing::info!(
+                client_id = id,
+                auth_user = ?auth.user_id,
+                is_admin = auth.is_admin,
+                "[ws.broadcast_change] auth read complete"
+            );
             if !auth.is_admin {
                 let row = event.data.as_ref();
                 match policy.check_entity_read(&event.entity, &auth, row) {
@@ -339,11 +350,26 @@ impl Shard {
                 }
             }
             drop(auth);
+            tracing::info!(
+                client_id = id,
+                "[ws.broadcast_change] policy passed — acquiring socket lock"
+            );
             let mut guard = match handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if guard.send(Message::Text((**json).to_string())).is_err() {
+            tracing::info!(
+                client_id = id,
+                "[ws.broadcast_change] socket locked — calling send"
+            );
+            let send_result = guard.send(Message::Text((**json).to_string()));
+            tracing::info!(
+                client_id = id,
+                send_ok = send_result.is_ok(),
+                send_err = ?send_result.as_ref().err().map(|e| format!("{e:?}")),
+                "[ws.broadcast_change] send returned"
+            );
+            if send_result.is_err() {
                 dead.push(id);
             } else {
                 delivered += 1;
