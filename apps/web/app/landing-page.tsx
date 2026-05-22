@@ -1622,7 +1622,7 @@ export function LandingPage({
 							</h1>
 							<p className="lede">
 								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
-								SQLite or Postgres, your choice. Deploy to your VPS or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
+								SQLite or Postgres, your choice. Deploy to your VPS or Pylon Cloud. Built to sit behind Next.js on Vercel.
 							</p>
 							{/* Primary CTA: actually start building. The fastest
 							    path from "landed on the site" to "running app on
@@ -1773,7 +1773,7 @@ export function LandingPage({
 				<section className="block" id="features">
 					<div className="shell">
 						<div className="eyebrow">The model</div>
-						<h2 className="h2">One framework. Three lines of code.</h2>
+						<h2 className="h2">Three lines of code. One running backend.</h2>
 						<p className="section-lede">
 							Most realtime backends are three systems glued together — a database, an API server, and a pub/sub layer. Pylon collapses the stack: the handler is the transaction, the query is the subscription.
 						</p>
@@ -1920,7 +1920,7 @@ export function LandingPage({
 				<section className="block" id="primitives" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Twelve primitives</div>
-						<h2 className="h2">Everything you&apos;d reach for, already in the box.</h2>
+						<h2 className="h2">Twelve primitives. No glue.</h2>
 						<p className="section-lede">The pieces you usually stitch together ship as one system. Use the app side alone, or layer on realtime, workflows, search, and game-shaped primitives when the product needs them.</p>
 
 						<div className="prims">
@@ -1942,7 +1942,7 @@ export function LandingPage({
 				<section className="block" id="clients">
 					<div className="shell">
 						<div className="eyebrow">Client bindings</div>
-						<h2 className="h2">Plug in from React, Swift, or whatever you ship.</h2>
+						<h2 className="h2">One backend. Every client you ship.</h2>
 						<p className="section-lede">Real-time subscriptions, optimistic mutations, and a typed client — across the runtimes you already use. One Pylon backend serves them all.</p>
 
 						<div className="lanes">
@@ -1982,7 +1982,7 @@ export function LandingPage({
 				<section className="block" id="compare">
 					<div className="shell">
 						<div className="eyebrow">How it compares</div>
-						<h2 className="h2">Rails-like productivity. None of the lock-in.</h2>
+						<h2 className="h2">Convex velocity. Rails ownership.</h2>
 						<p className="section-lede">Pick a managed backend and you inherit its boundaries. Pick raw infrastructure and you rebuild the framework. Pylon keeps one product model across both.</p>
 
 						<div className="compare-wrap">
@@ -2058,7 +2058,7 @@ export function LandingPage({
 				<section className="block" id="deploy" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Deploy</div>
-						<h2 className="h2">Start managed. Keep the escape hatch.</h2>
+						<h2 className="h2">Same binary, four ways to run it.</h2>
 						<p className="section-lede">Pylon is not a hosting bet. One app model running locally, on Pylon Cloud, on a VPS, or inside your AWS account — without rewriting handlers.</p>
 
 						<div className="lanes">
@@ -2220,8 +2220,7 @@ export function LandingPage({
 					<div className="accent-glow" />
 					<div className="shell">
 						<div className="inner">
-							<div className="eyebrow">Ship something live</div>
-							<h2>Build the thing you&apos;ve been putting off.</h2>
+							<h2>Stop gluing services together.</h2>
 							<p>Open source, MIT/Apache. Free tier on Pylon Cloud — pay when you outgrow it, or take the binary and run it yourself.</p>
 							<div className="ctas">
 								<Link className="btn accent" href="https://cloud.pylonsync.com">Start free →</Link>
