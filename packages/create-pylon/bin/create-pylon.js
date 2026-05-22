@@ -64,7 +64,11 @@ const PYLON_VERSION = JSON.parse(
 // without value. Pick a different template if you want mobile.
 // ---------------------------------------------------------------------------
 
-const PLATFORMS_AVAILABLE = ["web", "ios", "mac", "expo"];
+// `web` and `vite` both render into apps/web — they're mutually
+// exclusive web-frontend toolchains. `web` is Next.js 16 (SSR +
+// server actions); `vite` is plain Vite + React for an SPA setup.
+// Validation below rejects passing both.
+const PLATFORMS_AVAILABLE = ["web", "vite", "ios", "mac", "expo"];
 
 const TEMPLATE_REGISTRY = {
 	barebones: {
@@ -73,7 +77,7 @@ const TEMPLATE_REGISTRY = {
 	},
 	todo: {
 		blurb: "CRUD + drag-reorder + optimistic mutations.",
-		platforms: ["web", "ios", "mac", "expo"],
+		platforms: ["web", "vite", "ios", "mac", "expo"],
 	},
 	b2b: {
 		blurb: "Multi-tenant SaaS: orgs, members, roles, RBAC policies.",
@@ -201,6 +205,13 @@ if (platforms.length === 0) {
 	console.error(`\nError: at least one platform required.\n`);
 	exit(1);
 }
+if (platforms.includes("web") && platforms.includes("vite")) {
+	console.error(
+		`\nError: --platforms web and vite are mutually exclusive (both render into apps/web).\n` +
+			`       Pick one: web for Next.js 16, vite for plain Vite + React.\n`,
+	);
+	exit(1);
+}
 if (!TEMPLATES_AVAILABLE.includes(flags.template)) {
 	console.error(
 		`\nError: unknown template "${flags.template}". Valid: ${TEMPLATES_AVAILABLE.join(", ")}\n`,
@@ -324,9 +335,16 @@ function copyTemplate(srcSubpath, destSubpath = "") {
 copyTemplate("_root");
 copyTemplate(`backend/${flags.template}`);
 
+// `web` (Next.js) and `vite` are alternative web-frontend toolchains;
+// the mutex check above guarantees at most one of them is set. Either
+// way we also pull in packages/ui so the shared primitives are present.
 if (platforms.includes("web")) {
 	copyTemplate("ui");
 	copyTemplate(`web/${flags.template}`);
+}
+if (platforms.includes("vite")) {
+	copyTemplate("ui");
+	copyTemplate(`vite/${flags.template}`);
 }
 for (const p of ["ios", "mac", "expo"]) {
 	if (platforms.includes(p)) copyTemplate(`${p}/${flags.template}`);
@@ -374,7 +392,8 @@ const rootPkg = {
 	workspaces: ["apps/*", "packages/*"].filter((p) => {
 		// Only declare packages/* as a workspace if we actually scaffolded
 		// packages/ui — otherwise the empty match warns on bun install.
-		if (p === "packages/*") return platforms.includes("web");
+		if (p === "packages/*")
+			return platforms.includes("web") || platforms.includes("vite");
 		return true;
 	}),
 	scripts: {
@@ -421,6 +440,8 @@ const platformLines = [];
 platformLines.push("  → api      http://localhost:4321  (Pylon control plane)");
 if (platforms.includes("web"))
 	platformLines.push("  → web      http://localhost:3000  (Next.js)");
+if (platforms.includes("vite"))
+	platformLines.push("  → web      http://localhost:3000  (Vite + React)");
 if (platforms.includes("expo"))
 	platformLines.push(`  → expo     ${runDev}  (Metro + simulator, alongside web/api)`);
 if (platforms.includes("ios"))
@@ -431,6 +452,10 @@ if (platforms.includes("mac"))
 const layoutLines = ["  apps/api          schema + functions/ handlers"];
 if (platforms.includes("web")) {
 	layoutLines.push("  apps/web          Next.js 16 + React 19 + Tailwind v4");
+	layoutLines.push("  packages/ui       shared UI primitives");
+}
+if (platforms.includes("vite")) {
+	layoutLines.push("  apps/web          Vite + React 19 + Tailwind v4");
 	layoutLines.push("  packages/ui       shared UI primitives");
 }
 if (platforms.includes("ios"))
