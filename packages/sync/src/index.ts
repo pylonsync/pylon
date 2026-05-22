@@ -1262,23 +1262,21 @@ export class SyncEngine {
   private deriveWsUrl(): string {
     const base = this.config.baseUrl;
     const url = new URL(base);
-    const isHttps = url.protocol === "https:";
-    const scheme = isHttps ? "wss" : "ws";
+    const scheme = url.protocol === "https:" ? "wss" : "ws";
 
-    // Production HTTPS deploys: multiplex WS on the same origin via
-    // `/api/sync/ws`. The Pylon runtime accepts the Upgrade on its
-    // main HTTP port (4321), so any reverse proxy that already
-    // forwards `/api/*` carries the WebSocket through too. No
-    // separate WS port to expose, no per-deployment wsUrl env var.
+    // Always multiplex WS on the same origin via `/api/sync/ws`. The
+    // Pylon runtime accepts the Upgrade on its main HTTP port (4321),
+    // so any reverse proxy that already forwards `/api/*` carries the
+    // WebSocket through too (Vite's `ws: true` proxy, Next.js rewrites,
+    // CDNs with WS support).
     //
-    // Local dev (`pylon dev` on `http://localhost:4321`) keeps the
-    // legacy port+1 fallback so existing tutorials still work without
-    // touching their app config — the dedicated `:4322` listener is
-    // still running there too.
-    if (url.port) {
-      const port = parseInt(url.port, 10);
-      return `${scheme}://${url.hostname}:${port + 1}`;
-    }
+    // The legacy port+1 fallback (`:4322` for a `:4321` API) is still
+    // available on the runtime, but we don't derive it client-side
+    // anymore: any setup where the page origin (e.g. Vite on :3000)
+    // wasn't equal to the API origin would compute ws://localhost:3001
+    // — which doesn't exist and bypasses the dev-server proxy. The
+    // `/api/sync/ws` path goes through whatever proxies `/api/*`,
+    // which is the same code path prod already relies on.
     return `${scheme}://${url.host}/api/sync/ws`;
   }
 
@@ -2385,8 +2383,11 @@ export function createSyncEngine(
   baseUrl?: string,
   options?: Partial<SyncEngineConfig>,
 ): SyncEngine {
+  // `??` would treat an empty string as "set" — but `init({ baseUrl: "" })`
+  // is the intuitive "use page origin" incantation and must fall back. Use
+  // `||` so undefined/null/"" all route to the auto-detected origin.
   const resolved =
-    baseUrl ??
+    (baseUrl && baseUrl.length > 0 ? baseUrl : undefined) ??
     (typeof window !== "undefined" && window.location?.origin
       ? window.location.origin
       : "http://localhost:4321");
