@@ -1622,7 +1622,7 @@ export function LandingPage({
 							</h1>
 							<p className="lede">
 								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
-								Build on SQLite locally. Ship the same app to Postgres, your VPS, or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
+								SQLite or Postgres, your choice. Deploy to your VPS or Pylon Cloud. Pairs absurdly well with React and Next.js on Vercel.
 							</p>
 							{/* Primary CTA: actually start building. The fastest
 							    path from "landed on the site" to "running app on
