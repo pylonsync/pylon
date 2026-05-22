@@ -1085,6 +1085,22 @@ fn handle_ws_connection(
     // clients get disconnected rather than stalling the hub.
     stream.set_write_timeout(Some(WS_READ_TIMEOUT)).ok();
 
+    // Clone the underlying TcpStream BEFORE the handshake consumes the
+    // original. TcpStream::try_clone is `dup()` under the hood — both
+    // handles refer to the same kernel socket, so closing either one
+    // shuts the connection cleanly. The clone is for the dedicated
+    // writer thread that owns the WS write-half — it lets the broadcast
+    // path wake INSTANTLY on every event instead of waiting for the
+    // reader to loop back through its drain block (the architectural
+    // fix the v0.3.181 single-thread design couldn't deliver). If the
+    // clone fails (rare; should only happen at extreme fd pressure),
+    // fall back to single-thread mode with the reader-drains-outbound
+    // pattern.
+    let write_stream = stream.try_clone().ok();
+    if let Some(ref ws) = write_stream {
+        ws.set_write_timeout(Some(WS_READ_TIMEOUT)).ok();
+    }
+
     // Extract the bearer token from the handshake, preferring the
     // Authorization header (native clients) and falling back to the
     // `bearer.<token>` WebSocket subprotocol (browsers). We only learn
@@ -1163,7 +1179,28 @@ fn handle_ws_connection(
     // a custom error response, and we already have the socket open for
     // a clean close frame.
     let token = token_slot.lock().unwrap().clone();
-    run_authenticated_session(ws, hub, auth, token, snapshot_fetcher, reactive);
+
+    // Auth resolution happens inside run_authenticated_session so we
+    // can't add the client to the hub until that completes — but we
+    // need the client to exist BEFORE the writer thread can borrow
+    // its `outbound_rx`. Solve this by running the auth handshake
+    // inline here (duplicates a small amount of logic from
+    // `run_authenticated_session`), adding the client to the hub,
+    // spawning the writer thread on the cloned stream, and then
+    // calling run_authenticated_session with a pre-existing client_id
+    // — except the function takes `ws` ownership and adds it itself.
+    //
+    // Cleaner: do the writer-spawn inside `run_authenticated_session`
+    // and pass the cloned stream alongside the read-half WS.
+    run_authenticated_session(
+        ws,
+        hub,
+        auth,
+        token,
+        snapshot_fetcher,
+        reactive,
+        write_stream,
+    );
 }
 
 /// Take an already-handshaken WebSocket, resolve its bearer token,
@@ -1182,6 +1219,13 @@ fn run_authenticated_session(
     token: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    // When `Some`, this caller has a `try_clone`'d TcpStream for the
+    // write half and wants the dual-thread design — a dedicated writer
+    // thread blocks on `outbound_rx.recv()` and sends every broadcast
+    // immediately, no ping-bounded latency. When `None`, the reader
+    // drains outbound between reads (single-thread fallback for the
+    // HTTP-upgrade path that can't split its stream).
+    dual_write_stream: Option<TcpStream>,
 ) {
     // Use the shared bearer resolver so WS sees the same identities
     // HTTP does — admin token / API key / JWT / session — not only
@@ -1218,27 +1262,76 @@ fn run_authenticated_session(
     // sync demo silently fall back to no-broadcasts.
     let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone());
 
-    // Take exclusive ownership of the outbound receiver. Broadcasters
-    // push to `outbound_tx`; this reader is the sole drainer. Without
-    // this, the channel half stays parked in WsClient and outbound
-    // never flows out.
-    let outbound_rx = socket_handle
-        .outbound_rx
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take())
-        .expect("outbound_rx already taken — should be exactly one reader per client");
+    // Dual-thread path: spawn the writer thread on the cloned TcpStream.
+    // It owns `outbound_rx` and `WebSocket::from_raw_socket`-wraps the
+    // cloned stream — no shared mutex with the reader, so broadcasts
+    // wake the writer instantly via `recv()` instead of waiting for the
+    // reader's drain block to run between blocking reads.
+    let outbound_rx_for_reader: Option<mpsc::Receiver<Message>> =
+        if let Some(write_stream) = dual_write_stream {
+            // Take the receiver out of WsClient and into the writer
+            // thread's exclusive ownership.
+            let outbound_rx = socket_handle
+                .outbound_rx
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .expect("outbound_rx vacant before writer thread could claim it");
+            // Wrap the cloned stream in a Role::Server WebSocket. The
+            // original `ws` (now owned by the hub via `socket_handle`)
+            // has the inbound framing state; this fresh WebSocket has
+            // its own outbound state and writes through the cloned
+            // stream — TCP duplex semantics keep the two halves from
+            // interfering.
+            let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16 * 1024 * 1024);
+            let ws_config = WebSocketConfig {
+                max_message_size: Some(max_frame),
+                max_frame_size: Some(max_frame),
+                ..Default::default()
+            };
+            let writer_stream_boxed: Box<dyn WsStream> = Box::new(write_stream);
+            let mut writer_ws =
+                WebSocket::from_raw_socket(writer_stream_boxed, Role::Server, Some(ws_config));
+            let hub_for_writer = Arc::clone(&hub);
+            let writer_client_id = client_id;
+            let _ = std::thread::Builder::new()
+                .name(format!("ws-writer-{client_id}"))
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    // Block on the channel. Wakes instantly the moment a
+                    // broadcaster pushes via `try_send`. No mutex
+                    // contention; no ping-bounded latency; no polling.
+                    while let Ok(msg) = outbound_rx.recv() {
+                        if writer_ws.send(msg).is_err() {
+                            break;
+                        }
+                    }
+                    // Channel closed (client swept out of hub) or send
+                    // failed — sweep ourselves to be defensive. Cheap if
+                    // the reader already removed us.
+                    hub_for_writer.remove_client(writer_client_id);
+                });
+            None
+        } else {
+            // Single-thread mode: the reader takes outbound_rx and
+            // drains it between reads (HTTP-upgrade path that can't
+            // split its stream).
+            socket_handle
+                .outbound_rx
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+        };
 
     loop {
-        // Drain queued outbound BEFORE blocking on read. This is the
-        // hot path that fixes the broadcast wedge: broadcasters
-        // `try_send` to `outbound_tx` without contending for the
-        // socket mutex, and the reader writes them out whenever it
-        // loops back through here (between blocking reads). With
-        // client-side keepalive pings every 200ms, that's the
-        // worst-case broadcast latency on the HTTP-upgrade path
-        // where the underlying stream timeout can't be set.
-        {
+        // Drain queued outbound BEFORE blocking on read — but ONLY if
+        // we own the receiver (single-thread mode). In dual-thread mode
+        // the writer thread handles delivery and broadcasts have zero
+        // ping-bounded latency.
+        if let Some(ref outbound_rx) = outbound_rx_for_reader {
             let mut guard = match socket_handle.socket.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1348,10 +1441,14 @@ fn run_authenticated_session(
                 }
             }
             Ok(Message::Ping(data)) => {
-                // Respond with pong to keep the connection alive.
-                if let Ok(mut guard) = socket_handle.socket.lock() {
-                    let _ = guard.send(Message::Pong(data));
-                }
+                // Route the Pong through the outbound channel so the
+                // writer thread (dual-thread mode) sends it, or the
+                // reader's own drain loop sends it on the next
+                // iteration (single-thread mode). Sending directly
+                // here under socket.lock would race with the writer
+                // thread on dual-thread connections and interleave
+                // partial frames on the underlying TCP stream.
+                let _ = socket_handle.outbound_tx.try_send(Message::Pong(data));
             }
             Ok(Message::Close(_)) => {
                 // Drop every CRDT subscription this client held BEFORE
@@ -1755,6 +1852,10 @@ pub fn handle_http_upgrade(
         ..Default::default()
     };
     let ws = WebSocket::from_raw_socket(stream, Role::Server, Some(ws_config));
+    // HTTP-upgrade path can't try_clone the underlying stream — tiny_http's
+    // CustomStream hides the TcpStream behind trait objects. Fall back to
+    // single-thread mode (reader drains outbound between reads, bounded
+    // by client keepalive ping interval).
     run_authenticated_session(
         ws,
         hub,
@@ -1762,6 +1863,7 @@ pub fn handle_http_upgrade(
         upgrade.bearer_token,
         snapshot_fetcher,
         reactive,
+        None,
     );
 }
 
