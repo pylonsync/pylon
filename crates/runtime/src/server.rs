@@ -2996,7 +2996,7 @@ fn start_server(
                 "UPLOAD_DEPRECATED",
                 "POST /api/files/upload was removed in pylon 0.3.91 — the multipart proxy OOM'd on large uploads. \
                  Use the new 3-step flow: POST /api/files/init → client PUTs bytes to the returned uploadUrl → POST /api/files/confirm. \
-                 See https://pylonsync.com/docs/concepts/files.",
+                 See https://docs.pylonsync.com/concepts/files.",
             );
             let response = with_security_headers(
                 Response::from_string(&err)

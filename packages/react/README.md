@@ -104,7 +104,7 @@ await send.mutate({ channelId, body: "Hi!" });
 // Message appears in `db.useQuery("Message", ...)` before the server responds.
 ```
 
-The framework paints the ghost into the local store, threads `ctx.id` to the server (where your handler should re-use it), and reconciles on server broadcast. See the [optimistic updates concept doc](https://pylonsync.com/docs/concepts/optimistic-updates) for the full pattern.
+The framework paints the ghost into the local store, threads `ctx.id` to the server (where your handler should re-use it), and reconciles on server broadcast. See the [optimistic updates concept doc](https://docs.pylonsync.com/concepts/optimistic-updates) for the full pattern.
 
 ## Live presence + rooms
 
@@ -143,7 +143,7 @@ In browser contexts, omitting `baseUrl` falls back to `window.location.origin` â
 
 ## With Next.js
 
-Use [`@pylonsync/next`](https://npmjs.com/package/@pylonsync/next) for App Router server helpers, middleware, and cookie-aware auth. The full deploy story including Vercel env vars and CORS is at [pylonsync.com/docs/operations/vercel](https://pylonsync.com/docs/operations/vercel).
+Use [`@pylonsync/next`](https://npmjs.com/package/@pylonsync/next) for App Router server helpers, middleware, and cookie-aware auth. The full deploy story including Vercel env vars and CORS is at [docs.pylonsync.com/operations/vercel](https://docs.pylonsync.com/operations/vercel).
 
 ## With React Native
 

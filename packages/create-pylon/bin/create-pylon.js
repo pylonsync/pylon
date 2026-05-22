@@ -476,7 +476,7 @@ ${platformLines.join("\n")}
 Layout:
 ${layoutLines.join("\n")}
 
-Docs: https://pylonsync.com/docs
+Docs: https://docs.pylonsync.com
 `);
 
 // ---------------------------------------------------------------------------

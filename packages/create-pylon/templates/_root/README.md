@@ -40,4 +40,4 @@ bun run dev
 
 ## Docs
 
-[pylonsync.com/docs](https://pylonsync.com/docs)
+[docs.pylonsync.com](https://docs.pylonsync.com)

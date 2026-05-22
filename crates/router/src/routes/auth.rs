@@ -4784,7 +4784,7 @@ pub(crate) fn handle(
             (["ServiceProviderConfig"], HttpMethod::Get) => {
                 let cfg = serde_json::json!({
                     "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
-                    "documentationUri": "https://pylonsync.com/docs/auth/scim",
+                    "documentationUri": "https://docs.pylonsync.com/auth/scim",
                     "patch": {"supported": true},
                     // PUT IS supported but tagged as "replace" in
                     // SCIM-speak; we use the standard meaning.
