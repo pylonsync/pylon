@@ -797,6 +797,19 @@ impl Runtime {
     /// (legacy LWW path). Both produce the same on-disk row shape, so
     /// reads, indexes, FTS, and policies don't change between modes.
     pub fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, RuntimeError> {
+        // Apply manifest-declared field defaults BEFORE any storage
+        // backend sees the row. `field.X().defaultNow()` and
+        // `.default(value)` both flow through here — without this
+        // pass, the framework would reject inserts that omit
+        // non-optional fields with defaults, defeating the whole
+        // point of declaring the default.
+        let data_owned;
+        let data = if entity_has_any_default(&self.manifest, entity) {
+            data_owned = apply_field_defaults(&self.manifest, entity, data);
+            &data_owned
+        } else {
+            data
+        };
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
             // Both CRDT-mode and non-CRDT writes go through one
@@ -2562,6 +2575,61 @@ fn generate_id() -> String {
 /// and "user_42" style ids that would silently break cursor pagination
 /// (which assumes lex-sortable fixed-width ids; see `generate_id`'s doc
 /// comment for why).
+/// Cheap pre-check: does this entity declare any field with a
+/// `default` on it? If not, skip the clone in `insert()`. Most
+/// app entities don't use defaults, so this keeps the hot path
+/// allocation-free.
+fn entity_has_any_default(manifest: &pylon_kernel::AppManifest, entity: &str) -> bool {
+    manifest
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .map(|e| e.fields.iter().any(|f| f.default.is_some()))
+        .unwrap_or(false)
+}
+
+/// Walk the entity's manifest fields; for each one with a `default`
+/// declared, fill it in on the row if absent. Existing values in the
+/// row always win — only TRULY absent or `null` slots get defaulted.
+///
+/// `"now"` is the special marker for `field.datetime().defaultNow()`;
+/// any other literal is stamped as-is.
+fn apply_field_defaults(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    data: &serde_json::Value,
+) -> serde_json::Value {
+    let ent = match manifest.entities.iter().find(|e| e.name == entity) {
+        Some(e) => e,
+        None => return data.clone(),
+    };
+    let mut out = data.clone();
+    let obj = match out.as_object_mut() {
+        Some(o) => o,
+        // Non-object payload (e.g. transact ops that already produced
+        // a normalized row). Don't try to mutate — let the backend
+        // handle the shape mismatch.
+        None => return out,
+    };
+    for f in &ent.fields {
+        let already_set = matches!(
+            obj.get(&f.name),
+            Some(v) if !v.is_null()
+        );
+        if already_set {
+            continue;
+        }
+        let Some(default) = &f.default else { continue };
+        let value = if default == &serde_json::Value::String("now".to_string()) {
+            serde_json::Value::String(crate::tinybird_logger::iso_now_ms())
+        } else {
+            default.clone()
+        };
+        obj.insert(f.name.clone(), value);
+    }
+    out
+}
+
 fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
     let obj = match data.as_object() {
         Some(o) => o,
@@ -2679,6 +2747,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -2688,6 +2758,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -2840,6 +2912,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             },
             ManifestField {
                 name: "displayName".into(),
@@ -2849,6 +2923,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             },
             ManifestField {
                 name: "avatarColor".into(),
@@ -2858,6 +2934,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             },
             ManifestField {
                 name: "createdAt".into(),
@@ -2867,6 +2945,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             },
         ];
         // Important: turn off CRDT mode for this test — CRDT mode writes

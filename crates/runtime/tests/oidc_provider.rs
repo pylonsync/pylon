@@ -52,6 +52,8 @@ fn test_manifest() -> AppManifest {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 },
                 ManifestField {
                     name: "displayName".into(),
@@ -61,6 +63,8 @@ fn test_manifest() -> AppManifest {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 },
             ],
             indexes: vec![],

@@ -618,6 +618,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "age".into(),
@@ -627,6 +629,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "score".into(),
@@ -636,6 +640,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "active".into(),
@@ -645,6 +651,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "createdAt".into(),
@@ -654,6 +662,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "bio".into(),
@@ -663,6 +673,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                     ],
                     indexes: vec![ManifestIndex {
@@ -686,6 +698,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -695,6 +709,8 @@ mod tests {
                             crdt: None,
                             server_only: false,
                             readonly: false,
+                            default: None,
+                            enum_values: None,
                         },
                     ],
                     indexes: vec![],
@@ -716,6 +732,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                     ManifestField {
                         name: "notify".into(),
@@ -725,6 +743,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                 ],
             }],

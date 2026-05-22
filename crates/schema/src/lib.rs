@@ -1211,6 +1211,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }],
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
@@ -1409,6 +1411,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }],
         }];
         let diags = validate(&s);
@@ -1430,6 +1434,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }],
         }];
         let diags = validate(&s);
@@ -1462,6 +1468,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
             }],
             actions: vec![],
@@ -1503,6 +1511,8 @@ mod tests {
             crdt: None,
             server_only: false,
             readonly: false,
+            default: None,
+            enum_values: None,
         }
     }
 

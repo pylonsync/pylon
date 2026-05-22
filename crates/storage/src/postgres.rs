@@ -2146,6 +2146,8 @@ mod tests {
             crdt: None,
             server_only: false,
             readonly: false,
+            default: None,
+            enum_values: None,
         };
         AppManifest {
             manifest_version: 1,

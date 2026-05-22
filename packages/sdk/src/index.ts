@@ -395,6 +395,16 @@ export interface ManifestField {
   /** Set when the field is `field.X().readonly()` — see
    *  [`FieldDefinition.readonly`]. Omitted by default. */
   readonly?: boolean;
+  /** Default value to fill on insert when the row omits this field.
+   *  - `"now"`     → runtime stamps the current UTC time
+   *  - any literal → runtime stamps that exact value
+   *  Maps to `field.X().defaultNow()` / `.default(value)`. */
+  default?: "now" | string | number | boolean | null;
+  /** Allowed values for `field.enum([...])` — recorded so codegen
+   *  can emit a literal-union type and runtime validation can
+   *  reject out-of-set inserts. Plain `field.string()` doesn't
+   *  carry this; only `field.enum()`. */
+  enumValues?: readonly string[];
 }
 
 export interface ManifestIndex {
@@ -503,6 +513,24 @@ export function entitiesToManifest(
         }
         if (fb._def.readonly) {
           f.readonly = true;
+        }
+        // `default` + `enumValues` are surfaced on the fluent
+        // FieldBuilder via the v0.4 SDK. Read off the private
+        // backing slot so both APIs serialize identically — apps
+        // using the procedural `field` exports get the same
+        // ManifestField shape as fluent apps.
+        const extra = fb._def as FieldDefinition & {
+          default?: { kind: "value"; value: unknown } | { kind: "now" };
+          enumValues?: readonly string[];
+        };
+        if (extra.default) {
+          f.default =
+            extra.default.kind === "now"
+              ? "now"
+              : (extra.default.value as ManifestField["default"]);
+        }
+        if (extra.enumValues && extra.enumValues.length > 0) {
+          f.enumValues = extra.enumValues;
         }
         return f;
       }),

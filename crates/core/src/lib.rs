@@ -440,6 +440,24 @@ pub struct ManifestField {
     /// boundary check, not a hard write-lock.
     #[serde(default, rename = "readonly", skip_serializing_if = "is_false_ref")]
     pub readonly: bool,
+    /// Default value to inject on insert when the row omits this field.
+    /// - `"now"`     → runtime stamps the current UTC time
+    /// - any literal → runtime stamps that exact value
+    /// Maps to `field.X().defaultNow()` / `.default(value)` on the
+    /// TS side. None = no default; behaves like before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    /// Allowed values when this field was declared as
+    /// `field.enum([...])`. Empty / None means "no enum constraint" —
+    /// the field is a plain string. Recorded so codegen + runtime
+    /// can narrow the value type and (eventually) reject out-of-set
+    /// inserts at the insert path.
+    #[serde(
+        default,
+        rename = "enumValues",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enum_values: Option<Vec<String>>,
 }
 
 fn is_false_ref(b: &bool) -> bool {
@@ -460,6 +478,8 @@ impl Default for ManifestField {
             crdt: None,
             server_only: false,
             readonly: false,
+            default: None,
+            enum_values: None,
         }
     }
 }

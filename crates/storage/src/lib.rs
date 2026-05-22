@@ -737,6 +737,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -831,6 +833,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }],
             indexes: vec![],
             relations: vec![],
@@ -874,6 +878,8 @@ mod tests {
             crdt: None,
             server_only: false,
             readonly: false,
+            default: None,
+            enum_values: None,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -1102,6 +1108,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                     ManifestField {
                         name: "name".into(),
@@ -1111,6 +1119,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                 ],
                 indexes: vec![],
@@ -1164,6 +1174,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
                 indexes: vec![ManifestIndex {
                     name: "by_email".into(),
@@ -1249,6 +1261,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                     ManifestField {
                         name: "plan".into(),
@@ -1258,6 +1272,8 @@ mod tests {
                         crdt: None,
                         server_only: false,
                         readonly: false,
+                        default: None,
+                        enum_values: None,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -1347,6 +1363,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
                 // Manifest dropped the old_idx entry.
                 indexes: vec![],

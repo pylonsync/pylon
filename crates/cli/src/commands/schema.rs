@@ -1326,6 +1326,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -1393,6 +1395,8 @@ mod tests {
             crdt: None,
             server_only: false,
             readonly: false,
+            default: None,
+            enum_values: None,
         });
         let changes = compute_diff(&old, &new);
         assert!(changes.iter().any(|c| c.kind == "field_added"

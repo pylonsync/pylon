@@ -515,6 +515,8 @@ mod tests {
                     crdt: None,
                     server_only: false,
                     readonly: false,
+                    default: None,
+                    enum_values: None,
                 }],
                 indexes: vec![],
                 relations: vec![],

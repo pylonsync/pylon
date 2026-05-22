@@ -98,6 +98,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }
         }
         AppManifest {
@@ -171,6 +173,8 @@ mod tests {
                 crdt: None,
                 server_only: false,
                 readonly: false,
+                default: None,
+                enum_values: None,
             }],
         };
         let desc = QueryDescriptor::from_manifest(&mq);
