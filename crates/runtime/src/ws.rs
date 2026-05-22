@@ -1086,15 +1086,17 @@ fn run_authenticated_session(
             return;
         }
     };
-    if auth_ctx.user_id.is_none() && !auth_ctx.is_admin {
-        let mut ws = ws;
-        let _ = ws.close(Some(tungstenite::protocol::CloseFrame {
-            code: tungstenite::protocol::frame::coding::CloseCode::Policy,
-            reason: "unauthorized: bearer token required".into(),
-        }));
-        return;
-    }
-
+    // Anonymous WS connections are accepted — they subscribe to the
+    // public broadcast firehose. Per-broadcast policy filtering
+    // (`Shard::broadcast_change` runs `check_entity_read` against this
+    // client's stored AuthContext on every event) decides which events
+    // they actually receive. So an open-policy entity ("Todo" in the
+    // create-pylon starter) shows up over the wire even without a
+    // session, matching the HTTP behavior of `/api/sync/pull` and
+    // `/api/fn/listTodos` which both serve anonymous when policy
+    // allows. Pre-fix the WS layer rejected anonymous upgrades up
+    // front, contradicting the rest of the stack and making the live
+    // sync demo silently fall back to no-broadcasts.
     let (client_id, socket_handle) = hub.add_client(ws, auth_ctx.clone());
 
     loop {
