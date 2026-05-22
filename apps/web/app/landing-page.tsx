@@ -1799,20 +1799,19 @@ export function LandingPage({
 									<div className="schema-gutter">{Array.from({ length: 17 }, (_, i) => i + 1).map((n) => <div key={n}>{n}</div>)}</div>
 									<div className="schema-code">
 										<pre style={{ margin: 0 }}>
-											<span className="k">import</span>{" { e } "}<span className="k">from</span>{" "}<span className="s">&quot;@pylonsync/sdk&quot;</span>;{"\n\n"}
-											<span className="k">export const</span>{" "}<span className="b">Order</span>{" = e.entity({"}{"\n"}
-											{"  customer:  e."}<span className="t">id</span>(<span className="s">&quot;Customer&quot;</span>),{"\n"}
-											{"  total:     e."}<span className="t">int</span>(),                 <span className="anno">cents</span>{"\n"}
-											{"  status:    e."}<span className="t">enum</span>([<span className="s">&quot;pending&quot;</span>,<span className="s">&quot;paid&quot;</span>,<span className="s">&quot;failed&quot;</span>]),{"\n"}
-											{"  createdAt: e."}<span className="t">timestamp</span>().defaultNow(),{"\n"}
-											{"})\n.indexes(\n"}
-											{"  e.idx("}<span className="s">&quot;customer&quot;</span>, <span className="s">&quot;createdAt&quot;</span>{"),\n"}
-											{"  e.idx("}<span className="s">&quot;status&quot;</span>{"),\n"}
-											{")\n.policies({\n"}
-											{"  read:  "}<span className="s">&quot;auth.userId == data.customer || auth.role == &apos;admin&apos;&quot;</span>,{"\n"}
-											{"  write: "}<span className="s">&quot;auth.role == &apos;admin&apos;&quot;</span>,{"\n"}
-											{"})\n.behaviors(["}<span className="t">timestamps</span>, <span className="t">softDelete</span>, <span className="t">audit</span>{"]);\n"}
-											<span className="c">{"// → typed client + OpenAPI generated on save"}</span>
+											<span className="k">import</span>{" { e, field, policy, timestamps, softDelete, audit } "}<span className="k">from</span>{" "}<span className="s">&quot;@pylonsync/sdk&quot;</span>;{"\n\n"}
+											<span className="k">export const</span>{" "}<span className="b">Order</span>{" = e."}<span className="t">entity</span>(<span className="s">&quot;Order&quot;</span>, {"{\n"}
+											{"  customer:  "}<span className="t">field</span>.id(<span className="s">&quot;Customer&quot;</span>),{"\n"}
+											{"  total:     "}<span className="t">field</span>.int(),                 <span className="anno">cents</span>{"\n"}
+											{"  status:    "}<span className="t">field</span>.enum([<span className="s">&quot;pending&quot;</span>,<span className="s">&quot;paid&quot;</span>,<span className="s">&quot;failed&quot;</span>]),{"\n"}
+											{"  createdAt: "}<span className="t">field</span>.datetime().defaultNow(),{"\n"}
+											{"})\n  .indexes(e."}<span className="t">idx</span>(<span className="s">&quot;customer&quot;</span>, <span className="s">&quot;createdAt&quot;</span>{"), e."}<span className="t">idx</span>(<span className="s">&quot;status&quot;</span>{"))\n"}
+											{"  .policies("}<span className="t">policy</span>({"{\n"}
+											{"    allowRead:   "}<span className="s">&quot;auth.userId == data.customer || auth.hasRole(&apos;admin&apos;)&quot;</span>,{"\n"}
+											{"    allowUpdate: "}<span className="s">&quot;auth.hasRole(&apos;admin&apos;)&quot;</span>,{"\n"}
+											{"  }))\n"}
+											{"  .behaviors(["}<span className="t">timestamps</span>, <span className="t">softDelete</span>, <span className="t">audit</span>{"]);\n"}
+											<span className="c">{"// → pylon codegen client · OpenAPI at /api/openapi"}</span>
 										</pre>
 									</div>
 								</div>

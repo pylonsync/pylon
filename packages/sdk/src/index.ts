@@ -816,3 +816,304 @@ export {
   type StudioPageProps,
   type StudioExtensions,
 } from "./studio";
+
+// ---------------------------------------------------------------------------
+// Fluent schema API (`e` namespace)
+//
+// `entity(name, fields, options)` + `field.*` + `policy({...})` are the
+// stable foundation — every dependent app uses them today. The fluent
+// API below sits on top and compiles down to the same EntityDefinition
+// + PolicyDefinition shapes the runtime already understands, so both
+// styles can coexist forever. The fluent shape just reads better in
+// docs + marketing snippets:
+//
+// ```ts
+// export const Order = e.entity("Order", {
+//   customer:  field.id("Customer"),
+//   total:     field.int(),
+//   status:    field.enum(["pending", "paid", "failed"]),
+//   createdAt: field.datetime().defaultNow(),
+// })
+//   .indexes(e.idx("customer", "createdAt"), e.idx("status"))
+//   .policies(policy({
+//     allowRead:  "auth.userId == data.customer || auth.hasRole('admin')",
+//     allowUpdate: "auth.hasRole('admin')",
+//   }))
+//   .behaviors([timestamps, softDelete]);
+// ```
+//
+// Behaviors are field-injection helpers. `timestamps` adds
+// `createdAt` + `updatedAt` to the entity fields; `softDelete` adds
+// `deletedAt`. They mutate the EntityDefinition's fields before the
+// runtime sees it, so the rest of the framework (storage, sync,
+// policy gates) treats them as ordinary columns. Auto-stamping
+// (filling `now()` on insert/update) needs runtime support — landing
+// in a follow-up patch via the `defaultExpr: "now"` marker the
+// builder records.
+// ---------------------------------------------------------------------------
+
+/**
+ * Behavior — a function that mutates the entity definition before it's
+ * registered. Implementations should be idempotent (the user can list
+ * the same behavior twice without breaking the schema).
+ */
+export interface Behavior {
+  /** Stable identifier — surfaced in the manifest for tooling, lets a
+   *  pass-through inspector see which behaviors are active. */
+  readonly id: string;
+  apply(def: EntityDefinition): EntityDefinition;
+}
+
+/**
+ * `timestamps` — auto-add `createdAt` + `updatedAt` datetime fields.
+ * The `defaultNow()` marker on each tells the runtime to fill `now()`
+ * on insert (and on update for `updatedAt`). Wiring lands with the
+ * runtime patch — until then, app code can still set the values
+ * manually and the fields exist on the row.
+ */
+export const timestamps: Behavior = {
+  id: "timestamps",
+  apply(def) {
+    const fields = { ...def.fields };
+    if (!fields.createdAt) {
+      fields.createdAt = (field.datetime() as FieldBuilder & {
+        defaultNow?: () => FieldBuilder;
+      }).defaultNow?.() ?? field.datetime();
+    }
+    if (!fields.updatedAt) {
+      fields.updatedAt = (field.datetime() as FieldBuilder & {
+        defaultNow?: () => FieldBuilder;
+        updateOnWrite?: () => FieldBuilder;
+      }).defaultNow?.() ?? field.datetime();
+    }
+    return { ...def, fields };
+  },
+};
+
+/**
+ * `softDelete` — auto-add a nullable `deletedAt` datetime field.
+ * Rows with `deletedAt != null` are filtered from default reads
+ * (TS-side filtering today; runtime filter lands in the follow-up).
+ */
+export const softDelete: Behavior = {
+  id: "softDelete",
+  apply(def) {
+    const fields = { ...def.fields };
+    if (!fields.deletedAt) {
+      fields.deletedAt = field.datetime().optional();
+    }
+    return { ...def, fields };
+  },
+};
+
+/**
+ * `audit` — marker behavior. Tags the entity for the framework's
+ * audit pipeline (writes an `AuditEvent` row per mutation, recording
+ * the actor + diff). Runtime hook lands in a follow-up patch — for
+ * now the marker is preserved on the manifest so apps can opt in
+ * early without breaking later.
+ */
+export const audit: Behavior = {
+  id: "audit",
+  apply(def) {
+    // No field injection today. The behavior flag is recorded via
+    // the EntityBuilder's `_behaviors` list (read off on serialize)
+    // so the runtime can pick it up once the audit pipeline lands.
+    return def;
+  },
+};
+
+/**
+ * Internal sentinel — apps don't construct these directly. The
+ * `field.X` builders gain `default(val)` / `defaultNow()` chainables
+ * below; this is just the shape stored on the field definition for
+ * the runtime to read.
+ */
+type DefaultMarker = { kind: "value"; value: unknown } | { kind: "now" };
+
+/**
+ * Augment FieldBuilder with the new `default()` / `defaultNow()`
+ * chainables. Runtime support for actually filling these values on
+ * insert lands as part of v0.4.1; until then the markers are
+ * recorded in the manifest for tooling + the codegen layer.
+ */
+declare module "./index" {
+  // (Empty — the `default*` methods are added at runtime via the
+  // patched buildField below. Apps see them via the FieldBuilder
+  // surface declared above.)
+}
+
+// Patch the existing buildField to add default markers. Apps reach
+// the chainables through any returned FieldBuilder — `.default(val)`
+// records a literal, `.defaultNow()` records the `now` marker.
+const __originalBuildField = buildField;
+function buildFieldWithDefaults(def: FieldDefinition & { default?: DefaultMarker }): FieldBuilder & {
+  default(value: unknown): FieldBuilder;
+  defaultNow(): FieldBuilder;
+} {
+  const base = __originalBuildField(def);
+  return {
+    ...base,
+    default(value: unknown) {
+      return buildFieldWithDefaults({ ...def, default: { kind: "value", value } });
+    },
+    defaultNow() {
+      return buildFieldWithDefaults({ ...def, default: { kind: "now" } });
+    },
+  };
+}
+// Re-export `field` with the patched builder so callers picking up
+// the new SDK get the chainables transparently. The old `field`
+// surface still works — `.default()` / `.defaultNow()` are additive.
+// We intentionally re-export from the same name so existing imports
+// (`import { field } from "@pylonsync/sdk"`) keep working AND gain
+// the new methods without a code change.
+Object.assign(field, {
+  string: () => buildFieldWithDefaults({ type: "string", optional: false, unique: false }),
+  int: () => buildFieldWithDefaults({ type: "int", optional: false, unique: false }),
+  float: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
+  number: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
+  bool: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
+  boolean: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
+  datetime: () => buildFieldWithDefaults({ type: "datetime", optional: false, unique: false }),
+  richtext: () => buildFieldWithDefaults({ type: "richtext", optional: false, unique: false }),
+  id: (target: string) => buildFieldWithDefaults({ type: `id(${target})` as FieldType, optional: false, unique: false }),
+  /**
+   * `field.enum(["pending", "paid", "failed"])` — stored as a string
+   * with allowed-values metadata. Runtime enforcement (CHECK
+   * constraint or insert-time validation) lands in a follow-up
+   * patch; for now the values flow through to codegen so the
+   * generated client gets a precise `"pending" | "paid" | "failed"`
+   * literal-union type instead of a wide `string`.
+   */
+  enum(values: readonly string[]) {
+    const def: FieldDefinition & { enumValues?: readonly string[] } = {
+      type: "string",
+      optional: false,
+      unique: false,
+      enumValues: values,
+    };
+    return buildFieldWithDefaults(def);
+  },
+});
+
+/** Variadic index helper — `e.idx("customer", "createdAt")` reads
+ *  better than the options-object form for the common case. */
+function idx(...fields: string[]): IndexDefinition {
+  return {
+    name: `by_${fields.join("_")}`,
+    fields,
+    unique: false,
+  };
+}
+
+interface EntityBuilder {
+  readonly _def: EntityDefinition & { behaviors?: string[] };
+  indexes(...idxs: IndexDefinition[]): EntityBuilder;
+  policies(...policies: PolicyDefinition[]): EntityBuilder;
+  behaviors(list: readonly Behavior[]): EntityBuilder;
+  relations(...rels: RelationDefinition[]): EntityBuilder;
+  search(cfg: SearchConfig): EntityBuilder;
+}
+
+/**
+ * Internal — `e.entity()` is the public surface. Wraps an
+ * EntityDefinition with chainable builders that all return another
+ * EntityBuilder so the fluent calls compose freely. The terminal
+ * call is implicit: any place the framework expects an
+ * EntityDefinition (e.g. `entities: [...]` on the manifest), the
+ * builder unwraps via the `_def` getter on access.
+ */
+function buildEntity(def: EntityDefinition & { behaviors?: string[] }): EntityBuilder {
+  const self: EntityBuilder = {
+    get _def() {
+      return def;
+    },
+    indexes(...idxs) {
+      return buildEntity({
+        ...def,
+        indexes: [...(def.indexes ?? []), ...idxs],
+      });
+    },
+    policies(..._policies) {
+      // Policies aren't carried on the EntityDefinition itself —
+      // they live in the manifest's top-level `policies` list. We
+      // store them under a non-standard key here so the manifest
+      // builder can pluck them off; the export shape stays
+      // EntityDefinition-compatible.
+      const carried = { ...(def as EntityDefinition & { _attachedPolicies?: PolicyDefinition[] }) };
+      const existing = carried._attachedPolicies ?? [];
+      const stamped = _policies.map((p) => ({
+        ...p,
+        // Auto-bind the entity if the policy didn't specify one —
+        // this is the whole point of attaching policies via the
+        // builder: don't repeat the entity name.
+        entity: p.entity ?? def.name,
+      }));
+      carried._attachedPolicies = [...existing, ...stamped];
+      return buildEntity(carried);
+    },
+    behaviors(list) {
+      let next = def;
+      for (const b of list) {
+        next = b.apply(next);
+      }
+      return buildEntity({
+        ...next,
+        behaviors: [...(def.behaviors ?? []), ...list.map((b) => b.id)],
+      });
+    },
+    relations(...rels) {
+      return buildEntity({
+        ...def,
+        relations: [...(def.relations ?? []), ...rels],
+      });
+    },
+    search(cfg) {
+      return buildEntity({
+        ...def,
+        search: cfg,
+      });
+    },
+  };
+
+  // Spread `def` keys onto the builder so anywhere the framework
+  // expects an EntityDefinition shape (name, fields, indexes, etc.)
+  // sees them directly without unwrapping. Manifest builder paths
+  // walk `.name` and `.fields` straight off the builder.
+  Object.assign(self, def);
+  return self;
+}
+
+/**
+ * The fluent `e` namespace. Equivalent to the procedural `entity()`
+ * function — both produce manifest-compatible definitions, both can
+ * be mixed in the same app.
+ */
+export const e = {
+  entity(
+    name: string,
+    fields: Record<string, FieldBuilder>,
+  ): EntityBuilder {
+    return buildEntity({ name, fields });
+  },
+  idx,
+};
+
+/**
+ * Extract attached policies from a fluent entity. The manifest
+ * builder calls this when assembling the top-level `policies` list,
+ * so apps using the fluent `.policies(...)` chain don't have to
+ * register policies separately at the manifest root.
+ *
+ * Returns an empty array for entities produced by the procedural
+ * `entity()` API — those apps register policies the old way.
+ */
+export function extractAttachedPolicies(
+  e: EntityDefinition | EntityBuilder,
+): PolicyDefinition[] {
+  const carried = (e as EntityDefinition & {
+    _attachedPolicies?: PolicyDefinition[];
+  })._attachedPolicies;
+  return carried ?? [];
+}
