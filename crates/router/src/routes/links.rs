@@ -44,9 +44,10 @@ pub(crate) fn handle(
                 },
             ) {
                 Ok(_outcome) => (200, serde_json::json!({"linked": true}).to_string()),
-                Err(MutationError::NotFound) => {
-                    (404, json_error("NOT_FOUND", &format!("{entity}/{id} not found")))
-                }
+                Err(MutationError::NotFound) => (
+                    404,
+                    json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
+                ),
                 Err(err) => {
                     let (status, code, message) = error_response(&err);
                     (status, json_error(&code, &message))
@@ -83,9 +84,10 @@ pub(crate) fn handle(
                 },
             ) {
                 Ok(_outcome) => (200, serde_json::json!({"unlinked": true}).to_string()),
-                Err(MutationError::NotFound) => {
-                    (404, json_error("NOT_FOUND", &format!("{entity}/{id} not found")))
-                }
+                Err(MutationError::NotFound) => (
+                    404,
+                    json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
+                ),
                 Err(err) => {
                     let (status, code, message) = error_response(&err);
                     (status, json_error(&code, &message))

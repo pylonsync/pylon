@@ -866,11 +866,7 @@ mod tests {
         // can express that intent — and reviewers can flag any
         // gratuitous `snapshot: None` that should have captured the row.
         let log = ChangeLog::new();
-        let event = log.record(
-            "Todo",
-            "t1",
-            ChangeRecord::Delete { snapshot: None },
-        );
+        let event = log.record("Todo", "t1", ChangeRecord::Delete { snapshot: None });
         assert_eq!(event.kind, ChangeKind::Delete);
         assert!(event.data.is_none());
     }

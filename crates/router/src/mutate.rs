@@ -89,9 +89,9 @@ impl<'a> MutationOp<'a> {
     pub fn change_kind(&self) -> ChangeKind {
         match self {
             MutationOp::Insert { .. } => ChangeKind::Insert,
-            MutationOp::Update { .. }
-            | MutationOp::Link { .. }
-            | MutationOp::Unlink { .. } => ChangeKind::Update,
+            MutationOp::Update { .. } | MutationOp::Link { .. } | MutationOp::Unlink { .. } => {
+                ChangeKind::Update
+            }
             MutationOp::Delete { .. } => ChangeKind::Delete,
         }
     }
@@ -188,10 +188,7 @@ impl<'a> MutationCtx<'a> {
 /// (JSON + CRDT for insert/update), after-hook fired. On error:
 /// nothing was broadcast; the store may or may not have been written
 /// depending on which step failed.
-pub fn apply_mutation(
-    ctx: &MutationCtx,
-    op: MutationOp,
-) -> Result<MutationOutcome, MutationError> {
+pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutcome, MutationError> {
     let entity = op.entity().to_string();
     let kind = op.change_kind();
 
@@ -279,10 +276,7 @@ pub fn apply_mutation(
         Option<serde_json::Value>,
         Option<serde_json::Value>,
     ) = match op {
-        MutationOp::Insert {
-            entity: ent,
-            data,
-        } => {
+        MutationOp::Insert { entity: ent, data } => {
             let mut hook_data = data.clone();
             if let Err((status, code, message)) =
                 ctx.plugin_hooks
@@ -294,12 +288,13 @@ pub fn apply_mutation(
                     message,
                 });
             }
-            let id = ctx.store.insert(ent, &hook_data).map_err(|e| {
-                MutationError::Store {
+            let id = ctx
+                .store
+                .insert(ent, &hook_data)
+                .map_err(|e| MutationError::Store {
                     code: e.code,
                     message: e.message,
-                }
-            })?;
+                })?;
             let post = reread(ctx.store, ent, &id);
             (id, post, Some(hook_data))
         }
@@ -309,12 +304,10 @@ pub fn apply_mutation(
             data,
         } => {
             let mut hook_data = data.clone();
-            if let Err((status, code, message)) = ctx.plugin_hooks.before_update(
-                ent,
-                row_id,
-                &mut hook_data,
-                ctx.auth,
-            ) {
+            if let Err((status, code, message)) =
+                ctx.plugin_hooks
+                    .before_update(ent, row_id, &mut hook_data, ctx.auth)
+            {
                 return Err(MutationError::Hook {
                     status,
                     code,
@@ -371,12 +364,10 @@ pub fn apply_mutation(
             let mut hook_data = serde_json::json!({
                 "_pylon_link": { "relation": relation, "target_id": target_id },
             });
-            if let Err((status, code, message)) = ctx.plugin_hooks.before_update(
-                ent,
-                row_id,
-                &mut hook_data,
-                ctx.auth,
-            ) {
+            if let Err((status, code, message)) =
+                ctx.plugin_hooks
+                    .before_update(ent, row_id, &mut hook_data, ctx.auth)
+            {
                 return Err(MutationError::Hook {
                     status,
                     code,
@@ -405,12 +396,10 @@ pub fn apply_mutation(
             let mut hook_data = serde_json::json!({
                 "_pylon_unlink": { "relation": relation },
             });
-            if let Err((status, code, message)) = ctx.plugin_hooks.before_update(
-                ent,
-                row_id,
-                &mut hook_data,
-                ctx.auth,
-            ) {
+            if let Err((status, code, message)) =
+                ctx.plugin_hooks
+                    .before_update(ent, row_id, &mut hook_data, ctx.auth)
+            {
                 return Err(MutationError::Hook {
                     status,
                     code,
@@ -566,11 +555,7 @@ pub fn error_response(err: &MutationError) -> (u16, String, String) {
             code,
             message,
         } => (*status, code.clone(), message.clone()),
-        MutationError::NotFound => (
-            404,
-            "NOT_FOUND".to_string(),
-            "Row not found".to_string(),
-        ),
+        MutationError::NotFound => (404, "NOT_FOUND".to_string(), "Row not found".to_string()),
         MutationError::Store { code, message } => {
             let status = match code.as_str() {
                 "ENTITY_NOT_FOUND" | "ROW_NOT_FOUND" => 404,

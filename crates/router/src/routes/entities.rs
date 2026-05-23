@@ -191,7 +191,10 @@ pub(crate) fn handle(
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
                     match apply_mutation(
                         &mctx,
-                        MutationOp::Insert { entity, data: &data },
+                        MutationOp::Insert {
+                            entity,
+                            data: &data,
+                        },
                     ) {
                         Ok(outcome) => {
                             results.push(serde_json::json!({
@@ -245,10 +248,7 @@ pub(crate) fn handle(
                 }
                 "delete" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    match apply_mutation(
-                        &mctx,
-                        MutationOp::Delete { entity, row_id: id },
-                    ) {
+                    match apply_mutation(&mctx, MutationOp::Delete { entity, row_id: id }) {
                         Ok(_) => {
                             results.push(serde_json::json!({"op": "delete", "id": id, "ok": true}));
                             succeeded += 1;

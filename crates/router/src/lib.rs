@@ -1587,7 +1587,13 @@ pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u
     // else identical: plugin hooks, reread, change-log append,
     // broadcast, after-hook, X-Pylon-Change-Seq header.
     let mctx = mutate::MutationCtx::from_router_admin(ctx);
-    match mutate::apply_mutation(&mctx, mutate::MutationOp::Insert { entity, data: &data }) {
+    match mutate::apply_mutation(
+        &mctx,
+        mutate::MutationOp::Insert {
+            entity,
+            data: &data,
+        },
+    ) {
         Ok(outcome) => {
             if outcome.seq > 0 {
                 emit_change_seq_header(ctx, outcome.seq);
@@ -1651,10 +1657,7 @@ pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16
     // existing row. Pipeline handles pre-delete snapshot capture,
     // plugin hooks, broadcast, and after-hook.
     let mctx = mutate::MutationCtx::from_router_admin(ctx);
-    match mutate::apply_mutation(
-        &mctx,
-        mutate::MutationOp::Delete { entity, row_id: id },
-    ) {
+    match mutate::apply_mutation(&mctx, mutate::MutationOp::Delete { entity, row_id: id }) {
         Ok(outcome) => {
             if outcome.seq > 0 {
                 emit_change_seq_header(ctx, outcome.seq);
@@ -2768,8 +2771,12 @@ mod auth_gate_tests {
         with_ctx_full(is_dev, auth, &NoopPluginHooks, None, Some(notifier), f);
     }
 
-    pub(crate) fn with_ctx_hooks<F>(is_dev: bool, auth: &AuthContext, hooks: &dyn PluginHookOps, f: F)
-    where
+    pub(crate) fn with_ctx_hooks<F>(
+        is_dev: bool,
+        auth: &AuthContext,
+        hooks: &dyn PluginHookOps,
+        f: F,
+    ) where
         F: FnOnce(&RouterContext),
     {
         with_ctx_full(is_dev, auth, hooks, None, None, f);
@@ -4958,16 +4965,10 @@ mod consolidation_tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(obj) = data.as_object() {
                 if obj.contains_key("_pylon_link") {
-                    self.update_markers
-                        .lock()
-                        .unwrap()
-                        .push("link".into());
+                    self.update_markers.lock().unwrap().push("link".into());
                 }
                 if obj.contains_key("_pylon_unlink") {
-                    self.update_markers
-                        .lock()
-                        .unwrap()
-                        .push("unlink".into());
+                    self.update_markers.lock().unwrap().push("unlink".into());
                 }
             }
             Ok(())
@@ -5023,10 +5024,7 @@ mod consolidation_tests {
         ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
             Ok(Some(serde_json::json!({"id": id, "ownerId": "u1"})))
         }
-        fn list(
-            &self,
-            _entity: &str,
-        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+        fn list(&self, _entity: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
         }
         fn list_after(
@@ -5045,11 +5043,7 @@ mod consolidation_tests {
         ) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
-        fn delete(
-            &self,
-            _entity: &str,
-            _id: &str,
-        ) -> Result<bool, pylon_http::DataError> {
+        fn delete(&self, _entity: &str, _id: &str) -> Result<bool, pylon_http::DataError> {
             Ok(true)
         }
         fn lookup(
@@ -5288,10 +5282,7 @@ mod consolidation_tests {
                 >= 1,
         );
         assert!(
-            hooks
-                .after_insert
-                .load(std::sync::atomic::Ordering::SeqCst)
-                >= 1,
+            hooks.after_insert.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "after_insert must fire from the hook_data fallback when reread misses",
         );
     }
@@ -5339,13 +5330,16 @@ mod consolidation_tests {
                     },
                 ],
             });
-            let (status, response, _ct) =
-                route(ctx, HttpMethod::Post, "/api/sync/push", &body.to_string(), None);
+            let (status, response, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/sync/push",
+                &body.to_string(),
+                None,
+            );
             assert_eq!(status, 200);
             let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-            let results = parsed["results"]
-                .as_array()
-                .expect("results array present");
+            let results = parsed["results"].as_array().expect("results array present");
             assert_eq!(results.len(), 2, "one result per input op");
             // Each result MUST carry its op_id back unchanged so the
             // client can map by id, not by position.
@@ -5381,8 +5375,13 @@ mod consolidation_tests {
                     "kind": "delete",
                 }],
             });
-            let (_status, response, _ct) =
-                route(ctx, HttpMethod::Post, "/api/sync/push", &body.to_string(), None);
+            let (_status, response, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/sync/push",
+                &body.to_string(),
+                None,
+            );
             let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
             let status_val = &parsed["results"][0]["status"];
             assert!(
@@ -5395,4 +5394,3 @@ mod consolidation_tests {
         });
     }
 }
-

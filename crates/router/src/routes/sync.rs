@@ -507,12 +507,7 @@ pub(crate) fn handle(
                         kind_label, change.entity, change.row_id, message
                     );
                     errors.push(display);
-                    op_results.push(result_envelope(
-                        "error",
-                        None,
-                        None,
-                        Some((code, message)),
-                    ));
+                    op_results.push(result_envelope("error", None, None, Some((code, message))));
                     if let Some(ref op_id) = op_id_opt {
                         ctx.change_log.forget_op_id(op_id);
                         errored_op_ids.push(op_id.clone());
