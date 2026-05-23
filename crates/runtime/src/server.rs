@@ -3096,6 +3096,10 @@ fn start_server(
             let mut limited = request.as_reader().take((MAX_BODY_SIZE as u64) + 1);
             let _ = limited.read_to_string(&mut body);
         }
+        // Stamp bytes_in for the shipper's per-request rollup. The
+        // central dispatch loop is the only path that reads the body,
+        // so this is the single right place to capture its size.
+        crate::metrics::set_current_request_bytes(body.len());
 
         if body.len() > MAX_BODY_SIZE {
             let err_body = json_error(
@@ -4199,6 +4203,14 @@ fn start_server(
             }
         };
 
+        // Stamp bytes_out for the shipper's per-request rollup. This is
+        // the central path where every router response body becomes a
+        // wire frame, so capturing the length here covers entity CRUD,
+        // /api/fn/*, /api/sync/*, /api/auth/* — every JSON-shaped
+        // response. The streaming/upload paths (/api/files/*, SSE) have
+        // their own respond sites; they'll stay at 0 until separately
+        // stamped, which is an acceptable known undercount for now.
+        crate::metrics::set_current_response_bytes(response_body.len());
         let mut response = Response::from_string(&response_body)
             .with_status_code(status)
             .with_header(Header::from_bytes("Content-Type", content_type).unwrap())

@@ -121,6 +121,15 @@ pub struct Metrics {
 struct CurrentRequest {
     url: String,
     started: std::time::Instant,
+    /// Request body size in bytes — stamped by `set_current_request_bytes`
+    /// after the body read in the central dispatch loop. Pre-fix the
+    /// shipper hardcoded `bytes_in=0` for every event.
+    request_bytes: u32,
+    /// Response body size in bytes — stamped by `set_current_response_bytes`
+    /// at send time. Pre-fix the shipper hardcoded `bytes_out=0`, so
+    /// every project's "Egress" tile on the usage page was 0 regardless
+    /// of actual traffic.
+    response_bytes: u32,
 }
 
 thread_local! {
@@ -137,7 +146,34 @@ pub fn set_current_request(url: &str, started: std::time::Instant) {
         cell.set(Some(CurrentRequest {
             url: url.to_string(),
             started,
+            request_bytes: 0,
+            response_bytes: 0,
         }))
+    });
+}
+
+/// Stamp the request body length after the central dispatch loop
+/// reads it. Used by the shipper's `bytes_in` field. No-op when no
+/// request context exists (test paths, /health, etc).
+pub fn set_current_request_bytes(bytes: usize) {
+    CURRENT_REQUEST.with(|cell| {
+        if let Some(mut ctx) = cell.take() {
+            ctx.request_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+            cell.set(Some(ctx));
+        }
+    });
+}
+
+/// Update the in-flight request's response body size. Called from the
+/// response-send sites in `server.rs` once the body is known. No-op
+/// if no request context was set (test harnesses, paths that skipped
+/// `set_current_request`). Idempotent — last call wins.
+pub fn set_current_response_bytes(bytes: usize) {
+    CURRENT_REQUEST.with(|cell| {
+        if let Some(mut ctx) = cell.take() {
+            ctx.response_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+            cell.set(Some(ctx));
+        }
     });
 }
 
@@ -214,7 +250,15 @@ impl Metrics {
                 let path = c.url.split('?').next().unwrap_or(&c.url);
                 let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
                 if let Some(logger) = tinybird_logger() {
-                    logger.record(method, path, status, cpu_ms, 0, 0, "");
+                    logger.record(
+                        method,
+                        path,
+                        status,
+                        cpu_ms,
+                        c.request_bytes,
+                        c.response_bytes,
+                        "",
+                    );
                 }
                 // In-process ring buffer for the /admin/logs/tail
                 // endpoint. Tinybird is the long-term store; this is
