@@ -1939,13 +1939,35 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
     let mut errors: Vec<String> = Vec::new();
 
     // Delete the User row itself first.
+    //
+    // Documented exception to the "all writes go through `apply_mutation`"
+    // invariant: GDPR purge is admin-only and intentionally bypasses
+    // entity policies + plugin hooks (purging shouldn't be blocked by
+    // tenant-scope rules, and audit-log hooks would record the purge
+    // they're being purged for — circular). The delete events ship
+    // with `data: None` because the snapshot has already been
+    // captured for the export side of the GDPR contract; row-scoped
+    // read policies on subscribers degrade to entity-level only,
+    // which is acceptable for purge — clients see "this user is
+    // gone," not the row payload.
+    let snapshot = ctx.store.get_by_id("User", user_id).ok().flatten();
     if let Ok(true) = ctx.store.delete("User", user_id) {
         deleted += 1;
-        // Synthetic change event so sync clients notice.
-        let seq = ctx
-            .change_log
-            .append("User", user_id, ChangeKind::Delete, None);
-        broadcast_change(ctx.notifier, seq, "User", user_id, ChangeKind::Delete, None);
+        let event = ctx.change_log.record(
+            "User",
+            user_id,
+            pylon_sync::ChangeRecord::Delete {
+                snapshot: snapshot.clone(),
+            },
+        );
+        broadcast_change(
+            ctx.notifier,
+            event.seq,
+            "User",
+            user_id,
+            event.kind.clone(),
+            event.data.as_ref(),
+        );
     }
 
     // Referencing rows.
@@ -1972,13 +1994,30 @@ pub(crate) fn gdpr_purge(ctx: &RouterContext, user_id: &str) -> (u16, String) {
             let Some(id) = row.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
+            // Snapshot before the delete so the change event carries
+            // the row state row-scoped read policies need to evaluate
+            // delivery. Matches the pipeline's pre-delete snapshot
+            // invariant. (Same documented bypass-policy rationale as
+            // the User delete above.)
+            let snap = ctx.store.get_by_id(&ent.name, id).ok().flatten();
             match ctx.store.delete(&ent.name, id) {
                 Ok(true) => {
                     deleted += 1;
-                    let seq = ctx
-                        .change_log
-                        .append(&ent.name, id, ChangeKind::Delete, None);
-                    broadcast_change(ctx.notifier, seq, &ent.name, id, ChangeKind::Delete, None);
+                    let event = ctx.change_log.record(
+                        &ent.name,
+                        id,
+                        pylon_sync::ChangeRecord::Delete {
+                            snapshot: snap.clone(),
+                        },
+                    );
+                    broadcast_change(
+                        ctx.notifier,
+                        event.seq,
+                        &ent.name,
+                        id,
+                        event.kind.clone(),
+                        event.data.as_ref(),
+                    );
                 }
                 Ok(false) => {}
                 Err(e) => errors.push(format!("delete {}/{}: {}", ent.name, id, e.message)),

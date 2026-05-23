@@ -7,7 +7,7 @@ use crate::{
     RouterContext,
 };
 use pylon_http::HttpMethod;
-use pylon_sync::ChangeKind;
+use pylon_sync::{ChangeKind, ChangeRecord};
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -71,14 +71,28 @@ pub(crate) fn handle(
                 // path's wire shape. `Ok(None)` on re-read = the row
                 // was concurrently deleted; skip that op's broadcast.
                 if committed {
+                    // Post-commit fanout. The inner `store.transact()`
+                    // is atomic; we couldn't run each op through the
+                    // mutation pipeline because that would lose the
+                    // all-or-nothing guarantee. Instead, after COMMIT
+                    // succeeds we route each op through the same
+                    // typed `ChangeRecord` + `broadcast_change_with_crdt`
+                    // path the pipeline uses. Plugin `after_*` hooks
+                    // run here too so transact writes observe the
+                    // same plugin chain as entity-API + sync/push.
+                    //
+                    // Invariant: insert/update without a successful
+                    // reread → skip broadcast (the row may have been
+                    // concurrently deleted, or the read side errored).
+                    // Don't fall back to caller payload — that would
+                    // trip the per-tenant policy filter on every
+                    // subscriber and ghost-apply unprojected fields.
                     for (op, result) in ops.iter().zip(results.iter()) {
                         let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
                         let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
                         if entity.is_empty() {
                             continue;
                         }
-                        // Inner transact reports per-op success via
-                        // `{op, id, error?}` shape — skip on error.
                         if result.get("error").is_some() {
                             continue;
                         }
@@ -88,86 +102,72 @@ pub(crate) fn handle(
                         }
                         match op_type {
                             "insert" | "update" => {
-                                let kind = if op_type == "insert" {
-                                    ChangeKind::Insert
-                                } else {
-                                    ChangeKind::Update
-                                };
-                                match ctx.store.get_by_id(entity, id) {
-                                    Ok(Some(full)) => {
-                                        let seq = ctx.change_log.append(
-                                            entity,
-                                            id,
-                                            kind.clone(),
-                                            Some(full.clone()),
-                                        );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            entity,
-                                            id,
-                                            kind,
-                                            Some(&full),
-                                        );
-                                    }
+                                let row = match ctx.store.get_by_id(entity, id) {
+                                    Ok(Some(full)) => full,
                                     Ok(None) => {
                                         tracing::warn!(
-                                            "[/api/transact] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
+                                            "[/api/transact] post-{op_type} re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
                                         );
+                                        continue;
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                            "[/api/transact] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                            "[/api/transact] post-{op_type} re-read failed for {entity}/{id} ({}): skipping broadcast",
                                             e.message
                                         );
-                                        let data = op
-                                            .get("data")
-                                            .cloned()
-                                            .unwrap_or(serde_json::json!({}));
-                                        let seq = ctx.change_log.append(
-                                            entity,
-                                            id,
-                                            kind.clone(),
-                                            Some(data.clone()),
-                                        );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            entity,
-                                            id,
-                                            kind,
-                                            Some(&data),
-                                        );
+                                        continue;
                                     }
+                                };
+                                let record = if op_type == "insert" {
+                                    ChangeRecord::Insert { row: row.clone() }
+                                } else {
+                                    ChangeRecord::Update { row: row.clone() }
+                                };
+                                let event = ctx.change_log.record(entity, id, record);
+                                broadcast_change_with_crdt(
+                                    ctx.notifier,
+                                    ctx.store,
+                                    event.seq,
+                                    entity,
+                                    id,
+                                    event.kind.clone(),
+                                    event.data.as_ref(),
+                                );
+                                // after_* hook with the post-write row,
+                                // matching the entity-API + push path.
+                                if matches!(event.kind, ChangeKind::Insert) {
+                                    ctx.plugin_hooks
+                                        .after_insert(entity, id, &row, ctx.auth_ctx);
+                                } else {
+                                    ctx.plugin_hooks
+                                        .after_update(entity, id, &row, ctx.auth_ctx);
                                 }
                             }
                             "delete" => {
-                                // For delete the inner transact returns
-                                // `{op: "delete", id}`. We already have
-                                // the id from the request op.
                                 let delete_id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                                 if delete_id.is_empty() {
                                     continue;
                                 }
                                 let snapshot = delete_snapshots
                                     .remove(&(entity.to_string(), delete_id.to_string()));
-                                let seq = ctx.change_log.append(
+                                let event = ctx.change_log.record(
                                     entity,
                                     delete_id,
-                                    ChangeKind::Delete,
-                                    snapshot.clone(),
+                                    ChangeRecord::Delete {
+                                        snapshot: snapshot.clone(),
+                                    },
                                 );
                                 broadcast_change_with_crdt(
                                     ctx.notifier,
                                     ctx.store,
-                                    seq,
+                                    event.seq,
                                     entity,
                                     delete_id,
                                     ChangeKind::Delete,
-                                    snapshot.as_ref(),
+                                    event.data.as_ref(),
                                 );
+                                ctx.plugin_hooks
+                                    .after_delete(entity, delete_id, ctx.auth_ctx);
                             }
                             _ => {}
                         }

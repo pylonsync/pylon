@@ -148,23 +148,29 @@ pub(crate) fn handle(
                 // that `crdt_apply_update` writes. Without this, normal
                 // JSON sync clients see only the binary CRDT frame
                 // (which they don't decode) and miss the projected
-                // fields the SQL row now reflects — they'd be stale
-                // until reconcile (codex P1).
+                // fields the SQL row now reflects.
+                //
+                // Documented exception to the "all writes go through
+                // `apply_mutation`" invariant: the CRDT route already
+                // ran the policy gate + plugin before_update hook
+                // above, and `notify_crdt` did the binary broadcast.
+                // What's left is JSON-only notification of the
+                // materialized row to non-CRDT subscribers — handled
+                // here with the typed `ChangeRecord::Update`.
                 if let Ok(Some(row)) = ctx.store.get_by_id(entity, row_id) {
-                    let seq = ctx.change_log.append(
+                    let event = ctx.change_log.record(
                         entity,
                         row_id,
-                        pylon_sync::ChangeKind::Update,
-                        Some(row.clone()),
+                        pylon_sync::ChangeRecord::Update { row: row.clone() },
                     );
-                    crate::emit_change_seq_header(ctx, seq);
+                    crate::emit_change_seq_header(ctx, event.seq);
                     crate::broadcast_change(
                         ctx.notifier,
-                        seq,
+                        event.seq,
                         entity,
                         row_id,
-                        pylon_sync::ChangeKind::Update,
-                        Some(&row),
+                        event.kind.clone(),
+                        event.data.as_ref(),
                     );
                 }
                 (200, serde_json::json!({"ok": true}).to_string())

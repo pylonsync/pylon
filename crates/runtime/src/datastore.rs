@@ -2140,18 +2140,12 @@ impl<'a> DataStore for TxStore<'a> {
         //
         // Re-read failures don't bubble — the row is already in the
         // open tx, and erroring out would force a rollback of a write
-        // the caller has no reason to roll back. Log + fall back to
-        // the partial payload (the existing wire shape).
+        // the caller has no reason to roll back. Log + skip the
+        // broadcast: a partial payload would trip the per-tenant
+        // policy filter on every connected subscriber.
         let payload = match self.runtime.get_by_id_with_conn(self.conn, entity, &id) {
             Ok(Some(full)) => full,
             Ok(None) => {
-                // In a TxStore (mutation) the insert and the re-read
-                // share the same connection / open transaction, so
-                // the row should always be visible. `None` here
-                // means the row was synchronously deleted by a
-                // trigger (or some other in-tx side effect). Skip
-                // the broadcast — the trigger's own delete (or the
-                // tx rollback) is the canonical truth.
                 tracing::warn!(
                     "[TxStore] post-insert re-read returned None for {entity}/{id} — likely deleted by trigger; skipping broadcast"
                 );
@@ -2159,10 +2153,10 @@ impl<'a> DataStore for TxStore<'a> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "[TxStore] post-insert re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                    "[TxStore] post-insert re-read failed for {entity}/{id} ({}): skipping broadcast",
                     e.message
                 );
-                data.clone()
+                return Ok(id);
             }
         };
         // Buffer the event. If the outer mutation rolls back, the buffer
@@ -2217,10 +2211,10 @@ impl<'a> DataStore for TxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[TxStore] post-update re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[TxStore] post-update re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    data.clone()
+                    return Ok(updated);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -2298,10 +2292,10 @@ impl<'a> DataStore for TxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[TxStore] post-link re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[TxStore] post-link re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: target_id })
+                    return Ok(linked);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -2325,10 +2319,10 @@ impl<'a> DataStore for TxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[TxStore] post-unlink re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[TxStore] post-unlink re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: serde_json::Value::Null })
+                    return Ok(unlinked);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -2805,10 +2799,10 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "[PgBufferedTxStore] post-insert re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                    "[PgBufferedTxStore] post-insert re-read failed for {entity}/{id} ({}): skipping broadcast",
                     e.message
                 );
-                data.clone()
+                return Ok(id);
             }
         };
         self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(&payload));
@@ -2848,10 +2842,10 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[PgBufferedTxStore] post-update re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[PgBufferedTxStore] post-update re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    data.clone()
+                    return Ok(updated);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -2860,9 +2854,21 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
+        // Snapshot BEFORE the delete so the buffered change event
+        // carries the pre-delete row. Without it, every row-scoped
+        // read policy (e.g. `auth.userId == data.userId`) on the
+        // broadcast filter evaluates against `data: None`, fails,
+        // and suppresses the delete event — including from the
+        // owner's own tab. Matches the SQLite TxStore::delete fix.
+        let snapshot = self.inner.get_by_id(entity, id).ok().flatten();
         let deleted = self.inner.delete(entity, id)?;
         if deleted {
-            self.record(entity, id, pylon_sync::ChangeKind::Delete, None);
+            self.record(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Delete,
+                snapshot.as_ref(),
+            );
         }
         Ok(deleted)
     }
@@ -2898,10 +2904,10 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[PgBufferedTxStore] post-link re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[PgBufferedTxStore] post-link re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: target_id })
+                    return Ok(linked);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -2922,10 +2928,10 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[PgBufferedTxStore] post-unlink re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[PgBufferedTxStore] post-unlink re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: serde_json::Value::Null })
+                    return Ok(unlinked);
                 }
             };
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -3041,15 +3047,22 @@ impl<'a> AutoBroadcastStore<'a> {
         let seq = self
             .change_log
             .append(entity, row_id, kind.clone(), data.cloned());
-        let event = pylon_sync::ChangeEvent {
+        // Route through `broadcast_change_with_crdt` so CRDT
+        // subscribers get binary Loro frames alongside the JSON
+        // event. Matches the router mutation pipeline's invariant —
+        // pre-fix this path called notifier.notify() only and
+        // server-side writes through `AutoBroadcastStore` (used by
+        // some non-function backends) silently skipped the CRDT
+        // fanout, leaving collaborative Loro docs stale.
+        pylon_router::broadcast_change_with_crdt(
+            self.notifier.as_ref(),
+            self.inner,
             seq,
-            entity: entity.to_string(),
-            row_id: row_id.to_string(),
+            entity,
+            row_id,
             kind,
-            data: data.cloned(),
-            timestamp: String::new(),
-        };
-        self.notifier.notify(&event);
+            data,
+        );
     }
 }
 
@@ -3075,9 +3088,11 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
         //     concurrent delete will fire its own event, and
         //     emitting a phantom Insert here would resurrect the row
         //     in client replicas.
-        //   - `Err(e)` — read-side bug or storage outage. Log and
-        //     fall back to the caller's partial payload so the event
-        //     still ships (degraded > silent).
+        //   - `Err(e)` — read-side outage. Log and skip the
+        //     broadcast: a partial payload trips the per-tenant
+        //     policy filter on every connected subscriber and
+        //     ghost-applies unprojected fields. The write is durable
+        //     either way.
         let payload = match self.inner.get_by_id(entity, &id) {
             Ok(Some(full)) => full,
             Ok(None) => {
@@ -3088,10 +3103,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "[AutoBroadcastStore] post-insert re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                    "[AutoBroadcastStore] post-insert re-read failed for {entity}/{id} ({}): skipping broadcast",
                     e.message
                 );
-                data.clone()
+                return Ok(id);
             }
         };
         self.emit(entity, &id, pylon_sync::ChangeKind::Insert, Some(&payload));
@@ -3132,10 +3147,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[AutoBroadcastStore] post-update re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[AutoBroadcastStore] post-update re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    data.clone()
+                    return Ok(updated);
                 }
             };
             self.emit(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -3190,10 +3205,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[AutoBroadcastStore] post-link re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[AutoBroadcastStore] post-link re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: target_id })
+                    return Ok(linked);
                 }
             };
             self.emit(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -3214,10 +3229,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[AutoBroadcastStore] post-unlink re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                        "[AutoBroadcastStore] post-unlink re-read failed for {entity}/{id} ({}): skipping broadcast",
                         e.message
                     );
-                    serde_json::json!({ relation: serde_json::Value::Null })
+                    return Ok(unlinked);
                 }
             };
             self.emit(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
@@ -3304,11 +3319,9 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "[AutoBroadcastStore] post-transact re-read failed for {entity}/{id} ({}): broadcasting partial payload",
+                                "[AutoBroadcastStore] post-transact re-read failed for {entity}/{id} ({}): skipping broadcast",
                                 e.message
                             );
-                            let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
-                            self.emit(entity, id, kind, Some(&data));
                         }
                     }
                 }
@@ -3317,6 +3330,14 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                     if id.is_empty() {
                         continue;
                     }
+                    // We didn't pre-snapshot the row before transact()
+                    // committed (the inner storage owns the tx — by
+                    // the time we'd capture, the row is gone). So
+                    // emit `data: None` here. Callers that need
+                    // row-scoped read policies on transact-deletes
+                    // should drive the writes through the router's
+                    // `/api/transact` route, which snapshots BEFORE
+                    // calling the inner transact. Documented exception.
                     self.emit(entity, id, pylon_sync::ChangeKind::Delete, None);
                 }
                 _ => {}
@@ -3540,9 +3561,21 @@ impl pylon_router::FnOps for FnOpsImpl {
 
                     return match tx_result {
                         Ok((value, trace, pending)) => {
-                            // Mirror the SQLite path: append to the change
-                            // log first (so /api/sync/pull tail callers see
-                            // it), then notify WS/SSE subscribers.
+                            // Append to the change log first (so
+                            // /api/sync/pull tail callers see the rows),
+                            // then route through `broadcast_change_with_crdt`
+                            // so CRDT subscribers get binary Loro frames
+                            // alongside the JSON event.
+                            //
+                            // Documented exception to the "typed
+                            // `ChangeRecord` only" invariant: the pending
+                            // events are buffered by `PgBufferedTxStore`,
+                            // which has already enforced the shape contract
+                            // (full row on insert/update, pre-delete
+                            // snapshot on delete). We unpack the
+                            // (kind, data) tuple here to assign seq via
+                            // raw `append` because the events arrive
+                            // pre-shaped, not as a `ChangeRecord` enum.
                             for ev in pending {
                                 let seq = self.change_log.append(
                                     &ev.entity,
@@ -3550,8 +3583,15 @@ impl pylon_router::FnOps for FnOpsImpl {
                                     ev.kind.clone(),
                                     ev.data.clone(),
                                 );
-                                let event = pylon_sync::ChangeEvent { seq, ..ev };
-                                self.notifier.notify(&event);
+                                pylon_router::broadcast_change_with_crdt(
+                                    self.notifier.as_ref(),
+                                    self.runtime.as_ref(),
+                                    seq,
+                                    &ev.entity,
+                                    &ev.row_id,
+                                    ev.kind.clone(),
+                                    ev.data.as_ref(),
+                                );
                             }
                             // Flush scheduled jobs after the commit lands.
                             // On rollback the early `Err(e)` arm below
@@ -3633,8 +3673,19 @@ impl pylon_router::FnOps for FnOpsImpl {
                                     ev.kind.clone(),
                                     ev.data.clone(),
                                 );
-                                let event = pylon_sync::ChangeEvent { seq, ..ev };
-                                self.notifier.notify(&event);
+                                // Route through `broadcast_change_with_crdt`
+                                // so CRDT subscribers get binary Loro frames
+                                // for function-driven writes, matching the
+                                // router pipeline's invariant.
+                                pylon_router::broadcast_change_with_crdt(
+                                    self.notifier.as_ref(),
+                                    self.runtime.as_ref(),
+                                    seq,
+                                    &ev.entity,
+                                    &ev.row_id,
+                                    ev.kind.clone(),
+                                    ev.data.as_ref(),
+                                );
                             }
                             // Same flush as the PG path — durable commit,
                             // then flush schedules. Drop the guard
@@ -4304,8 +4355,20 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                         ev.kind.clone(),
                                         ev.data.clone(),
                                     );
-                                    let event = pylon_sync::ChangeEvent { seq, ..ev };
-                                    ops.notifier.notify(&event);
+                                    // Route through `broadcast_change_with_crdt`
+                                    // so nested-mutation writes get binary
+                                    // Loro frames alongside JSON events,
+                                    // matching the top-level flush + router
+                                    // pipeline invariant.
+                                    pylon_router::broadcast_change_with_crdt(
+                                        ops.notifier.as_ref(),
+                                        ops.runtime.as_ref(),
+                                        seq,
+                                        &ev.entity,
+                                        &ev.row_id,
+                                        ev.kind.clone(),
+                                        ev.data.as_ref(),
+                                    );
                                 }
                                 ops.flush_pending_schedules(sched_guard.take());
                                 drop(sched_guard);
@@ -4376,8 +4439,19 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                     ev.kind.clone(),
                                     ev.data.clone(),
                                 );
-                                let event = pylon_sync::ChangeEvent { seq, ..ev };
-                                ops.notifier.notify(&event);
+                                // Match the top-level flush: route
+                                // through `broadcast_change_with_crdt`
+                                // so CRDT subscribers get binary Loro
+                                // frames for nested-mutation writes.
+                                pylon_router::broadcast_change_with_crdt(
+                                    ops.notifier.as_ref(),
+                                    ops.runtime.as_ref(),
+                                    seq,
+                                    &ev.entity,
+                                    &ev.row_id,
+                                    ev.kind.clone(),
+                                    ev.data.as_ref(),
+                                );
                             }
                             ops.flush_pending_schedules(sched_guard.take());
                             drop(sched_guard);

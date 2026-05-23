@@ -395,6 +395,12 @@ fn start_server(
     // pull nothing and see an empty replica). Seqs here are fresh; clients
     // whose cursors are ahead of `self.seq` get a 410 and full resync,
     // which then hits this seeded log and gets every current row back.
+    // Documented exception to the "all writes go through `apply_mutation`"
+    // invariant: this is startup seeding, not a mutation. No clients are
+    // connected yet, so there's nothing to broadcast — we're seeding the
+    // change log so cursors at last_seq=0 see the current rows when they
+    // pull. Policy / plugin hooks / CRDT broadcast don't apply: nothing
+    // is changing, this is "the state at boot."
     for entity in runtime.manifest().entities.iter() {
         match runtime.list(&entity.name) {
             Ok(rows) => {
