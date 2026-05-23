@@ -1598,23 +1598,38 @@ export class SyncEngine {
     this.lastSeenToken = tokenNow;
 
     try {
-      const resp = await this.request<PullResponse>(
-        "GET",
-        `/api/sync/pull?since=${this.cursor.last_seq}`
-      );
-      // Successful response — clear the 410 circuit breaker.
-      this.consecutive_410s = 0;
-      // Route through the apply queue so concurrent WS messages and
-      // pull responses don't race. The queue's monotonic guard skips
-      // any seq we've already applied (e.g. WS already landed the
-      // events that pull is now redelivering) and only advances the
-      // cursor forward. We still advance even when no changes land,
-      // because the server's last_seq may have moved past us due to
-      // policy-filtered events.
-      await this.enqueueApply(resp.changes, resp.cursor);
-      // If there are more, pull again immediately.
-      if (resp.has_more) {
-        await this.pull();
+      // Snapshot pagination: when the cursor is 0 and the server's
+      // table is larger than a single batch, the response carries
+      // `snapshot_after` for the next page. Loop until exhausted
+      // BEFORE returning so a fresh client always observes a
+      // consistent full snapshot, not a 1k-row prefix it mistakes
+      // for the whole replica.
+      let snapshotAfter: string | undefined;
+      let firstPass = true;
+      while (firstPass || snapshotAfter) {
+        firstPass = false;
+        const params = new URLSearchParams();
+        params.set("since", String(this.cursor.last_seq));
+        if (snapshotAfter) {
+          params.set("snapshot_after", snapshotAfter);
+        }
+        const resp = await this.request<
+          PullResponse & { snapshot_after?: string | null }
+        >("GET", `/api/sync/pull?${params.toString()}`);
+        this.consecutive_410s = 0;
+        await this.enqueueApply(resp.changes, resp.cursor);
+        // `snapshot_after` is only set when the server is mid-snapshot.
+        // Continue paginating in the same loop iteration so we don't
+        // leave a fresh client with a partial replica.
+        snapshotAfter = resp.snapshot_after ?? undefined;
+        // The change-log tail also paginates via `has_more` — handle
+        // that one recursively after the snapshot loop completes so
+        // backpressure on the change-log path uses the existing
+        // tail-pull semantics.
+        if (!snapshotAfter && resp.has_more) {
+          await this.pull();
+          break;
+        }
       }
     } catch (err) {
       // Swallow network + transient errors so the poll/reconnect loop
