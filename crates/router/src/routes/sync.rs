@@ -5,7 +5,8 @@
 //! coverage in the auth-matrix scaffold).
 
 use crate::{
-    broadcast_change, gdpr_export, gdpr_purge, json_error_safe, require_admin, RouterContext,
+    broadcast_change, broadcast_change_with_crdt, gdpr_export, gdpr_purge, json_error_safe,
+    require_admin, RouterContext,
 };
 use pylon_http::HttpMethod;
 use pylon_sync::{ChangeKind, SyncCursor};
@@ -99,20 +100,30 @@ pub(crate) fn handle(
                 .nth(1)
                 .and_then(|s| s.split('&').next())
                 .map(|s| s.to_string());
-            let snapshot_after: Option<(String, Option<String>)> = snapshot_after_raw
+            let snapshot_after_parsed: Option<serde_json::Value> = snapshot_after_raw
                 .as_deref()
-                .and_then(|s| {
-                    // Manual URL-decode of just %-escapes — small enough
-                    // and avoids dragging in a urlencoding dep here.
-                    let decoded = url_decode(s);
-                    serde_json::from_str::<serde_json::Value>(&decoded).ok()
-                })
-                .and_then(|v| {
+                .map(url_decode)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let snapshot_after: Option<(String, Option<String>)> =
+                snapshot_after_parsed.as_ref().and_then(|v| {
                     let entity = v.get("e").and_then(|s| s.as_str())?.to_string();
                     let after_id = v.get("a").and_then(|s| s.as_str()).map(|s| s.to_string());
                     Some((entity, after_id))
                 });
-            let current_seq = ctx.change_log.current_seq();
+            // Pin snapshot_seq across all pages of a single client's
+            // snapshot fetch. Codex P1: previously each page captured
+            // a fresh current_seq, so a write landing between page 1
+            // and the final page could be skipped (page 1 emitted
+            // the row at seq=N, write landed at seq=N+1, final page
+            // advanced cursor to N+2, the in-between write was lost
+            // because the snapshot pages claimed seq=N+2 too). Now
+            // the seq is captured once on the first page and carried
+            // through `snapshot_after` so all pages share it.
+            let snapshot_seq: u64 = snapshot_after_parsed
+                .as_ref()
+                .and_then(|v| v.get("s").and_then(|s| s.as_u64()))
+                .unwrap_or_else(|| ctx.change_log.current_seq());
+            let current_seq = snapshot_seq;
             let manifest = ctx.store.manifest();
             let auth_user = &manifest.auth.user;
             let mut changes: Vec<pylon_sync::ChangeEvent> = Vec::new();
@@ -200,8 +211,10 @@ pub(crate) fn handle(
             // the change-log tail at the right "as of" point.
             let has_more = next_after.is_some();
             let cursor_seq = if has_more { 0 } else { current_seq };
+            // Carry `snapshot_seq` through every page so all of a
+            // client's snapshot batches reference the same as-of seq.
             let next_after_str = next_after.map(|(e, a)| {
-                let payload = serde_json::json!({"e": e, "a": a}).to_string();
+                let payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq}).to_string();
                 url_encode(&payload)
             });
             let resp = serde_json::json!({
@@ -320,9 +333,14 @@ pub(crate) fn handle(
         // diverges from truth as retention evicts old events.
         let mut max_seq: u64 = 0;
 
-        // Track which op_ids we successfully claimed AND applied, so
-        // we know which to keep cached vs roll back if a downstream
-        // write fails.
+        // Per-op result envelope. The client maps each entry back to
+        // its op_id (or array index when op_id is absent) to know
+        // exactly which mutations applied, were deduplicated, or
+        // failed — and with what seq. Codex P1: the previous
+        // `{applied, deduped, errors}` count-based summary lost the
+        // per-op mapping; the client guessed by ordering and got it
+        // wrong on partial failures, leaving optimistic ghosts stuck.
+        let mut op_results: Vec<serde_json::Value> = Vec::with_capacity(push_req.changes.len());
         let mut claimed_op_ids: Vec<String> = Vec::new();
         let mut errored_op_ids: Vec<String> = Vec::new();
         for change in &push_req.changes {
@@ -335,12 +353,17 @@ pub(crate) fn handle(
             if let Some(ref op_id) = change.op_id {
                 if !ctx.change_log.claim_op_id(op_id) {
                     deduped += 1;
+                    op_results.push(serde_json::json!({
+                        "op_id": op_id,
+                        "status": "deduped",
+                    }));
                     continue;
                 }
                 claimed_op_ids.push(op_id.clone());
             }
             let mut op_errored = false;
             let mut op_error_message: Option<String> = None;
+            let mut op_applied_seq: Option<u64> = None;
             match change.kind {
                 ChangeKind::Insert => {
                     if let Some(ref data) = change.data {
@@ -380,30 +403,44 @@ pub(crate) fn handle(
                             } else {
                                 match ctx.store.insert(&change.entity, &hook_data) {
                                     Ok(id) => {
+                                        // Re-read the full row so the broadcast
+                                        // carries server-stamped defaults +
+                                        // plugin-added fields (tenantId, etc).
+                                        // hook_data alone misses those, and a
+                                        // partial broadcast trips the per-
+                                        // client read-policy filter (codex P1).
+                                        let full = ctx
+                                            .store
+                                            .get_by_id(&change.entity, &id)
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_else(|| hook_data.clone());
                                         let seq = ctx.change_log.append(
                                             &change.entity,
                                             &id,
                                             ChangeKind::Insert,
-                                            Some(hook_data.clone()),
+                                            Some(full.clone()),
                                         );
-                                        broadcast_change(
+                                        broadcast_change_with_crdt(
                                             ctx.notifier,
+                                            ctx.store,
                                             seq,
                                             &change.entity,
                                             &id,
                                             ChangeKind::Insert,
-                                            Some(&hook_data),
+                                            Some(&full),
                                         );
                                         ctx.plugin_hooks.after_insert(
                                             &change.entity,
                                             &id,
-                                            &hook_data,
+                                            &full,
                                             ctx.auth_ctx,
                                         );
                                         if seq > max_seq {
                                             max_seq = seq;
                                         }
                                         applied += 1;
+                                        op_applied_seq = Some(seq);
                                     }
                                     Err(e) => {
                                         op_errored = true;
@@ -458,31 +495,57 @@ pub(crate) fn handle(
                                 errors.push(full);
                             } else {
                                 match ctx.store.update(&change.entity, &change.row_id, &hook_data) {
-                                    Ok(_) => {
+                                    // `Ok(false)` = no row matched the id.
+                                    // Previously this fell through to "success
+                                    // + broadcast" and the client thought its
+                                    // mutation landed; codex P1 flagged it.
+                                    // Treat as not-found so the client surfaces
+                                    // the failure and clears the optimistic
+                                    // ghost.
+                                    Ok(true) => {
+                                        // Re-read for the broadcast — partial
+                                        // patch alone trips the policy filter.
+                                        let full = ctx
+                                            .store
+                                            .get_by_id(&change.entity, &change.row_id)
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_else(|| hook_data.clone());
                                         let seq = ctx.change_log.append(
                                             &change.entity,
                                             &change.row_id,
                                             ChangeKind::Update,
-                                            Some(hook_data.clone()),
+                                            Some(full.clone()),
                                         );
-                                        broadcast_change(
+                                        broadcast_change_with_crdt(
                                             ctx.notifier,
+                                            ctx.store,
                                             seq,
                                             &change.entity,
                                             &change.row_id,
                                             ChangeKind::Update,
-                                            Some(&hook_data),
+                                            Some(&full),
                                         );
                                         ctx.plugin_hooks.after_update(
                                             &change.entity,
                                             &change.row_id,
-                                            &hook_data,
+                                            &full,
                                             ctx.auth_ctx,
                                         );
                                         if seq > max_seq {
                                             max_seq = seq;
                                         }
                                         applied += 1;
+                                        op_applied_seq = Some(seq);
+                                    }
+                                    Ok(false) => {
+                                        op_errored = true;
+                                        let msg = format!(
+                                            "update {}/{}: row not found",
+                                            change.entity, change.row_id
+                                        );
+                                        op_error_message = Some(msg.clone());
+                                        errors.push(msg);
                                     }
                                     Err(e) => {
                                         op_errored = true;
@@ -536,7 +599,7 @@ pub(crate) fn handle(
                         errors.push(full);
                     } else {
                         match ctx.store.delete(&change.entity, &change.row_id) {
-                            Ok(_) => {
+                            Ok(true) => {
                                 let seq = ctx.change_log.append(
                                     &change.entity,
                                     &change.row_id,
@@ -560,6 +623,16 @@ pub(crate) fn handle(
                                     max_seq = seq;
                                 }
                                 applied += 1;
+                                op_applied_seq = Some(seq);
+                            }
+                            Ok(false) => {
+                                op_errored = true;
+                                let msg = format!(
+                                    "delete {}/{}: row not found",
+                                    change.entity, change.row_id
+                                );
+                                op_error_message = Some(msg.clone());
+                                errors.push(msg);
                             }
                             Err(e) => {
                                 op_errored = true;
@@ -574,10 +647,26 @@ pub(crate) fn handle(
                     }
                 }
             }
-            // Record per-op result so the client can map success/fail
-            // back to specific op_ids in the response (no more
-            // count-only summary that hid which ops succeeded).
-            let _ = &op_error_message;
+            // Per-op result entry — clients map this back to their
+            // optimistic ghost by op_id (or array position when op_id
+            // is absent on the request).
+            let entry = if op_errored {
+                serde_json::json!({
+                    "op_id": change.op_id,
+                    "status": "error",
+                    "error": op_error_message.unwrap_or_else(|| "unknown".into()),
+                })
+            } else {
+                let mut e = serde_json::json!({
+                    "op_id": change.op_id,
+                    "status": "applied",
+                });
+                if let Some(seq) = op_applied_seq {
+                    e["seq"] = serde_json::Value::from(seq);
+                }
+                e
+            };
+            op_results.push(entry);
             // Roll back the op_id claim on failure so the client's
             // retry can succeed. Previously failed inserts were
             // un-deduped via string-matching on the row_id in the
@@ -612,6 +701,11 @@ pub(crate) fn handle(
                 "applied": applied,
                 "deduped": deduped,
                 "errors": errors,
+                // Per-op result envelope. Clients should prefer this
+                // over the count fields for status mapping. Kept the
+                // count fields for backwards compat with older SDKs
+                // until they catch up.
+                "results": op_results,
                 "cursor": {"last_seq": cursor_seq}
             })
             .to_string(),

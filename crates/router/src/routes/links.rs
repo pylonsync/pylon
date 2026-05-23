@@ -52,9 +52,14 @@ pub(crate) fn handle(
             }
             Err(e) => return Some((500, json_error(&e.code, &e.message))),
         };
+        // `check_entity_update`, not `check_entity_write`: setting/clearing
+        // a FK on an existing row is conceptually an Update, and
+        // `check_entity_write` confusingly delegates to EntityAction::Insert
+        // (codex P0). A policy that allowed create but denied update
+        // would otherwise still allow FK mutation through this path.
         let check = ctx
             .policy_engine
-            .check_entity_write(entity, ctx.auth_ctx, Some(&source_row));
+            .check_entity_update(entity, ctx.auth_ctx, Some(&source_row));
         if let pylon_policy::PolicyResult::Denied {
             policy_name,
             reason,
@@ -157,9 +162,14 @@ pub(crate) fn handle(
             }
             Err(e) => return Some((500, json_error(&e.code, &e.message))),
         };
+        // `check_entity_update`, not `check_entity_write`: setting/clearing
+        // a FK on an existing row is conceptually an Update, and
+        // `check_entity_write` confusingly delegates to EntityAction::Insert
+        // (codex P0). A policy that allowed create but denied update
+        // would otherwise still allow FK mutation through this path.
         let check = ctx
             .policy_engine
-            .check_entity_write(entity, ctx.auth_ctx, Some(&source_row));
+            .check_entity_update(entity, ctx.auth_ctx, Some(&source_row));
         if let pylon_policy::PolicyResult::Denied {
             policy_name,
             reason,

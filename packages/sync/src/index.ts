@@ -51,9 +51,32 @@ export interface ResolvedSession {
   roles: string[];
 }
 
+/**
+ * Per-op result entry for `/api/sync/push`. Returned in the `results`
+ * array so the client can map each mutation back to its op_id and
+ * know exactly which applied / deduped / failed. Server emits these
+ * in arrival order (one per input change). Codex P1: the previous
+ * `{applied, deduped, errors}` count-based shape lost per-op
+ * mapping — clients had to guess by ordering and got it wrong on
+ * partial failures, stranding optimistic ghosts.
+ */
+export interface PushOpResult {
+  /** op_id from the request, if the client supplied one. */
+  op_id?: string | null;
+  status: "applied" | "deduped" | "error";
+  /** Assigned seq when `status === "applied"`. */
+  seq?: number;
+  /** Server's error message when `status === "error"`. */
+  error?: string;
+}
+
 export interface PushResponse {
   applied: number;
+  deduped: number;
   errors: string[];
+  /** Per-op results in arrival order. Prefer this over the count
+   *  fields for status mapping. */
+  results?: PushOpResult[];
   cursor: SyncCursor;
 }
 
@@ -953,15 +976,27 @@ export class SyncEngine {
           if (persistence) await persistChange(persistence, change);
         };
 
-        // Hydrate the mutation queue from disk. Any offline writes queued
-        // before the tab was closed come back as pending here and will be
-        // pushed on the next `push()` tick. Without this, `MutationQueue`
-        // stayed memory-only and offline mutations were silently lost.
+        // Hydrate the mutation queue from disk. Any offline writes
+        // queued before the tab was closed come back as pending here.
+        // Codex P1: previously these only got pushed on the next
+        // `push()` tick (polling mode) or when a NEW local mutation
+        // triggered push. In WebSocket-only mode there's no polling,
+        // and if the user reloads without making a fresh mutation,
+        // pull+reconcile (which run shortly after this) can sweep
+        // the optimistic ghosts before push() ever fires. Fire push
+        // explicitly here so hydrated offline mutations reach the
+        // server before reconcile inspects local state.
         try {
           const { IndexedDBMutationPersistence } = await import("./persistence");
           const mqPersistence = new IndexedDBMutationPersistence(persistence);
           this.mutations.attachPersistence(mqPersistence);
           await this.mutations.hydrate();
+          // Fire-and-forget — the actual mutation HTTP calls happen
+          // async, and we don't want to block engine startup on them.
+          // pull()/reconcile() below run in parallel; push()'s
+          // mutations carry op_ids so racing the broadcasts won't
+          // double-apply.
+          void this.push();
         } catch {
           // Queue persistence optional — memory-only still works.
         }
@@ -2127,12 +2162,43 @@ export class SyncEngine {
         client_id: this.clientId,
       });
 
-      // Mark mutations based on response.
-      for (let i = 0; i < pending.length; i++) {
-        if (i < resp.applied) {
-          this.mutations.markApplied(pending[i].id);
-        } else if (resp.errors[i - resp.applied]) {
-          this.mutations.markFailed(pending[i].id, resp.errors[i - resp.applied]);
+      // Prefer the per-op `results` array (added 0.3.188). Match each
+      // by op_id when present, else fall back to positional matching.
+      // Codex P1: previous count-based mapping ("first N applied,
+      // next M failed") got partial failures wrong — when op 2 of 3
+      // failed, op 3 was incorrectly marked failed and a successful
+      // retry-after-lost-response came back deduped but stayed
+      // pending forever.
+      if (Array.isArray(resp.results)) {
+        const byOpId = new Map<string, PushOpResult>();
+        for (const r of resp.results) {
+          if (r.op_id) byOpId.set(r.op_id, r);
+        }
+        for (let i = 0; i < pending.length; i++) {
+          const m = pending[i];
+          const r =
+            (m.change.op_id ? byOpId.get(m.change.op_id) : undefined) ??
+            resp.results[i];
+          if (!r) continue;
+          if (r.status === "applied" || r.status === "deduped") {
+            this.mutations.markApplied(m.id);
+          } else if (r.status === "error") {
+            this.mutations.markFailed(m.id, r.error ?? "unknown");
+          }
+        }
+      } else {
+        // Legacy server response (pre-0.3.188): count-based mapping.
+        // Buggy on partial failures but the best we can do without
+        // the per-op envelope.
+        for (let i = 0; i < pending.length; i++) {
+          if (i < resp.applied) {
+            this.mutations.markApplied(pending[i].id);
+          } else if (resp.errors[i - resp.applied]) {
+            this.mutations.markFailed(
+              pending[i].id,
+              resp.errors[i - resp.applied],
+            );
+          }
         }
       }
 
@@ -2144,15 +2210,28 @@ export class SyncEngine {
 
   /** Insert a row with optimistic local update. */
   async insert(entity: string, data: Row): Promise<string> {
-    const tempId = this.store.optimisticInsert(entity, data);
+    // Codex P1: previously this minted a `_pending_<random>` local id
+    // via `optimisticInsert(entity, data)` but sent `data` to the
+    // server WITHOUT that id. The server generated its own canonical
+    // id, broadcast under that id, and the local replica ended up
+    // with two rows: the `_pending_` ghost (never cleared, because
+    // server's broadcast doesn't reference it) and the canonical row.
+    // Fix: mint a real Pylon-shaped id client-side, force the data
+    // payload to carry it, optimistic-insert under that exact id,
+    // and queue the mutation with the same id. Server honors the
+    // provided id, broadcasts under it, the optimistic ghost is the
+    // canonical row.
+    const id = generateId();
+    const dataWithId = { ...data, id };
+    this.store.optimisticInsertWithId(entity, id, dataWithId);
     this.mutations.add({
       entity,
-      row_id: tempId,
+      row_id: id,
       kind: "insert",
-      data,
+      data: dataWithId,
     });
     await this.push();
-    return tempId;
+    return id;
   }
 
   /** Update a row with optimistic local update. */
