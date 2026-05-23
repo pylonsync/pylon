@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { pylonFetch } from '@pylonsync/sync';
 import { getBaseUrl, getReactStorage, storageKey } from './index';
 
 // ---------------------------------------------------------------------------
@@ -96,12 +97,13 @@ export function useRoom(
   const presenceRef = useRef(initialPresence);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Stable header builder -- only changes when `token` changes.
-  const headers = useCallback((): Record<string, string> => {
-    const h: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) h['Authorization'] = `Bearer ${token}`;
-    return h;
-  }, [token]);
+  // Transport config — shared across every room API call. The
+  // `pylonFetch` helper owns auth + credentials + JSON handling so
+  // every site here drops the duplicate header builder.
+  const transport = useCallback(
+    () => ({ baseUrl, token }),
+    [baseUrl, token],
+  );
 
   // ------- lifecycle: join / heartbeat / leave -------
   //
@@ -118,34 +120,25 @@ export function useRoom(
 
     const join = async () => {
       try {
-        const res = await fetch(`${baseUrl}/api/rooms/join`, {
-          method: 'POST',
-          headers: headers(),
-          body: JSON.stringify({
-            room: roomId,
-            user_id: userId,
-            data: presenceRef.current,
-          }),
-        });
-        const body = await res.json();
+        const body = await pylonFetch<{ snapshot?: { peers?: RoomPeer[] } }>(
+          transport(),
+          '/api/rooms/join',
+          {
+            method: 'POST',
+            json: { room: roomId, user_id: userId, data: presenceRef.current },
+          },
+        );
         if (!mounted) return;
-
-        if (res.ok) {
-          joined = true;
-          setIsConnected(true);
-          setError(null);
-          if (body.snapshot?.peers) {
-            setPeers(
-              (body.snapshot.peers as RoomPeer[]).filter(
-                (p) => p.user_id !== userId,
-              ),
-            );
-          }
-        } else {
-          setError(body.error?.message || 'Failed to join room');
+        joined = true;
+        setIsConnected(true);
+        setError(null);
+        if (body.snapshot?.peers) {
+          setPeers(
+            body.snapshot.peers.filter((p) => p.user_id !== userId),
+          );
         }
       } catch (e: any) {
-        if (mounted) setError(e.message);
+        if (mounted) setError(e?.message ?? 'Failed to join room');
       }
     };
 
@@ -155,19 +148,14 @@ export function useRoom(
     intervalRef.current = setInterval(async () => {
       if (!mounted) return;
       try {
-        const res = await fetch(
-          `${baseUrl}/api/rooms/${encodeURIComponent(roomId)}`,
-          { headers: headers() },
+        const body = await pylonFetch<{ members?: RoomPeer[] }>(
+          transport(),
+          `/api/rooms/${encodeURIComponent(roomId)}`,
         );
-        if (res.ok) {
-          const body = await res.json();
-          if (mounted) {
-            setPeers(
-              ((body.members ?? []) as RoomPeer[]).filter(
-                (p) => p.user_id !== userId,
-              ),
-            );
-          }
+        if (mounted) {
+          setPeers(
+            (body.members ?? []).filter((p) => p.user_id !== userId),
+          );
         }
       } catch {
         // Swallow -- next heartbeat will retry.
@@ -183,10 +171,9 @@ export function useRoom(
       // not in this room" errors. Server leave is also idempotent so
       // a stray duplicate would 200 anyway, but we save the round trip.
       if (joined) {
-        fetch(`${baseUrl}/api/rooms/leave`, {
+        pylonFetch(transport(), '/api/rooms/leave', {
           method: 'POST',
-          headers: headers(),
-          body: JSON.stringify({ room: roomId, user_id: userId }),
+          json: { room: roomId, user_id: userId },
         }).catch(() => {});
       }
     };
@@ -199,35 +186,32 @@ export function useRoom(
   const setPresence = useCallback(
     (data: Record<string, any>) => {
       presenceRef.current = data;
-      fetch(`${baseUrl}/api/rooms/presence`, {
+      pylonFetch(transport(), '/api/rooms/presence', {
         method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ room: roomId, user_id: userId, data }),
+        json: { room: roomId, user_id: userId, data },
       }).catch(() => {});
     },
-    [roomId, userId, baseUrl, headers],
+    [roomId, userId, transport],
   );
 
   const broadcast = useCallback(
     (topic: string, data: any) => {
-      fetch(`${baseUrl}/api/rooms/broadcast`, {
+      pylonFetch(transport(), '/api/rooms/broadcast', {
         method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ room: roomId, user_id: userId, topic, data }),
+        json: { room: roomId, user_id: userId, topic, data },
       }).catch(() => {});
     },
-    [roomId, userId, baseUrl, headers],
+    [roomId, userId, transport],
   );
 
   const leave = useCallback(() => {
-    fetch(`${baseUrl}/api/rooms/leave`, {
+    pylonFetch(transport(), '/api/rooms/leave', {
       method: 'POST',
-      headers: headers(),
-      body: JSON.stringify({ room: roomId, user_id: userId }),
+      json: { room: roomId, user_id: userId },
     }).catch(() => {});
     setIsConnected(false);
     setPeers([]);
-  }, [roomId, userId, baseUrl, headers]);
+  }, [roomId, userId, transport]);
 
   return { peers, isConnected, setPresence, broadcast, leave, error };
 }

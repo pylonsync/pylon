@@ -20,7 +20,7 @@
 import { useSyncExternalStore, useEffect } from "react";
 import type { LoroDoc, LoroText, LoroMap } from "loro-crdt";
 import { db, getBaseUrl, getReactStorage, storageKey } from "@pylonsync/react";
-import type { SyncEngine } from "@pylonsync/sync";
+import { pylonFetch, type SyncEngine } from "@pylonsync/sync";
 import { globalRegistry, LoroRegistry } from "./registry";
 
 export { LoroRegistry, globalRegistry } from "./registry";
@@ -197,45 +197,25 @@ async function pushCrdtUpdate(
   id: string,
   update: Uint8Array,
 ): Promise<void> {
-  const baseUrl = getBaseUrl();
-  const token = getReactStorage().get(storageKey("token"));
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   try {
-    const res = await fetch(
-      `${baseUrl}/api/crdt/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`,
+    // Server acknowledges with {ok: true}. The merged-state broadcast
+    // arrives over the WS, applied automatically by the registry — no
+    // need to read the response body here, but pylonFetch surfaces
+    // structured errors so failed pushes log instead of vanishing.
+    await pylonFetch(
+      {
+        baseUrl: getBaseUrl(),
+        getToken: () =>
+          (getReactStorage().get(storageKey("token")) ?? undefined) as
+            | string
+            | undefined,
+      },
+      `/api/crdt/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`,
       {
         method: "POST",
-        headers,
-        // Cookie-auth callers (Next.js middleware that issues session
-        // cookies) need credentials forwarded; Bearer-only setups
-        // ignore them. Without this, a logged-in Next.js app silently
-        // pushed unauthenticated CRDT updates and the server rejected
-        // them with 401/403 while the caller saw "ok" — collaborative
-        // edits vanished without an error surface.
-        credentials: "include",
-        body: JSON.stringify({ update: bytesToHex(update) }),
+        json: { update: bytesToHex(update) },
       },
     );
-    if (!res.ok) {
-      // Previously this code path swallowed every non-2xx — auth
-      // failures, validation errors, and 5xx all looked indistinguishable
-      // from a successful merge. Surface them so the app at least logs
-      // the loss instead of silently dropping the update.
-      let detail = "";
-      try {
-        const body = (await res.json()) as { error?: { message?: string } };
-        detail = body?.error?.message ?? "";
-      } catch {
-        /* body wasn't JSON — fall back to status text */
-      }
-      throw new Error(
-        `CRDT push HTTP ${res.status}${detail ? `: ${detail}` : ""}`,
-      );
-    }
-    // Server acknowledges with {ok: true}. The merged-state broadcast
-    // arrives over the WS, applied automatically by the registry; no
-    // need to read the response body here.
   } catch (err) {
     console.warn(`[loro] CRDT push failed for ${entity}/${id}:`, err);
   }

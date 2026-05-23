@@ -1,7 +1,12 @@
 export { defineRoute } from "@pylonsync/sdk";
 export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 
-import { defaultStorage, type Storage as PylonStorage } from "@pylonsync/sync";
+import {
+  defaultStorage,
+  pylonFetch,
+  pylonFetchRaw,
+  type Storage as PylonStorage,
+} from "@pylonsync/sync";
 
 // React hooks — high-level ergonomic shape
 export {
@@ -192,39 +197,30 @@ function assertBaseUrlSafeForEnv(): void {
   }
 }
 
+/**
+ * Build the transport config for the React free helpers — base URL,
+ * token getter, and cookie credentials are all centralized in
+ * `pylonFetch`. Cookie-auth apps work because the transport always
+ * sets `credentials: "include"`; bearer-auth apps work because
+ * `getToken` returns the cached session token.
+ */
+function transportConfig(): import("@pylonsync/sync").TransportConfig {
+  return {
+    baseUrl: _baseUrl,
+    getToken: () => currentAuthToken() ?? undefined,
+  };
+}
+
 async function apiRequest(
   method: string,
   path: string,
-  body?: unknown
+  body?: unknown,
 ): Promise<unknown> {
   assertBaseUrlSafeForEnv();
-  // Auto-attach the session token so `db.insert`, `fetchList`, etc. behave
-  // as the signed-in user without every call site threading the header.
-  // Safe: `currentAuthToken` is a no-op server-side.
-  const headers: Record<string, string> = {};
-  if (body) headers["Content-Type"] = "application/json";
-  const token = currentAuthToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`${_baseUrl}${path}`, {
-    method,
-    headers,
-    // Cookie-auth apps store the session in an httpOnly cookie that
-    // `currentAuthToken()` can't reach (the whole point of httpOnly).
-    // `credentials: "include"` lets the browser attach the cookie to
-    // cross-origin / sub-origin requests the same way the core
-    // SyncEngine does. Codex P2: without this the free helpers
-    // (fetchList, insert, update, remove, callFn, etc.) silently
-    // posted as anonymous on cookie-auth apps and every entity
-    // request returned 401/403.
-    credentials: "include",
-    body: body ? JSON.stringify(body) : undefined,
+  return pylonFetch(transportConfig(), path, {
+    method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    json: body,
   });
-  if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    const errorObj = err?.error as Record<string, unknown> | undefined;
-    throw new Error((errorObj?.message as string) ?? `HTTP ${res.status}`);
-  }
-  return res.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -287,12 +283,10 @@ export async function createSession(
 export async function getAuthContext(
   token?: string
 ): Promise<{ user_id: string | null }> {
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-  const res = await fetch(`${_baseUrl}/api/auth/me`, { headers });
-  return res.json() as Promise<{ user_id: string | null }>;
+  return pylonFetch<{ user_id: string | null }>(
+    { baseUrl: _baseUrl, token },
+    "/api/auth/me",
+  );
 }
 
 /**
@@ -306,16 +300,15 @@ export async function getAuthContext(
 export async function refreshSession(
   token: string
 ): Promise<{ token: string; user_id: string; expires_at: number } | null> {
-  const res = await fetch(`${_baseUrl}/api/auth/refresh`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) return null;
-  return res.json() as Promise<{
-    token: string;
-    user_id: string;
-    expires_at: number;
-  }>;
+  try {
+    return await pylonFetch<{
+      token: string;
+      user_id: string;
+      expires_at: number;
+    }>({ baseUrl: _baseUrl, token }, "/api/auth/refresh", { method: "POST" });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -414,24 +407,14 @@ export async function callFn<T = unknown>(
   args: Record<string, unknown> = {},
   options: { token?: string } = {}
 ): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = options.token ?? currentAuthToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`${_baseUrl}/api/fn/${name}`, {
-    method: "POST",
-    headers,
-    // Cookie-auth parity with the SyncEngine's request path — see
-    // `apiRequest` above. Codex P2: helper APIs were broken on
-    // cookie-auth apps without this.
-    credentials: "include",
-    body: JSON.stringify(args),
-  });
-  const json = (await res.json()) as unknown;
-  if (!res.ok) {
-    const err = (json as { error?: { code: string; message: string } }).error;
-    throw new Error(err?.message || `HTTP ${res.status}`);
-  }
-  return json as T;
+  return pylonFetch<T>(
+    {
+      baseUrl: _baseUrl,
+      getToken: () => options.token ?? currentAuthToken() ?? undefined,
+    },
+    `/api/fn/${name}`,
+    { method: "POST", json: args },
+  );
 }
 
 /**
@@ -449,18 +432,21 @@ export async function* streamFn(
   args: Record<string, unknown> = {},
   options: { token?: string } = {}
 ): AsyncGenerator<string, unknown, unknown> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-  };
-  if (options.token) headers["Authorization"] = `Bearer ${options.token}`;
-
-  const res = await fetch(`${_baseUrl}/api/fn/${name}`, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: JSON.stringify(args),
-  });
+  // Streaming response — use pylonFetchRaw so we can read .body
+  // ourselves. URL + auth + credentials are centralized in the
+  // transport.
+  const res = await pylonFetchRaw(
+    {
+      baseUrl: _baseUrl,
+      getToken: () => options.token ?? currentAuthToken() ?? undefined,
+    },
+    `/api/fn/${name}`,
+    {
+      method: "POST",
+      json: args,
+      accept: "text/event-stream",
+    },
+  );
   if (!res.ok || !res.body) {
     throw new Error(`Stream failed: HTTP ${res.status}`);
   }
@@ -573,27 +559,21 @@ export async function uploadFile(
   filename ??= "upload";
   contentType ??= "application/octet-stream";
 
-  const headers: Record<string, string> = {
-    "Content-Type": contentType,
-    "X-Filename": filename,
-  };
-  if (options.token) headers["Authorization"] = `Bearer ${options.token}`;
-
-  const res = await fetch(`${_baseUrl}/api/files/upload`, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body,
-  });
-
-  if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as {
-      error?: { code: string; message: string };
-    };
-    throw new Error(err.error?.message || `Upload failed: HTTP ${res.status}`);
-  }
-
-  return (await res.json()) as UploadedFile;
+  return pylonFetch<UploadedFile>(
+    {
+      baseUrl: _baseUrl,
+      getToken: () => options.token ?? currentAuthToken() ?? undefined,
+    },
+    "/api/files/upload",
+    {
+      method: "POST",
+      body,
+      headers: {
+        "Content-Type": contentType,
+        "X-Filename": filename,
+      },
+    },
+  );
 }
 
 /**
@@ -612,20 +592,12 @@ export async function uploadFileMultipart(
   }
   form.append("file", file);
 
-  const headers: Record<string, string> = {};
-  if (options.token) headers["Authorization"] = `Bearer ${options.token}`;
-
-  const res = await fetch(`${_baseUrl}/api/files/upload`, {
-    method: "POST",
-    headers,
-    credentials: "include",
-    body: form,
-  });
-  if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as {
-      error?: { code: string; message: string };
-    };
-    throw new Error(err.error?.message || `Upload failed: HTTP ${res.status}`);
-  }
-  return (await res.json()) as UploadedFile;
+  return pylonFetch<UploadedFile>(
+    {
+      baseUrl: _baseUrl,
+      getToken: () => options.token ?? currentAuthToken() ?? undefined,
+    },
+    "/api/files/upload",
+    { method: "POST", body: form },
+  );
 }

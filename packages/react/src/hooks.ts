@@ -1,6 +1,6 @@
 "use client";
 
-import { SyncEngine, generateId, type Row } from "@pylonsync/sync";
+import { SyncEngine, generateId, pylonFetch, type Row } from "@pylonsync/sync";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { callFn, getBaseUrl, getReactStorage, storageKey } from "./index";
 
@@ -905,20 +905,17 @@ export function useAggregate<Row = Record<string, unknown>>(
     setLoading(true);
     setError(null);
     try {
-      const baseUrl = getBaseUrl();
-      const token = getReactStorage().get(storageKey("token"));
-      const res = await fetch(`${baseUrl}/api/aggregate/${entity}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      const json = await pylonFetch<{ rows?: Row[] }>(
+        {
+          baseUrl: getBaseUrl(),
+          getToken: () =>
+            (getReactStorage().get(storageKey("token")) ?? undefined) as
+              | string
+              | undefined,
         },
-        body: specKey,
-      });
-      const json = (await res.json()) as { rows?: Row[]; error?: { message: string } };
-      if (!res.ok) {
-        throw new Error(json.error?.message || `HTTP ${res.status}`);
-      }
+        `/api/aggregate/${entity}`,
+        { method: "POST", body: specKey },
+      );
       setData(json.rows ?? []);
     } catch (e) {
       setError(e instanceof Error ? e : new Error(String(e)));
@@ -1051,36 +1048,34 @@ export function useSearch<T = Row>(
     setLoading(true);
     setError(null);
     try {
-      const baseUrl = getBaseUrl();
-      const token = getReactStorage().get(storageKey("token"));
-      const body = JSON.stringify({
-        query: spec.query ?? "",
-        filters: spec.filters ?? {},
-        facets: spec.facets ?? [],
-        sort: spec.sort,
-        page: spec.page ?? 0,
-        page_size: spec.pageSize ?? 20,
-      });
-      const res = await fetch(`${baseUrl}/api/search/${entity}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body,
-        signal: controller.signal,
-      });
-      const json = (await res.json()) as {
+      const json = await pylonFetch<{
         hits?: T[];
         facetCounts?: Record<string, Record<string, number>>;
         total?: number;
         tookMs?: number;
-        error?: { message: string };
-      };
+      }>(
+        {
+          baseUrl: getBaseUrl(),
+          getToken: () =>
+            (getReactStorage().get(storageKey("token")) ?? undefined) as
+              | string
+              | undefined,
+        },
+        `/api/search/${entity}`,
+        {
+          method: "POST",
+          json: {
+            query: spec.query ?? "",
+            filters: spec.filters ?? {},
+            facets: spec.facets ?? [],
+            sort: spec.sort,
+            page: spec.page ?? 0,
+            page_size: spec.pageSize ?? 20,
+          },
+          signal: controller.signal,
+        },
+      );
       if (myId !== requestIdRef.current) return; // stale — newer in flight
-      if (!res.ok) {
-        throw new Error(json.error?.message ?? `HTTP ${res.status}`);
-      }
       setHits(json.hits ?? []);
       setFacetCounts(json.facetCounts ?? {});
       setTotal(json.total ?? 0);

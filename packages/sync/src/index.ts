@@ -8,7 +8,44 @@
 // projection + convergence model.
 // ---------------------------------------------------------------------------
 
+import {
+  pylonFetch,
+  PylonHttpError,
+  type TransportConfig,
+} from "./transport";
+import { LocalStore } from "./local-store";
+import { MutationQueue } from "./mutation-queue";
+import { generateClientId, generateId } from "./ids";
 export { IndexedDBPersistence, persistChange } from "./persistence";
+export {
+  buildRequest,
+  pylonFetch,
+  pylonFetchRaw,
+  PylonHttpError,
+  resolveBaseUrl,
+} from "./transport";
+export type { PylonRequestInit, TransportConfig } from "./transport";
+export { LocalStore } from "./local-store";
+export {
+  MutationQueue,
+  type MutationQueuePersistence,
+  type PendingMutation,
+} from "./mutation-queue";
+export { generateId } from "./ids";
+export type {
+  ChangeEvent,
+  ClientChange,
+  PullResponse,
+  PushOpResult,
+  PushResponse,
+  ReactiveMessage,
+  ReactiveSpec,
+  ResolvedSession,
+  Row,
+  SyncConnectionStatus,
+  SyncCursor,
+  TransportType,
+} from "./types";
 export {
   defaultStorage,
   createWriteThroughStorage,
@@ -17,633 +54,28 @@ export {
 
 import { defaultStorage } from "./storage";
 
-export interface ChangeEvent {
-  seq: number;
-  entity: string;
-  row_id: string;
-  kind: "insert" | "update" | "delete";
-  data?: Record<string, unknown>;
-  timestamp: string;
-}
+// Type-only imports for the SyncEngine implementation that follows.
+// Public exports of these types live at the top of this file (re-
+// exported from `./types`).
+import type {
+  ChangeEvent,
+  ClientChange,
+  PullResponse,
+  PushOpResult,
+  PushResponse,
+  ReactiveMessage,
+  ReactiveSpec,
+  ResolvedSession,
+  Row,
+  SyncConnectionStatus,
+  SyncCursor,
+  TransportType,
+} from "./types";
 
-export interface SyncCursor {
-  last_seq: number;
-}
-
-export interface PullResponse {
-  changes: ChangeEvent[];
-  cursor: SyncCursor;
-  has_more: boolean;
-}
-
-/**
- * Server-resolved auth/session state. Shape mirrors what `/api/auth/me`
- * returns (which is `AuthContext` from the Rust side, with camelCase
- * normalization on the way out).
- *
- * `userId=null` means anonymous. `tenantId=null` means the user hasn't
- * selected an org yet (or the backend is single-tenant).
- */
-export interface ResolvedSession {
-  userId: string | null;
-  tenantId: string | null;
-  isAdmin: boolean;
-  roles: string[];
-}
-
-/**
- * Per-op result entry for `/api/sync/push`. Returned in the `results`
- * array so the client can map each mutation back to its op_id and
- * know exactly which applied / deduped / failed. Server emits these
- * in arrival order (one per input change). Codex P1: the previous
- * `{applied, deduped, errors}` count-based shape lost per-op
- * mapping — clients had to guess by ordering and got it wrong on
- * partial failures, stranding optimistic ghosts.
- */
-/**
- * Per-op result on /api/sync/push. Formal shape:
- *
- *   { op_id, row_id, entity, kind, status, seq?, error? }
- *
- * Status semantics:
- *   - `applied`   — first-time write committed at `seq`.
- *   - `replayed`  — same op_id arrived again after a confirmed apply;
- *                   `seq` is the cached value of the original write so
- *                   the client can adopt it on its optimistic ghost
- *                   without waiting for the WS rebroadcast.
- *   - `pending`   — a concurrent push carrying this op_id is still
- *                   in flight on the server. No `seq` yet; the
- *                   client should retry after a short backoff.
- *   - `error`     — the write was attempted and rejected; `error`
- *                   carries the server's code + message.
- *
- * Legacy `deduped` is treated as `replayed` for compatibility — older
- * servers (≤ 0.3.190) returned `deduped` for both InFlight and
- * Replayed cases. Treat it as replayed (assume the op landed) since
- * the InFlight case is rare and clients in that path will reconcile
- * on the next pull regardless.
- */
-export interface PushOpResult {
-  /** op_id from the request, if the client supplied one. */
-  op_id?: string | null;
-  /** Entity the op targeted. Echoed from the request. */
-  entity?: string;
-  /** Row id the op landed under. For Insert this is the server-minted
-   *  id; for Update/Delete it's the caller-supplied id. */
-  row_id?: string;
-  /** Echo of the request kind so clients can dispatch by it. */
-  kind?: "insert" | "update" | "delete";
-  status: "applied" | "replayed" | "pending" | "error" | "deduped";
-  /** Assigned seq when `status === "applied"` or `"replayed"`. */
-  seq?: number;
-  /** Structured error from the server. Falls back to a string form
-   *  when the server didn't ship the structured envelope (older
-   *  versions). */
-  error?: { code: string; message: string } | string;
-}
-
-export interface PushResponse {
-  applied: number;
-  deduped: number;
-  errors: string[];
-  /** Per-op results in arrival order. Prefer this over the count
-   *  fields for status mapping. */
-  results?: PushOpResult[];
-  cursor: SyncCursor;
-}
-
-export interface ClientChange {
-  entity: string;
-  row_id: string;
-  kind: "insert" | "update" | "delete";
-  data?: Record<string, unknown>;
-  /**
-   * Client-minted idempotency key. The server tracks recently-seen op_ids
-   * and returns a no-op success for replays. Supply this on every retry of
-   * the same logical mutation — the `MutationQueue` does so automatically.
-   */
-  op_id?: string;
-}
-
-/**
- * Reactive subscription spec — what the server needs to replay a
- * subscription if the client reconnects. Cached client-side so the
- * `ws.onopen` reconnect sweep can re-register every active sub
- * without the React hooks having to know about reconnect lifecycle.
- */
-export interface ReactiveSpec {
-  fn_name: string;
-  args: unknown;
-}
-
-/**
- * Push message routed to a reactive subscription handler. `result`
- * fires on initial run + every time the server's re-run produces a
- * value whose hash differs from the last push. `error` fires when
- * the server can't execute the handler (function not registered,
- * reactive runtime unavailable, runtime error in user code).
- */
-export type ReactiveMessage =
-  | { kind: "result"; result: unknown }
-  | { kind: "error"; code: string; message: string };
-
-// ---------------------------------------------------------------------------
-// Local store — in-memory replica of server state
-// ---------------------------------------------------------------------------
-
-export type Row = Record<string, unknown>;
-
-export class LocalStore {
-  private tables: Map<string, Map<string, Row>> = new Map();
-  /**
-   * Tombstones: `(entity, row_id) -> deletedAt seq`. A row whose id is in
-   * here has been deleted; any insert/update event older than the tombstone
-   * is ignored so an out-of-order replay cannot resurrect it.
-   *
-   * Without tombstones, a delete followed by a reconnect-driven replay of
-   * the original insert would re-materialize the row — "last write wins"
-   * was decided by arrival order instead of event sequence.
-   *
-   * The tombstone seq comes from the server's `ChangeEvent.seq`. Client-
-   * triggered optimistic deletes use `Number.MAX_SAFE_INTEGER` so they
-   * dominate anything a concurrent pull could replay.
-   */
-  private tombstones: Map<string, Map<string, number>> = new Map();
-  /**
-   * Pending optimistic deletes — `(entity, row_id)` pairs the local
-   * client has dropped but the server hasn't yet confirmed. Stored
-   * separately from `tombstones` because the optimistic "block any
-   * incoming insert/update for this row" guard runs at infinite
-   * seq, but the real server delete seq (typically 4–6 digits)
-   * would never max-merge past `Number.MAX_SAFE_INTEGER`. The old
-   * design left MAX_SAFE_INTEGER permanently in `tombstones` for
-   * any optimistically-deleted id, so a future server-issued insert
-   * with seq=N could never pass the `seq < tombstoneSeq` check —
-   * the row id was blocked for the lifetime of the replica.
-   */
-  private optimisticTombstones: Map<string, Set<string>> = new Map();
-  private listeners: Set<() => void> = new Set();
-
-  /** Get all rows for an entity. */
-  list(entity: string): Row[] {
-    const table = this.tables.get(entity);
-    if (!table) return [];
-    return Array.from(table.values());
-  }
-
-  /** Get a row by ID. */
-  get(entity: string, id: string): Row | null {
-    return this.tables.get(entity)?.get(id) ?? null;
-  }
-
-  /** Snapshot of every entity name with at least one local row. Used by
-   *  `SyncEngine.reconcile` to know which tables to diff against the
-   *  server's current truth. Returning a fresh array lets callers iterate
-   *  without holding a reference into the live map. */
-  entityNames(): string[] {
-    const names: string[] = [];
-    for (const [name, table] of this.tables) {
-      if (table.size > 0) names.push(name);
-    }
-    return names;
-  }
-
-  /**
-   * Remove a row recorded as deleted by the server-truth reconciler.
-   * Records a tombstone at `tombstoneSeq` so a stale insert/update
-   * replayed afterwards (e.g. from a slow WS frame) doesn't resurrect
-   * it. Callers pass the current sync cursor as `tombstoneSeq` — any
-   * future change events will have higher seqs and pass the tombstone
-   * check; older replays will be filtered.
-   *
-   * Differs from `optimisticDelete` which uses `MAX_SAFE_INTEGER` (the
-   * caller is asserting it knows the future). Reconciliation only knows
-   * what the server currently shows; a row re-created server-side later
-   * MUST be allowed back in.
-   */
-  reconcileRemove(entity: string, id: string, tombstoneSeq: number): boolean {
-    const table = this.tables.get(entity);
-    if (!table || !table.has(id)) return false;
-    table.delete(id);
-    this.recordTombstone(entity, id, tombstoneSeq);
-    return true;
-  }
-
-  /** Check if `(entity, id)` has a tombstone. */
-  private isTombstoned(entity: string, id: string, at_seq?: number): boolean {
-    // Pending optimistic delete — block everything until the server's
-    // real delete arrives and supersedes us.
-    if (this.optimisticTombstones.get(entity)?.has(id)) return true;
-    const tombSeq = this.tombstones.get(entity)?.get(id);
-    if (tombSeq === undefined) return false;
-    // If the caller didn't tell us when their change happened, treat as
-    // "this change is older than the tombstone". Safer default.
-    if (at_seq === undefined) return true;
-    return at_seq < tombSeq;
-  }
-
-  private recordTombstone(entity: string, id: string, seq: number): void {
-    // A real (server-issued) tombstone supersedes any pending optimistic
-    // entry for this id. Without this drop, the optimistic
-    // MAX_SAFE_INTEGER entry would persist forever and block future
-    // re-creations of the same id (the case codex flagged P1).
-    this.optimisticTombstones.get(entity)?.delete(id);
-    if (!this.tombstones.has(entity)) {
-      this.tombstones.set(entity, new Map());
-    }
-    const existing = this.tombstones.get(entity)!.get(id);
-    if (existing === undefined || seq > existing) {
-      this.tombstones.get(entity)!.set(id, seq);
-    }
-  }
-
-  /** Apply a change event to the local store. */
-  applyChange(change: ChangeEvent): void {
-    if (!this.tables.has(change.entity)) {
-      this.tables.set(change.entity, new Map());
-    }
-    const table = this.tables.get(change.entity)!;
-
-    // Drop insert/update events that arrive AFTER a delete for the same row.
-    // The tombstone map records the seq of the delete; anything strictly
-    // older than that seq is a stale resurrect and must be ignored.
-    if (
-      (change.kind === "insert" || change.kind === "update") &&
-      this.isTombstoned(change.entity, change.row_id, change.seq)
-    ) {
-      return;
-    }
-
-    switch (change.kind) {
-      case "insert":
-        if (change.data) {
-          // Spread data FIRST, then force id = change.row_id. Previously
-          // id came first and was overridden by any id field in data,
-          // which let a crafted/buggy server event corrupt the replica's
-          // primary key on reload.
-          table.set(change.row_id, {
-            ...change.data,
-            id: change.row_id,
-          });
-        }
-        break;
-      case "update":
-        if (change.data) {
-          const existing = table.get(change.row_id) ?? { id: change.row_id };
-          table.set(change.row_id, {
-            ...existing,
-            ...change.data,
-            id: change.row_id, // authoritative — ignore any id in data
-          });
-        }
-        break;
-      case "delete":
-        table.delete(change.row_id);
-        this.recordTombstone(change.entity, change.row_id, change.seq);
-        break;
-    }
-  }
-
-  /** Apply multiple changes synchronously. Persistence runs fire-and-forget.
-   *  Prefer [`applyChangesAsync`] when you plan to advance a cursor after —
-   *  otherwise a crash can save the cursor before rows hit disk, causing
-   *  permanent missed changes on restart. */
-  applyChanges(changes: ChangeEvent[]): void {
-    for (const change of changes) {
-      this.applyChange(change);
-    }
-    this.notify();
-
-    if (this._persistFn) {
-      for (const change of changes) {
-        // Persist from the post-merge row in memory so updates don't
-        // overwrite the on-disk mirror with just the patched columns.
-        // `applyChange` already merged update.data into the existing row
-        // (see case "update" above); the raw `change.data` only contains
-        // the patch and would drop every other column on save.
-        const merged = this.hydrateFromMemory(change);
-        void this._persistFn(merged);
-      }
-    }
-  }
-
-  /**
-   * Apply + persist, awaiting disk writes before returning. Callers that are
-   * about to advance a cursor based on `changes` MUST use this path —
-   * otherwise cursor durability is broken: a crash between the memory apply
-   * and the eventual disk write can persist a cursor that's ahead of the
-   * replica, skipping those rows forever on restart.
-   */
-  async applyChangesAsync(changes: ChangeEvent[]): Promise<void> {
-    for (const change of changes) {
-      this.applyChange(change);
-    }
-    this.notify();
-    if (this._persistFn) {
-      // Persist sequentially in arrival order — `Promise.all` would
-      // fire every IndexedDB write concurrently and the IDB scheduler
-      // can resolve them out of order. An `update → delete` pair on
-      // the same row would race the delete behind the update on disk,
-      // leaving a stale row in the persisted replica while the cursor
-      // advanced past the delete. Sequencing here matches the in-memory
-      // apply order, which itself is sequenced by the engine's
-      // `applyQueue`.
-      for (const change of changes) {
-        const result = this._persistFn(this.hydrateFromMemory(change));
-        if (result instanceof Promise) {
-          await result;
-        }
-      }
-    }
-  }
-
-  /**
-   * Reshape a change event so its `data` field matches the row as it now
-   * exists in memory after `applyChange` merged the patch. Persistence
-   * callers (IndexedDB) save the full row, which only works if they
-   * receive the full row. Deletes pass through untouched.
-   */
-  private hydrateFromMemory(change: ChangeEvent): ChangeEvent {
-    if (change.kind === "delete") return change;
-    const merged = this.tables.get(change.entity)?.get(change.row_id);
-    if (!merged) return change;
-    return { ...change, data: merged };
-  }
-
-  /** Set a persistence callback for auto-saving changes. The return type is
-   *  Promise<void> so callers can await. Void-returning callbacks are still
-   *  accepted for backwards compatibility (just not awaitable). */
-  _persistFn: ((change: ChangeEvent) => void | Promise<void>) | null = null;
-
-  /** Subscribe to store changes. Returns unsubscribe function. */
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  notify(): void {
-    for (const listener of this.listeners) {
-      listener();
-    }
-  }
-
-  /** Apply an optimistic insert. Returns a temporary ID. */
-  optimisticInsert(entity: string, data: Row): string {
-    const tempId = `_pending_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    if (!this.tables.has(entity)) {
-      this.tables.set(entity, new Map());
-    }
-    this.tables.get(entity)!.set(tempId, { id: tempId, ...data });
-    this.notify();
-    return tempId;
-  }
-
-  /**
-   * Apply an optimistic insert with a caller-provided id.
-   *
-   * Used by `useMutation({ optimistic })`: the React hook generates a
-   * Pylon-shaped id (40-char hex via `generateId()`), threads it
-   * through the mutation args as `_optimisticId`, and the server
-   * function honors it on `ctx.db.insert("Entity", { id, ... })`.
-   * Because the optimistic ghost and the canonical row share the same
-   * `row_id`, the WS broadcast that follows the mutation lands as a
-   * field-level merge on top of the optimistic — no delete-then-replace
-   * flash, no temp-row swap.
-   *
-   * Different from `optimisticInsert` (above) which mints a `_pending_`
-   * id the server can't possibly know about. Use that for fire-and-
-   * forget UI affordances, and this one whenever the canonical insert
-   * needs to map back to the same row.
-   */
-  optimisticInsertWithId(entity: string, id: string, data: Row): void {
-    if (!this.tables.has(entity)) {
-      this.tables.set(entity, new Map());
-    }
-    this.tables.get(entity)!.set(id, { ...data, id });
-    this.notify();
-  }
-
-  /**
-   * Roll back an optimistic insert without leaving a tombstone.
-   *
-   * Counterpart to `optimisticInsertWithId`. When a mutation rejects,
-   * we want the ghost row gone but we do NOT want a tombstone — a
-   * future legitimate insert with the same id (e.g. user retries the
-   * mutation, or a workflow eventually creates the row) must not be
-   * blocked. `optimisticDelete` records a MAX_SAFE_INTEGER tombstone
-   * which is the wrong semantic here; this is just a plain remove.
-   */
-  rollbackOptimisticInsert(entity: string, id: string): void {
-    const removed = this.tables.get(entity)?.delete(id);
-    if (removed) this.notify();
-  }
-
-  /** Apply an optimistic update. */
-  optimisticUpdate(entity: string, id: string, data: Partial<Row>): void {
-    const table = this.tables.get(entity);
-    if (!table) return;
-    const existing = table.get(id);
-    if (existing) {
-      table.set(id, { ...existing, ...data });
-      this.notify();
-    }
-  }
-
-  /** Apply an optimistic delete. */
-  optimisticDelete(entity: string, id: string): void {
-    this.tables.get(entity)?.delete(id);
-    // Optimistic delete: block any incoming insert/update for this id
-    // until the server's authoritative delete arrives. Tracked in
-    // `optimisticTombstones` rather than `tombstones` so the real
-    // server seq can supersede it cleanly — the previous design wrote
-    // MAX_SAFE_INTEGER into `tombstones` and `recordTombstone`'s
-    // max-merge would never replace it with the smaller real seq,
-    // leaving the id permanently quarantined.
-    if (!this.optimisticTombstones.has(entity)) {
-      this.optimisticTombstones.set(entity, new Set());
-    }
-    this.optimisticTombstones.get(entity)!.add(id);
-    this.notify();
-  }
-
-  /**
-   * Drop every table + tombstone in-place, then notify. Used by the sync
-   * engine's `resetReplica()` on identity flip (token or tenant changed —
-   * the old replica reflects a different visible set). Kept on
-   * `LocalStore` so the `tables`/`tombstones` maps stay private.
-   */
-  clearAll(): void {
-    this.tables.clear();
-    this.tombstones.clear();
-    this.optimisticTombstones.clear();
-    this.notify();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Pending mutation queue — offline-safe write queue
-// ---------------------------------------------------------------------------
-
-export interface PendingMutation {
-  id: string;
-  change: ClientChange;
-  status: "pending" | "applied" | "failed";
-  error?: string;
-}
-
-/**
- * Optional persistence backend for the mutation queue. The default
- * IndexedDB persistence layer provides `savePending`/`loadPending`/etc.
- * Callers can supply a custom backend for tests or alternative storage.
- */
-export interface MutationQueuePersistence {
-  saveAll(mutations: PendingMutation[]): Promise<void>;
-  loadAll(): Promise<PendingMutation[]>;
-}
-
-/**
- * Offline-safe write queue.
- *
- * Before: the queue was memory-only. A tab crash or refresh silently lost
- * every pending write. Now: if a `persistence` backend is provided the queue
- * writes-through on every mutation, and `hydrate()` restores pending/failed
- * mutations on startup. Applied mutations are pruned during `clear()`.
- *
- * The `id` scheme is stable (timestamp + random suffix) and is also used
- * as the server-side `op_id` for idempotent replay. A retried push carrying
- * the same id will short-circuit on the server instead of re-applying.
- */
-export class MutationQueue {
-  private queue: PendingMutation[] = [];
-  private persistence?: MutationQueuePersistence;
-
-  constructor(persistence?: MutationQueuePersistence) {
-    this.persistence = persistence;
-  }
-
-  /**
-   * Attach a persistence backend after construction. The SyncEngine
-   * uses this to swap in IndexedDB-backed persistence once the DB
-   * has opened (after the constructor runs). Public so it doesn't
-   * need a `// @ts-expect-error` to reach in from the same package.
-   */
-  attachPersistence(persistence: MutationQueuePersistence): void {
-    this.persistence = persistence;
-  }
-
-  /** Load persisted queue state. Call once at startup. */
-  async hydrate(): Promise<void> {
-    if (!this.persistence) return;
-    try {
-      const loaded = await this.persistence.loadAll();
-      // Merge in-memory with on-disk. An `add()` that ran while hydrate
-      // was awaiting `loadAll()` will already have flushed a snapshot
-      // that didn't include the loaded rows — re-flush after merge so
-      // disk matches memory again. Without this, a crash between the
-      // interleaved add-flush and the next mutation would leave the
-      // on-disk snapshot missing the loaded mutations.
-      const existingIds = new Set(this.queue.map((m) => m.id));
-      let mergedAny = false;
-      for (const m of loaded) {
-        if (!existingIds.has(m.id)) {
-          this.queue.push(m);
-          mergedAny = true;
-        }
-      }
-      if (mergedAny) this.flush();
-    } catch (err) {
-      // Broken storage shouldn't prevent the app from running — warn and
-      // degrade to memory-only mode.
-      console.warn("[sync] mutation-queue hydrate failed:", err);
-    }
-  }
-
-  /** Add a pending mutation. Returns the op_id used for server idempotency. */
-  add(change: ClientChange): string {
-    const id = `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    // Attach op_id on the outgoing ClientChange itself so the server can dedupe.
-    const changeWithOp: ClientChange = { ...change, op_id: id };
-    this.queue.push({ id, change: changeWithOp, status: "pending" });
-    this.flush();
-    return id;
-  }
-
-  pending(): PendingMutation[] {
-    return this.queue.filter((m) => m.status === "pending");
-  }
-
-  /**
-   * Set of `${entity}/${row_id}` keys for every mutation currently in
-   * Pending or Failed state. Used by reconcile() to skip rows whose
-   * canonical state on the server hasn't caught up with the local
-   * optimistic ghost yet — otherwise reconcile would tombstone the
-   * row (it's not yet on the server, so the snapshot misses it) and
-   * the still-pending push would later re-apply against the
-   * tombstone, fighting the local replica. Codex P1.
-   *
-   * Failed mutations are also included: a user-visible failure is
-   * recoverable (retry via the UI), and reconcile sweeping the row
-   * would discard the local edit the user is still trying to push.
-   */
-  pendingRowKeys(): Set<string> {
-    const out = new Set<string>();
-    for (const m of this.queue) {
-      if (m.status === "pending" || m.status === "failed") {
-        out.add(`${m.change.entity}/${m.change.row_id}`);
-      }
-    }
-    return out;
-  }
-
-  markApplied(id: string): void {
-    const m = this.queue.find((m) => m.id === id);
-    if (m) m.status = "applied";
-    this.flush();
-  }
-
-  markFailed(id: string, error: string): void {
-    const m = this.queue.find((m) => m.id === id);
-    if (m) {
-      m.status = "failed";
-      m.error = error;
-    }
-    this.flush();
-  }
-
-  /**
-   * Prune applied mutations. Failed mutations are KEPT so the UI can surface
-   * them to the user and so retries are possible. Previously this dropped
-   * failed mutations too, silently discarding server rejections.
-   */
-  clear(): void {
-    this.queue = this.queue.filter(
-      (m) => m.status === "pending" || m.status === "failed",
-    );
-    this.flush();
-  }
-
-  /** Remove a specific mutation by id. Used by the UI after user ack of failures. */
-  remove(id: string): void {
-    this.queue = this.queue.filter((m) => m.id !== id);
-    this.flush();
-  }
-
-  /** Fire-and-forget persistence write. Errors are logged but not thrown. */
-  private flush(): void {
-    if (!this.persistence) return;
-    // Snapshot the queue before the async write so we don't race a later mutation.
-    const snapshot = this.queue.slice();
-    this.persistence.saveAll(snapshot).catch((err) => {
-      console.warn("[sync] mutation-queue persist failed:", err);
-    });
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Sync engine — coordinates pull, push, local store, mutation queue
 // ---------------------------------------------------------------------------
-
-export type TransportType = "websocket" | "sse" | "poll";
 
 export interface SyncEngineConfig {
   baseUrl: string;
@@ -719,66 +151,6 @@ export interface SyncEngineConfig {
  * the mutation (e.g. to reference the row from another optimistic
  * insert in the same gesture).
  */
-let idCounter = 0;
-export function generateId(): string {
-  // BigInt to dodge the 2^53 ceiling — `Date.now() * 1_000_000` busts
-  // Number.MAX_SAFE_INTEGER for any timestamp past 1973. Hex output is
-  // padded to 32 chars so it lex-sorts at width boundaries (a 39-char
-  // id sorts before a 40-char one even when the suffix is larger,
-  // which would corrupt cursor pagination).
-  const nanos = BigInt(Date.now()) * 1_000_000n;
-  const seq = idCounter++ >>> 0;
-  return nanos.toString(16).padStart(32, "0") + seq.toString(16).padStart(8, "0");
-}
-
-function generateClientId(storage: import("./storage").Storage): string {
-  const key = "pylon:client_id";
-  const existing = storage.get(key);
-  if (existing) return existing;
-  const fresh = newUuidLike();
-  storage.set(key, fresh);
-  return fresh;
-}
-
-function newUuidLike(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID();
-    }
-  } catch {
-    /* fall through */
-  }
-  // Fallback: 20 hex chars from random + time.
-  const rand = Math.random().toString(36).slice(2, 10);
-  const t = Date.now().toString(36);
-  return `cl_${t}_${rand}`;
-}
-
-/**
- * Coarse connection state for UI consumers.
- *
- * - `connecting`   — engine is starting up; first WS handshake hasn't
- *                    completed yet. Apps typically render their initial
- *                    skeleton during this state.
- * - `connected`    — WS is open and we've stayed open long enough to
- *                    consider it stable (5s on the wire). Live queries
- *                    are receiving real-time updates.
- * - `reconnecting` — WS dropped (network blip, Fly autostop) and the
- *                    engine is backing off + retrying. Live queries
- *                    keep returning the last-known data; mutations
- *                    queue locally and replay on the next connect.
- * - `offline`      — engine has been stopped via `engine.stop()` or
- *                    was never started. No retries pending.
- *
- * The `useSyncStatus` hook in `@pylonsync/react` subscribes to this
- * via the existing store notify channel so re-renders happen
- * automatically without a separate event bus.
- */
-export type SyncConnectionStatus =
-  | "connecting"
-  | "connected"
-  | "reconnecting"
-  | "offline";
 
 export class SyncEngine {
   private config: SyncEngineConfig;
@@ -1603,69 +975,36 @@ export class SyncEngine {
   }
 
   /** Shared by `fn()` and any future entity-mutation wrappers. POSTs
-   *  with the engine's auth, parses JSON, observes
-   *  `X-Pylon-Change-Seq`, and triggers a one-shot pull when the
-   *  server says it produced events past our local cursor. The pull
-   *  short-circuits cheaply (`{changes:[]}`) if WS broadcast already
-   *  caught us up — so the worst case is one extra in-flight pull
-   *  per mutation, never a stale render. */
+   *  through the central transport, observes `X-Pylon-Change-Seq`,
+   *  and triggers a one-shot pull when the server says it produced
+   *  events past our local cursor. The pull short-circuits cheaply
+   *  (`{changes:[]}`) if WS broadcast already caught us up — so the
+   *  worst case is one extra in-flight pull per mutation, never a
+   *  stale render. */
   private async requestWithChangeSync<T>(
     method: string,
     path: string,
     body?: unknown,
   ): Promise<T> {
-    const headers: Record<string, string> = {};
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const token =
-      this.config.token ??
-      this.storage.get(this.tokenStorageKey()) ??
-      undefined;
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const res = await fetch(`${this.config.baseUrl}${path}`, {
-      method,
-      headers,
-      credentials: "include",
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    // Read the change-seq header BEFORE consuming the body — some
-    // fetch polyfills consume headers lazily and discard them after
-    // the body stream is drained.
-    const seqHeader = res.headers.get("x-pylon-change-seq");
-    const text = await res.text();
-    let parsed: unknown = null;
-    if (text) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        // Non-JSON body (HTML proxy error, 204, etc.) — fall through;
-        // the !res.ok branch synthesises an Error from the status.
-      }
-    }
-    if (!res.ok) {
-      const err = new Error(
-        (parsed as { error?: { message?: string } } | null)?.error?.message ??
-          `${method} ${path} failed: ${res.status}`,
-      ) as Error & { status?: number; code?: string };
-      err.status = res.status;
-      const code = (parsed as { error?: { code?: string } } | null)?.error
-        ?.code;
-      if (code) err.code = code;
-      throw err;
-    }
-    // Opportunistic pull when the server reports a seq we haven't
-    // applied locally yet. Fire-and-forget — the caller doesn't
-    // block on this; useQuery hooks pick up the new data via the
-    // store notify whenever the pull lands. Skipped when the seq
-    // is already covered (the common case: a write that doesn't
-    // affect the caller's visible set, or one whose WS event
-    // already raced the response).
-    if (seqHeader) {
-      const seq = Number(seqHeader);
-      if (Number.isFinite(seq) && seq > this.cursor.last_seq) {
-        void this.pull();
-      }
-    }
-    return parsed as T;
+    return pylonFetch<T>(
+      {
+        baseUrl: this.config.baseUrl,
+        getToken: () =>
+          this.config.token ??
+          this.storage.get(this.tokenStorageKey()) ??
+          undefined,
+        onChangeSeq: (seq) => {
+          if (seq > this.cursor.last_seq) {
+            void this.pull();
+          }
+        },
+      },
+      path,
+      {
+        method: method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+        json: body,
+      },
+    );
   }
 
   /** Pull changes from the server. */
