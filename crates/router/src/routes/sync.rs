@@ -464,10 +464,7 @@ pub(crate) fn handle(
                                         //                    client and ghost-
                                         //                    apply unprojected
                                         //                    fields).
-                                        let full = match ctx
-                                            .store
-                                            .get_by_id(&change.entity, &id)
-                                        {
+                                        let full = match ctx.store.get_by_id(&change.entity, &id) {
                                             Ok(Some(full)) => Some(full),
                                             Ok(None) => {
                                                 tracing::warn!(

@@ -139,11 +139,7 @@ pub(crate) fn handle(
                 // Fetch the post-merge row so the broadcast can run per-
                 // subscriber policy re-checks against it. None → entity-
                 // level only (graceful degradation for row-level rules).
-                let row_for_authz = ctx
-                    .store
-                    .get_by_id(entity, row_id)
-                    .ok()
-                    .flatten();
+                let row_for_authz = ctx.store.get_by_id(entity, row_id).ok().flatten();
                 ctx.notifier
                     .notify_crdt(entity, row_id, &snapshot, row_for_authz.as_ref());
                 // ALSO emit a JSON change event so non-CRDT subscribers
