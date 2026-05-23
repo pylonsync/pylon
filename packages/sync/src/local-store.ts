@@ -25,12 +25,14 @@ export class LocalStore {
   private tombstones: Map<string, Map<string, number>> = new Map();
   /**
    * Pending optimistic deletes — `(entity, row_id)` pairs the client
-   * has dropped but the server hasn't yet confirmed. Stored separately
-   * from `tombstones` so the real server-issued delete (with its
-   * real, smaller seq) can supersede the optimistic entry. Pre-fix,
-   * an optimistic delete wrote `MAX_SAFE_INTEGER` into `tombstones`
-   * and a future legitimate re-create of the same id was permanently
-   * blocked because no real seq could pass the max-merge guard.
+   * has dropped but the server hasn't yet confirmed. Stored
+   * separately from `tombstones` so the real server-issued delete
+   * (with its real, smaller seq) can supersede the optimistic entry
+   * without being max-merged out.
+   *
+   * Invariant: a future legitimate re-create of the same id must
+   * succeed once the server's authoritative delete arrives. Test:
+   * `optimistic_delete_releases_id_when_server_confirms`.
    */
   private optimisticTombstones: Map<string, Set<string>> = new Map();
   private listeners: Set<() => void> = new Set();

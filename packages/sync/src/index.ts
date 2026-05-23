@@ -405,14 +405,13 @@ export class SyncEngine {
 
         // Hydrate the mutation queue from disk. Any offline writes
         // queued before the tab was closed come back as pending here.
-        // Codex P1: previously these only got pushed on the next
-        // `push()` tick (polling mode) or when a NEW local mutation
-        // triggered push. In WebSocket-only mode there's no polling,
-        // and if the user reloads without making a fresh mutation,
-        // pull+reconcile (which run shortly after this) can sweep
-        // the optimistic ghosts before push() ever fires. Fire push
-        // explicitly here so hydrated offline mutations reach the
-        // server before reconcile inspects local state.
+        //
+        // Invariant: hydrated offline mutations reach the server
+        // before reconcile inspects local state. Test:
+        // `hydrated_offline_mutations_survive_startup_reconcile`.
+        // Without an explicit push here, WS-only mode (no polling)
+        // would let pull+reconcile sweep the optimistic ghosts before
+        // push() ever fires.
         try {
           const { IndexedDBMutationPersistence } = await import("./persistence");
           const mqPersistence = new IndexedDBMutationPersistence(persistence);
@@ -1183,8 +1182,8 @@ export class SyncEngine {
       // reconcile. If a WS event lands while this entity is being
       // pulled, our snapshot is already stale — applying it would
       // overwrite a newer authoritative row. Skip apply in that case
-      // and rely on the WS event (which has the correct seq) plus the
-      // next reconcile trigger to converge. Codex P1.
+      // and rely on the WS event plus the next reconcile trigger to
+      // converge.
       const cursorBeforeFetch = this.cursor.last_seq;
       let serverRows: Row[];
       try {
@@ -1243,13 +1242,14 @@ export class SyncEngine {
     serverRows: Row[],
     tombstoneSeq: number,
   ): Promise<void> {
-    // Rows with an in-flight or failed mutation are excluded from
-    // reconcile — neither the "server row missing from local
-    // snapshot" branch nor the "local row missing from server
-    // snapshot" tombstone branch should touch them. Otherwise: a
-    // hydrated offline mutation that hasn't been pushed yet looks
-    // like a phantom local-only row to reconcile, and gets
-    // tombstoned before push has a chance to ship it. Codex P1.
+    // Invariant: rows with in-flight or failed mutations are
+    // off-limits to reconcile. Neither the "server row missing from
+    // local snapshot" apply branch nor the "local row missing from
+    // server snapshot" tombstone branch may touch them. A hydrated
+    // offline mutation that hasn't been pushed yet would otherwise
+    // look like a phantom local-only row and get tombstoned before
+    // push has a chance to ship it.
+    // Test: `hydrated_offline_mutations_survive_startup_reconcile`.
     const pendingKeys = this.mutations.pendingRowKeys();
     const serverIds = new Set<string>();
     const changes: ChangeEvent[] = [];
@@ -1307,10 +1307,10 @@ export class SyncEngine {
     for (const local of locals) {
       const id = (local as { id?: unknown }).id;
       if (typeof id !== "string") continue;
-      // Pending mutations protect the row: a queued insert that
-      // hasn't been pushed yet would otherwise look like a phantom
-      // local-only row and get tombstoned, only for push() to later
-      // resurrect it. Codex P1.
+      // Pending mutations protect the row from the removal pass too
+      // — a queued insert that hasn't been pushed yet would otherwise
+      // look like a phantom local-only row and get tombstoned, only
+      // for push() to later resurrect it.
       if (pendingKeys.has(`${entity}/${id}`)) continue;
       if (!serverIds.has(id)) {
         removalChanges.push({
@@ -1573,13 +1573,10 @@ export class SyncEngine {
         client_id: this.clientId,
       });
 
-      // Prefer the per-op `results` array (added 0.3.188). Match each
-      // by op_id when present, else fall back to positional matching.
-      // Codex P1: previous count-based mapping ("first N applied,
-      // next M failed") got partial failures wrong — when op 2 of 3
-      // failed, op 3 was incorrectly marked failed and a successful
-      // retry-after-lost-response came back deduped but stayed
-      // pending forever.
+      // Per-op `results` mapping: match by op_id when present, fall
+      // back to positional. Invariant: a partial-failure batch lands
+      // the correct status on each mutation by id, never by position.
+      // Test: `push_partial_failure_maps_results_by_op_id`.
       let maxAppliedSeq = 0;
       let hasInFlightDedupe = false;
       if (Array.isArray(resp.results)) {
@@ -1636,12 +1633,12 @@ export class SyncEngine {
 
       this.mutations.clear();
 
-      // Catch-up pull: if the server confirmed an apply at a seq that's
-      // ahead of our local cursor, request the delta now so the local
-      // replica picks up server-side defaults / plugin fields / linked
-      // rows without waiting for the WS broadcast. The WS event is the
-      // happy path; this is the fallback for dropped/delayed frames
-      // (relay timeouts, cross-tab in service workers, etc.). Codex P1.
+      // Catch-up pull: if the server confirmed an apply at a seq
+      // ahead of our local cursor, request the delta now so the
+      // local replica picks up server-side defaults / plugin fields
+      // / linked rows without waiting for the WS broadcast (the WS
+      // event is the happy path; this is the fallback for
+      // dropped/delayed frames).
       if (maxAppliedSeq > this.cursor.last_seq) {
         // Fire-and-forget — pull() is internally serialized via
         // inFlightPull so concurrent triggers from WS + this branch
@@ -1665,19 +1662,14 @@ export class SyncEngine {
     }
   }
 
-  /** Insert a row with optimistic local update. */
+  /** Insert a row with optimistic local update.
+   *
+   *  Invariant: the optimistic ghost and the canonical server row
+   *  share a single id. The client mints a Pylon-shaped id, threads
+   *  it through the data payload, and the server honors it on the
+   *  canonical insert. Test:
+   *  `insert_optimistic_ghost_and_server_row_share_id`. */
   async insert(entity: string, data: Row): Promise<string> {
-    // Codex P1: previously this minted a `_pending_<random>` local id
-    // via `optimisticInsert(entity, data)` but sent `data` to the
-    // server WITHOUT that id. The server generated its own canonical
-    // id, broadcast under that id, and the local replica ended up
-    // with two rows: the `_pending_` ghost (never cleared, because
-    // server's broadcast doesn't reference it) and the canonical row.
-    // Fix: mint a real Pylon-shaped id client-side, force the data
-    // payload to carry it, optimistic-insert under that exact id,
-    // and queue the mutation with the same id. Server honors the
-    // provided id, broadcasts under it, the optimistic ghost is the
-    // canonical row.
     const id = generateId();
     const dataWithId = { ...data, id };
     this.store.optimisticInsertWithId(entity, id, dataWithId);

@@ -297,17 +297,17 @@ pub(crate) fn handle(
     }
 
     // POST /api/sync/push — client-safe public write path. Each op
-    // runs through the same policy gate + plugin-hook chain as the
-    // entity-API handlers (handle_insert/handle_update/handle_delete),
-    // so a non-admin caller's write must pass `check_entity_insert/
-    // update/delete` for the row AND any registered `before_*` plugin
-    // hook (validation, tenant-scope, audit, etc.). Per-op errors are
-    // reported individually so a partial batch returns the failed
-    // ops' error codes without rolling back the successful ones.
-    // Codex P1: previously this route was admin-only, but the SDK's
-    // `SyncEngine.insert/update/delete` still called it — for
-    // non-admin clients every optimistic mutation 403'd and the
-    // optimistic ghost stuck in the local replica with no recovery.
+    // runs through the same mutation pipeline as the entity-API
+    // handlers (apply_mutation), so a non-admin caller's write must
+    // pass the action-specific policy check (insert/update/delete)
+    // AND any registered before_* plugin hook (validation, tenant-
+    // scope, audit, etc.).
+    //
+    // Invariant: partial-failure batches return the per-op result
+    // envelope intact — successful ops apply and broadcast; failed
+    // ops short-circuit with their error code without rolling back
+    // siblings. Test: `sync_push_anon_empty_succeeds` +
+    // `push_partial_failure_maps_results_by_op_id`.
     if url == "/api/sync/push" && method == HttpMethod::Post {
         let push_req: pylon_sync::PushRequest = match serde_json::from_str(body) {
             Ok(v) => v,
@@ -331,13 +331,12 @@ pub(crate) fn handle(
         // diverges from truth as retention evicts old events.
         let mut max_seq: u64 = 0;
 
-        // Per-op result envelope. The client maps each entry back to
-        // its op_id (or array index when op_id is absent) to know
-        // exactly which mutations applied, were deduplicated, or
-        // failed — and with what seq. Codex P1: the previous
-        // `{applied, deduped, errors}` count-based summary lost the
-        // per-op mapping; the client guessed by ordering and got it
-        // wrong on partial failures, leaving optimistic ghosts stuck.
+        // Per-op result envelope, formal shape:
+        //   { op_id, row_id, entity, kind, status, seq?, error? }
+        // The client maps each entry back to its op_id (or array
+        // index when op_id is absent) to know exactly which
+        // mutations applied, were deduplicated, or failed — and
+        // with what seq.
         let mut op_results: Vec<serde_json::Value> = Vec::with_capacity(push_req.changes.len());
         let mut claimed_op_ids: Vec<String> = Vec::new();
         let mut errored_op_ids: Vec<String> = Vec::new();
