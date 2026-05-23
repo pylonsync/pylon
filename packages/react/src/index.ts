@@ -208,6 +208,15 @@ async function apiRequest(
   const res = await fetch(`${_baseUrl}${path}`, {
     method,
     headers,
+    // Cookie-auth apps store the session in an httpOnly cookie that
+    // `currentAuthToken()` can't reach (the whole point of httpOnly).
+    // `credentials: "include"` lets the browser attach the cookie to
+    // cross-origin / sub-origin requests the same way the core
+    // SyncEngine does. Codex P2: without this the free helpers
+    // (fetchList, insert, update, remove, callFn, etc.) silently
+    // posted as anonymous on cookie-auth apps and every entity
+    // request returned 401/403.
+    credentials: "include",
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -411,6 +420,10 @@ export async function callFn<T = unknown>(
   const res = await fetch(`${_baseUrl}/api/fn/${name}`, {
     method: "POST",
     headers,
+    // Cookie-auth parity with the SyncEngine's request path — see
+    // `apiRequest` above. Codex P2: helper APIs were broken on
+    // cookie-auth apps without this.
+    credentials: "include",
     body: JSON.stringify(args),
   });
   const json = (await res.json()) as unknown;
@@ -445,6 +458,7 @@ export async function* streamFn(
   const res = await fetch(`${_baseUrl}/api/fn/${name}`, {
     method: "POST",
     headers,
+    credentials: "include",
     body: JSON.stringify(args),
   });
   if (!res.ok || !res.body) {
@@ -568,6 +582,7 @@ export async function uploadFile(
   const res = await fetch(`${_baseUrl}/api/files/upload`, {
     method: "POST",
     headers,
+    credentials: "include",
     body,
   });
 
@@ -603,6 +618,7 @@ export async function uploadFileMultipart(
   const res = await fetch(`${_baseUrl}/api/files/upload`, {
     method: "POST",
     headers,
+    credentials: "include",
     body: form,
   });
   if (!res.ok) {

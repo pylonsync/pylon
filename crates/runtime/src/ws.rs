@@ -432,6 +432,47 @@ impl Shard {
     /// until the reader thread notices the EOF and runs unsubscribe_all,
     /// which can take up to one read-timeout (200ms) longer than the
     /// send-side death detection.
+    /// Partition `ids` into (allowed, denied) by re-running
+    /// `check_entity_read` against each client's current `AuthContext`.
+    /// Admins bypass the gate (matches `broadcast_change`). Clients
+    /// whose handles have already been swept (Disconnected from the
+    /// shard map) are silently dropped from both lists — they're
+    /// dead, not denied.
+    ///
+    /// Used by `broadcast_binary_to_authed` (codex P1 — CRDT
+    /// subscriptions leaked frames after permission revocation).
+    fn filter_binary_recipients(
+        &self,
+        ids: &[u64],
+        entity: &str,
+        row: Option<&serde_json::Value>,
+        policy: &PolicyEngine,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let handles: Vec<(u64, ClientSocket)> = {
+            let clients = self.clients.lock().unwrap();
+            ids.iter()
+                .filter_map(|id| clients.get(id).map(|h| (*id, Arc::clone(h))))
+                .collect()
+        };
+        let mut allowed: Vec<u64> = Vec::with_capacity(handles.len());
+        let mut denied: Vec<u64> = Vec::new();
+        for (id, handle) in handles {
+            let auth = match handle.auth.read() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if auth.is_admin {
+                allowed.push(id);
+                continue;
+            }
+            match policy.check_entity_read(entity, &auth, row) {
+                PolicyResult::Allowed => allowed.push(id),
+                PolicyResult::Denied { .. } => denied.push(id),
+            }
+        }
+        (allowed, denied)
+    }
+
     fn send_binary_to(&self, ids: &[u64], msg: &Arc<[u8]>) -> Vec<u64> {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
@@ -833,6 +874,64 @@ impl WsHub {
                 // timeout fires and runs unsubscribe_all on its own,
                 // and a future broadcast might re-attempt the dead id.
                 self.subscriptions.unsubscribe_all(dead_id);
+            }
+        }
+    }
+
+    /// Per-subscriber-authorized variant of `broadcast_binary_to`. Used
+    /// by the CRDT broadcast path so a client whose entity-read
+    /// permission was revoked mid-session stops receiving frames
+    /// immediately — instead of only on disconnect.
+    ///
+    /// For every subscriber, re-evaluates `check_entity_read` against
+    /// the client's current `AuthContext` and the post-write row data
+    /// (when supplied; row-level rules degrade open without it). On
+    /// deny, the subscription is removed from the row's registry so
+    /// the next broadcast skips the auth work entirely. Admins
+    /// bypass (matches the JSON broadcast filter behavior).
+    ///
+    /// Codex P1: pre-fix the auth check ran ONLY at subscribe time and
+    /// the broadcast filtered solely by subscription membership, so a
+    /// user removed from a private channel kept receiving its Loro
+    /// deltas until they closed the tab.
+    pub fn broadcast_binary_to_authed(
+        &self,
+        client_ids: &[u64],
+        bytes: Vec<u8>,
+        entity: &str,
+        row_id: &str,
+        row: Option<&serde_json::Value>,
+        policy: &PolicyEngine,
+    ) {
+        if client_ids.is_empty() {
+            return;
+        }
+        let shared: Arc<[u8]> = Arc::from(bytes.into_boxed_slice());
+        let mut by_shard: Vec<Vec<u64>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for id in client_ids {
+            by_shard[(*id as usize) % NUM_SHARDS].push(*id);
+        }
+        for (idx, ids) in by_shard.iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            // Partition into allowed/denied by per-client policy
+            // check. Hold the per-client auth read-lock only across
+            // the policy call, then drop before the broadcast send.
+            let (allowed, denied) =
+                self.shards[idx].filter_binary_recipients(ids, entity, row, policy);
+            for revoked_id in denied {
+                // Drop the subscription entry so subsequent broadcasts
+                // don't pay this filter cost for the same revoked
+                // client. unsubscribe is keyed by (entity, row_id),
+                // not all-subs — a client may still be a legitimate
+                // subscriber to OTHER rows under different policies.
+                self.subscriptions.unsubscribe(revoked_id, entity, row_id);
+            }
+            if !allowed.is_empty() {
+                for dead_id in self.shards[idx].send_binary_to(&allowed, &shared) {
+                    self.subscriptions.unsubscribe_all(dead_id);
+                }
             }
         }
     }

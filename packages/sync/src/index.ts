@@ -63,8 +63,24 @@ export interface ResolvedSession {
 export interface PushOpResult {
   /** op_id from the request, if the client supplied one. */
   op_id?: string | null;
-  status: "applied" | "deduped" | "error";
-  /** Assigned seq when `status === "applied"`. */
+  /**
+   * Outcome of this op on the server:
+   *   - `applied`  — first-time write committed at `seq`.
+   *   - `deduped`  — previously-applied retry; `seq` carries the
+   *                  cached value of the original write so the client
+   *                  can adopt it on its optimistic ghost.
+   *   - `pending`  — a concurrent push carrying this op_id is still
+   *                  in flight. The server has no `seq` to return
+   *                  yet; the client should retry after a short
+   *                  backoff (the first write may have failed and
+   *                  been forgotten, in which case the retry will
+   *                  Proceed) or wait for the WS rebroadcast from
+   *                  the original writer to confirm.
+   *   - `error`    — the write was attempted and rejected; `error`
+   *                  carries the server's message.
+   */
+  status: "applied" | "deduped" | "pending" | "error";
+  /** Assigned seq when `status === "applied"` or `"deduped"`. */
   seq?: number;
   /** Server's error message when `status === "error"`. */
   error?: string;
@@ -538,6 +554,29 @@ export class MutationQueue {
 
   pending(): PendingMutation[] {
     return this.queue.filter((m) => m.status === "pending");
+  }
+
+  /**
+   * Set of `${entity}/${row_id}` keys for every mutation currently in
+   * Pending or Failed state. Used by reconcile() to skip rows whose
+   * canonical state on the server hasn't caught up with the local
+   * optimistic ghost yet — otherwise reconcile would tombstone the
+   * row (it's not yet on the server, so the snapshot misses it) and
+   * the still-pending push would later re-apply against the
+   * tombstone, fighting the local replica. Codex P1.
+   *
+   * Failed mutations are also included: a user-visible failure is
+   * recoverable (retry via the UI), and reconcile sweeping the row
+   * would discard the local edit the user is still trying to push.
+   */
+  pendingRowKeys(): Set<string> {
+    const out = new Set<string>();
+    for (const m of this.queue) {
+      if (m.status === "pending" || m.status === "failed") {
+        out.add(`${m.change.entity}/${m.change.row_id}`);
+      }
+    }
+    return out;
   }
 
   markApplied(id: string): void {
@@ -1849,12 +1888,24 @@ export class SyncEngine {
     serverRows: Row[],
     tombstoneSeq: number,
   ): Promise<void> {
+    // Rows with an in-flight or failed mutation are excluded from
+    // reconcile — neither the "server row missing from local
+    // snapshot" branch nor the "local row missing from server
+    // snapshot" tombstone branch should touch them. Otherwise: a
+    // hydrated offline mutation that hasn't been pushed yet looks
+    // like a phantom local-only row to reconcile, and gets
+    // tombstoned before push has a chance to ship it. Codex P1.
+    const pendingKeys = this.mutations.pendingRowKeys();
     const serverIds = new Set<string>();
     const changes: ChangeEvent[] = [];
     for (const row of serverRows) {
       const id = (row as { id?: unknown }).id;
       if (typeof id !== "string" || id.length === 0) continue;
       serverIds.add(id);
+      // Skip any row whose canonical state is still being decided
+      // by an in-flight mutation — applying the server snapshot
+      // would clobber the user's pending edit.
+      if (pendingKeys.has(`${entity}/${id}`)) continue;
       const local = this.store.get(entity, id);
       if (!local) {
         changes.push({
@@ -1901,6 +1952,11 @@ export class SyncEngine {
     for (const local of locals) {
       const id = (local as { id?: unknown }).id;
       if (typeof id !== "string") continue;
+      // Pending mutations protect the row: a queued insert that
+      // hasn't been pushed yet would otherwise look like a phantom
+      // local-only row and get tombstoned, only for push() to later
+      // resurrect it. Codex P1.
+      if (pendingKeys.has(`${entity}/${id}`)) continue;
       if (!serverIds.has(id)) {
         removalChanges.push({
           seq: tombstoneSeq,
@@ -2169,6 +2225,8 @@ export class SyncEngine {
       // failed, op 3 was incorrectly marked failed and a successful
       // retry-after-lost-response came back deduped but stayed
       // pending forever.
+      let maxAppliedSeq = 0;
+      let hasInFlightDedupe = false;
       if (Array.isArray(resp.results)) {
         const byOpId = new Map<string, PushOpResult>();
         for (const r of resp.results) {
@@ -2182,6 +2240,17 @@ export class SyncEngine {
           if (!r) continue;
           if (r.status === "applied" || r.status === "deduped") {
             this.mutations.markApplied(m.id);
+            if (typeof r.seq === "number" && r.seq > maxAppliedSeq) {
+              maxAppliedSeq = r.seq;
+            }
+          } else if (r.status === "pending") {
+            // Server tristate: a concurrent push carrying this op_id
+            // is still in flight. Keep the mutation pending locally;
+            // a later push() will retry. Codex P1 — pre-fix the
+            // server returned a flat "deduped" for both Applied AND
+            // Pending and the client mistakenly marked the row
+            // applied while the first writer was still mid-flush.
+            hasInFlightDedupe = true;
           } else if (r.status === "error") {
             this.mutations.markFailed(m.id, r.error ?? "unknown");
           }
@@ -2203,6 +2272,31 @@ export class SyncEngine {
       }
 
       this.mutations.clear();
+
+      // Catch-up pull: if the server confirmed an apply at a seq that's
+      // ahead of our local cursor, request the delta now so the local
+      // replica picks up server-side defaults / plugin fields / linked
+      // rows without waiting for the WS broadcast. The WS event is the
+      // happy path; this is the fallback for dropped/delayed frames
+      // (relay timeouts, cross-tab in service workers, etc.). Codex P1.
+      if (maxAppliedSeq > this.cursor.last_seq) {
+        // Fire-and-forget — pull() is internally serialized via
+        // inFlightPull so concurrent triggers from WS + this branch
+        // coalesce.
+        void this.pull();
+      }
+      // If any op came back with status="pending" (a concurrent push
+      // is still in flight on the server for the same op_id), schedule
+      // a retry shortly. The first writer will either Commit (and
+      // we'll get the canonical seq on next push, or pick it up via
+      // WS rebroadcast) or Fail (the entry is forgotten, our retry
+      // takes the Proceed slot). 250ms is short enough that user
+      // perception doesn't notice, long enough to not hot-loop.
+      if (hasInFlightDedupe) {
+        setTimeout(() => {
+          void this.push();
+        }, 250);
+      }
     } catch {
       // Will retry on next tick. op_id makes retries idempotent on the server.
     }

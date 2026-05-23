@@ -132,11 +132,49 @@ pub struct ChangeLog {
     /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
     /// `append_peer()` interop correctly with the global counter.
     seq_provider: Option<SeqProvider>,
-    /// Recently-seen client op_ids, for push idempotency. Bounded by
-    /// `op_id_capacity`; oldest entries age out when the map grows past it.
-    seen_op_ids: Mutex<std::collections::VecDeque<String>>,
-    seen_op_id_set: Mutex<std::collections::HashSet<String>>,
+    /// Recently-claimed client op_ids and their applied seq, for push
+    /// idempotency. Entries transition `Pending` → `Applied(seq)` on the
+    /// final state of the write; on failure the entry is removed entirely
+    /// so the client's retry can run for real. Bounded by `op_id_capacity`:
+    /// the FIFO queue tracks insertion order so the oldest entries age
+    /// out when the map grows past the limit.
+    op_state: Mutex<std::collections::HashMap<String, OpEntry>>,
+    op_order: Mutex<std::collections::VecDeque<String>>,
     op_id_capacity: usize,
+}
+
+/// State of a tracked op_id. Used by the push handler to disambiguate
+/// "concurrent retry of an in-flight write" (Pending) from "retry after
+/// a confirmed apply" (Applied) — pre-fix the two looked identical
+/// because we stored a flat seen-set with no per-entry result.
+#[derive(Debug, Clone)]
+pub enum OpEntry {
+    /// Claim succeeded; the writer is currently mutating the store. A
+    /// concurrent push carrying the same op_id should NOT re-apply (it
+    /// would race the first writer) but also can't be told a seq yet
+    /// because the first hasn't committed.
+    Pending,
+    /// First write succeeded and was assigned this seq. Subsequent
+    /// pushes carrying the same op_id get the cached seq back so the
+    /// client can advance its cursor correctly instead of treating the
+    /// dedupe as "applied at unknown seq".
+    Applied { seq: u64 },
+}
+
+/// Outcome of `ChangeLog::claim_op_id_v2`. Caller branches:
+/// - `Proceed` → run the write; on success call `complete_op_id`, on
+///    failure call `forget_op_id`.
+/// - `InFlight` → another caller is currently writing this op_id; return
+///    `status="pending"` to the client so it can retry later when the
+///    first writer has committed and the entry has transitioned to
+///    `Applied`.
+/// - `Replayed { seq }` → previously applied. Return success with the
+///    cached seq.
+#[derive(Debug, Clone)]
+pub enum OpClaim {
+    Proceed,
+    InFlight,
+    Replayed { seq: u64 },
 }
 
 impl ChangeLog {
@@ -154,8 +192,8 @@ impl ChangeLog {
             seq: Mutex::new(0),
             capacity,
             seq_provider: None,
-            seen_op_ids: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
-            seen_op_id_set: Mutex::new(std::collections::HashSet::with_capacity(1024)),
+            op_state: Mutex::new(std::collections::HashMap::with_capacity(1024)),
+            op_order: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
             op_id_capacity: 10_000,
         }
     }
@@ -190,69 +228,90 @@ impl ChangeLog {
         self
     }
 
-    /// Returns true if this op_id was already applied. Used by the push
-    /// handler to short-circuit replays. Callers that observe `true` should
-    /// NOT re-apply the change and should return success to the client.
+    /// Returns true if this op_id was already applied to completion.
+    /// Used by tests + observability surfaces. Push handlers should
+    /// prefer `claim_op_id` which atomically transitions state.
     pub fn has_seen_op_id(&self, op_id: &str) -> bool {
-        self.seen_op_id_set.lock().unwrap().contains(op_id)
+        matches!(
+            self.op_state.lock().unwrap().get(op_id),
+            Some(OpEntry::Applied { .. })
+        )
     }
 
-    /// Mark an op_id as processed. Safe to call multiple times. Evicts the
-    /// oldest entry when the cache exceeds `op_id_capacity`.
-    pub fn remember_op_id(&self, op_id: &str) {
-        let mut set = self.seen_op_id_set.lock().unwrap();
-        if set.contains(op_id) {
-            return;
-        }
-        set.insert(op_id.to_string());
-        drop(set);
-        let mut q = self.seen_op_ids.lock().unwrap();
-        q.push_back(op_id.to_string());
-        while q.len() > self.op_id_capacity {
-            if let Some(evicted) = q.pop_front() {
-                self.seen_op_id_set.lock().unwrap().remove(&evicted);
-            }
-        }
-    }
-
-    /// Atomic check-and-claim: returns true if THIS caller is the first
-    /// to claim the op_id (and it's now marked seen), false if another
-    /// caller already claimed it. Use this instead of the
-    /// `has_seen_op_id` + `remember_op_id` pair when two concurrent
-    /// pushes carrying the same op_id arrive — the pair has a race
-    /// where both check `has_seen_op_id`, both see false, and both
-    /// apply the same change. Codex P1.
+    /// Atomic check-and-claim. Replaces the seen-set design that
+    /// conflated "in flight" with "applied" — pre-fix, a concurrent
+    /// retry that arrived while the first writer was mid-flush got
+    /// deduped, and if the first writer then errored and called
+    /// `forget_op_id`, the retry was lost forever. Now state is
+    /// tristate:
+    ///   - absent           → claimer wins, transitions to Pending
+    ///   - present Pending  → another writer is mid-flight; return
+    ///                        `InFlight` so the client knows to retry
+    ///                        once that writer commits (or fails)
+    ///   - present Applied  → previous write committed; return the
+    ///                        cached seq so the client's optimistic
+    ///                        row can adopt the canonical seq instead
+    ///                        of waiting for the WS rebroadcast
     ///
-    /// The caller MUST roll back the claim via `forget_op_id` if the
-    /// downstream write fails, otherwise a real retry by the client
-    /// would be silently swallowed as a duplicate.
-    pub fn claim_op_id(&self, op_id: &str) -> bool {
-        let mut set = self.seen_op_id_set.lock().unwrap();
-        if set.contains(op_id) {
-            return false;
-        }
-        set.insert(op_id.to_string());
-        drop(set);
-        let mut q = self.seen_op_ids.lock().unwrap();
-        q.push_back(op_id.to_string());
-        while q.len() > self.op_id_capacity {
-            if let Some(evicted) = q.pop_front() {
-                self.seen_op_id_set.lock().unwrap().remove(&evicted);
+    /// After `Proceed`, the caller MUST call either `complete_op_id`
+    /// (on success, with the assigned seq) or `forget_op_id` (on
+    /// failure). Forgetting clears the Pending entry so the client's
+    /// retry has a clean state to claim. Codex P1.
+    pub fn claim_op_id(&self, op_id: &str) -> OpClaim {
+        let mut state = self.op_state.lock().unwrap();
+        match state.get(op_id) {
+            Some(OpEntry::Pending) => OpClaim::InFlight,
+            Some(OpEntry::Applied { seq }) => OpClaim::Replayed { seq: *seq },
+            None => {
+                state.insert(op_id.to_string(), OpEntry::Pending);
+                drop(state);
+                let mut q = self.op_order.lock().unwrap();
+                q.push_back(op_id.to_string());
+                while q.len() > self.op_id_capacity {
+                    if let Some(evicted) = q.pop_front() {
+                        self.op_state.lock().unwrap().remove(&evicted);
+                    }
+                }
+                OpClaim::Proceed
             }
         }
-        true
+    }
+
+    /// Mark a previously-claimed op_id as successfully applied at
+    /// `seq`. Subsequent claims for the same op_id return
+    /// `OpClaim::Replayed { seq }` so the client can advance its
+    /// cursor / clear its optimistic ghost with the right seq.
+    pub fn complete_op_id(&self, op_id: &str, seq: u64) {
+        let mut state = self.op_state.lock().unwrap();
+        // Always overwrite to Applied even if not Pending — a stale
+        // pre-fix call site that called `remember_op_id` without first
+        // claiming still ends up in the right terminal state.
+        state.insert(op_id.to_string(), OpEntry::Applied { seq });
+        if !self.op_order.lock().unwrap().iter().any(|s| s == op_id) {
+            // Defensive: keep the FIFO + map in sync if a caller
+            // somehow completed without claiming first.
+            let mut q = self.op_order.lock().unwrap();
+            q.push_back(op_id.to_string());
+            while q.len() > self.op_id_capacity {
+                if let Some(evicted) = q.pop_front() {
+                    state.remove(&evicted);
+                }
+            }
+        }
     }
 
     /// Roll back a `claim_op_id`. Called by push handlers when the
     /// downstream write failed — without this, the client's legitimate
-    /// retry would be deduped away by the still-cached claim.
+    /// retry would be deduped away by the still-cached claim. Only
+    /// removes Pending entries; Applied entries are immutable history.
     pub fn forget_op_id(&self, op_id: &str) {
-        let mut set = self.seen_op_id_set.lock().unwrap();
-        set.remove(op_id);
-        drop(set);
-        let mut q = self.seen_op_ids.lock().unwrap();
-        // Cheap O(n) here; op_id_capacity is small (1024 default) and
-        // rollback is a slow path.
+        let mut state = self.op_state.lock().unwrap();
+        if matches!(state.get(op_id), Some(OpEntry::Applied { .. })) {
+            return;
+        }
+        state.remove(op_id);
+        drop(state);
+        let mut q = self.op_order.lock().unwrap();
         if let Some(pos) = q.iter().position(|s| s == op_id) {
             q.remove(pos);
         }
@@ -676,5 +735,78 @@ mod tests {
         let json = r#"{"changes":[]}"#;
         let parsed: PushRequest = serde_json::from_str(json).unwrap();
         assert!(parsed.client_id.is_none());
+    }
+
+    // ---- op_id state machine ----
+
+    #[test]
+    fn op_id_first_claim_proceeds() {
+        let log = ChangeLog::new();
+        match log.claim_op_id("op-1") {
+            OpClaim::Proceed => {}
+            other => panic!("expected Proceed, got {other:?}"),
+        }
+        // Still Pending until complete.
+        assert!(!log.has_seen_op_id("op-1"));
+    }
+
+    #[test]
+    fn op_id_concurrent_retry_during_pending_returns_inflight() {
+        // Codex P1: pre-fix this returned `false` (deduped + claimed),
+        // and if the first writer then errored, the retry was lost
+        // because the claim was rolled back AFTER the retry had been
+        // told "you're already done". InFlight lets the client try
+        // again later.
+        let log = ChangeLog::new();
+        assert!(matches!(log.claim_op_id("op-1"), OpClaim::Proceed));
+        match log.claim_op_id("op-1") {
+            OpClaim::InFlight => {}
+            other => panic!("expected InFlight while Pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn op_id_replay_after_apply_returns_cached_seq() {
+        // The whole point of the redesign: a retry that arrives AFTER
+        // the first write committed should learn the seq so the
+        // client's optimistic ghost can adopt the canonical seq rather
+        // than waiting for the WS rebroadcast.
+        let log = ChangeLog::new();
+        assert!(matches!(log.claim_op_id("op-1"), OpClaim::Proceed));
+        log.complete_op_id("op-1", 42);
+        match log.claim_op_id("op-1") {
+            OpClaim::Replayed { seq: 42 } => {}
+            other => panic!("expected Replayed{{42}}, got {other:?}"),
+        }
+        assert!(log.has_seen_op_id("op-1"));
+    }
+
+    #[test]
+    fn op_id_forget_clears_pending_for_retry() {
+        // Failure path: the writer errored, forget() runs, the next
+        // claim from the client's retry must succeed (Proceed) — not
+        // be silently swallowed as a stale claim.
+        let log = ChangeLog::new();
+        assert!(matches!(log.claim_op_id("op-1"), OpClaim::Proceed));
+        log.forget_op_id("op-1");
+        match log.claim_op_id("op-1") {
+            OpClaim::Proceed => {}
+            other => panic!("expected Proceed after forget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn op_id_forget_does_not_clear_applied() {
+        // Once an op_id is Applied it's immutable history — a stray
+        // forget call (e.g. error after a successful broadcast) must
+        // not let the client re-apply by retrying.
+        let log = ChangeLog::new();
+        assert!(matches!(log.claim_op_id("op-1"), OpClaim::Proceed));
+        log.complete_op_id("op-1", 7);
+        log.forget_op_id("op-1");
+        match log.claim_op_id("op-1") {
+            OpClaim::Replayed { seq: 7 } => {}
+            other => panic!("Applied must survive forget, got {other:?}"),
+        }
     }
 }

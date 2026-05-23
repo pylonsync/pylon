@@ -32,9 +32,29 @@ pub trait ChangeNotifier: Send + Sync {
     /// the implementation owns wire-format framing — see
     /// `encode_crdt_frame` for the canonical Pylon shape.
     ///
+    /// `row` is the post-write row payload (same value that ships in the
+    /// JSON change event). The notifier uses it to RE-CHECK
+    /// `check_entity_read` per subscriber on every broadcast — so a
+    /// client whose permissions are revoked mid-session stops receiving
+    /// CRDT frames even though their subscription wasn't explicitly torn
+    /// down. Codex P1: pre-fix the auth check ran ONLY at subscribe
+    /// time, leaking row state to revoked users until disconnect.
+    ///
+    /// Pass `None` when the row data isn't on hand — the notifier falls
+    /// back to an entity-level-only policy check (sufficient for the
+    /// common case where access is gated by `exists()` joins against
+    /// membership tables, but row-level rules degrade open without it).
+    ///
     /// Default impl is a no-op so backends without WebSocket support
     /// (Workers, no-op notifier) compile without ceremony.
-    fn notify_crdt(&self, _entity: &str, _row_id: &str, _snapshot: &[u8]) {}
+    fn notify_crdt(
+        &self,
+        _entity: &str,
+        _row_id: &str,
+        _snapshot: &[u8],
+        _row: Option<&serde_json::Value>,
+    ) {
+    }
 
     /// Push a `session-changed` envelope to every connected WS client
     /// whose authenticated user_id matches. Fires when the server
@@ -1917,7 +1937,7 @@ pub fn broadcast_change_with_crdt(
         // on it. We pass the bytes through unchanged; the
         // delta-vs-snapshot decision was made here.
         let _ = fell_back_to_snapshot; // intentionally unused — see note above
-        notifier.notify_crdt(entity, row_id, &payload);
+        notifier.notify_crdt(entity, row_id, &payload, data);
         // Stash the post-write VV so the NEXT write's delta is
         // computed against this point. Skip the update on
         // backends that don't support VV tracking (returns None).
@@ -3089,8 +3109,19 @@ mod auth_gate_tests {
     }
 
     /// Prior vuln: /api/sync/push had no auth check.
+    ///
+    /// Pre-fix (v0.3.155-ish): the push handler required is_admin so
+    /// public clients couldn't push at all. Now: the handler is
+    /// `auth: "public"` (cookie-auth React/Next.js apps push as
+    /// their signed-in user) and gates every individual op through
+    /// the per-entity policy + plugin hooks — same checks the
+    /// /api/entities CRUD path runs. So an anonymous push of an
+    /// empty changes array succeeds (0 ops to gate), and a real
+    /// payload would be denied per-op by the entity's policy.
+    /// Asserting 200+empty here pins the new contract so a future
+    /// regression that reintroduces the admin gate fails loudly.
     #[test]
-    fn sync_push_requires_admin() {
+    fn sync_push_anon_empty_succeeds() {
         let anon = AuthContext::anonymous();
         with_ctx(false, &anon, |ctx| {
             let (status, body, _ct) = route(
@@ -3100,8 +3131,9 @@ mod auth_gate_tests {
                 r#"{"changes":[]}"#,
                 None,
             );
-            assert_eq!(status, 403);
-            assert!(body.contains("FORBIDDEN"));
+            assert_eq!(status, 200);
+            // Per-op envelope present and empty.
+            assert!(body.contains("\"results\":[]"));
         });
     }
 

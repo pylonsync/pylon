@@ -1012,6 +1012,12 @@ pub struct WsSseNotifier {
     /// subscriptions. None when reactive queries aren't wired (tests,
     /// minimal setups).
     pub reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    /// Policy engine used to re-authorize each subscriber on every
+    /// CRDT broadcast. Set via [`Self::with_policy`] at construction;
+    /// None means the notifier degrades to the legacy "trust subscribe-
+    /// time check" behavior. Codex P1: pre-fix, revoked permissions
+    /// kept leaking until the WS connection died.
+    pub policy: Option<Arc<pylon_policy::PolicyEngine>>,
 }
 
 impl WsSseNotifier {
@@ -1027,6 +1033,7 @@ impl WsSseNotifier {
             auth_user,
             cluster_bus: Arc::new(pylon_cluster::NoopBus::new()),
             reactive: None,
+            policy: None,
         }
     }
 
@@ -1044,6 +1051,7 @@ impl WsSseNotifier {
             auth_user,
             cluster_bus,
             reactive: None,
+            policy: None,
         }
     }
 
@@ -1051,6 +1059,14 @@ impl WsSseNotifier {
     /// default; `start_server` wires it once the registry is built.
     pub fn with_reactive(mut self, reactive: Arc<crate::reactive::ReactiveRegistry>) -> Self {
         self.reactive = Some(reactive);
+        self
+    }
+
+    /// Attach the policy engine — call after construction. Required
+    /// for per-broadcast CRDT re-auth (codex P1). When None, the
+    /// notifier degrades to subscribe-time-only auth.
+    pub fn with_policy(mut self, policy: Arc<pylon_policy::PolicyEngine>) -> Self {
+        self.policy = Some(policy);
         self
     }
 }
@@ -1148,7 +1164,13 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     /// header) gets logged and dropped — the row's regular JSON change
     /// event already shipped via `notify`, so clients still see the
     /// write happened, they just don't get the binary CRDT delta.
-    fn notify_crdt(&self, entity: &str, row_id: &str, snapshot: &[u8]) {
+    fn notify_crdt(
+        &self,
+        entity: &str,
+        row_id: &str,
+        snapshot: &[u8],
+        row: Option<&serde_json::Value>,
+    ) {
         // P0 leak guard: never ship raw CRDT snapshots for the User
         // entity. CRDT frames carry the full Loro doc state, which
         // includes every non-id field on the row — `passwordHash`,
@@ -1169,15 +1191,39 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         if subscribers.is_empty() {
             return;
         }
-        match pylon_router::encode_crdt_frame(
+        let frame = match pylon_router::encode_crdt_frame(
             pylon_router::CRDT_FRAME_SNAPSHOT,
             entity,
             row_id,
             snapshot,
         ) {
-            Ok(frame) => self.ws.broadcast_binary_to(&subscribers, frame),
+            Ok(frame) => frame,
             Err(e) => {
                 tracing::warn!("[crdt] dropping binary frame for {entity}/{row_id}: {e}");
+                return;
+            }
+        };
+        match self.policy.as_ref() {
+            Some(policy) => {
+                // Per-subscriber re-auth (codex P1). Revoked clients
+                // are removed from the subscription registry at the
+                // same time so subsequent frames skip the work too —
+                // pre-fix a revoked user kept consuming the CRDT
+                // hot-path filter per write until their socket closed.
+                self.ws.broadcast_binary_to_authed(
+                    &subscribers,
+                    frame,
+                    entity,
+                    row_id,
+                    row,
+                    policy.as_ref(),
+                );
+            }
+            None => {
+                // Degraded path — only hit by tests / minimal harnesses
+                // that don't wire the policy engine. Falls back to the
+                // legacy subscribe-time-only auth.
+                self.ws.broadcast_binary_to(&subscribers, frame);
             }
         }
         // Cross-machine: ship the raw snapshot bytes. The receiving
@@ -1268,6 +1314,7 @@ pub fn install_cluster_bus_subscriber(
     change_log: Arc<pylon_sync::ChangeLog>,
     auth_user: pylon_kernel::ManifestAuthUserConfig,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    policy: Option<Arc<pylon_policy::PolicyEngine>>,
 ) {
     use std::sync::Arc as StdArc;
     let ws_handler = StdArc::clone(&ws);
@@ -1275,6 +1322,7 @@ pub fn install_cluster_bus_subscriber(
     let change_log_handler = StdArc::clone(&change_log);
     let auth_user_handler = auth_user;
     let reactive_handler = reactive;
+    let policy_handler = policy;
     bus.subscribe(StdArc::new(move |envelope: pylon_cluster::Envelope| {
         // Change events: same User projection + fanout as the local
         // notifier. Already projected by the originating machine, but
@@ -1337,7 +1385,24 @@ pub fn install_cluster_bus_subscriber(
                 &crdt.row_id,
                 &crdt.snapshot,
             ) {
-                Ok(frame) => ws_handler.broadcast_binary_to(&subs, frame),
+                Ok(frame) => match policy_handler.as_ref() {
+                    // Per-subscriber re-auth, even cross-machine
+                    // (codex P1). The envelope doesn't carry the
+                    // post-write row payload, so row-level rules
+                    // degrade open here — entity-level rules
+                    // (membership exists() joins, role checks) still
+                    // enforce correctly, which covers the typical
+                    // private-channel revocation case.
+                    Some(p) => ws_handler.broadcast_binary_to_authed(
+                        &subs,
+                        frame,
+                        &crdt.entity,
+                        &crdt.row_id,
+                        None,
+                        p.as_ref(),
+                    ),
+                    None => ws_handler.broadcast_binary_to(&subs, frame),
+                },
                 Err(e) => {
                     tracing::warn!(
                         "[cluster] inbound CRDT frame encode failed for {}/{}: {}",
@@ -4813,7 +4878,14 @@ mod auto_broadcast_tests {
             self.events.lock().unwrap().push(event.clone());
         }
         fn notify_presence(&self, _json: &str) {}
-        fn notify_crdt(&self, _entity: &str, _row_id: &str, _snapshot: &[u8]) {}
+        fn notify_crdt(
+            &self,
+            _entity: &str,
+            _row_id: &str,
+            _snapshot: &[u8],
+            _row: Option<&serde_json::Value>,
+        ) {
+        }
     }
 
     /// In-memory DataStore that simulates server-side stamping — when
@@ -5533,7 +5605,7 @@ mod user_projection_broadcast_tests {
                 *self.captured.lock().unwrap() = Some(ev.clone());
             }
             fn notify_presence(&self, _: &str) {}
-            fn notify_crdt(&self, _: &str, _: &str, _: &[u8]) {}
+            fn notify_crdt(&self, _: &str, _: &str, _: &[u8], _: Option<&serde_json::Value>) {}
         }
 
         let insp = Inspecting {
@@ -5629,7 +5701,7 @@ mod user_projection_broadcast_tests {
         // must complete fast (the entity-name guard short-circuits
         // before the subscription HashMap lookup).
         let fake_snapshot = vec![0u8; 32];
-        notifier.notify_crdt("User", "u1", &fake_snapshot);
+        notifier.notify_crdt("User", "u1", &fake_snapshot, None);
         // If we ever change the User entity name in the manifest,
         // the guard must follow.
         assert_eq!(notifier.auth_user.entity, "User");

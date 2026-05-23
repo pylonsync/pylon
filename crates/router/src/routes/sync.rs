@@ -344,22 +344,55 @@ pub(crate) fn handle(
         let mut claimed_op_ids: Vec<String> = Vec::new();
         let mut errored_op_ids: Vec<String> = Vec::new();
         for change in &push_req.changes {
-            // Atomic check-and-claim: if another concurrent push raced
-            // us to the same op_id, claim_op_id returns false and we
-            // dedupe. The previous (has_seen_op_id → apply → remember)
-            // sequence had a race window where both racers passed the
-            // has-seen check, both applied, and the row got
-            // double-mutated. Codex P1.
+            // Tristate op-id state machine:
+            //   Proceed           → run the write; on failure forget
+            //   InFlight          → a concurrent writer is mid-flight;
+            //                       respond "pending" so the client can
+            //                       retry once the first writer commits
+            //   Replayed{seq}     → the first write already applied;
+            //                       return the cached seq so the
+            //                       client's optimistic row adopts the
+            //                       canonical seq instead of waiting
+            //                       for the WS rebroadcast
+            // The pre-fix design conflated "in-flight" with "applied"
+            // — a retry that arrived during Pending and then failed
+            // got silently swallowed because forget rolled back AFTER
+            // the retry had been told "you're already done". Codex P1.
             if let Some(ref op_id) = change.op_id {
-                if !ctx.change_log.claim_op_id(op_id) {
-                    deduped += 1;
-                    op_results.push(serde_json::json!({
-                        "op_id": op_id,
-                        "status": "deduped",
-                    }));
-                    continue;
+                match ctx.change_log.claim_op_id(op_id) {
+                    pylon_sync::OpClaim::Proceed => {
+                        claimed_op_ids.push(op_id.clone());
+                    }
+                    pylon_sync::OpClaim::InFlight => {
+                        // Treat as deduped on the wire but with an
+                        // explicit "pending" status so a smart client
+                        // can choose to retry — the canonical apply
+                        // hasn't committed yet so we have no seq.
+                        deduped += 1;
+                        op_results.push(serde_json::json!({
+                            "op_id": op_id,
+                            "status": "pending",
+                        }));
+                        continue;
+                    }
+                    pylon_sync::OpClaim::Replayed { seq } => {
+                        // Idempotent replay after confirmed apply.
+                        // Return the cached seq so the client can
+                        // adopt it on its optimistic ghost and clear
+                        // local state without waiting for the WS
+                        // rebroadcast.
+                        deduped += 1;
+                        if seq > max_seq {
+                            max_seq = seq;
+                        }
+                        op_results.push(serde_json::json!({
+                            "op_id": op_id,
+                            "status": "deduped",
+                            "seq": seq,
+                        }));
+                        continue;
+                    }
                 }
-                claimed_op_ids.push(op_id.clone());
             }
             let mut op_errored = false;
             let mut op_error_message: Option<String> = None;
@@ -406,36 +439,77 @@ pub(crate) fn handle(
                                         // Re-read the full row so the broadcast
                                         // carries server-stamped defaults +
                                         // plugin-added fields (tenantId, etc).
-                                        // hook_data alone misses those, and a
-                                        // partial broadcast trips the per-
-                                        // client read-policy filter (codex P1).
-                                        let full = ctx
+                                        //
+                                        // Three outcomes, matching the entity-
+                                        // API + AutoBroadcastStore behavior
+                                        // (codex P2):
+                                        //   Ok(Some(full)) — broadcast it.
+                                        //   Ok(None)       — row was concurrently
+                                        //                    deleted by a trigger
+                                        //                    or sibling write.
+                                        //                    Skip the broadcast
+                                        //                    so we don't
+                                        //                    resurrect a row
+                                        //                    that's already gone.
+                                        //                    The concurrent delete
+                                        //                    will fire its own
+                                        //                    event.
+                                        //   Err(_)         — read-side outage; log
+                                        //                    and skip rather than
+                                        //                    falling back to the
+                                        //                    partial hook_data
+                                        //                    (which would trip
+                                        //                    the policy filter on
+                                        //                    every connected
+                                        //                    client and ghost-
+                                        //                    apply unprojected
+                                        //                    fields).
+                                        let full = match ctx
                                             .store
                                             .get_by_id(&change.entity, &id)
-                                            .ok()
-                                            .flatten()
-                                            .unwrap_or_else(|| hook_data.clone());
+                                        {
+                                            Ok(Some(full)) => Some(full),
+                                            Ok(None) => {
+                                                tracing::warn!(
+                                                    "[sync.push] post-insert re-read returned None for {}/{} — concurrent delete; skipping broadcast",
+                                                    change.entity,
+                                                    id,
+                                                );
+                                                None
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "[sync.push] post-insert re-read failed for {}/{} ({}); skipping broadcast",
+                                                    change.entity,
+                                                    id,
+                                                    e.message,
+                                                );
+                                                None
+                                            }
+                                        };
                                         let seq = ctx.change_log.append(
                                             &change.entity,
                                             &id,
                                             ChangeKind::Insert,
-                                            Some(full.clone()),
+                                            full.clone(),
                                         );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            &change.entity,
-                                            &id,
-                                            ChangeKind::Insert,
-                                            Some(&full),
-                                        );
-                                        ctx.plugin_hooks.after_insert(
-                                            &change.entity,
-                                            &id,
-                                            &full,
-                                            ctx.auth_ctx,
-                                        );
+                                        if let Some(ref payload) = full {
+                                            broadcast_change_with_crdt(
+                                                ctx.notifier,
+                                                ctx.store,
+                                                seq,
+                                                &change.entity,
+                                                &id,
+                                                ChangeKind::Insert,
+                                                Some(payload),
+                                            );
+                                            ctx.plugin_hooks.after_insert(
+                                                &change.entity,
+                                                &id,
+                                                payload,
+                                                ctx.auth_ctx,
+                                            );
+                                        }
                                         if seq > max_seq {
                                             max_seq = seq;
                                         }
@@ -503,35 +577,61 @@ pub(crate) fn handle(
                                     // the failure and clears the optimistic
                                     // ghost.
                                     Ok(true) => {
-                                        // Re-read for the broadcast — partial
-                                        // patch alone trips the policy filter.
-                                        let full = ctx
+                                        // Re-read for the broadcast. Match the
+                                        // entity-API behavior: skip the
+                                        // broadcast on Ok(None) (row deleted
+                                        // between our update and the re-read)
+                                        // or Err (read-side outage). Codex P2
+                                        // — pre-fix we fell back to partial
+                                        // hook_data, which tripped the policy
+                                        // filter and pushed an unprojected
+                                        // row to every connected client.
+                                        let full = match ctx
                                             .store
                                             .get_by_id(&change.entity, &change.row_id)
-                                            .ok()
-                                            .flatten()
-                                            .unwrap_or_else(|| hook_data.clone());
+                                        {
+                                            Ok(Some(full)) => Some(full),
+                                            Ok(None) => {
+                                                tracing::warn!(
+                                                    "[sync.push] post-update re-read returned None for {}/{} — concurrent delete; skipping broadcast",
+                                                    change.entity,
+                                                    change.row_id,
+                                                );
+                                                None
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "[sync.push] post-update re-read failed for {}/{} ({}); skipping broadcast",
+                                                    change.entity,
+                                                    change.row_id,
+                                                    e.message,
+                                                );
+                                                None
+                                            }
+                                        };
                                         let seq = ctx.change_log.append(
                                             &change.entity,
                                             &change.row_id,
                                             ChangeKind::Update,
-                                            Some(full.clone()),
+                                            full.clone(),
                                         );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            &change.entity,
-                                            &change.row_id,
-                                            ChangeKind::Update,
-                                            Some(&full),
-                                        );
-                                        ctx.plugin_hooks.after_update(
-                                            &change.entity,
-                                            &change.row_id,
-                                            &full,
-                                            ctx.auth_ctx,
-                                        );
+                                        if let Some(ref payload) = full {
+                                            broadcast_change_with_crdt(
+                                                ctx.notifier,
+                                                ctx.store,
+                                                seq,
+                                                &change.entity,
+                                                &change.row_id,
+                                                ChangeKind::Update,
+                                                Some(payload),
+                                            );
+                                            ctx.plugin_hooks.after_update(
+                                                &change.entity,
+                                                &change.row_id,
+                                                payload,
+                                                ctx.auth_ctx,
+                                            );
+                                        }
                                         if seq > max_seq {
                                             max_seq = seq;
                                         }
@@ -667,16 +767,22 @@ pub(crate) fn handle(
                 e
             };
             op_results.push(entry);
-            // Roll back the op_id claim on failure so the client's
-            // retry can succeed. Previously failed inserts were
-            // un-deduped via string-matching on the row_id in the
-            // error message — but the insert error path didn't
-            // include the row_id at all, so the claim got silently
-            // kept and the retry was dropped. Codex P1.
+            // Finalize the op-id state. Two transitions matter:
+            //   - failure → `forget_op_id` clears Pending so the
+            //     client's retry isn't deduped against a dead claim.
+            //   - success → `complete_op_id` transitions Pending →
+            //     Applied{seq}. Without this transition, a retry that
+            //     arrives after this push commits would re-claim
+            //     Proceed and re-apply the write — which is the bug
+            //     codex P1 flagged.
             if op_errored {
                 if let Some(ref op_id) = change.op_id {
                     ctx.change_log.forget_op_id(op_id);
                     errored_op_ids.push(op_id.clone());
+                }
+            } else if let Some(seq) = op_applied_seq {
+                if let Some(ref op_id) = change.op_id {
+                    ctx.change_log.complete_op_id(op_id, seq);
                 }
             }
         }

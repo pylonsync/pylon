@@ -642,7 +642,11 @@ fn start_server(
             runtime.manifest().auth.user.clone(),
             Arc::clone(&cluster_bus),
         )
-        .with_reactive(Arc::clone(&reactive_registry)),
+        .with_reactive(Arc::clone(&reactive_registry))
+        // Codex P1: per-CRDT-broadcast re-auth needs the policy engine
+        // on the notifier so a subscriber whose entity-read permission
+        // is revoked mid-session stops receiving frames immediately.
+        .with_policy(Arc::clone(&policy_engine)),
     );
     // Subscriber: inbound peer events → local hubs. Idempotent —
     // calling subscribe registers a handler; Noop never delivers, so
@@ -654,6 +658,7 @@ fn start_server(
         Arc::clone(&change_log),
         runtime.manifest().auth.user.clone(),
         Some(Arc::clone(&reactive_registry)),
+        Some(Arc::clone(&policy_engine)),
     );
     // Single EmailAdapter for the whole runtime: the function runner's
     // ctx.email.send hook + the per-request route handlers below both
@@ -4125,7 +4130,8 @@ fn start_server(
                     rt.manifest().auth.user.clone(),
                     Arc::clone(&cb),
                 )
-                .with_reactive(Arc::clone(&rr));
+                .with_reactive(Arc::clone(&rr))
+                .with_policy(Arc::clone(&pe));
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),
                 };
