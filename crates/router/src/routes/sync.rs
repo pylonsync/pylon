@@ -4,10 +4,8 @@
 //! can't sidestep entity policies via the change feed (regression
 //! coverage in the auth-matrix scaffold).
 
-use crate::{
-    broadcast_change, broadcast_change_with_crdt, gdpr_export, gdpr_purge, json_error_safe,
-    require_admin, RouterContext,
-};
+use crate::mutate::{apply_mutation, MutationCtx, MutationError, MutationOp};
+use crate::{gdpr_export, gdpr_purge, json_error_safe, require_admin, RouterContext};
 use pylon_http::HttpMethod;
 use pylon_sync::{ChangeKind, SyncCursor};
 
@@ -364,13 +362,22 @@ pub(crate) fn handle(
                         claimed_op_ids.push(op_id.clone());
                     }
                     pylon_sync::OpClaim::InFlight => {
-                        // Treat as deduped on the wire but with an
-                        // explicit "pending" status so a smart client
-                        // can choose to retry — the canonical apply
-                        // hasn't committed yet so we have no seq.
+                        // Another writer is mid-flush with this
+                        // op_id. The canonical apply hasn't committed
+                        // so we have no seq to return; the client
+                        // should retry after a short backoff. Per-op
+                        // shape matches the PushOpResult contract:
+                        // {op_id, row_id, entity, kind, status="pending"}.
                         deduped += 1;
                         op_results.push(serde_json::json!({
                             "op_id": op_id,
+                            "entity": change.entity,
+                            "row_id": change.row_id,
+                            "kind": match change.kind {
+                                ChangeKind::Insert => "insert",
+                                ChangeKind::Update => "update",
+                                ChangeKind::Delete => "delete",
+                            },
                             "status": "pending",
                         }));
                         continue;
@@ -378,408 +385,139 @@ pub(crate) fn handle(
                     pylon_sync::OpClaim::Replayed { seq } => {
                         // Idempotent replay after confirmed apply.
                         // Return the cached seq so the client can
-                        // adopt it on its optimistic ghost and clear
-                        // local state without waiting for the WS
-                        // rebroadcast.
+                        // adopt it on its optimistic ghost. Formal
+                        // status "replayed" so clients can distinguish
+                        // first-time-applied from same-op-id-replay.
                         deduped += 1;
                         if seq > max_seq {
                             max_seq = seq;
                         }
                         op_results.push(serde_json::json!({
                             "op_id": op_id,
-                            "status": "deduped",
+                            "entity": change.entity,
+                            "row_id": change.row_id,
+                            "kind": match change.kind {
+                                ChangeKind::Insert => "insert",
+                                ChangeKind::Update => "update",
+                                ChangeKind::Delete => "delete",
+                            },
+                            "status": "replayed",
                             "seq": seq,
                         }));
                         continue;
                     }
                 }
             }
-            let mut op_errored = false;
-            let mut op_error_message: Option<String> = None;
-            let mut op_applied_seq: Option<u64> = None;
-            match change.kind {
-                ChangeKind::Insert => {
-                    if let Some(ref data) = change.data {
-                        // Policy gate first — `check_entity_insert`
-                        // matches the entity-API handle_insert path.
-                        if let pylon_policy::PolicyResult::Denied {
-                            policy_name,
-                            reason,
-                        } = ctx.policy_engine.check_entity_insert(
-                            &change.entity,
-                            ctx.auth_ctx,
-                            Some(data),
-                        ) {
-                            op_errored = true;
-                            let msg = format!(
-                                "insert {}: policy \"{}\" denied: {}",
-                                change.entity, policy_name, reason
-                            );
-                            op_error_message = Some(msg.clone());
-                            errors.push(msg);
-                        } else {
-                            // Plugin before_insert may mutate `data` —
-                            // clone so we don't poison the request.
-                            let mut hook_data = data.clone();
-                            if let Err((_status, code, msg)) = ctx.plugin_hooks.before_insert(
-                                &change.entity,
-                                &mut hook_data,
-                                ctx.auth_ctx,
-                            ) {
-                                op_errored = true;
-                                let full = format!(
-                                    "insert {}: hook denied ({}): {}",
-                                    change.entity, code, msg
-                                );
-                                op_error_message = Some(full.clone());
-                                errors.push(full);
-                            } else {
-                                match ctx.store.insert(&change.entity, &hook_data) {
-                                    Ok(id) => {
-                                        // Re-read the full row so the broadcast
-                                        // carries server-stamped defaults +
-                                        // plugin-added fields (tenantId, etc).
-                                        //
-                                        // Three outcomes, matching the entity-
-                                        // API + AutoBroadcastStore behavior
-                                        // (codex P2):
-                                        //   Ok(Some(full)) — broadcast it.
-                                        //   Ok(None)       — row was concurrently
-                                        //                    deleted by a trigger
-                                        //                    or sibling write.
-                                        //                    Skip the broadcast
-                                        //                    so we don't
-                                        //                    resurrect a row
-                                        //                    that's already gone.
-                                        //                    The concurrent delete
-                                        //                    will fire its own
-                                        //                    event.
-                                        //   Err(_)         — read-side outage; log
-                                        //                    and skip rather than
-                                        //                    falling back to the
-                                        //                    partial hook_data
-                                        //                    (which would trip
-                                        //                    the policy filter on
-                                        //                    every connected
-                                        //                    client and ghost-
-                                        //                    apply unprojected
-                                        //                    fields).
-                                        let full = match ctx.store.get_by_id(&change.entity, &id) {
-                                            Ok(Some(full)) => Some(full),
-                                            Ok(None) => {
-                                                tracing::warn!(
-                                                    "[sync.push] post-insert re-read returned None for {}/{} — concurrent delete; skipping broadcast",
-                                                    change.entity,
-                                                    id,
-                                                );
-                                                None
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "[sync.push] post-insert re-read failed for {}/{} ({}); skipping broadcast",
-                                                    change.entity,
-                                                    id,
-                                                    e.message,
-                                                );
-                                                None
-                                            }
-                                        };
-                                        let seq = ctx.change_log.append(
-                                            &change.entity,
-                                            &id,
-                                            ChangeKind::Insert,
-                                            full.clone(),
-                                        );
-                                        if let Some(ref payload) = full {
-                                            broadcast_change_with_crdt(
-                                                ctx.notifier,
-                                                ctx.store,
-                                                seq,
-                                                &change.entity,
-                                                &id,
-                                                ChangeKind::Insert,
-                                                Some(payload),
-                                            );
-                                            ctx.plugin_hooks.after_insert(
-                                                &change.entity,
-                                                &id,
-                                                payload,
-                                                ctx.auth_ctx,
-                                            );
-                                        }
-                                        if seq > max_seq {
-                                            max_seq = seq;
-                                        }
-                                        applied += 1;
-                                        op_applied_seq = Some(seq);
-                                    }
-                                    Err(e) => {
-                                        op_errored = true;
-                                        let msg =
-                                            format!("insert {}: {}", change.entity, e.message);
-                                        op_error_message = Some(msg.clone());
-                                        errors.push(msg);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                ChangeKind::Update => {
-                    if let Some(ref data) = change.data {
-                        // Authorize against the EXISTING row, not the
-                        // caller's data (P0 class of bug from links.rs).
-                        let existing = ctx
-                            .store
-                            .get_by_id(&change.entity, &change.row_id)
-                            .ok()
-                            .flatten();
-                        if let pylon_policy::PolicyResult::Denied {
-                            policy_name,
-                            reason,
-                        } = ctx.policy_engine.check_entity_update(
-                            &change.entity,
-                            ctx.auth_ctx,
-                            existing.as_ref(),
-                        ) {
-                            op_errored = true;
-                            let msg = format!(
-                                "update {}/{}: policy \"{}\" denied: {}",
-                                change.entity, change.row_id, policy_name, reason
-                            );
-                            op_error_message = Some(msg.clone());
-                            errors.push(msg);
-                        } else {
-                            let mut hook_data = data.clone();
-                            if let Err((_status, code, msg)) = ctx.plugin_hooks.before_update(
-                                &change.entity,
-                                &change.row_id,
-                                &mut hook_data,
-                                ctx.auth_ctx,
-                            ) {
-                                op_errored = true;
-                                let full = format!(
-                                    "update {}/{}: hook denied ({}): {}",
-                                    change.entity, change.row_id, code, msg
-                                );
-                                op_error_message = Some(full.clone());
-                                errors.push(full);
-                            } else {
-                                match ctx.store.update(&change.entity, &change.row_id, &hook_data) {
-                                    // `Ok(false)` = no row matched the id.
-                                    // Previously this fell through to "success
-                                    // + broadcast" and the client thought its
-                                    // mutation landed; codex P1 flagged it.
-                                    // Treat as not-found so the client surfaces
-                                    // the failure and clears the optimistic
-                                    // ghost.
-                                    Ok(true) => {
-                                        // Re-read for the broadcast. Match the
-                                        // entity-API behavior: skip the
-                                        // broadcast on Ok(None) (row deleted
-                                        // between our update and the re-read)
-                                        // or Err (read-side outage). Codex P2
-                                        // — pre-fix we fell back to partial
-                                        // hook_data, which tripped the policy
-                                        // filter and pushed an unprojected
-                                        // row to every connected client.
-                                        let full = match ctx
-                                            .store
-                                            .get_by_id(&change.entity, &change.row_id)
-                                        {
-                                            Ok(Some(full)) => Some(full),
-                                            Ok(None) => {
-                                                tracing::warn!(
-                                                    "[sync.push] post-update re-read returned None for {}/{} — concurrent delete; skipping broadcast",
-                                                    change.entity,
-                                                    change.row_id,
-                                                );
-                                                None
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "[sync.push] post-update re-read failed for {}/{} ({}); skipping broadcast",
-                                                    change.entity,
-                                                    change.row_id,
-                                                    e.message,
-                                                );
-                                                None
-                                            }
-                                        };
-                                        let seq = ctx.change_log.append(
-                                            &change.entity,
-                                            &change.row_id,
-                                            ChangeKind::Update,
-                                            full.clone(),
-                                        );
-                                        if let Some(ref payload) = full {
-                                            broadcast_change_with_crdt(
-                                                ctx.notifier,
-                                                ctx.store,
-                                                seq,
-                                                &change.entity,
-                                                &change.row_id,
-                                                ChangeKind::Update,
-                                                Some(payload),
-                                            );
-                                            ctx.plugin_hooks.after_update(
-                                                &change.entity,
-                                                &change.row_id,
-                                                payload,
-                                                ctx.auth_ctx,
-                                            );
-                                        }
-                                        if seq > max_seq {
-                                            max_seq = seq;
-                                        }
-                                        applied += 1;
-                                        op_applied_seq = Some(seq);
-                                    }
-                                    Ok(false) => {
-                                        op_errored = true;
-                                        let msg = format!(
-                                            "update {}/{}: row not found",
-                                            change.entity, change.row_id
-                                        );
-                                        op_error_message = Some(msg.clone());
-                                        errors.push(msg);
-                                    }
-                                    Err(e) => {
-                                        op_errored = true;
-                                        let msg = format!(
-                                            "update {}/{}: {}",
-                                            change.entity, change.row_id, e.message
-                                        );
-                                        op_error_message = Some(msg.clone());
-                                        errors.push(msg);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                ChangeKind::Delete => {
-                    // Pre-delete snapshot serves two purposes: (1) the
-                    // read-policy fence on broadcast can see the row,
-                    // and (2) we authorize the delete against the
-                    // actual row (not against caller-supplied data).
-                    let snapshot = ctx
-                        .store
-                        .get_by_id(&change.entity, &change.row_id)
-                        .ok()
-                        .flatten();
-                    if let pylon_policy::PolicyResult::Denied {
-                        policy_name,
-                        reason,
-                    } = ctx.policy_engine.check_entity_delete(
-                        &change.entity,
-                        ctx.auth_ctx,
-                        snapshot.as_ref(),
-                    ) {
-                        op_errored = true;
-                        let msg = format!(
-                            "delete {}/{}: policy \"{}\" denied: {}",
-                            change.entity, change.row_id, policy_name, reason
-                        );
-                        op_error_message = Some(msg.clone());
-                        errors.push(msg);
-                    } else if let Err((_status, code, msg)) =
-                        ctx.plugin_hooks
-                            .before_delete(&change.entity, &change.row_id, ctx.auth_ctx)
-                    {
-                        op_errored = true;
-                        let full = format!(
-                            "delete {}/{}: hook denied ({}): {}",
-                            change.entity, change.row_id, code, msg
-                        );
-                        op_error_message = Some(full.clone());
-                        errors.push(full);
-                    } else {
-                        match ctx.store.delete(&change.entity, &change.row_id) {
-                            Ok(true) => {
-                                let seq = ctx.change_log.append(
-                                    &change.entity,
-                                    &change.row_id,
-                                    ChangeKind::Delete,
-                                    snapshot.clone(),
-                                );
-                                broadcast_change(
-                                    ctx.notifier,
-                                    seq,
-                                    &change.entity,
-                                    &change.row_id,
-                                    ChangeKind::Delete,
-                                    snapshot.as_ref(),
-                                );
-                                ctx.plugin_hooks.after_delete(
-                                    &change.entity,
-                                    &change.row_id,
-                                    ctx.auth_ctx,
-                                );
-                                if seq > max_seq {
-                                    max_seq = seq;
-                                }
-                                applied += 1;
-                                op_applied_seq = Some(seq);
-                            }
-                            Ok(false) => {
-                                op_errored = true;
-                                let msg = format!(
-                                    "delete {}/{}: row not found",
-                                    change.entity, change.row_id
-                                );
-                                op_error_message = Some(msg.clone());
-                                errors.push(msg);
-                            }
-                            Err(e) => {
-                                op_errored = true;
-                                let msg = format!(
-                                    "delete {}/{}: {}",
-                                    change.entity, change.row_id, e.message
-                                );
-                                op_error_message = Some(msg.clone());
-                                errors.push(msg);
-                            }
-                        }
-                    }
-                }
-            }
-            // Per-op result entry — clients map this back to their
-            // optimistic ghost by op_id (or array position when op_id
-            // is absent on the request).
-            let entry = if op_errored {
-                serde_json::json!({
-                    "op_id": change.op_id,
-                    "status": "error",
-                    "error": op_error_message.unwrap_or_else(|| "unknown".into()),
-                })
-            } else {
+            // Map the wire change kind onto a typed MutationOp so the
+            // shared pipeline runs identical policy + plugin + reread
+            // + broadcast logic as the entity REST handlers and
+            // /api/link/unlink. The pipeline returns the assigned seq
+            // (Some on apply, None when the reread missed and no
+            // event was appended).
+            let mctx = MutationCtx::from_router(ctx);
+            let op_id_opt = change.op_id.clone();
+            let kind_label = match change.kind {
+                ChangeKind::Insert => "insert",
+                ChangeKind::Update => "update",
+                ChangeKind::Delete => "delete",
+            };
+            let outcome = match change.kind {
+                ChangeKind::Insert => match change.data.as_ref() {
+                    Some(data) => apply_mutation(
+                        &mctx,
+                        MutationOp::Insert {
+                            entity: &change.entity,
+                            data,
+                        },
+                    ),
+                    None => Err(MutationError::Store {
+                        code: "INVALID_INPUT".into(),
+                        message: "insert requires data".into(),
+                    }),
+                },
+                ChangeKind::Update => match change.data.as_ref() {
+                    Some(data) => apply_mutation(
+                        &mctx,
+                        MutationOp::Update {
+                            entity: &change.entity,
+                            row_id: &change.row_id,
+                            data,
+                        },
+                    ),
+                    None => Err(MutationError::Store {
+                        code: "INVALID_INPUT".into(),
+                        message: "update requires data".into(),
+                    }),
+                },
+                ChangeKind::Delete => apply_mutation(
+                    &mctx,
+                    MutationOp::Delete {
+                        entity: &change.entity,
+                        row_id: &change.row_id,
+                    },
+                ),
+            };
+
+            // Per-op result entry uses the formal PushOpResult shape:
+            // (op_id, row_id, entity, kind, status, seq?, error?).
+            // Clients map back by op_id (or array index when op_id is
+            // absent) — no positional guessing required.
+            let result_envelope = |status: &str,
+                                   row_id: Option<&str>,
+                                   seq: Option<u64>,
+                                   error: Option<(String, String)>|
+             -> serde_json::Value {
                 let mut e = serde_json::json!({
-                    "op_id": change.op_id,
-                    "status": "applied",
+                    "op_id": op_id_opt,
+                    "entity": change.entity,
+                    "row_id": row_id.unwrap_or(&change.row_id),
+                    "kind": kind_label,
+                    "status": status,
                 });
-                if let Some(seq) = op_applied_seq {
-                    e["seq"] = serde_json::Value::from(seq);
+                if let Some(s) = seq {
+                    e["seq"] = serde_json::Value::from(s);
+                }
+                if let Some((code, message)) = error {
+                    e["error"] = serde_json::json!({
+                        "code": code,
+                        "message": message,
+                    });
                 }
                 e
             };
-            op_results.push(entry);
-            // Finalize the op-id state. Two transitions matter:
-            //   - failure → `forget_op_id` clears Pending so the
-            //     client's retry isn't deduped against a dead claim.
-            //   - success → `complete_op_id` transitions Pending →
-            //     Applied{seq}. Without this transition, a retry that
-            //     arrives after this push commits would re-claim
-            //     Proceed and re-apply the write — which is the bug
-            //     codex P1 flagged.
-            if op_errored {
-                if let Some(ref op_id) = change.op_id {
-                    ctx.change_log.forget_op_id(op_id);
-                    errored_op_ids.push(op_id.clone());
+            match outcome {
+                Ok(out) => {
+                    if out.seq > max_seq {
+                        max_seq = out.seq;
+                    }
+                    applied += 1;
+                    op_results.push(result_envelope(
+                        "applied",
+                        Some(&out.row_id),
+                        Some(out.seq),
+                        None,
+                    ));
+                    if let Some(ref op_id) = op_id_opt {
+                        ctx.change_log.complete_op_id(op_id, out.seq);
+                    }
                 }
-            } else if let Some(seq) = op_applied_seq {
-                if let Some(ref op_id) = change.op_id {
-                    ctx.change_log.complete_op_id(op_id, seq);
+                Err(err) => {
+                    let (_status, code, message) = crate::mutate::error_response(&err);
+                    let display = format!(
+                        "{} {}/{}: {}",
+                        kind_label, change.entity, change.row_id, message
+                    );
+                    errors.push(display);
+                    op_results.push(result_envelope(
+                        "error",
+                        None,
+                        None,
+                        Some((code, message)),
+                    ));
+                    if let Some(ref op_id) = op_id_opt {
+                        ctx.change_log.forget_op_id(op_id);
+                        errored_op_ids.push(op_id.clone());
+                    }
                 }
             }
         }

@@ -32,6 +32,61 @@ pub enum ChangeKind {
     Delete,
 }
 
+/// Typed, shape-correct change record. Use `ChangeLog::record` instead
+/// of `ChangeLog::append` whenever possible — the typed variants make
+/// invariants checkable at the call site:
+///
+/// - `Insert { row }` requires the full post-insert row (not the
+///   caller's partial input). The change-event broadcast filter relies
+///   on per-row policy evaluation, and a partial row trips false denies.
+/// - `Update { row }` requires the full post-update row. Same reason.
+/// - `Delete { snapshot }` requires the pre-delete row (or explicit
+///   `None` for cases where the snapshot was unrecoverable — e.g. the
+///   row was already gone, or this is a tenant-scoped purge). The WS
+///   broadcast filter needs the snapshot to authorize delivery to
+///   subscribers whose policy depends on row data.
+#[derive(Debug, Clone)]
+pub enum ChangeRecord {
+    Insert {
+        row: serde_json::Value,
+    },
+    Update {
+        row: serde_json::Value,
+    },
+    Delete {
+        /// The pre-delete row snapshot. `None` is permitted but
+        /// documented at every call site that uses it — without the
+        /// snapshot, row-scoped read policies fall back to entity-level
+        /// only and a private row's deletion may leak to clients that
+        /// shouldn't have seen the row in the first place.
+        snapshot: Option<serde_json::Value>,
+    },
+}
+
+impl ChangeRecord {
+    pub fn kind(&self) -> ChangeKind {
+        match self {
+            ChangeRecord::Insert { .. } => ChangeKind::Insert,
+            ChangeRecord::Update { .. } => ChangeKind::Update,
+            ChangeRecord::Delete { .. } => ChangeKind::Delete,
+        }
+    }
+
+    pub fn data(&self) -> Option<&serde_json::Value> {
+        match self {
+            ChangeRecord::Insert { row } | ChangeRecord::Update { row } => Some(row),
+            ChangeRecord::Delete { snapshot } => snapshot.as_ref(),
+        }
+    }
+
+    pub fn into_data(self) -> Option<serde_json::Value> {
+        match self {
+            ChangeRecord::Insert { row } | ChangeRecord::Update { row } => Some(row),
+            ChangeRecord::Delete { snapshot } => snapshot,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sync cursor — tracks client position in the log
 // ---------------------------------------------------------------------------
@@ -330,12 +385,39 @@ impl ChangeLog {
         *self.seq.lock().unwrap()
     }
 
+    /// Append a typed change record. Returns the full `ChangeEvent`
+    /// (seq, entity, row_id, kind, data, timestamp) so callers can
+    /// hand it straight to the broadcast notifier without re-
+    /// assembling the fields and accidentally diverging from the log
+    /// entry's shape.
+    ///
+    /// Prefer this over `append`: the typed variant catches shape
+    /// errors (e.g. emitting an Insert without the post-insert row) at
+    /// the call site instead of producing a partial event that the
+    /// per-client policy filter then rejects, leaving subscribers
+    /// silently desynced.
+    pub fn record(&self, entity: &str, row_id: &str, change: ChangeRecord) -> ChangeEvent {
+        let kind = change.kind();
+        let data = change.into_data();
+        let seq = self.append(entity, row_id, kind.clone(), data.clone());
+        ChangeEvent {
+            seq,
+            entity: entity.to_string(),
+            row_id: row_id.to_string(),
+            kind,
+            data,
+            timestamp: now_iso8601(),
+        }
+    }
+
     /// Append a change event. Returns the assigned sequence number.
     ///
-    /// Lock order: `events` then `seq`. `pull()` takes the same order
-    /// (codex P1: previously this method took seq-then-events while
-    /// pull took events-then-seq, a classic lock-order inversion that
-    /// could deadlock under concurrent append + pull).
+    /// Lock order is `events` → `seq` (matches `pull()`'s order so
+    /// concurrent append + pull don't deadlock on the inverted ordering).
+    ///
+    /// Prefer `record` for new call sites — `append` is preserved
+    /// because `append_peer` and a handful of historical call sites
+    /// need the raw seq without the wrapped event.
     pub fn append(
         &self,
         entity: &str,
@@ -738,6 +820,60 @@ mod tests {
     }
 
     // ---- op_id state machine ----
+
+    // ---- typed change records ----
+
+    #[test]
+    fn record_insert_carries_full_row() {
+        let log = ChangeLog::new();
+        let event = log.record(
+            "Todo",
+            "t1",
+            ChangeRecord::Insert {
+                row: serde_json::json!({"id": "t1", "title": "Test"}),
+            },
+        );
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.kind, ChangeKind::Insert);
+        assert_eq!(event.data.as_ref().unwrap()["title"], "Test");
+    }
+
+    #[test]
+    fn record_delete_carries_snapshot_for_policy_authz() {
+        // Regression: tenant/owner-scoped delete events must include
+        // the deleted row snapshot so WS subscribers' row-level read
+        // policy can authorize delivery. A bare delete with None
+        // forces entity-level policy and leaks "this row was here"
+        // to clients that never saw the row.
+        let log = ChangeLog::new();
+        let event = log.record(
+            "PrivateNote",
+            "n1",
+            ChangeRecord::Delete {
+                snapshot: Some(serde_json::json!({"ownerId": "u1", "body": "secret"})),
+            },
+        );
+        assert_eq!(event.kind, ChangeKind::Delete);
+        assert!(event.data.is_some());
+        assert_eq!(event.data.as_ref().unwrap()["ownerId"], "u1");
+    }
+
+    #[test]
+    fn record_delete_with_none_snapshot_is_explicit() {
+        // Permitted shape: a delete whose pre-snapshot was unrecoverable
+        // (row was already gone, tenant purge, etc.). Compiles without
+        // friction so call sites that genuinely can't supply a snapshot
+        // can express that intent — and reviewers can flag any
+        // gratuitous `snapshot: None` that should have captured the row.
+        let log = ChangeLog::new();
+        let event = log.record(
+            "Todo",
+            "t1",
+            ChangeRecord::Delete { snapshot: None },
+        );
+        assert_eq!(event.kind, ChangeKind::Delete);
+        assert!(event.data.is_none());
+    }
 
     #[test]
     fn op_id_first_claim_proceeds() {

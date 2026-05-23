@@ -60,30 +60,46 @@ export interface ResolvedSession {
  * mapping — clients had to guess by ordering and got it wrong on
  * partial failures, stranding optimistic ghosts.
  */
+/**
+ * Per-op result on /api/sync/push. Formal shape:
+ *
+ *   { op_id, row_id, entity, kind, status, seq?, error? }
+ *
+ * Status semantics:
+ *   - `applied`   — first-time write committed at `seq`.
+ *   - `replayed`  — same op_id arrived again after a confirmed apply;
+ *                   `seq` is the cached value of the original write so
+ *                   the client can adopt it on its optimistic ghost
+ *                   without waiting for the WS rebroadcast.
+ *   - `pending`   — a concurrent push carrying this op_id is still
+ *                   in flight on the server. No `seq` yet; the
+ *                   client should retry after a short backoff.
+ *   - `error`     — the write was attempted and rejected; `error`
+ *                   carries the server's code + message.
+ *
+ * Legacy `deduped` is treated as `replayed` for compatibility — older
+ * servers (≤ 0.3.190) returned `deduped` for both InFlight and
+ * Replayed cases. Treat it as replayed (assume the op landed) since
+ * the InFlight case is rare and clients in that path will reconcile
+ * on the next pull regardless.
+ */
 export interface PushOpResult {
   /** op_id from the request, if the client supplied one. */
   op_id?: string | null;
-  /**
-   * Outcome of this op on the server:
-   *   - `applied`  — first-time write committed at `seq`.
-   *   - `deduped`  — previously-applied retry; `seq` carries the
-   *                  cached value of the original write so the client
-   *                  can adopt it on its optimistic ghost.
-   *   - `pending`  — a concurrent push carrying this op_id is still
-   *                  in flight. The server has no `seq` to return
-   *                  yet; the client should retry after a short
-   *                  backoff (the first write may have failed and
-   *                  been forgotten, in which case the retry will
-   *                  Proceed) or wait for the WS rebroadcast from
-   *                  the original writer to confirm.
-   *   - `error`    — the write was attempted and rejected; `error`
-   *                  carries the server's message.
-   */
-  status: "applied" | "deduped" | "pending" | "error";
-  /** Assigned seq when `status === "applied"` or `"deduped"`. */
+  /** Entity the op targeted. Echoed from the request. */
+  entity?: string;
+  /** Row id the op landed under. For Insert this is the server-minted
+   *  id; for Update/Delete it's the caller-supplied id. */
+  row_id?: string;
+  /** Echo of the request kind so clients can dispatch by it. */
+  kind?: "insert" | "update" | "delete";
+  status: "applied" | "replayed" | "pending" | "error" | "deduped";
+  /** Assigned seq when `status === "applied"` or `"replayed"`. */
   seq?: number;
-  /** Server's error message when `status === "error"`. */
-  error?: string;
+  /** Structured error from the server. Falls back to a string form
+   *  when the server didn't ship the structured envelope (older
+   *  versions). */
+  error?: { code: string; message: string } | string;
 }
 
 export interface PushResponse {
@@ -2238,21 +2254,29 @@ export class SyncEngine {
             (m.change.op_id ? byOpId.get(m.change.op_id) : undefined) ??
             resp.results[i];
           if (!r) continue;
-          if (r.status === "applied" || r.status === "deduped") {
+          // applied: first-time commit at r.seq.
+          // replayed: same op_id arrived again after a confirmed apply;
+          // r.seq is the original write's seq. Both are terminal-success
+          // from the client's perspective.
+          // deduped: legacy server response — treat as replayed.
+          if (r.status === "applied" || r.status === "replayed" || r.status === "deduped") {
             this.mutations.markApplied(m.id);
             if (typeof r.seq === "number" && r.seq > maxAppliedSeq) {
               maxAppliedSeq = r.seq;
             }
           } else if (r.status === "pending") {
-            // Server tristate: a concurrent push carrying this op_id
-            // is still in flight. Keep the mutation pending locally;
-            // a later push() will retry. Codex P1 — pre-fix the
-            // server returned a flat "deduped" for both Applied AND
-            // Pending and the client mistakenly marked the row
-            // applied while the first writer was still mid-flush.
+            // A concurrent push carrying this op_id is still in
+            // flight on the server. Keep the mutation queued; a
+            // later push() will retry. The client must NOT mark
+            // applied here — the in-flight writer might fail and
+            // forget the claim, leaving the row un-committed.
             hasInFlightDedupe = true;
           } else if (r.status === "error") {
-            this.mutations.markFailed(m.id, r.error ?? "unknown");
+            const msg =
+              typeof r.error === "string"
+                ? r.error
+                : r.error?.message ?? "unknown";
+            this.mutations.markFailed(m.id, msg);
           }
         }
       } else {

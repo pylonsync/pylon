@@ -12,6 +12,7 @@ use pylon_sync::{ChangeKind, ChangeLog};
 use std::cell::RefCell;
 
 pub mod merge;
+pub mod mutate;
 mod routes;
 
 // ---------------------------------------------------------------------------
@@ -1568,7 +1569,7 @@ pub(crate) fn handle_get(store: &dyn DataStore, entity: &str, id: &str) -> (u16,
 }
 
 pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u16, String) {
-    let mut data: serde_json::Value = match serde_json::from_str(body) {
+    let data: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -1581,76 +1582,22 @@ pub(crate) fn handle_insert(ctx: &RouterContext, entity: &str, body: &str) -> (u
             )
         }
     };
-    // Run plugin `before_insert` hooks. Registered plugins (validation,
-    // timestamps, slugify) mutate `data` here; a rejected hook aborts
-    // the write with their status + error payload.
-    if let Err((status, code, msg)) =
-        ctx.plugin_hooks
-            .before_insert(entity, &mut data, ctx.auth_ctx)
-    {
-        return (status, json_error(&code, &msg));
-    }
-    match ctx.store.insert(entity, &data) {
-        Ok(id) => {
-            // Re-read so the broadcast event carries the full
-            // materialized row (server-stamped defaults, plugin-added
-            // fields like tenantId, SQL DEFAULTs). Partial broadcasts
-            // trip the per-client policy filter on the WS shard
-            // worker — `auth.tenantId == row.tenantId` evaluates
-            // false against a row that's missing tenantId. See the
-            // same fix on TxStore::insert.
-            //
-            // `Ok(None)` = concurrent delete (or a trigger removed
-            // the row mid-write). Skip the broadcast; the delete
-            // will fire its own event and emitting an Insert here
-            // would resurrect a row the server already considers
-            // gone.
-            match ctx.store.get_by_id(entity, &id) {
-                Ok(Some(full)) => {
-                    let seq =
-                        ctx.change_log
-                            .append(entity, &id, ChangeKind::Insert, Some(full.clone()));
-                    emit_change_seq_header(ctx, seq);
-                    broadcast_change_with_crdt(
-                        ctx.notifier,
-                        ctx.store,
-                        seq,
-                        entity,
-                        &id,
-                        ChangeKind::Insert,
-                        Some(&full),
-                    );
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        "[handle_insert] post-write re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[handle_insert] post-write re-read failed for {entity}/{id} ({}): broadcasting partial payload",
-                        e.message
-                    );
-                    let seq =
-                        ctx.change_log
-                            .append(entity, &id, ChangeKind::Insert, Some(data.clone()));
-                    emit_change_seq_header(ctx, seq);
-                    broadcast_change_with_crdt(
-                        ctx.notifier,
-                        ctx.store,
-                        seq,
-                        entity,
-                        &id,
-                        ChangeKind::Insert,
-                        Some(&data),
-                    );
-                }
+    // Policy was already gated at the route entry. Use bypass_policy
+    // here so the pipeline doesn't double-check, but keep everything
+    // else identical: plugin hooks, reread, change-log append,
+    // broadcast, after-hook, X-Pylon-Change-Seq header.
+    let mctx = mutate::MutationCtx::from_router_admin(ctx);
+    match mutate::apply_mutation(&mctx, mutate::MutationOp::Insert { entity, data: &data }) {
+        Ok(outcome) => {
+            if outcome.seq > 0 {
+                emit_change_seq_header(ctx, outcome.seq);
             }
-            ctx.plugin_hooks
-                .after_insert(entity, &id, &data, ctx.auth_ctx);
-            (201, serde_json::json!({"id": id}).to_string())
+            (201, serde_json::json!({"id": outcome.row_id}).to_string())
         }
-        Err(e) => (400, json_error(&e.code, &e.message)),
+        Err(err) => {
+            let (status, code, message) = mutate::error_response(&err);
+            (status, json_error(&code, &message))
+        }
     }
 }
 
@@ -1660,7 +1607,7 @@ pub(crate) fn handle_update(
     id: &str,
     body: &str,
 ) -> (u16, String) {
-    let mut data: serde_json::Value = match serde_json::from_str(body) {
+    let data: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -1673,122 +1620,59 @@ pub(crate) fn handle_update(
             )
         }
     };
-    if let Err((status, code, msg)) =
-        ctx.plugin_hooks
-            .before_update(entity, id, &mut data, ctx.auth_ctx)
-    {
-        return (status, json_error(&code, &msg));
-    }
-    match ctx.store.update(entity, id, &data) {
-        Ok(true) => {
-            // Re-read post-update so the broadcast carries the full
-            // current row state, not just the partial patch. See the
-            // commentary on handle_insert above — `Ok(None)` = the
-            // row was concurrently deleted; skip the broadcast to
-            // avoid resurrecting it in client replicas.
-            match ctx.store.get_by_id(entity, id) {
-                Ok(Some(full)) => {
-                    let seq =
-                        ctx.change_log
-                            .append(entity, id, ChangeKind::Update, Some(full.clone()));
-                    emit_change_seq_header(ctx, seq);
-                    broadcast_change_with_crdt(
-                        ctx.notifier,
-                        ctx.store,
-                        seq,
-                        entity,
-                        id,
-                        ChangeKind::Update,
-                        Some(&full),
-                    );
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        "[handle_update] post-write re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[handle_update] post-write re-read failed for {entity}/{id} ({}): broadcasting partial payload",
-                        e.message
-                    );
-                    let seq =
-                        ctx.change_log
-                            .append(entity, id, ChangeKind::Update, Some(data.clone()));
-                    emit_change_seq_header(ctx, seq);
-                    broadcast_change_with_crdt(
-                        ctx.notifier,
-                        ctx.store,
-                        seq,
-                        entity,
-                        id,
-                        ChangeKind::Update,
-                        Some(&data),
-                    );
-                }
+    // Route entry already ran `check_entity_update` against the
+    // existing row. Use bypass_policy so the pipeline runs hooks +
+    // store + reread + broadcast + after-hook + change-seq header
+    // without re-evaluating policy.
+    let mctx = mutate::MutationCtx::from_router_admin(ctx);
+    match mutate::apply_mutation(
+        &mctx,
+        mutate::MutationOp::Update {
+            entity,
+            row_id: id,
+            data: &data,
+        },
+    ) {
+        Ok(outcome) => {
+            if outcome.seq > 0 {
+                emit_change_seq_header(ctx, outcome.seq);
             }
-            ctx.plugin_hooks
-                .after_update(entity, id, &data, ctx.auth_ctx);
             (200, serde_json::json!({"updated": true}).to_string())
         }
-        Ok(false) => (
-            404,
-            json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
-        ),
-        Err(e) => (400, json_error(&e.code, &e.message)),
+        Err(err) => {
+            let (status, code, message) = mutate::error_response(&err);
+            (status, json_error(&code, &message))
+        }
     }
 }
 
 pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16, String) {
-    if let Err((status, code, msg)) = ctx.plugin_hooks.before_delete(entity, id, ctx.auth_ctx) {
-        return (status, json_error(&code, &msg));
-    }
-    // Snapshot the row BEFORE deletion so the WS/pull policy filter can
-    // evaluate row-scoped read predicates (e.g. `auth.userId ==
-    // data.userId`) against the deleted row. The previous `data: None`
-    // broadcast was being denied by every tenant-scoped policy, so
-    // owners never observed their own delete and the row sat orphaned
-    // in their replica until manual reconcile.
-    let snapshot = ctx.store.get_by_id(entity, id).ok().flatten();
-    match ctx.store.delete(entity, id) {
-        Ok(true) => {
-            let seq = ctx
-                .change_log
-                .append(entity, id, ChangeKind::Delete, snapshot.clone());
-            emit_change_seq_header(ctx, seq);
-            broadcast_change(
-                ctx.notifier,
-                seq,
-                entity,
-                id,
-                ChangeKind::Delete,
-                snapshot.as_ref(),
-            );
-            ctx.plugin_hooks.after_delete(entity, id, ctx.auth_ctx);
-            // Cascade-clean auth-related stores when the deleted
-            // row is the auth User. Without this, deleting from
-            // Studio (or `DELETE /api/entities/User/<id>` from any
-            // admin client) left stale Account links, sessions,
-            // API keys, and trusted-device rows behind. The
-            // canonical surface bug: OAuth's `find_by_provider`
-            // returns the orphan Account link, the next sign-in
-            // mints a session for a deleted user_id, and every
-            // downstream lookup of that id returns nothing —
-            // breaking the dashboard in confusing ways.
-            //
-            // Same cascade the self-service `/api/auth/account`
-            // DELETE handler runs; lifting it here means deletion
-            // semantics match across both surfaces.
+    // Route entry already ran `check_entity_delete` against the
+    // existing row. Pipeline handles pre-delete snapshot capture,
+    // plugin hooks, broadcast, and after-hook.
+    let mctx = mutate::MutationCtx::from_router_admin(ctx);
+    match mutate::apply_mutation(
+        &mctx,
+        mutate::MutationOp::Delete { entity, row_id: id },
+    ) {
+        Ok(outcome) => {
+            if outcome.seq > 0 {
+                emit_change_seq_header(ctx, outcome.seq);
+            }
+            // Cascade-clean auth-related stores when the deleted row
+            // is the auth User. Keeps deletion semantics aligned with
+            // the self-service `/api/auth/account` DELETE handler.
+            // Stale Account links + sessions otherwise let a deleted
+            // user_id resurrect through OAuth.
             if entity == ctx.store.manifest().auth.user.entity {
                 cascade_clean_user_auth_stores(ctx, id);
             }
             (200, serde_json::json!({"deleted": true}).to_string())
         }
-        Ok(false) => (
-            404,
-            json_error("NOT_FOUND", &format!("{entity}/{id} not found")),
-        ),
-        Err(e) => (400, json_error(&e.code, &e.message)),
+        Err(err) => {
+            let (status, code, message) = mutate::error_response(&err);
+            (status, json_error(&code, &message))
+        }
     }
 }
 

@@ -7,13 +7,12 @@
 //! sidestep ownership rules by omitting the ownership field from
 //! their patch.
 
+use crate::mutate::{apply_mutation, MutationCtx, MutationOp};
 use crate::{
-    broadcast_change, broadcast_change_with_crdt, handle_delete, handle_get, handle_insert,
-    handle_list, handle_update, json_error, json_error_safe, json_error_with_hint, require_admin,
-    RouterContext,
+    handle_delete, handle_get, handle_insert, handle_list, handle_update, json_error,
+    json_error_safe, json_error_with_hint, require_admin, RouterContext,
 };
 use pylon_http::HttpMethod;
-use pylon_sync::ChangeKind;
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -182,6 +181,7 @@ pub(crate) fn handle(
         let mut succeeded: u32 = 0;
         let mut failed: u32 = 0;
 
+        let mctx = MutationCtx::from_router_admin(ctx);
         for op in ops {
             let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
             let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
@@ -189,64 +189,25 @@ pub(crate) fn handle(
             match op_type {
                 "insert" => {
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
-                    match ctx.store.insert(entity, &data) {
-                        Ok(id) => {
-                            // Re-read for full-row broadcast — see
-                            // handle_insert in router/src/lib.rs.
-                            // `Ok(None)` = concurrent delete; skip
-                            // the broadcast to avoid resurrecting.
-                            match ctx.store.get_by_id(entity, &id) {
-                                Ok(Some(full)) => {
-                                    let seq = ctx.change_log.append(
-                                        entity,
-                                        &id,
-                                        ChangeKind::Insert,
-                                        Some(full.clone()),
-                                    );
-                                    broadcast_change_with_crdt(
-                                        ctx.notifier,
-                                        ctx.store,
-                                        seq,
-                                        entity,
-                                        &id,
-                                        ChangeKind::Insert,
-                                        Some(&full),
-                                    );
-                                }
-                                Ok(None) => {
-                                    tracing::warn!(
-                                        "[batch insert] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[batch insert] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
-                                        e.message
-                                    );
-                                    let seq = ctx.change_log.append(
-                                        entity,
-                                        &id,
-                                        ChangeKind::Insert,
-                                        Some(data.clone()),
-                                    );
-                                    broadcast_change_with_crdt(
-                                        ctx.notifier,
-                                        ctx.store,
-                                        seq,
-                                        entity,
-                                        &id,
-                                        ChangeKind::Insert,
-                                        Some(&data),
-                                    );
-                                }
-                            }
-                            results.push(serde_json::json!({"op": "insert", "id": id, "ok": true}));
+                    match apply_mutation(
+                        &mctx,
+                        MutationOp::Insert { entity, data: &data },
+                    ) {
+                        Ok(outcome) => {
+                            results.push(serde_json::json!({
+                                "op": "insert",
+                                "id": outcome.row_id,
+                                "ok": true,
+                            }));
                             succeeded += 1;
                         }
-                        Err(e) => {
-                            results.push(
-                                serde_json::json!({"op": "insert", "ok": false, "error": e.message}),
-                            );
+                        Err(err) => {
+                            let (_status, _code, message) = crate::mutate::error_response(&err);
+                            results.push(serde_json::json!({
+                                "op": "insert",
+                                "ok": false,
+                                "error": message,
+                            }));
                             failed += 1;
                         }
                     }
@@ -254,105 +215,52 @@ pub(crate) fn handle(
                 "update" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let data = op.get("data").cloned().unwrap_or(serde_json::json!({}));
-                    match ctx.store.update(entity, id, &data) {
-                        Ok(updated) => {
-                            if updated {
-                                // Re-read post-update so subscribers
-                                // get the full row state. Skip on
-                                // `Ok(None)` (concurrent delete).
-                                match ctx.store.get_by_id(entity, id) {
-                                    Ok(Some(full)) => {
-                                        let seq = ctx.change_log.append(
-                                            entity,
-                                            id,
-                                            ChangeKind::Update,
-                                            Some(full.clone()),
-                                        );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            entity,
-                                            id,
-                                            ChangeKind::Update,
-                                            Some(&full),
-                                        );
-                                    }
-                                    Ok(None) => {
-                                        tracing::warn!(
-                                            "[batch update] re-read returned None for {entity}/{id} — concurrent delete; skipping broadcast"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "[batch update] re-read failed for {entity}/{id} ({}): broadcasting partial payload",
-                                            e.message
-                                        );
-                                        let seq = ctx.change_log.append(
-                                            entity,
-                                            id,
-                                            ChangeKind::Update,
-                                            Some(data.clone()),
-                                        );
-                                        broadcast_change_with_crdt(
-                                            ctx.notifier,
-                                            ctx.store,
-                                            seq,
-                                            entity,
-                                            id,
-                                            ChangeKind::Update,
-                                            Some(&data),
-                                        );
-                                    }
-                                }
-                            }
-                            results.push(serde_json::json!({"op": "update", "id": id, "ok": true}));
+                    match apply_mutation(
+                        &mctx,
+                        MutationOp::Update {
+                            entity,
+                            row_id: id,
+                            data: &data,
+                        },
+                    ) {
+                        Ok(_) => {
+                            results.push(serde_json::json!({
+                                "op": "update",
+                                "id": id,
+                                "ok": true,
+                            }));
                             succeeded += 1;
                         }
-                        Err(e) => {
-                            results.push(
-                                serde_json::json!({"op": "update", "id": id, "ok": false, "error": e.message}),
-                            );
+                        Err(err) => {
+                            let (_status, _code, message) = crate::mutate::error_response(&err);
+                            results.push(serde_json::json!({
+                                "op": "update",
+                                "id": id,
+                                "ok": false,
+                                "error": message,
+                            }));
                             failed += 1;
                         }
                     }
                 }
                 "delete" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    // Snapshot pre-delete so the WS/pull read-policy
-                    // filter can evaluate row-scoped predicates against
-                    // actual data. Without this the broadcast goes out
-                    // with `data: None`, every tenant-scoped policy
-                    // denies the owner, and the row sits as a ghost in
-                    // their replica. Same fix the normal DELETE handler
-                    // already has; admin /api/batch was missed in the
-                    // first pass (codex P1).
-                    let snapshot = ctx.store.get_by_id(entity, id).ok().flatten();
-                    match ctx.store.delete(entity, id) {
-                        Ok(deleted) => {
-                            if deleted {
-                                let seq = ctx.change_log.append(
-                                    entity,
-                                    id,
-                                    ChangeKind::Delete,
-                                    snapshot.clone(),
-                                );
-                                broadcast_change(
-                                    ctx.notifier,
-                                    seq,
-                                    entity,
-                                    id,
-                                    ChangeKind::Delete,
-                                    snapshot.as_ref(),
-                                );
-                            }
+                    match apply_mutation(
+                        &mctx,
+                        MutationOp::Delete { entity, row_id: id },
+                    ) {
+                        Ok(_) => {
                             results.push(serde_json::json!({"op": "delete", "id": id, "ok": true}));
                             succeeded += 1;
                         }
-                        Err(e) => {
-                            results.push(
-                                serde_json::json!({"op": "delete", "id": id, "ok": false, "error": e.message}),
-                            );
+                        Err(err) => {
+                            let (_status, _code, message) = crate::mutate::error_response(&err);
+                            results.push(serde_json::json!({
+                                "op": "delete",
+                                "id": id,
+                                "ok": false,
+                                "error": message,
+                            }));
                             failed += 1;
                         }
                     }
