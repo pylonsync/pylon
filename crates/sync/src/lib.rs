@@ -116,10 +116,22 @@ pub struct ClientChange {
 /// counter still increments monotonically; clients pulling with an old
 /// cursor will see only what remains in memory (or should issue a full
 /// re-sync if their cursor falls off the back).
+/// Closure called by `ChangeLog::append` to mint a new sequence number.
+/// Wired by the runtime to Postgres' `nextval('pylon_change_seq')` in
+/// cluster mode — that gives globally-monotonic seqs across every
+/// instance writing to the same database. SQLite / single-instance
+/// deployments leave this `None` and the in-memory atomic counter
+/// generates seqs locally.
+pub type SeqProvider = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
+
 pub struct ChangeLog {
     events: Mutex<std::collections::VecDeque<ChangeEvent>>,
     seq: Mutex<u64>,
     capacity: usize,
+    /// External seq mint. When set, `append` calls this for every new
+    /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
+    /// `append_peer()` interop correctly with the global counter.
+    seq_provider: Option<SeqProvider>,
     /// Recently-seen client op_ids, for push idempotency. Bounded by
     /// `op_id_capacity`; oldest entries age out when the map grows past it.
     seen_op_ids: Mutex<std::collections::VecDeque<String>>,
@@ -141,10 +153,41 @@ impl ChangeLog {
             )),
             seq: Mutex::new(0),
             capacity,
+            seq_provider: None,
             seen_op_ids: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
             seen_op_id_set: Mutex::new(std::collections::HashSet::with_capacity(1024)),
             op_id_capacity: 10_000,
         }
+    }
+
+    /// Install an external seq provider — typically a closure that
+    /// calls `nextval()` on a Postgres SEQUENCE so multi-instance
+    /// deployments share a single monotonic counter. Returns self so
+    /// callers can chain: `ChangeLog::with_capacity(N).with_seq(p)`.
+    ///
+    /// On install, seeds the internal `seq` mutex with the provider's
+    /// current value (`SELECT last_value FROM pylon_change_seq` style)
+    /// — the wiring closure should bump `seq` to that value before
+    /// returning, or pass it through `with_initial_seq`. We don't
+    /// query the provider here because that would couple the sync
+    /// crate to whatever the provider's I/O strategy is.
+    pub fn with_seq(mut self, provider: SeqProvider) -> Self {
+        self.seq_provider = Some(provider);
+        self
+    }
+
+    /// Seed the local seq counter — used in cluster mode after the
+    /// provider is installed, so `current_seq()` returns the correct
+    /// value before any `append` has fired. Idempotent (only bumps,
+    /// never lowers).
+    pub fn with_initial_seq(self, initial: u64) -> Self {
+        {
+            let mut seq = self.seq.lock().unwrap();
+            if initial > *seq {
+                *seq = initial;
+            }
+        }
+        self
     }
 
     /// Returns true if this op_id was already applied. Used by the push
@@ -243,9 +286,24 @@ impl ChangeLog {
     ) -> u64 {
         let mut events = self.events.lock().unwrap();
         let mut seq = self.seq.lock().unwrap();
-        *seq += 1;
+        // External provider (typically Postgres SEQUENCE for cluster
+        // mode) gives globally-monotonic seqs across instances. The
+        // local counter tracks the max seen so `current_seq()` and
+        // `append_peer()` interop with the provider's space. When no
+        // provider is wired (SQLite / single-instance), increment the
+        // local counter as before.
+        let new_seq = if let Some(provider) = self.seq_provider.as_ref() {
+            let s = provider();
+            if s > *seq {
+                *seq = s;
+            }
+            s
+        } else {
+            *seq += 1;
+            *seq
+        };
         let event = ChangeEvent {
-            seq: *seq,
+            seq: new_seq,
             entity: entity.to_string(),
             row_id: row_id.to_string(),
             kind,
@@ -256,7 +314,7 @@ impl ChangeLog {
         while events.len() > self.capacity {
             events.pop_front();
         }
-        *seq
+        new_seq
     }
 
     /// Append a change event RECEIVED FROM A PEER over the cluster bus,

@@ -5063,11 +5063,14 @@ mod auto_broadcast_tests {
         );
     }
 
-    /// Deletes broadcast with `data: None` — entity-level policy
-    /// rules still apply on the WS shard, but there's no row to
-    /// inspect post-delete.
+    /// Deletes broadcast WITH the pre-delete row snapshot so the
+    /// row-scoped read-policy filter on the WS shard can evaluate
+    /// against actual data. Without the snapshot, predicates like
+    /// `auth.userId == data.userId` deny the owner (data is None →
+    /// comparison evaluates false) and the owner never observes
+    /// their own delete — ghost rows linger. Codex P1 fix.
     #[test]
-    fn action_delete_broadcasts_with_no_data() {
+    fn action_delete_broadcasts_with_pre_delete_snapshot() {
         let manifest = minimal_manifest();
         let inner = StampingStore::new(manifest);
         inner.seed(
@@ -5085,7 +5088,12 @@ mod auto_broadcast_tests {
         let events = cap.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].kind, pylon_sync::ChangeKind::Delete));
-        assert!(events[0].data.is_none());
+        let data = events[0]
+            .data
+            .as_ref()
+            .expect("delete broadcast must carry the pre-delete row");
+        assert_eq!(data["id"], "r1");
+        assert_eq!(data["status"], "queued");
     }
 
     /// Update on a missing row: no broadcast (the underlying store

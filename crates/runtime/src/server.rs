@@ -349,7 +349,44 @@ fn start_server(
     policy_engine.set_resolver(Arc::new(crate::datastore::DataStoreResolver::new(
         Arc::clone(&runtime) as Arc<dyn pylon_http::DataStore>,
     )));
-    let change_log = Arc::new(ChangeLog::new());
+    // Postgres backends: wire a global SEQUENCE-backed seq provider so
+    // every instance writing to the same database shares one
+    // monotonically-increasing seq space. Without this, instance A and
+    // instance B can independently mint seq=N for different events;
+    // a client connected to one and pulling from the other drops
+    // events as "duplicate seq" (codex P1). SQLite / single-instance
+    // deployments stay on the in-memory atomic counter.
+    let mut change_log_builder = ChangeLog::new();
+    if runtime.is_postgres() {
+        if let Err(e) = runtime.bootstrap_global_change_seq() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap PG SEQUENCE; falling back to per-instance seq: {}",
+                e.message
+            );
+        } else {
+            let rt_for_provider = Arc::clone(&runtime);
+            let initial = runtime.current_global_change_seq().unwrap_or(0);
+            let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
+            let local_for_provider = std::sync::Arc::clone(&local_fallback);
+            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
+                // Try Postgres first; on transient failure fall back
+                // to a local atomic incremented from the last known PG
+                // value. Single-instance behavior under outage; the
+                // next successful PG call resyncs via the max() guard
+                // inside ChangeLog::append.
+                rt_for_provider.next_global_change_seq().unwrap_or_else(|| {
+                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+                })
+            });
+            change_log_builder = change_log_builder
+                .with_seq(provider)
+                .with_initial_seq(initial);
+            tracing::info!(
+                "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
+            );
+        }
+    }
+    let change_log = Arc::new(change_log_builder);
 
     // Seed the change log with one synthetic insert per extant row so that
     // a pull from seq=0 after a restart reconstructs current state. The

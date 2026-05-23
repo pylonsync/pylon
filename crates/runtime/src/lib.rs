@@ -368,6 +368,82 @@ impl Runtime {
         self.is_in_memory
     }
 
+    /// Bootstrap a globally-monotonic change-log SEQUENCE on Postgres.
+    /// Idempotent — `CREATE SEQUENCE IF NOT EXISTS` runs once per
+    /// process boot. Returns `Ok(())` on SQLite (no-op) so callers
+    /// don't have to branch on backend.
+    ///
+    /// Cluster mode: every instance shares this single sequence so
+    /// `append`'s `nextval` returns globally-unique, monotonically-
+    /// increasing seqs. Without it, instance A and instance B can
+    /// independently emit seq=5, and clients drop one as a duplicate
+    /// of the other (codex P1).
+    pub fn bootstrap_global_change_seq(&self) -> Result<(), RuntimeError> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Ok(());
+        };
+        pg.store
+            .with_client(|c| {
+                c.execute(
+                    "CREATE SEQUENCE IF NOT EXISTS pylon_change_seq START 1",
+                    &[],
+                )
+                .map_err(|e| pylon_http::DataError {
+                    code: "PG_SEQUENCE_BOOTSTRAP_FAILED".into(),
+                    message: format!("CREATE SEQUENCE pylon_change_seq: {e}"),
+                })?;
+                Ok::<(), pylon_http::DataError>(())
+            })
+            .map_err(data_err_to_runtime)
+    }
+
+    /// Mint the next global change-log seq. Postgres-only — SQLite
+    /// returns `None` and callers should fall back to the local
+    /// atomic counter.
+    pub fn next_global_change_seq(&self) -> Option<u64> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return None;
+        };
+        pg.store
+            .with_client(|c| {
+                let row = c
+                    .query_one("SELECT nextval('pylon_change_seq')", &[])
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_SEQUENCE_NEXTVAL_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                let v: i64 = row.get(0);
+                Ok::<u64, pylon_http::DataError>(v as u64)
+            })
+            .ok()
+    }
+
+    /// Snapshot the current SEQUENCE value (without minting a new one)
+    /// so the change-log's local seq counter starts at the correct
+    /// position after process restart. Postgres-only.
+    pub fn current_global_change_seq(&self) -> Option<u64> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return None;
+        };
+        pg.store
+            .with_client(|c| {
+                let row = c
+                    .query_one("SELECT last_value, is_called FROM pylon_change_seq", &[])
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_SEQUENCE_LASTVAL_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                let last_value: i64 = row.get(0);
+                let is_called: bool = row.get(1);
+                // A fresh sequence reports `last_value=1, is_called=false`
+                // meaning "next nextval() returns 1". Normalize to 0 so
+                // the change-log doesn't claim seq=1 prematurely.
+                let v = if is_called { last_value } else { 0 };
+                Ok::<u64, pylon_http::DataError>(v as u64)
+            })
+            .ok()
+    }
+
     /// Filesystem path to the SQLite database, if this runtime is file-backed.
     /// Returns `None` for in-memory runtimes AND Postgres runtimes (no local
     /// file). Used by the server bootstrap to derive companion paths
