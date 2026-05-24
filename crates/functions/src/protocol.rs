@@ -188,6 +188,18 @@ pub enum TsMessage {
     #[serde(rename = "send_email")]
     SendEmail(SendEmailMessage),
 
+    /// Call the configured LLM provider. The request body is the
+    /// Anthropic Messages shape (model, messages, system, tools,
+    /// max_tokens). Available from all handler types — agents
+    /// commonly run tool-use loops out of queries.
+    #[serde(rename = "llm_complete")]
+    LlmComplete(LlmCompleteMessage),
+
+    /// `ctx.connections.*` op. Wired to the runtime's
+    /// ConnectionManager.
+    #[serde(rename = "connection")]
+    Connection(ConnectionOpMessage),
+
     /// Function completed successfully.
     #[serde(rename = "return")]
     Return(ReturnMessage),
@@ -366,6 +378,37 @@ pub struct SendEmailMessage {
     pub to: String,
     pub subject: String,
     pub body: String,
+}
+
+/// Call the configured LLM provider. The `request` field is forwarded
+/// to [`pylon_runtime::llm::LlmClient::complete`] verbatim — the TS
+/// side builds it once, the host doesn't transform the shape (so
+/// callers can use new fields like `tool_choice` without a host
+/// release).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmCompleteMessage {
+    pub call_id: String,
+    /// Anthropic Messages-shaped request body. See pylon_runtime::llm
+    /// for the canonical Rust type; the TS SDK normalizes provider
+    /// differences.
+    pub request: serde_json::Value,
+}
+
+/// `ctx.connections.<op>(name, ...)` request. `op` is one of:
+/// - `"authorize_url"` — returns `{url}`. Optional
+///   `post_redirect` in body for post-callback browser destination.
+/// - `"get"` — returns `{access_token, scope, expires_at}`.
+///   Refreshes silently when needed.
+/// - `"list"` — returns `{connections: [...]}` for the signed-in user.
+/// - `"disconnect"` — removes the stored `_Connection` row.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectionOpMessage {
+    pub call_id: String,
+    pub op: String,
+    /// Op-specific payload. For all ops except `list`, must include
+    /// `name`. `authorize_url` accepts optional `post_redirect`.
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 /// Function returned successfully.

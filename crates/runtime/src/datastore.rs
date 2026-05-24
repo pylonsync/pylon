@@ -4124,9 +4124,22 @@ pub fn try_spawn_functions(
     let policy_gate: Arc<dyn pylon_functions::runner::PolicyGate> = Arc::new(PolicyGateAdapter {
         engine: Arc::clone(&policy_engine),
     });
+    // LlmClient loaded once at boot from env + manifest. When
+    // unconfigured the ctx.llm.complete hook returns LLM_NOT_CONFIGURED
+    // so authors see the gap explicitly instead of getting a silent
+    // no-op. Manifest's `llm:` block contributes default model +
+    // allowed_models — env wins on conflict so operators rotate keys
+    // without rebuilding the bundle.
+    let llm_client = crate::llm::LlmClient::from_env_with_manifest(Some(&runtime.manifest().llm));
+    // ConnectionManager: per-app OAuth integrations. Built only
+    // when the manifest declares connections — the auto-injected
+    // `_Connection` entity is already present at this point.
+    let connection_mgr = build_connection_manager(&runtime);
     for runner in &runners {
         install_schedule_hook(runner, &registry, Arc::clone(&job_queue));
         install_email_hook(runner, Arc::clone(&email_adapter));
+        install_llm_hook(runner, llm_client.clone());
+        install_connection_hook(runner, connection_mgr.clone(), Arc::clone(&runtime));
         runner.set_policy_gate(Arc::clone(&policy_gate));
     }
 
@@ -4260,6 +4273,330 @@ fn install_email_hook(runner: &Arc<FnRunner>, email_adapter: Arc<EmailAdapter>) 
             email_adapter.send(to, subject, body)
         },
     ));
+}
+
+/// Wire `ctx.llm.complete` → the runtime's LlmClient on a single
+/// runner. When no LLM provider was configured at boot (`from_env`
+/// returned `None`), the hook returns `LLM_NOT_CONFIGURED` so authors
+/// see the gap rather than silently getting an empty completion.
+///
+/// Model-allowlist enforcement: when the caller supplies an explicit
+/// `model` in the request body AND isn't admin, `PYLON_AI_MODELS_ALLOWED`
+/// must list it. Same gate as `/api/ai/stream` so server-side
+/// `ctx.llm.complete` calls can't burn through the budget on a
+/// premium model just because the function is signed in.
+fn install_llm_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::LlmClient>) {
+    use pylon_functions::protocol::AuthInfo;
+    runner.set_llm_hook(Box::new(
+        move |req: &serde_json::Value, auth: &AuthInfo| -> Result<serde_json::Value, (String, String)> {
+            // Codex P1-7: ctx.llm.complete is reachable from query +
+            // mutation + action handlers. A public query that calls
+            // ctx.llm.complete becomes an unauthenticated LLM proxy
+            // burning the framework's API budget. Require a real
+            // (non-anonymous) caller — public functions that
+            // legitimately need LLM access MUST elevate via
+            // ctx.auth.elevate({ admin: true, reason: "..." }) after
+            // running their own auth (webhook HMAC, JWT, etc.).
+            if auth.user_id.is_none() && !auth.is_admin {
+                return Err((
+                    "LLM_REQUIRES_AUTH".to_string(),
+                    "ctx.llm.complete requires an authenticated caller. Public functions must elevate auth (ctx.auth.elevate) before calling ctx.llm.".to_string(),
+                ));
+            }
+
+            let client = client.as_ref().ok_or_else(|| {
+                (
+                    "LLM_NOT_CONFIGURED".to_string(),
+                    "ctx.llm.complete: no LLM provider configured. Set PYLON_LLM_PROVIDER + ANTHROPIC_API_KEY (or OPENAI_API_KEY)."
+                        .to_string(),
+                )
+            })?;
+
+            // Codex P1-6+P1-1: enforce model allowlist by MERGING
+            // env (PYLON_AI_MODELS_ALLOWED) and manifest
+            // (llm.allowed_models). Admin callers skip the gate.
+            if let Some(req_model) = req.get("model").and_then(|m| m.as_str()) {
+                if !req_model.is_empty() && !auth.is_admin {
+                    let env_allowed = std::env::var("PYLON_AI_MODELS_ALLOWED").unwrap_or_default();
+                    let mut allowed_set: std::collections::HashSet<String> = env_allowed
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    for m in client.manifest_allowed_models() {
+                        allowed_set.insert(m.clone());
+                    }
+                    if allowed_set.is_empty() {
+                        return Err((
+                            "MODEL_OVERRIDE_FORBIDDEN".to_string(),
+                            "Client model override requires PYLON_AI_MODELS_ALLOWED env or llm({ allowedModels: [...] }) in the manifest.".to_string(),
+                        ));
+                    }
+                    if !allowed_set.contains(req_model) {
+                        return Err((
+                            "MODEL_NOT_ALLOWED".to_string(),
+                            format!("Model \"{req_model}\" is not in the allowlist."),
+                        ));
+                    }
+                }
+            }
+
+            let parsed: crate::llm::LlmCompleteRequest =
+                serde_json::from_value(req.clone()).map_err(|e| {
+                    (
+                        "INVALID_REQUEST".to_string(),
+                        format!("Failed to parse LLM request: {e}"),
+                    )
+                })?;
+            let resp = client.complete(parsed).map_err(|e| {
+                // Codex P1-M: don't echo provider body to TS handler /
+                // remote caller. The transparent code preserves
+                // useful signal (PROVIDER_HTTP_<n>, PROVIDER_UNREACHABLE,
+                // MODEL_NOT_ALLOWED) but the upstream body — which can
+                // include prompt fragments + provider hints — stays
+                // server-side via tracing only.
+                tracing::warn!(
+                    "[llm] hook complete failed code={} detail={}",
+                    e.code,
+                    e.message
+                );
+                (e.code, sanitized_llm_caller_message(&e.message))
+            })?;
+            serde_json::to_value(&resp).map_err(|e| {
+                (
+                    "SERIALIZE_FAILED".to_string(),
+                    format!("Failed to serialize LLM response: {e}"),
+                )
+            })
+        },
+    ));
+}
+
+/// Caller-facing message for an LLM error. Returns a generic per-
+/// category string instead of the raw provider body — that body may
+/// echo prompt text, request fragments, or hint at the framework's
+/// API key prefix. The TS handler still sees the typed code so
+/// branching logic works.
+fn sanitized_llm_caller_message(_provider_body: &str) -> String {
+    // The error code carries the actionable signal. Body details
+    // stay in the server log (see tracing::warn above).
+    "Upstream LLM provider returned an error. See server logs for details.".to_string()
+}
+
+/// Crate-local convenience: hand back the runtime's single shared
+/// ConnectionManager (or `None` when no connections are declared).
+/// All callers — function hook, HTTP routes — MUST go through this
+/// path so they observe each other's minted state tokens (codex P1).
+pub(crate) fn build_connection_manager(
+    runtime: &Arc<crate::Runtime>,
+) -> Option<Arc<crate::connections::ConnectionManager>> {
+    runtime.connection_manager()
+}
+
+/// Wire `ctx.connections.*` to the runtime's ConnectionManager on a
+/// single runner. The hook reads/writes `_Connection` rows via the
+/// runtime's DataStore impl (which encrypts the token fields).
+fn install_connection_hook(
+    runner: &Arc<FnRunner>,
+    manager: Option<Arc<crate::connections::ConnectionManager>>,
+    runtime: Arc<crate::Runtime>,
+) {
+    use pylon_functions::protocol::AuthInfo;
+    use pylon_http::DataStore as _;
+    runner.set_connection_hook(Box::new(
+        move |op: &str,
+              payload: &serde_json::Value,
+              auth: &AuthInfo|
+              -> Result<serde_json::Value, (String, String)> {
+            let mgr = manager.as_ref().ok_or_else(|| {
+                (
+                    "CONNECTIONS_NOT_CONFIGURED".to_string(),
+                    "No defineConnection(...) entries in the manifest.".to_string(),
+                )
+            })?;
+            let user_id = auth.user_id.as_deref().ok_or_else(|| {
+                (
+                    "CONNECTION_REQUIRES_AUTH".to_string(),
+                    "ctx.connections.* requires an authenticated user.".to_string(),
+                )
+            })?;
+            match op {
+                "authorize_url" => {
+                    let name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            (
+                                "INVALID_REQUEST".to_string(),
+                                "authorize_url requires `name`".to_string(),
+                            )
+                        })?;
+                    let post_redirect = payload
+                        .get("post_redirect")
+                        .and_then(|v| v.as_str());
+                    let url = mgr
+                        .build_auth_url(name, user_id, post_redirect)
+                        .map_err(|e| (e.code().to_string(), e.to_string()))?;
+                    Ok(serde_json::json!({ "url": url }))
+                }
+                "get" => {
+                    let name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            (
+                                "INVALID_REQUEST".to_string(),
+                                "get requires `name`".to_string(),
+                            )
+                        })?
+                        .to_string();
+                    let user = user_id.to_string();
+                    let load_runtime = Arc::clone(&runtime);
+                    let store_runtime = Arc::clone(&runtime);
+                    let load_user = user.clone();
+                    let load_name = name.clone();
+                    let store_user = user.clone();
+                    let store_name = name.clone();
+                    // load_fn is `Fn` (called twice on the slow path:
+                    // once before taking the per-key lock, once
+                    // after). Move the Arcs + strings into a closure
+                    // that captures by reference internally.
+                    let access_token = mgr
+                        .ensure_fresh_token(
+                            &user,
+                            &name,
+                            || load_connection_row(&load_runtime, &load_user, &load_name),
+                            move |row| save_connection_row(&store_runtime, &store_user, &store_name, row),
+                        )
+                        .map_err(|e| (e.code().to_string(), e.to_string()))?;
+                    // Fetch the row again for scope + expires_at.
+                    let row = load_connection_row(&runtime, &user, &name)
+                        .map_err(|e| ("STORAGE_FAILED".to_string(), e))?;
+                    let (scope, expires_at) = row
+                        .map(|r| (r.scope.clone(), r.expires_at))
+                        .unwrap_or((None, None));
+                    Ok(serde_json::json!({
+                        "access_token": access_token,
+                        "scope": scope,
+                        "expires_at": expires_at,
+                    }))
+                }
+                "list" => {
+                    let rows = runtime
+                        .query_filtered("_Connection", &serde_json::json!({ "userId": user_id }))
+                        .map_err(|e| ("STORAGE_FAILED".to_string(), e.message))?;
+                    let summaries: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "name": r.get("name").cloned().unwrap_or(serde_json::Value::Null),
+                                "provider": r.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+                                "scope": r.get("scope").cloned().unwrap_or(serde_json::Value::Null),
+                                "expires_at": r.get("expiresAt").cloned().unwrap_or(serde_json::Value::Null),
+                                "updated_at": r.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::json!({ "connections": summaries }))
+                }
+                "disconnect" => {
+                    let name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            (
+                                "INVALID_REQUEST".to_string(),
+                                "disconnect requires `name`".to_string(),
+                            )
+                        })?;
+                    let id = crate::connections::stable_id(user_id, name);
+                    let _ = runtime.delete("_Connection", &id);
+                    Ok(serde_json::json!({ "disconnected": true }))
+                }
+                other => Err((
+                    "INVALID_REQUEST".to_string(),
+                    format!("Unknown connections op: {other}"),
+                )),
+            }
+        },
+    ));
+}
+
+fn load_connection_row(
+    runtime: &Arc<crate::Runtime>,
+    user_id: &str,
+    name: &str,
+) -> Result<Option<crate::connections::StoredConnection>, String> {
+    let id = crate::connections::stable_id(user_id, name);
+    let row = runtime
+        .get_by_id("_Connection", &id)
+        .map_err(|e| e.message)?;
+    let row = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    Ok(Some(connection_row_from_json(&row, user_id, name)))
+}
+
+fn save_connection_row(
+    runtime: &Arc<crate::Runtime>,
+    user_id: &str,
+    name: &str,
+    row: &crate::connections::StoredConnection,
+) -> Result<(), String> {
+    let id = crate::connections::stable_id(user_id, name);
+    let payload = connection_row_to_json(row);
+    // Upsert: try update first, fall back to insert.
+    let updated = runtime
+        .update("_Connection", &id, &payload)
+        .map_err(|e| e.message)?;
+    if !updated {
+        let mut insert_payload = payload.clone();
+        if let Some(obj) = insert_payload.as_object_mut() {
+            obj.insert("id".into(), serde_json::Value::String(id));
+        }
+        runtime
+            .insert("_Connection", &insert_payload)
+            .map_err(|e| e.message)?;
+    }
+    Ok(())
+}
+
+fn connection_row_to_json(row: &crate::connections::StoredConnection) -> serde_json::Value {
+    serde_json::json!({
+        "userId": row.user_id,
+        "name": row.name,
+        "provider": row.provider,
+        "accessToken": row.access_token,
+        "refreshToken": row.refresh_token,
+        "expiresAt": row.expires_at,
+        "scope": row.scope,
+        "updatedAt": row.updated_at,
+    })
+}
+
+fn connection_row_from_json(
+    row: &serde_json::Value,
+    user_id_fallback: &str,
+    name_fallback: &str,
+) -> crate::connections::StoredConnection {
+    fn opt_str(v: &serde_json::Value, k: &str) -> Option<String> {
+        v.get(k).and_then(|x| x.as_str()).map(String::from)
+    }
+    fn opt_u64(v: &serde_json::Value, k: &str) -> Option<u64> {
+        v.get(k).and_then(|x| x.as_u64())
+    }
+    crate::connections::StoredConnection {
+        id: opt_str(row, "id").unwrap_or_default(),
+        user_id: opt_str(row, "userId").unwrap_or_else(|| user_id_fallback.into()),
+        name: opt_str(row, "name").unwrap_or_else(|| name_fallback.into()),
+        provider: opt_str(row, "provider").unwrap_or_default(),
+        access_token: opt_str(row, "accessToken").unwrap_or_default(),
+        refresh_token: opt_str(row, "refreshToken"),
+        expires_at: opt_u64(row, "expiresAt"),
+        scope: opt_str(row, "scope"),
+        updated_at: opt_u64(row, "updatedAt").unwrap_or(0),
+    }
 }
 
 /// Bridge scheduled function calls (via `ctx.scheduler.runAfter` or
@@ -4840,6 +5177,7 @@ mod hook_enforcing_tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -4851,6 +5189,7 @@ mod hook_enforcing_tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 ..Default::default()
@@ -5215,6 +5554,7 @@ mod auto_broadcast_tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 ..Default::default()
             }],
@@ -5688,6 +6028,7 @@ mod user_projection_broadcast_tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "email".into(),
@@ -5699,6 +6040,7 @@ mod user_projection_broadcast_tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "passwordHash".into(),
@@ -5710,6 +6052,7 @@ mod user_projection_broadcast_tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 ..Default::default()

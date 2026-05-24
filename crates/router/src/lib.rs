@@ -2401,6 +2401,8 @@ mod field_gate_tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -2451,6 +2453,8 @@ mod field_gate_tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let row = serde_json::json!({ "id": "p1", "title": "hi", "body": "there" });
         let out = strip_server_only_fields(&manifest, "PublicPost", row.clone());
@@ -2536,6 +2540,8 @@ mod field_gate_tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let payload = serde_json::json!({ "title": "new" });
         assert!(reject_readonly_payload(
@@ -2831,6 +2837,8 @@ mod auth_gate_tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -4027,6 +4035,8 @@ mod auth_gate_tests {
                 ..Default::default()
             }],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let store = StubDataStore {
             manifest: manifest.clone(),
@@ -4557,6 +4567,8 @@ mod auth_gate_tests {
                 ..Default::default()
             }],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let pub_m = super::public_manifest(&m);
         let p = &pub_m.policies[0];
@@ -4972,6 +4984,8 @@ mod user_projection_tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let store = LeakyUserStore { manifest };
         let (status, body) = handle_get(&store, "User", "u-1");

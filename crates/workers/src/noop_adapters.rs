@@ -448,6 +448,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 ..Default::default()
             }],

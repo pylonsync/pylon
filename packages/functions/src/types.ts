@@ -306,10 +306,175 @@ export interface EmailSender {
 }
 
 // ---------------------------------------------------------------------------
+// LLM — provider-abstracted text/tool-use completion
+// ---------------------------------------------------------------------------
+
+/**
+ * Server-side LLM client. Available on every ctx variant (query,
+ * mutation, action) because agent loops often run as queries —
+ * read tool args from the message, ship the response back.
+ *
+ * Provider is configured at the server boot (PYLON_LLM_PROVIDER +
+ * ANTHROPIC_API_KEY or OPENAI_API_KEY). The wire shape is Anthropic
+ * Messages — OpenAI calls translate at the transport boundary, so
+ * the same caller code works against either provider.
+ *
+ * The framework does NOT expose this surface to the browser; clients
+ * that need streaming should call POST /api/ai/stream directly.
+ * `ctx.llm.complete` is server-only on purpose — the API key never
+ * leaves the runtime process.
+ */
+export interface Llm {
+  /**
+   * Send a completion request to the configured LLM provider. The
+   * shape is Anthropic Messages: a list of {role, content} pairs
+   * where content is either a string or a list of content blocks
+   * (text, tool_use, tool_result). Returns the full response once
+   * the model finishes generating.
+   *
+   * For agent tool-use loops, inspect `response.stopReason` — when
+   * it's `"tool_use"`, append the assistant's content (which
+   * includes the `tool_use` blocks) plus your `tool_result`
+   * follow-ups to the message list and call again. Loop until
+   * `stopReason === "end_turn"`.
+   *
+   * Errors are thrown as standard Error objects with an `err.code`
+   * property set to one of: `LLM_NOT_CONFIGURED`, `MODEL_NOT_ALLOWED`,
+   * `MODEL_OVERRIDE_FORBIDDEN`, `PROVIDER_HTTP_<code>`,
+   * `PROVIDER_UNREACHABLE`, `INVALID_REQUEST`.
+   */
+  complete(request: LlmCompleteRequest): Promise<LlmCompleteResponse>;
+}
+
+export interface LlmMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string | LlmContentBlock[];
+}
+
+export type LlmContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
+  | {
+      type: "tool_result";
+      tool_use_id: string;
+      content: string;
+      is_error?: boolean;
+    };
+
+export interface LlmTool {
+  name: string;
+  description?: string;
+  /** JSON Schema object describing the tool's input shape. */
+  input_schema: Record<string, unknown>;
+}
+
+export interface LlmCompleteRequest {
+  /** Override the server's default model. Subject to
+   *  PYLON_AI_MODELS_ALLOWED gating for non-admin callers. */
+  model?: string;
+  messages: LlmMessage[];
+  system?: string;
+  tools?: LlmTool[];
+  /** Defaults to 4096. */
+  max_tokens?: number;
+  temperature?: number;
+}
+
+export interface LlmCompleteResponse {
+  model: string;
+  content: LlmContentBlock[];
+  /** `end_turn` | `tool_use` | `max_tokens` | `stop_sequence` */
+  stop_reason: string;
+  usage: { input_tokens: number; output_tokens: number };
+}
+
+// ---------------------------------------------------------------------------
+// Connections — per-user OAuth integrations
+// ---------------------------------------------------------------------------
+
+/**
+ * Server-side OAuth connection registry. Apps declare connections
+ * via `defineConnection({...})` in `app.ts`; this surface lets
+ * actions fetch fresh access tokens (auto-refresh) and start the
+ * OAuth dance.
+ *
+ * Available on mutation + action ctx only — connections perform
+ * external I/O (token refresh, DB writes) that doesn't belong
+ * inside a reactive query.
+ *
+ * All ops require an authenticated caller (`ctx.auth.userId !==
+ * null`). Public functions must `ctx.auth.elevate({ admin: true,
+ * reason: "..." })` before reaching `ctx.connections.*`.
+ */
+export interface Connections {
+  /**
+   * Mint the URL the browser should navigate to so the user can
+   * link an external account. `name` matches a `defineConnection({...})`
+   * entry. `postRedirect` (optional) is where the browser lands
+   * after a successful callback — defaults to `/`.
+   *
+   * Throws `CONNECTIONS_NOT_CONFIGURED`, `CONNECTION_UNKNOWN`,
+   * `PROVIDER_NOT_CONFIGURED`, or `ENCRYPTION_REQUIRED` (refresh
+   * tokens are not allowed to land in plaintext).
+   */
+  authorizeUrl(
+    name: string,
+    opts?: { postRedirect?: string }
+  ): Promise<{ url: string }>;
+
+  /**
+   * Returns a fresh access token for `(ctx.auth.userId, name)`. If
+   * the stored token expires within 60s, the framework refreshes
+   * via the provider's refresh-token grant FIRST, persists the new
+   * token pair, then returns the new access token.
+   *
+   * Throws `CONNECTION_NOT_LINKED` when the user hasn't started
+   * the OAuth flow, `REFRESH_FAILED` when the provider rejects
+   * the refresh token (user must re-link).
+   */
+  get(name: string): Promise<{
+    accessToken: string;
+    scope: string | null;
+    expiresAt: number | null;
+  }>;
+
+  /** List the signed-in user's linked connections. Token values
+   *  are NOT included — call `get(name)` for those. */
+  list(): Promise<{
+    connections: Array<{
+      name: string;
+      provider: string;
+      scope: string | null;
+      expiresAt: number | null;
+      updatedAt: number;
+    }>;
+  }>;
+
+  /** Remove the stored connection. Provider-side revocation is
+   *  the caller's responsibility — most providers expose a separate
+   *  `/revoke` endpoint that this surface intentionally doesn't
+   *  call (revoke vs unlink semantics differ per provider). */
+  disconnect(name: string): Promise<{ disconnected: boolean }>;
+}
+
+// ---------------------------------------------------------------------------
 // Context objects — what handlers receive
 // ---------------------------------------------------------------------------
 
-/** Context for query handlers (read-only). */
+/** Context for query handlers (read-only).
+ *
+ * NOTE: `ctx.llm` is NOT exposed here. Queries are reactive: a
+ * subscribed query re-runs whenever its `ctx.db.*` reads change.
+ * Calling a stochastic, paid LLM from a query would (a) silently
+ * burn the framework's API key on every dep invalidation, and
+ * (b) violate the reactive purity contract (same inputs → same
+ * outputs). LLM calls belong in mutations (transactional) or
+ * actions (external I/O). */
 export interface QueryCtx<R extends AuthRequirement = "optional"> {
   db: DbReader;
   auth: AuthInfo<R>;
@@ -325,6 +490,10 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   scheduler: Scheduler;
   /** Environment variables / secrets. */
   env: Record<string, string>;
+  /** Provider-abstracted LLM client. */
+  llm: Llm;
+  /** Per-user OAuth connection registry. */
+  connections: Connections;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
 }
@@ -336,6 +505,10 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   scheduler: Scheduler;
   /** Send transactional email via the runtime's configured provider. */
   email: EmailSender;
+  /** Provider-abstracted LLM client. */
+  llm: Llm;
+  /** Per-user OAuth connection registry. */
+  connections: Connections;
   /** Environment variables / secrets. */
   env: Record<string, string>;
   /** Run a registered query within its own read transaction. */

@@ -112,6 +112,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -123,6 +124,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                     ],
                 },
@@ -138,10 +140,13 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     }],
                 },
             ],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -185,6 +190,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "y".into(),
@@ -196,6 +202,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
         };

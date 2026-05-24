@@ -528,6 +528,8 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         actions: vec![],
         policies: vec![],
         auth: Default::default(),
+        llm: Default::default(),
+        connections: vec![],
     }
 }
 

@@ -27,6 +27,7 @@ fn field(name: &str, ty: &str) -> ManifestField {
         readonly: false,
         default: None,
         enum_values: None,
+        encrypted: false,
     }
 }
 
@@ -68,6 +69,8 @@ fn merge_manifest() -> AppManifest {
         actions: vec![],
         policies: vec![],
         auth: Default::default(),
+        llm: Default::default(),
+        connections: vec![],
     }
 }
 

@@ -26,6 +26,12 @@ pub(crate) fn handle(
         let rest_no_qs = rest.split('?').next().unwrap_or(rest);
         if let Some(entity_name) = rest_no_qs.strip_suffix("/cursor") {
             if method == HttpMethod::Get {
+                // Codex P1: same underscore-prefix gate as below —
+                // framework-managed entities are admin-only on the
+                // entity REST surface.
+                if entity_name.starts_with('_') && !ctx.auth_ctx.is_admin {
+                    return Some((404, json_error("NOT_FOUND", "Entity not found")));
+                }
                 // Scan-aware pre-check: hard-deny policies (`"false"`
                 // or default-deny) still 403 here. Data-dependent
                 // predicates (anything referencing `data.X`) are
@@ -302,6 +308,16 @@ pub(crate) fn handle(
         let segments: Vec<&str> = path.splitn(2, '/').collect();
         let entity_name = segments[0];
         let entity_id = segments.get(1).filter(|s| !s.is_empty()).copied();
+
+        // Codex P1: underscore-prefix entities are framework-managed
+        // (`_Connection`, `_PylonJobs`, etc.). The policy layer
+        // bypasses them as "internal scaffolding" — but the entity
+        // REST surface still mounts them, so a SELECT cursor
+        // enumerates every user's connection metadata. Gate the
+        // surface to admin-only at the route edge.
+        if entity_name.starts_with('_') && !ctx.auth_ctx.is_admin {
+            return Some((404, json_error("NOT_FOUND", "Entity not found")));
+        }
 
         // Parse body up-front for POST/PATCH so the policy can see
         // incoming data. Parse errors short-circuit to 400 before the

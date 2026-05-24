@@ -32,6 +32,8 @@ fn empty_manifest() -> AppManifest {
         actions: vec![],
         policies: vec![],
         auth: Default::default(),
+        llm: Default::default(),
+        connections: vec![],
     }
 }
 
@@ -50,6 +52,7 @@ fn fresh_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "name".into(),
@@ -61,6 +64,7 @@ fn fresh_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
             indexes: vec![],
@@ -221,6 +225,7 @@ fn typed_columns_roundtrip_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "active".into(),
@@ -232,6 +237,7 @@ fn typed_columns_roundtrip_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "score".into(),
@@ -243,6 +249,7 @@ fn typed_columns_roundtrip_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "ownerId".into(),
@@ -254,6 +261,7 @@ fn typed_columns_roundtrip_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
             indexes: vec![],
@@ -440,6 +448,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -472,6 +481,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -530,6 +540,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -557,6 +568,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -606,6 +618,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "createdAt".into(),
@@ -617,6 +630,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "verifiedAt".into(),
@@ -628,6 +642,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
             indexes: vec![],
@@ -775,6 +790,7 @@ fn crdt_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "body".into(),
@@ -786,6 +802,7 @@ fn crdt_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
             indexes: vec![],
@@ -934,6 +951,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "description".into(),
@@ -945,6 +963,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
                 ManifestField {
                     name: "brand".into(),
@@ -956,6 +975,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 },
             ],
             indexes: vec![],

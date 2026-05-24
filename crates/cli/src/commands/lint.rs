@@ -424,6 +424,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         }
     }
 
@@ -449,6 +450,8 @@ mod tests {
             actions: vec![],
             policies,
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 

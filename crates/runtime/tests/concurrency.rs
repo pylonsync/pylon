@@ -35,6 +35,7 @@ fn counter_manifest() -> AppManifest {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -46,6 +47,8 @@ fn counter_manifest() -> AppManifest {
         actions: vec![],
         policies: vec![],
         auth: Default::default(),
+        llm: Default::default(),
+        connections: vec![],
     }
 }
 

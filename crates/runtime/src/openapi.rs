@@ -620,6 +620,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "age".into(),
@@ -631,6 +632,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "score".into(),
@@ -642,6 +644,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "active".into(),
@@ -653,6 +656,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "createdAt".into(),
@@ -664,6 +668,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "bio".into(),
@@ -675,6 +680,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                     ],
                     indexes: vec![ManifestIndex {
@@ -700,6 +706,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -711,6 +718,7 @@ mod tests {
                             readonly: false,
                             default: None,
                             enum_values: None,
+                            encrypted: false,
                         },
                     ],
                     indexes: vec![],
@@ -734,6 +742,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "notify".into(),
@@ -745,11 +754,14 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
             }],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -948,6 +960,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let spec = generate_openapi(&manifest, "");
 

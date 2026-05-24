@@ -50,6 +50,12 @@ ureq = { workspace = true }
 # socket without going back through tungstenite's accept path.
 sha1 = { workspace = true }
 base64 = { workspace = true }
+# AEAD (ChaCha20-Poly1305) for field.encrypted() at-rest encryption.
+# Ring is already used by pylon-auth; same dep, no new system requirements.
+ring = { workspace = true }
+# SHA-256 for ctx.connections.* stable id (hash of user+connection
+# name fits Pylon's 40-char id constraint).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

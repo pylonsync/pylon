@@ -271,6 +271,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }
         }
         AppManifest {
@@ -316,6 +317,8 @@ mod tests {
                 input: vec![f("title", "string", false), f("done", "bool", true)],
             }],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 

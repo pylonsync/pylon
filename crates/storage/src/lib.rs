@@ -739,6 +739,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -750,6 +751,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -814,6 +817,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = adapter.plan_schema(&manifest).unwrap();
         assert!(plan.is_empty());
@@ -835,6 +840,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -880,6 +886,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -1066,6 +1073,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.is_empty());
@@ -1110,6 +1119,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "name".into(),
@@ -1121,6 +1131,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 indexes: vec![],
@@ -1133,6 +1144,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.operations.iter().any(|op| matches!(op, SchemaOperation::AddField { entity, field } if entity == "User" && field.name == "name")));
@@ -1176,6 +1189,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 indexes: vec![ManifestIndex {
                     name: "by_email".into(),
@@ -1192,6 +1206,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan
@@ -1263,6 +1279,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "plan".into(),
@@ -1274,6 +1291,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -1291,6 +1309,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
 
@@ -1365,6 +1385,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 // Manifest dropped the old_idx entry.
                 indexes: vec![],
@@ -1377,6 +1398,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(
@@ -1429,6 +1452,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         let drops_pkey = plan.operations.iter().any(|op| {

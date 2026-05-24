@@ -1619,6 +1619,8 @@ mod tests {
             actions: vec![],
             policies: vec![owner_read_todos, authenticated_create, owner_toggle],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -1692,6 +1694,8 @@ mod tests {
                 ..Default::default()
             }],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let engine = PolicyEngine::from_manifest(&m);
         let user = AuthContext::authenticated("user-1".into());
@@ -1738,6 +1742,8 @@ mod tests {
                 ..Default::default()
             }],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
         let engine = PolicyEngine::from_manifest(&m);
         let anon = AuthContext::anonymous();

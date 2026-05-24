@@ -118,6 +118,40 @@ pub struct AppManifest {
     /// `auth({...})` block in app.ts still work.
     #[serde(default)]
     pub auth: ManifestAuthConfig,
+    /// App-level LLM configuration. Selects the provider + default
+    /// model used by `ctx.llm.complete` and `/api/llm/complete` when
+    /// the env doesn't already pin them.
+    ///
+    /// Defaults to `LlmProviderName::None` — apps that don't declare
+    /// an `llm({...})` block get the missing-config gap surface
+    /// (`LLM_NOT_CONFIGURED`) instead of silently no-op'ing.
+    #[serde(default, skip_serializing_if = "ManifestLlmConfig::is_default")]
+    pub llm: ManifestLlmConfig,
+    /// External OAuth integrations declared via `defineConnection({...})`.
+    /// Each entry adds a `ctx.connections.<name>` surface for
+    /// server-side actions to fetch OAuth-protected resources on
+    /// behalf of the signed-in user. Token storage uses the auto-
+    /// created `_Connection` entity (AEAD-encrypted at rest).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<ManifestConnection>,
+}
+
+/// One external OAuth integration. Emitted by the SDK's
+/// `defineConnection({...})` factory in app.ts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestConnection {
+    /// App-facing key — `ctx.connections.get("google")` matches on
+    /// this. Different connections can target the same provider
+    /// with different scopes (e.g. "google-calendar" vs "google-drive").
+    pub name: String,
+    /// Provider identifier the runtime's OAuth client understands —
+    /// matches `pylon-auth`'s built-in provider list (`google`,
+    /// `github`, `slack`, `microsoft`, `notion`, etc.) or an
+    /// `oidc:` prefix for generic OIDC discovery.
+    pub provider: String,
+    /// Whitespace-separated scopes. Empty = the provider's default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scopes: String,
 }
 
 /// Pylon's auth configuration block — emitted by the SDK's
@@ -313,6 +347,46 @@ fn default_cookie_cache_max_age() -> u64 {
     5 * 60
 }
 
+// ---------------------------------------------------------------------------
+// LLM configuration
+// ---------------------------------------------------------------------------
+
+/// App-level LLM provider config. Emitted by the SDK's `llm({...})`
+/// factory in app.ts. All fields optional; environment variables
+/// (`PYLON_LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+/// `PYLON_LLM_MODEL`) take precedence so operators can override per
+/// deploy without redeploying the app bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManifestLlmConfig {
+    /// Provider name. `None` = no manifest preference; the runtime
+    /// falls back to env detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<LlmProviderName>,
+    /// Default model name (e.g. `claude-sonnet-4-5`, `gpt-4o`). When
+    /// set + the caller doesn't supply an explicit `model`, requests
+    /// use this. Overridden by `PYLON_LLM_MODEL` env.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// Optional allowlist of models callers may request via the
+    /// `model` field. Same gate as `PYLON_AI_MODELS_ALLOWED` env;
+    /// the manifest list is merged with whatever env carries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_models: Vec<String>,
+}
+
+impl ManifestLlmConfig {
+    pub fn is_default(&self) -> bool {
+        self.provider.is_none() && self.default_model.is_none() && self.allowed_models.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmProviderName {
+    Anthropic,
+    Openai,
+}
+
 fn default_cookie_cache_claims() -> Vec<String> {
     vec!["is_admin".into(), "tenant_id".into()]
 }
@@ -458,6 +532,23 @@ pub struct ManifestField {
         skip_serializing_if = "Option::is_none"
     )]
     pub enum_values: Option<Vec<String>>,
+    /// `true` when the TS def used `field.X().encrypted()`. The
+    /// framework AEAD-encrypts the value before SQLite/Postgres
+    /// persistence and decrypts on read. The plaintext only exists
+    /// in memory inside the Pylon process; a hot-copy of the DB file
+    /// or a compromised SQL dump exposes only ciphertext.
+    ///
+    /// Backed by `PYLON_ENCRYPTION_KEY` (32-byte URL-safe base64 key).
+    /// AEAD = ChaCha20-Poly1305. Per-cell random nonce stored alongside
+    /// the ciphertext. Wire format: `enc:v1:<base64(nonce)>:<base64(ct)>`.
+    ///
+    /// Only valid for `string`/`text`/`json` field types. Booleans, ints,
+    /// timestamps stay queryable + indexable. Indexed encrypted fields
+    /// only support exact match via deterministic encryption (future
+    /// work); for now, encrypted fields with `unique: true` are
+    /// rejected at manifest validation.
+    #[serde(default, rename = "encrypted", skip_serializing_if = "is_false_ref")]
+    pub encrypted: bool,
 }
 
 fn is_false_ref(b: &bool) -> bool {
@@ -480,6 +571,7 @@ impl Default for ManifestField {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         }
     }
 }

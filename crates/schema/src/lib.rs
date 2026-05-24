@@ -1213,6 +1213,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
@@ -1413,6 +1414,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
         }];
         let diags = validate(&s);
@@ -1436,6 +1438,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
         }];
         let diags = validate(&s);
@@ -1470,6 +1473,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
             }],
             actions: vec![],
@@ -1513,6 +1517,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         }
     }
 
@@ -1593,6 +1598,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 

@@ -462,6 +462,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -491,6 +493,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         }
     }
 

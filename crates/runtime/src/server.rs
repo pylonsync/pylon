@@ -635,6 +635,12 @@ fn start_server(
         .unwrap_or(3600);
     let ai_rate_limiter = Arc::new(RateLimiter::new(ai_rl_max, ai_rl_window));
 
+    // LlmClient built once at boot — env reads + ureq agent
+    // construction (with connection pooling) happen here. The route
+    // below reuses the same Arc per request. Codex P1-2.
+    let llm_client_route: Option<crate::llm::LlmClient> =
+        crate::llm::LlmClient::from_env_with_manifest(Some(&runtime.manifest().llm));
+
     // Cluster bus: enables horizontal scaling. When PYLON_CLUSTER_BUS
     // points at a Redis URL, every change event / presence relay /
     // CRDT frame from this machine gets published; peer pylon
@@ -3540,6 +3546,476 @@ fn start_server(
                 mt.record_request("POST", 200);
                 continue;
             }
+        }
+
+        // --- POST /api/connections/<name>/auth-url ---
+        //
+        // Authed-only. Mints a CSRF state token, persists payload,
+        // returns the URL the browser should navigate to. The
+        // user's OAuth consent flow then redirects to /callback.
+        if method == Method::Post
+            && url.starts_with("/api/connections/")
+            && url.ends_with("/auth-url")
+        {
+            if auth_ctx.user_id.is_none() {
+                let err = json_error(
+                    "AUTH_REQUIRED",
+                    "/api/connections/*/auth-url requires an authenticated session",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&err)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 401);
+                continue;
+            }
+            let name = url
+                .trim_start_matches("/api/connections/")
+                .trim_end_matches("/auth-url");
+            let post_redirect = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.get("post_redirect")
+                        .and_then(|p| p.as_str())
+                        .map(String::from)
+                });
+            let mgr = match crate::datastore::build_connection_manager(&runtime) {
+                Some(m) => m,
+                None => {
+                    let err = json_error(
+                        "CONNECTIONS_NOT_CONFIGURED",
+                        "No defineConnection(...) entries in the manifest.",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 503);
+                    continue;
+                }
+            };
+            let result = mgr.build_auth_url(
+                name,
+                auth_ctx.user_id.as_deref().unwrap_or(""),
+                post_redirect.as_deref(),
+            );
+            let (status, body) = match result {
+                Ok(u) => (200u16, serde_json::json!({"url": u}).to_string()),
+                Err(e) => {
+                    let code = e.code();
+                    let status = match code {
+                        "CONNECTION_UNKNOWN" => 404,
+                        "PROVIDER_NOT_CONFIGURED" => 503,
+                        "ENCRYPTION_REQUIRED" => 503,
+                        _ => 400,
+                    };
+                    (status, json_error(code, &e.to_string()))
+                }
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", status);
+            continue;
+        }
+
+        // --- GET /api/connections/<name>/callback?code=...&state=... ---
+        //
+        // Called by the OAuth provider after consent. No prior auth
+        // session — the user might land here in an unauth'd
+        // incognito window — so the state token serves as the only
+        // identity binding (mapped back to user_id via the state
+        // payload). On success: stores the row + redirects to the
+        // app-supplied post-callback URL or `/`.
+        if method == Method::Get
+            && url.starts_with("/api/connections/")
+            && url.contains("/callback")
+        {
+            let path_no_query = url.split('?').next().unwrap_or(&url);
+            let name = path_no_query
+                .trim_start_matches("/api/connections/")
+                .trim_end_matches("/callback");
+            let qs = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let mut code: Option<String> = None;
+            let mut state: Option<String> = None;
+            for pair in qs.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    let decoded = percent_decode_str(v);
+                    match k {
+                        "code" => code = Some(decoded),
+                        "state" => state = Some(decoded),
+                        _ => {}
+                    }
+                }
+            }
+            let mgr = match crate::datastore::build_connection_manager(&runtime) {
+                Some(m) => m,
+                None => {
+                    let err = json_error(
+                        "CONNECTIONS_NOT_CONFIGURED",
+                        "No defineConnection(...) entries in the manifest.",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 503);
+                    continue;
+                }
+            };
+            let (code, state) = match (code, state) {
+                (Some(c), Some(s)) => (c, s),
+                _ => {
+                    let err = json_error(
+                        "MISSING_PARAMS",
+                        "Callback requires both `code` and `state`",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 400);
+                    continue;
+                }
+            };
+            let runtime_for_store = Arc::clone(&runtime);
+            let _name_owned = name.to_string();
+            let outcome = mgr.complete_callback(&code, &state, move |row| {
+                let id = crate::connections::stable_id(&row.user_id, &row.name);
+                let payload = serde_json::json!({
+                    "id": id.clone(),
+                    "userId": row.user_id,
+                    "name": row.name,
+                    "provider": row.provider,
+                    "accessToken": row.access_token,
+                    "refreshToken": row.refresh_token,
+                    "expiresAt": row.expires_at,
+                    "scope": row.scope,
+                    "updatedAt": row.updated_at,
+                });
+                let updated = runtime_for_store
+                    .update("_Connection", &id, &payload)
+                    .map_err(|e| e.message)?;
+                if !updated {
+                    runtime_for_store
+                        .insert("_Connection", &payload)
+                        .map_err(|e| e.message)?;
+                }
+                Ok(())
+            });
+            let (status, location, body): (u16, Option<String>, String) = match outcome {
+                Ok(o) => {
+                    // Defense-in-depth: even though build_auth_url
+                    // validated post_redirect before minting state,
+                    // re-validate here. If the state row was tampered,
+                    // refuse to honor a foreign-origin redirect.
+                    let redirect = if o.post_redirect.is_empty()
+                        || !crate::connections::is_safe_relative_redirect(&o.post_redirect)
+                    {
+                        "/".to_string()
+                    } else {
+                        o.post_redirect.clone()
+                    };
+                    (302, Some(redirect), String::new())
+                }
+                Err(e) => {
+                    let status = match e.code() {
+                        "AUTH_FAILED" => 400,
+                        "CONNECTION_UNKNOWN" => 404,
+                        "PROVIDER_NOT_CONFIGURED" => 503,
+                        "ENCRYPTION_REQUIRED" => 503,
+                        _ => 400,
+                    };
+                    (status, None, json_error(e.code(), &e.to_string()))
+                }
+            };
+            let mut resp = Response::from_string(&body).with_status_code(status);
+            if let Some(loc) = location.as_deref() {
+                resp = resp.with_header(Header::from_bytes("Location", loc.as_bytes()).unwrap());
+            }
+            resp =
+                resp.with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+            let response = with_security_headers(resp);
+            let _ = request.respond(response);
+            mt.record_request("GET", status);
+            continue;
+        }
+
+        // --- POST /api/llm/complete — non-streaming LLM completion ---
+        //
+        // Anthropic-shaped JSON in/out. Supports tool_use loops via
+        // content blocks. Same auth + rate-limit + model-allowlist
+        // gates as /api/ai/stream — clients that already authed for
+        // streaming can use this when they don't need progressive
+        // output (sync agent loops, batch jobs).
+        if url == "/api/llm/complete" && method == Method::Post {
+            if auth_ctx.user_id.is_none() {
+                let err = json_error(
+                    "AUTH_REQUIRED",
+                    "/api/llm/complete requires an authenticated session",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&err)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 401);
+                continue;
+            }
+            let ai_identity = auth_ctx.user_id.as_deref().unwrap_or(&peer_ip);
+            if !auth_ctx.is_admin {
+                if let Err(retry_after) = ai_rate_limiter.check(ai_identity) {
+                    let body = format!(
+                        r#"{{"error":{{"code":"RATE_LIMITED","message":"AI requests rate limit exceeded","retry_after_secs":{retry_after}}}}}"#
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&body)
+                            .with_status_code(429u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 429);
+                    continue;
+                }
+            }
+            let client = match llm_client_route.clone() {
+                Some(c) => c,
+                None => {
+                    let err = json_error(
+                        "LLM_NOT_CONFIGURED",
+                        "Set PYLON_LLM_PROVIDER + ANTHROPIC_API_KEY (or OPENAI_API_KEY)",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 503);
+                    continue;
+                }
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => {
+                    let err = json_error("INVALID_JSON", "Invalid request body");
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    continue;
+                }
+            };
+            // Model-allowlist gate — env + manifest merged (codex P1-1).
+            if let Some(req_model) = parsed.get("model").and_then(|m| m.as_str()) {
+                if !req_model.is_empty() && !auth_ctx.is_admin {
+                    let env_allowed = std::env::var("PYLON_AI_MODELS_ALLOWED").unwrap_or_default();
+                    let mut allowed_set: std::collections::HashSet<String> = env_allowed
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    for m in client.manifest_allowed_models() {
+                        allowed_set.insert(m.clone());
+                    }
+                    if allowed_set.is_empty() {
+                        let err = json_error(
+                            "MODEL_OVERRIDE_FORBIDDEN",
+                            "Client model override requires PYLON_AI_MODELS_ALLOWED env or llm({ allowedModels: [...] }) in the manifest",
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(403u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 403);
+                        continue;
+                    }
+                    if !allowed_set.contains(req_model) {
+                        let err = json_error(
+                            "MODEL_NOT_ALLOWED",
+                            &format!("Model \"{req_model}\" is not in the allowlist"),
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(403u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 403);
+                        continue;
+                    }
+                }
+            }
+            let req_obj: crate::llm::LlmCompleteRequest = match serde_json::from_value(parsed) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = json_error(
+                        "INVALID_REQUEST",
+                        &format!("Failed to parse LLM request: {e}"),
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    continue;
+                }
+            };
+            let (status, body) = match client.complete(req_obj) {
+                Ok(resp) => (200u16, serde_json::to_string(&resp).unwrap_or_default()),
+                Err(e) => {
+                    // Codex P2-E: a provider 401 must NOT propagate as
+                    // 401 to the caller — they'd assume their auth is
+                    // wrong, not the server's API key. All upstream
+                    // errors map to 502 Bad Gateway (or 504 on
+                    // timeouts) with the typed code preserved in the
+                    // JSON body. Caller still gets actionable signal.
+                    // Codex P1-M: caller never sees the redacted
+                    // provider body — that stays in server logs.
+                    let status_code = if e.code == "PROVIDER_UNREACHABLE" {
+                        504
+                    } else if e.code.starts_with("PROVIDER_HTTP_") {
+                        502
+                    } else {
+                        500
+                    };
+                    tracing::warn!(
+                        "[llm] /api/llm/complete upstream error code={} detail={}",
+                        e.code,
+                        e.message
+                    );
+                    (
+                        status_code,
+                        json_error(&e.code, "Upstream LLM provider returned an error"),
+                    )
+                }
+            };
+            let response = with_security_headers(
+                Response::from_string(&body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", status);
+            continue;
         }
 
         // --- POST /api/ai/stream — SSE streaming AI completion ---

@@ -1328,6 +1328,7 @@ mod tests {
                     readonly: false,
                     default: None,
                     enum_values: None,
+                    encrypted: false,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -1344,6 +1345,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -1397,6 +1400,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         });
         let changes = compute_diff(&old, &new);
         assert!(changes.iter().any(|c| c.kind == "field_added"

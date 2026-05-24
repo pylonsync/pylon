@@ -2148,6 +2148,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         };
         AppManifest {
             manifest_version: 1,
@@ -2190,6 +2191,8 @@ mod tests {
             policies: vec![],
             routes: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 

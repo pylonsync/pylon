@@ -96,6 +96,29 @@ export interface FieldDefinition {
    * Server code is trusted to enforce its own invariants.
    */
   readonly?: boolean;
+  /**
+   * When true, the field is AEAD-encrypted at rest. The framework
+   * encrypts the value before writing to SQLite/Postgres and
+   * decrypts on read. Cipher: ChaCha20-Poly1305. Key:
+   * `PYLON_ENCRYPTION_KEY` env (32 bytes, hex or base64).
+   *
+   * Use for PII / secrets that must survive a DB-file leak: API
+   * keys stored on rows, social security numbers, OAuth tokens.
+   * Plaintext only exists inside the Pylon process.
+   *
+   * Restrictions:
+   * - Encrypted fields are NOT queryable. `ctx.db.lookup` /
+   *   `WHERE encryptedField = 'x'` always returns nothing because
+   *   each write produces fresh ciphertext.
+   * - Cannot combine with `unique: true`.
+   * - Valid only on `string`, `richtext`, and JSON-shaped fields.
+   *
+   * Decryption pre-pass means rows written BEFORE the field was
+   * annotated `encrypted: true` continue to read fine (passes
+   * through as plaintext). Next write through the mutation
+   * pipeline upgrades them to ciphertext.
+   */
+  encrypted?: boolean;
 }
 
 interface FieldBuilder {
@@ -131,6 +154,16 @@ interface FieldBuilder {
    * closes the IDOR-via-update-payload class.
    */
   readonly(): FieldBuilder;
+  /**
+   * Mark the field as AEAD-encrypted at rest. See
+   * [`FieldDefinition.encrypted`] for the full semantics +
+   * restrictions.
+   *
+   * Example: `apiKey: field.string().serverOnly().encrypted()`
+   * keeps the key out of HTTP responses AND encrypts the bytes
+   * sitting in SQLite.
+   */
+  encrypted(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -154,6 +187,9 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     readonly() {
       return buildField({ ...def, readonly: true });
+    },
+    encrypted() {
+      return buildField({ ...def, encrypted: true });
     },
   };
 }
@@ -405,6 +441,9 @@ export interface ManifestField {
    *  reject out-of-set inserts. Plain `field.string()` doesn't
    *  carry this; only `field.enum()`. */
   enumValues?: readonly string[];
+  /** Set when the field is `field.X().encrypted()` — AEAD-encrypted
+   *  at rest. See [`FieldDefinition.encrypted`]. */
+  encrypted?: boolean;
 }
 
 export interface ManifestIndex {
@@ -487,6 +526,11 @@ export interface AppManifest {
   actions: ManifestAction[];
   policies: ManifestPolicy[];
   auth?: ManifestAuthConfig;
+  /** App-level LLM provider config. Optional — env wins when set. */
+  llm?: ManifestLlmConfig;
+  /** Declared OAuth integrations. Auto-creates the `_Connection`
+   *  entity at runtime boot. */
+  connections?: ManifestConnection[];
 }
 
 export function entitiesToManifest(
@@ -513,6 +557,9 @@ export function entitiesToManifest(
         }
         if (fb._def.readonly) {
           f.readonly = true;
+        }
+        if (fb._def.encrypted) {
+          f.encrypted = true;
         }
         // `default` + `enumValues` are surfaced on the fluent
         // FieldBuilder via the v0.4 SDK. Read off the private
@@ -735,6 +782,127 @@ export type AuthConfig = {
   trustedOrigins?: string[];
 };
 
+// ---------------------------------------------------------------------------
+// LLM provider configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Developer-facing camelCase config consumed by the `llm({...})`
+ * factory. All fields optional; environment variables
+ * (`PYLON_LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+ * `PYLON_LLM_MODEL`) take precedence so operators can override per
+ * deploy without redeploying the bundle.
+ */
+export type LlmConfig = {
+  /** Provider name. Default: env detection. */
+  provider?: "anthropic" | "openai";
+  /** Default model when the caller doesn't pass `model`. */
+  defaultModel?: string;
+  /**
+   * Allowlist of models callers may request via the `model` field.
+   * Empty = no extra allowance beyond what `PYLON_AI_MODELS_ALLOWED`
+   * env provides. Non-admin callers can't request models outside
+   * this list.
+   */
+  allowedModels?: string[];
+};
+
+export type ManifestLlmConfig = {
+  provider?: "anthropic" | "openai";
+  default_model?: string;
+  allowed_models?: string[];
+};
+
+// ---------------------------------------------------------------------------
+// Connection (per-user OAuth integrations)
+// ---------------------------------------------------------------------------
+
+/**
+ * Developer-facing config for `defineConnection({...})`. Each entry
+ * adds a `ctx.connections.<name>` surface to mutation + action ctx
+ * (server-side OAuth tokens, never visible to the browser).
+ *
+ * `provider` selects the OAuth client wire shape from pylon-auth's
+ * built-in list (`google`, `github`, `slack`, `microsoft`, etc.).
+ * `name` is the app-facing key — different connections can target
+ * the same provider with different scopes
+ * (e.g. `google-calendar` vs `google-drive`).
+ *
+ * Configuration: per-provider client id + secret come from env
+ * (`PYLON_OAUTH_<PROVIDER>_CLIENT_ID`, `PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET`).
+ * Callback URL is derived from `PYLON_PUBLIC_URL` +
+ * `/api/connections/<name>/callback`.
+ *
+ * Storage: the framework auto-creates a `_Connection` entity at
+ * boot when any connection is declared; token fields are AEAD-
+ * encrypted at rest (`PYLON_ENCRYPTION_KEY` is REQUIRED — boot
+ * fails without it when connections are declared).
+ */
+export type ConnectionConfig = {
+  /** App-facing key. `ctx.connections.get(name)` matches on this. */
+  name: string;
+  /** Provider identifier matching pylon-auth's OAuth client. */
+  provider: string;
+  /** Whitespace-separated scopes. Empty = provider default. */
+  scopes?: string;
+};
+
+export type ManifestConnection = {
+  name: string;
+  provider: string;
+  scopes?: string;
+};
+
+/**
+ * Declare a server-side OAuth integration. Returns the manifest
+ * entry the runtime parses. Re-exported through `app.ts`:
+ *
+ * ```ts
+ * import { defineConnection } from "@pylonsync/sdk";
+ *
+ * export const googleConn = defineConnection({
+ *   name: "google",
+ *   provider: "google",
+ *   scopes: "email profile https://www.googleapis.com/auth/calendar.readonly",
+ * });
+ * ```
+ *
+ * `buildManifest({ connections: [googleConn] })` carries this into
+ * the manifest; the runtime auto-creates the `_Connection` entity
+ * and exposes `ctx.connections.get("google")` to actions.
+ */
+export function defineConnection(cfg: ConnectionConfig): ManifestConnection {
+  return {
+    name: cfg.name,
+    provider: cfg.provider,
+    ...(cfg.scopes ? { scopes: cfg.scopes } : {}),
+  };
+}
+
+/**
+ * Build the manifest's `llm` block from the user-facing camelCase
+ * config. Returns the snake_case shape the Rust runtime parses.
+ *
+ * ```ts
+ * export default {
+ *   llm: llm({
+ *     provider: "anthropic",
+ *     defaultModel: "claude-sonnet-4-5",
+ *     allowedModels: ["claude-sonnet-4-5", "claude-haiku-4-5"],
+ *   }),
+ * }
+ * ```
+ */
+export function llm(cfg: LlmConfig = {}): ManifestLlmConfig {
+  const out: ManifestLlmConfig = {};
+  if (cfg.provider) out.provider = cfg.provider;
+  if (cfg.defaultModel) out.default_model = cfg.defaultModel;
+  if (cfg.allowedModels && cfg.allowedModels.length > 0) {
+    out.allowed_models = cfg.allowedModels;
+  }
+  return out;
+}
+
 export type ManifestAuthConfig = {
   user: {
     entity: string;
@@ -801,6 +969,8 @@ export function buildManifest(options: {
   actions?: ActionDefinition[];
   policies?: PolicyDefinition[];
   auth?: ManifestAuthConfig;
+  llm?: ManifestLlmConfig;
+  connections?: ManifestConnection[];
 }): AppManifest {
   // Pull policies attached via the fluent `e.entity().policies(...)`
   // chain onto the top-level policies list. Without this, fluent
@@ -839,6 +1009,12 @@ export function buildManifest(options: {
     actions: actionsToManifest(options.actions ?? []),
     policies: policiesToManifest(allPolicies),
     auth: options.auth ?? auth(),
+    ...(options.llm && Object.keys(options.llm).length > 0
+      ? { llm: options.llm }
+      : {}),
+    ...(options.connections && options.connections.length > 0
+      ? { connections: options.connections }
+      : {}),
   };
 }
 
@@ -1048,6 +1224,9 @@ function buildFieldWithDefaults(
     },
     readonly() {
       return buildFieldWithDefaults({ ...def, readonly: true });
+    },
+    encrypted() {
+      return buildFieldWithDefaults({ ...def, encrypted: true });
     },
     default(value: unknown) {
       return buildFieldWithDefaults({

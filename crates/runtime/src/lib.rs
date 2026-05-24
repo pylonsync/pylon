@@ -4,11 +4,14 @@ pub mod audit_backend;
 pub mod cache_handlers;
 pub mod cache_server;
 pub mod config;
+pub mod connections;
 pub mod cron;
 pub mod datastore;
+pub mod encryption;
 pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
+pub mod llm;
 pub mod log;
 pub mod log_ring;
 pub mod loro_store;
@@ -71,6 +74,142 @@ pub fn bind_dual_stack_tcp(port: u16) -> Result<TcpListener, std::io::Error> {
 
 use pylon_kernel::{AppManifest, ManifestEntity, StudioConfig};
 use rusqlite::Connection;
+
+// ---------------------------------------------------------------------------
+// Encryption helpers — used by Runtime constructors + Runtime methods that
+// touch encrypted fields (insert/update/get_by_id/list/list_after/lookup).
+// ---------------------------------------------------------------------------
+
+/// Build `entity → [encrypted field names]` from the manifest. Called
+/// once per `Runtime::open` and cached. Entities with no encrypted
+/// fields don't appear; lookup is `Option<&Vec<String>>`.
+fn encryption_field_map(
+    entities: &HashMap<String, ManifestEntity>,
+) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for (name, entity) in entities {
+        let enc: Vec<String> = entity
+            .fields
+            .iter()
+            .filter(|f| f.encrypted)
+            .map(|f| f.name.clone())
+            .collect();
+        if !enc.is_empty() {
+            out.insert(name.clone(), enc);
+        }
+    }
+    out
+}
+
+/// Load the `PYLON_ENCRYPTION_KEY` env. Returns:
+/// - `Ok(None)` when the env is unset (apps without encrypted fields)
+/// - `Ok(Some(key))` when the env decodes to a valid 32-byte key
+/// - `Err(RuntimeError)` when the env is set but malformed —
+///   FAILS BOOT. Codex called out that the previous "log + continue"
+///   behavior shipped a process that looks healthy but rejects
+///   every encrypted-field write at runtime.
+fn load_encryption_key() -> Result<Option<encryption::EncryptionKey>, RuntimeError> {
+    encryption::EncryptionKey::from_env().map_err(|e| RuntimeError {
+        code: "ENCRYPTION_KEY_INVALID".into(),
+        message: format!(
+            "PYLON_ENCRYPTION_KEY is set but invalid: {e}. \
+             Fix the env (32-byte hex or base64) or unset it."
+        ),
+    })
+}
+
+/// Inject the framework-managed `_Connection` entity into the
+/// manifest when the app declares any `connections:`. Idempotent —
+/// if an `_Connection` entity already exists (apps that want to
+/// extend it shouldn't have to, but we don't fight them), we leave
+/// it alone.
+fn ensure_connection_entity(manifest: &mut AppManifest) {
+    if manifest.connections.is_empty() {
+        return;
+    }
+    if manifest.entities.iter().any(|e| e.name == "_Connection") {
+        return;
+    }
+    manifest.entities.push(connections::connection_entity());
+}
+
+/// When an app declares connections, `PYLON_ENCRYPTION_KEY` is
+/// REQUIRED — refresh tokens never live in plaintext. Codex P2
+/// fix: fail boot with a clear error rather than letting the
+/// runtime serve broken auth-url calls.
+fn validate_connection_encryption_present(
+    manifest: &AppManifest,
+    key: &Option<encryption::EncryptionKey>,
+) -> Result<(), RuntimeError> {
+    if !manifest.connections.is_empty() && key.is_none() {
+        return Err(RuntimeError {
+            code: "CONNECTIONS_REQUIRE_ENCRYPTION".into(),
+            message: format!(
+                "Manifest declares {} connection(s) but PYLON_ENCRYPTION_KEY is unset. \
+                 Refresh tokens must be encrypted at rest.",
+                manifest.connections.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate that every manifest field marked `encrypted: true`
+/// meets the documented restrictions:
+/// - field type is `string` or `richtext` (random-nonce encryption
+///   produces opaque bytes; numeric/bool columns would corrupt)
+/// - `unique: true` is NOT set (random nonce defeats uniqueness)
+/// - `server_only: true` is set (encrypted plaintext must never
+///   reach the wire — without `serverOnly`, decrypted values would
+///   ship over every public HTTP/WS surface)
+///
+/// Returns a `RuntimeError` listing every violation found. Boot
+/// fails on the first violating manifest so deploys reject mis-
+/// configurations instead of running with a silently-broken
+/// invariant.
+fn validate_encrypted_fields(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    let mut violations: Vec<String> = Vec::new();
+    for entity in &manifest.entities {
+        for field in &entity.fields {
+            if !field.encrypted {
+                continue;
+            }
+            let ent = &entity.name;
+            let name = &field.name;
+            let ftype = &field.field_type;
+            // Only string-shaped types. The encryption pre-pass
+            // always produces a base64 string on the wire; a column
+            // typed `int`/`bool`/`datetime`/`float` either rejects
+            // (Postgres) or silently corrupts (SQLite via type
+            // affinity).
+            if !matches!(ftype.as_str(), "string" | "richtext") {
+                violations.push(format!(
+                    "{ent}.{name}: encrypted() requires field type `string` or `richtext` (got `{ftype}`)"
+                ));
+            }
+            if field.unique {
+                violations.push(format!(
+                    "{ent}.{name}: encrypted() cannot combine with unique() — random-nonce encryption defeats uniqueness"
+                ));
+            }
+            if !field.server_only {
+                violations.push(format!(
+                    "{ent}.{name}: encrypted() requires serverOnly() — decrypted plaintext must never reach HTTP/WS responses"
+                ));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        return Err(RuntimeError {
+            code: "ENCRYPTION_MANIFEST_INVALID".into(),
+            message: format!(
+                "Manifest declares encrypted fields with invalid combinations:\n  - {}",
+                violations.join("\n  - ")
+            ),
+        });
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Runtime errors
@@ -234,6 +373,23 @@ pub struct Runtime {
     /// ships custom Studio extensions. Same hot-swap semantics as
     /// `studio_config_path`.
     studio_entry_path: RwLock<Option<PathBuf>>,
+    /// AEAD key for `field.encrypted()` fields. Loaded once at boot
+    /// from `PYLON_ENCRYPTION_KEY` env. `None` means encryption is
+    /// not configured — reads/writes to encrypted fields skip the
+    /// crypto step but the runtime logs a warning per write when the
+    /// manifest declares encrypted fields without a key (operator
+    /// surface: see `docs/security/encryption.md`).
+    encryption_key: Option<encryption::EncryptionKey>,
+    /// Cached `entity → encrypted field names` map, computed once
+    /// from the manifest. Per-row encrypt/decrypt looks the entity
+    /// up here to avoid scanning the manifest on the hot path.
+    encrypted_fields: HashMap<String, Vec<String>>,
+    /// Shared ConnectionManager — `None` when the manifest declares
+    /// no connections. Codex P1: this MUST be a single Arc shared
+    /// across boot, HTTP routes, and the function hook, so the
+    /// CSRF state token minted in /auth-url is observable from
+    /// /callback. Per-call construction breaks the flow.
+    connection_manager: std::sync::OnceLock<Option<std::sync::Arc<connections::ConnectionManager>>>,
 }
 
 /// Backend storage for entity CRUD. SQLite variant owns the connection
@@ -301,7 +457,7 @@ impl Runtime {
     ///   `postgres-live` feature on `pylon-storage`, enabled by default).
     /// - Anything else → SQLite, treating the string as a filesystem path
     ///   (`":memory:"` works via `Runtime::in_memory` instead).
-    pub fn open(url: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
+    pub fn open(url: &str, mut manifest: AppManifest) -> Result<Self, RuntimeError> {
         if is_postgres_url(url) {
             Self::open_postgres(url, manifest)
         } else {
@@ -322,7 +478,7 @@ impl Runtime {
     /// production Postgres deployments are typically managed: schema is
     /// migrated via a controlled, observable step, not as a side effect
     /// of the server starting up.
-    pub fn open_postgres(url: &str, manifest: AppManifest) -> Result<Self, RuntimeError> {
+    pub fn open_postgres(url: &str, mut manifest: AppManifest) -> Result<Self, RuntimeError> {
         let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
             .map_err(data_err_to_runtime)?;
         // Bootstrap the CRDT sidecar table on every open. Idempotent
@@ -336,11 +492,17 @@ impl Runtime {
                 code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
                 message: format!("ensure pg crdt sidecar: {e}"),
             })?;
+        ensure_connection_entity(&mut manifest);
+        validate_encrypted_fields(&manifest)?;
+        // Encryption-key check happens after key load — see below.
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
             .iter()
             .map(|e| (e.name.clone(), e.clone()))
             .collect();
+        let encrypted_fields = encryption_field_map(&entities);
+        let encryption_key = load_encryption_key()?;
+        validate_connection_encryption_present(&manifest, &encryption_key)?;
         Ok(Self {
             backend: RuntimeBackend::Postgres(PgBackend {
                 store,
@@ -351,6 +513,9 @@ impl Runtime {
             is_in_memory: false,
             studio_config_path: RwLock::new(None),
             studio_entry_path: RwLock::new(None),
+            encryption_key,
+            encrypted_fields,
+            connection_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -499,12 +664,19 @@ impl Runtime {
 
     fn from_connection(
         conn: Connection,
-        manifest: AppManifest,
+        mut manifest: AppManifest,
         is_in_memory: bool,
     ) -> Result<Self, RuntimeError> {
         // Apply the production pragma set on the write connection.
         tune_runtime_connection(&conn, is_in_memory);
 
+        ensure_connection_entity(&mut manifest);
+        validate_encrypted_fields(&manifest)?;
+        // Encryption key + connections requirement check must run
+        // BEFORE schema init — a manifest declaring connections
+        // without a key shouldn't even reach the CREATE TABLE step.
+        let encryption_key_early = load_encryption_key()?;
+        validate_connection_encryption_present(&manifest, &encryption_key_early)?;
         // Build entity lookup map.
         let entities: HashMap<String, ManifestEntity> = manifest
             .entities
@@ -677,6 +849,8 @@ impl Runtime {
             message: format!("create CRDT sidecar table: {e}"),
         })?;
 
+        let encrypted_fields = encryption_field_map(&entities);
+        let encryption_key = encryption_key_early;
         Ok(Self {
             backend: RuntimeBackend::Sqlite(SqliteBackend {
                 write_conn: Mutex::new(conn),
@@ -689,6 +863,9 @@ impl Runtime {
             is_in_memory,
             studio_config_path: RwLock::new(None),
             studio_entry_path: RwLock::new(None),
+            encryption_key,
+            encrypted_fields,
+            connection_manager: std::sync::OnceLock::new(),
         })
     }
 
@@ -739,6 +916,115 @@ impl Runtime {
     }
 
     /// Return a reference to the app manifest.
+    /// Encrypt every field in `data` declared `encrypted: true` for
+    /// the given entity. Called on the WRITE side
+    /// (insert/update) before the row hits the backend store.
+    ///
+    /// Returns an unmodified clone when the entity has no encrypted
+    /// fields (the common case). On encryption failure (no key
+    /// configured but encrypted fields present, or AEAD primitive
+    /// rejection), returns a `RuntimeError` so the write surfaces
+    /// `ENCRYPTION_FAILED` instead of silently writing plaintext.
+    fn maybe_encrypt_row(
+        &self,
+        entity: &str,
+        data: &serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let fields = match self.encrypted_fields.get(entity) {
+            Some(f) => f,
+            None => return Ok(data.clone()),
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => {
+                return Err(RuntimeError {
+                    code: "ENCRYPTION_NOT_CONFIGURED".into(),
+                    message: format!(
+                        "Entity \"{entity}\" has encrypted fields but PYLON_ENCRYPTION_KEY is not set."
+                    ),
+                });
+            }
+        };
+        let mut out = data.clone();
+        let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+        encryption::encrypt_row_fields(key, entity, &mut out, &field_refs).map_err(|e| {
+            RuntimeError {
+                code: "ENCRYPTION_FAILED".into(),
+                message: e.to_string(),
+            }
+        })?;
+        Ok(out)
+    }
+
+    /// Decrypt every field in `row` declared `encrypted: true` for
+    /// the entity. Called on the READ side (get_by_id, list,
+    /// list_after, lookup). Plaintext values (no `enc:v1:` prefix)
+    /// pass through — rows written before the field gained
+    /// `encrypted: true` stay readable.
+    fn maybe_decrypt_row(&self, entity: &str, row: &mut serde_json::Value) {
+        let fields = match self.encrypted_fields.get(entity) {
+            Some(f) => f,
+            None => return,
+        };
+        let key = match &self.encryption_key {
+            Some(k) => k,
+            None => return, // legacy plaintext rows pass through
+        };
+        let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+        if let Err(e) = encryption::decrypt_row_fields(key, entity, row, &field_refs) {
+            tracing::warn!(
+                "[encryption] Failed to decrypt encrypted fields on {entity}: {e}. \
+                 Ciphertext returned as-is."
+            );
+        }
+    }
+
+    /// Crate-internal accessor for the loaded encryption key.
+    /// Connections + future at-rest primitives consult it.
+    pub(crate) fn encryption_key_for_test(&self) -> Option<encryption::EncryptionKey> {
+        self.encryption_key.clone()
+    }
+
+    /// Lazy-init the shared ConnectionManager and return it.
+    /// Codex P1 fix: the manager owns the state-token SQLite backend,
+    /// which MUST be the same instance across HTTP routes and the
+    /// function hook — otherwise tokens minted on auth-url don't
+    /// exist when /callback runs.
+    pub fn connection_manager(
+        self: &std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<connections::ConnectionManager>> {
+        self.connection_manager
+            .get_or_init(|| {
+                if self.manifest.connections.is_empty() {
+                    return None;
+                }
+                let defs: Vec<connections::ConnectionDef> = self
+                    .manifest
+                    .connections
+                    .iter()
+                    .map(|c| connections::ConnectionDef {
+                        name: c.name.clone(),
+                        provider: c.provider.clone(),
+                        scopes: c.scopes.clone(),
+                    })
+                    .collect();
+                let state_backend: std::sync::Arc<dyn pylon_auth::OAuthStateBackend> =
+                    match crate::oauth_backend::SqliteOAuthBackend::in_memory() {
+                        Ok(b) => std::sync::Arc::new(b),
+                        Err(e) => {
+                            tracing::error!("[connections] failed to init state backend: {e}");
+                            return None;
+                        }
+                    };
+                Some(std::sync::Arc::new(connections::ConnectionManager::new(
+                    defs,
+                    self.encryption_key.clone(),
+                    state_backend,
+                )))
+            })
+            .clone()
+    }
+
     pub fn manifest(&self) -> &AppManifest {
         &self.manifest
     }
@@ -883,6 +1169,17 @@ impl Runtime {
         let data = if entity_has_any_default(&self.manifest, entity) {
             data_owned = apply_field_defaults(&self.manifest, entity, data);
             &data_owned
+        } else {
+            data
+        };
+        // Encrypt encrypted-field values before the storage backend
+        // sees the row. The `enc:v1:<nonce>:<ct>` strings persist
+        // through CRDT projection, FTS indexing, JSON change events —
+        // the wire never sees plaintext for these fields again.
+        let encrypted_owned;
+        let data = if self.encrypted_fields.contains_key(entity) {
+            encrypted_owned = self.maybe_encrypt_row(entity, data)?;
+            &encrypted_owned
         } else {
             data
         };
@@ -1043,8 +1340,12 @@ impl Runtime {
         id: &str,
     ) -> Result<Option<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            return pylon_http::DataStore::get_by_id(&pg.store, entity, id)
-                .map_err(data_err_to_runtime);
+            let mut row = pylon_http::DataStore::get_by_id(&pg.store, entity, id)
+                .map_err(data_err_to_runtime)?;
+            if let Some(r) = row.as_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(row);
         }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
@@ -1057,17 +1358,24 @@ impl Runtime {
 
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let result = stmt
+        let mut result = stmt
             .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
             .ok();
-
+        if let Some(r) = result.as_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
         Ok(result)
     }
 
     /// List all rows for an entity.
     pub fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            return pylon_http::DataStore::list(&pg.store, entity).map_err(data_err_to_runtime);
+            let mut rows =
+                pylon_http::DataStore::list(&pg.store, entity).map_err(data_err_to_runtime)?;
+            for r in rows.iter_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(rows);
         }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
@@ -1089,7 +1397,8 @@ impl Runtime {
 
         let mut result = Vec::new();
         for row in rows {
-            if let Ok(val) = row {
+            if let Ok(mut val) = row {
+                self.maybe_decrypt_row(entity, &mut val);
                 result.push(val);
             }
         }
@@ -1104,8 +1413,12 @@ impl Runtime {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            return pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
-                .map_err(data_err_to_runtime);
+            let mut rows = pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
+                .map_err(data_err_to_runtime)?;
+            for r in rows.iter_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(rows);
         }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
@@ -1144,7 +1457,8 @@ impl Runtime {
 
         let mut result = Vec::new();
         for row in rows {
-            if let Ok(val) = row {
+            if let Ok(mut val) = row {
+                self.maybe_decrypt_row(entity, &mut val);
                 result.push(val);
             }
         }
@@ -1162,6 +1476,17 @@ impl Runtime {
         id: &str,
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
+        // Encrypt any encrypted-field patches before the backend
+        // sees them. Partial updates (PATCH-style) only touch fields
+        // the caller included — fields the caller omits stay as the
+        // ciphertext that was already on disk.
+        let encrypted_owned;
+        let data = if self.encrypted_fields.contains_key(entity) {
+            encrypted_owned = self.maybe_encrypt_row(entity, data)?;
+            &encrypted_owned
+        } else {
+            data
+        };
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
             if ent.crdt {
@@ -1384,6 +1709,12 @@ impl Runtime {
     }
 
     /// Lookup a single row by a field value (e.g., email).
+    ///
+    /// Encrypted fields are NOT queryable here — each write produces
+    /// fresh ciphertext (random nonce), so a lookup by an encrypted
+    /// field's plaintext value never matches anything. The caller
+    /// will get `Ok(None)` even when the row exists. Document this
+    /// constraint in your handler if it surprises a user.
     pub fn lookup(
         &self,
         entity: &str,
@@ -1391,8 +1722,12 @@ impl Runtime {
         value: &str,
     ) -> Result<Option<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            return pylon_http::DataStore::lookup(&pg.store, entity, field, value)
-                .map_err(data_err_to_runtime);
+            let mut row = pylon_http::DataStore::lookup(&pg.store, entity, field, value)
+                .map_err(data_err_to_runtime)?;
+            if let Some(r) = row.as_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(row);
         }
         let ent = self.require_entity(entity)?;
         validate_column_name(field, ent)?;
@@ -1405,13 +1740,15 @@ impl Runtime {
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let result = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
+        let mut result = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
                 Ok(row_to_json(row, &columns))
             })
             .ok()
         });
-
+        if let Some(r) = result.as_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
         Ok(result)
     }
 
@@ -1758,6 +2095,18 @@ impl Runtime {
     ) -> Result<String, RuntimeError> {
         let ent = self.require_entity(entity)?;
         let id = resolve_or_generate_id(data)?;
+        // Encrypt encrypted-field values before this connection sees
+        // the row. Codex P1: the *_with_conn family is the per-
+        // transaction store path used by ALL action handlers (TxStore,
+        // PgBufferedTxStore). Without this, plaintext lands in the DB
+        // for every action-handler write.
+        let encrypted_owned;
+        let data = if self.encrypted_fields.contains_key(entity) {
+            encrypted_owned = self.maybe_encrypt_row(entity, data)?;
+            &encrypted_owned
+        } else {
+            data
+        };
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Insert data must be a JSON object".into(),
@@ -1822,6 +2171,15 @@ impl Runtime {
         data: &serde_json::Value,
     ) -> Result<bool, RuntimeError> {
         let ent = self.require_entity(entity)?;
+        // Encrypt before this connection sees the patch — same
+        // rationale as insert_with_conn.
+        let encrypted_owned;
+        let data = if self.encrypted_fields.contains_key(entity) {
+            encrypted_owned = self.maybe_encrypt_row(entity, data)?;
+            &encrypted_owned
+        } else {
+            data
+        };
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Update data must be a JSON object".into(),
@@ -1930,9 +2288,13 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
-        Ok(stmt
+        let mut row = stmt
             .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
-            .ok())
+            .ok();
+        if let Some(r) = row.as_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
+        Ok(row)
     }
 
     /// List rows using a pre-held connection (for transactions).
@@ -1954,7 +2316,11 @@ impl Runtime {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
             })?;
-        Ok(rows.flatten().collect())
+        let mut out: Vec<serde_json::Value> = rows.flatten().collect();
+        for r in out.iter_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
+        Ok(out)
     }
 
     /// List after cursor using a pre-held connection (for transactions).
@@ -1990,7 +2356,11 @@ impl Runtime {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
             })?;
-        Ok(rows.flatten().collect())
+        let mut out: Vec<serde_json::Value> = rows.flatten().collect();
+        for r in out.iter_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
+        Ok(out)
     }
 
     /// Lookup by field using a pre-held connection (for transactions).
@@ -2009,12 +2379,16 @@ impl Runtime {
             quote_ident(field)
         );
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
-        Ok(conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
+        let mut row = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
                 Ok(row_to_json(row, &columns))
             })
             .ok()
-        }))
+        });
+        if let Some(r) = row.as_mut() {
+            self.maybe_decrypt_row(entity, r);
+        }
+        Ok(row)
     }
 
     /// Link relation using a pre-held connection (for transactions).
@@ -2825,6 +3199,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -2836,6 +3211,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -2853,6 +3229,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -2990,6 +3368,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             },
             ManifestField {
                 name: "displayName".into(),
@@ -3001,6 +3380,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             },
             ManifestField {
                 name: "avatarColor".into(),
@@ -3012,6 +3392,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             },
             ManifestField {
                 name: "createdAt".into(),
@@ -3023,6 +3404,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             },
         ];
         // Important: turn off CRDT mode for this test — CRDT mode writes

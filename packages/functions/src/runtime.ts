@@ -21,6 +21,10 @@ import type {
   EmailSender,
   Stream,
   Scheduler,
+  Llm,
+  LlmCompleteRequest,
+  LlmCompleteResponse,
+  Connections,
   QueryCtx,
   MutationCtx,
   ActionCtx,
@@ -529,12 +533,103 @@ function buildEmail(callId: string): EmailSender {
   };
 }
 
+/**
+ * Build the LLM client that round-trips through the host runtime.
+ *
+ * Each call emits an `llm_complete` protocol message; the runtime
+ * forwards to the configured provider (PYLON_LLM_PROVIDER) and replies
+ * with the parsed response. The host enforces model-allowlist gating
+ * for non-admin callers — that's why the API key never leaves the
+ * server process.
+ *
+ * Errors carry an `err.code` so handlers can branch on `LLM_NOT_CONFIGURED`
+ * vs `PROVIDER_HTTP_429` vs `MODEL_NOT_ALLOWED` without parsing message
+ * strings.
+ */
+function buildLlm(callId: string): Llm {
+  return {
+    async complete(request: LlmCompleteRequest): Promise<LlmCompleteResponse> {
+      return (await rpc(callId, {
+        type: "llm_complete",
+        request,
+      })) as LlmCompleteResponse;
+    },
+  };
+}
+
+/**
+ * Build the connection registry that round-trips through the host.
+ * Each method emits a `{type:"connection", op:"..."}` message;
+ * the host's ConnectionManager runs the actual OAuth flow + DB
+ * read/write and returns the typed reply.
+ */
+function buildConnections(callId: string): Connections {
+  return {
+    async authorizeUrl(name, opts) {
+      const data = (await rpc(callId, {
+        type: "connection",
+        op: "authorize_url",
+        payload: {
+          name,
+          post_redirect: opts?.postRedirect,
+        },
+      })) as { url: string };
+      return data;
+    },
+    async get(name) {
+      const data = (await rpc(callId, {
+        type: "connection",
+        op: "get",
+        payload: { name },
+      })) as { access_token: string; scope: string | null; expires_at: number | null };
+      return {
+        accessToken: data.access_token,
+        scope: data.scope,
+        expiresAt: data.expires_at,
+      };
+    },
+    async list() {
+      const data = (await rpc(callId, {
+        type: "connection",
+        op: "list",
+        payload: {},
+      })) as {
+        connections: Array<{
+          name: string;
+          provider: string;
+          scope: string | null;
+          expires_at: number | null;
+          updated_at: number;
+        }>;
+      };
+      return {
+        connections: data.connections.map((c) => ({
+          name: c.name,
+          provider: c.provider,
+          scope: c.scope,
+          expiresAt: c.expires_at,
+          updatedAt: c.updated_at,
+        })),
+      };
+    },
+    async disconnect(name) {
+      return (await rpc(callId, {
+        type: "connection",
+        op: "disconnect",
+        payload: { name },
+      })) as { disconnected: boolean };
+    },
+  };
+}
+
 function buildActionCtx(
   callId: string,
   auth: AuthInfo,
   stream: Stream,
   scheduler: Scheduler,
   email: EmailSender,
+  llm: Llm,
+  connections: Connections,
   request?: unknown
 ): ActionCtx {
   // The host sends `request` as snake_case JSON (`raw_body`); normalize it
@@ -555,6 +650,8 @@ function buildActionCtx(
     stream,
     scheduler,
     email,
+    llm,
+    connections,
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
       return rpc(callId, {
@@ -635,6 +732,8 @@ async function handleCall(msg: CallMessage): Promise<void> {
   const stream = buildStream(msg.call_id);
   const scheduler = buildScheduler(msg.call_id);
   const email = buildEmail(msg.call_id);
+  const llm = buildLlm(msg.call_id);
+  const connections = buildConnections(msg.call_id);
 
   // Normalize the Rust-side auth envelope (snake_case) to the camelCase
   // shape that AuthInfo documents. Handlers read `ctx.auth.userId`; the
@@ -680,6 +779,9 @@ async function handleCall(msg: CallMessage): Promise<void> {
   let ctx: QueryCtx | MutationCtx | ActionCtx;
   switch (def.type) {
     case "query":
+      // ctx.llm is intentionally absent on queries — reactive
+      // re-runs would re-bill the LLM call on every dep change.
+      // Move LLM calls into actions / mutations.
       ctx = { db: buildDbReader(msg.call_id), auth, env };
       break;
     case "mutation":
@@ -689,6 +791,8 @@ async function handleCall(msg: CallMessage): Promise<void> {
         stream,
         scheduler,
         env,
+        llm,
+        connections,
         error(code, message) {
           const err = new Error(message);
           (err as any).code = code;
@@ -697,17 +801,14 @@ async function handleCall(msg: CallMessage): Promise<void> {
       };
       break;
     case "action":
-      // Pass `msg.request` so actions invoked via `defineRoute` HTTP
-      // bindings can reach raw headers + body (for webhook signature
-      // verification). Programmatic invocations (runAction, jobs) get
-      // undefined here and `ctx.request` reads as undefined — the type
-      // is optional on purpose.
       ctx = buildActionCtx(
         msg.call_id,
         auth,
         stream,
         scheduler,
         email,
+        llm,
+        connections,
         (msg as unknown as { request?: unknown }).request,
       );
       break;

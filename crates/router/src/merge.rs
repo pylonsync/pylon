@@ -147,6 +147,7 @@ mod tests {
             readonly: false,
             default: None,
             enum_values: None,
+            encrypted: false,
         }
     }
 
@@ -180,6 +181,8 @@ mod tests {
                 },
                 ..Default::default()
             },
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 

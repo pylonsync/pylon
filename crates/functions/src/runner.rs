@@ -95,6 +95,37 @@ pub type NestedCallHook = Box<
 /// of silently no-op'ing — apps shouldn't think email sent when it didn't.
 pub type EmailHook = Box<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
 
+/// Callback invoked when a function calls `ctx.llm.complete({...})`.
+///
+/// The `request` is the same JSON shape as `/api/llm/complete` accepts
+/// (Anthropic Messages: messages, system, tools, model, max_tokens,
+/// temperature). The hook is responsible for the actual provider call
+/// + model allowlist check + usage logging.
+///
+/// Returns the full Anthropic-style response body (model + content +
+/// stop_reason + usage) on success; Err with a code + message that
+/// surfaces to the TS handler as a thrown error from `ctx.llm.complete`.
+pub type LlmHook = Box<
+    dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `ctx.connections.{authorizeUrl,get,disconnect}`.
+///
+/// Args: op name (`"authorize_url"` | `"get"` | `"disconnect"` |
+/// `"list"`), the typed request payload (connection name +
+/// optional fields), and the caller's auth context.
+///
+/// Returns the JSON body to ship back to the TS handler on
+/// success; `Err((code, message))` propagates as a typed
+/// throwable with `err.code`.
+pub type ConnectionHook = Box<
+    dyn Fn(&str, &serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 // ---------------------------------------------------------------------------
 // Function runner
 // ---------------------------------------------------------------------------
@@ -162,6 +193,13 @@ pub struct FnRunner {
     /// error so silently-dropped invite emails surface in the action's
     /// error response.
     email_hook: Mutex<Option<EmailHook>>,
+    /// Optional handler for `ctx.llm.complete(...)`. When unset, the
+    /// hook returns an explicit "LLM_NOT_CONFIGURED" error so authors
+    /// see the gap instead of getting a silent no-op.
+    llm_hook: Mutex<Option<LlmHook>>,
+    /// Hook for `ctx.connections.*`. Wires authorize-url / get /
+    /// list / disconnect calls to the runtime's ConnectionManager.
+    connection_hook: Mutex<Option<ConnectionHook>>,
     /// Timeout for `recv()` between protocol messages. A handler that doesn't
     /// reply within this window is treated as stuck.
     call_timeout: Mutex<Duration>,
@@ -188,6 +226,8 @@ impl FnRunner {
             schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
             email_hook: Mutex::new(None),
+            llm_hook: Mutex::new(None),
+            connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
             policy_gate: Mutex::new(None),
@@ -232,6 +272,21 @@ impl FnRunner {
     /// instead of getting a silent no-op.
     pub fn set_email_hook(&self, hook: EmailHook) {
         *self.email_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback for `ctx.llm.complete(...)` from any handler
+    /// (query, mutation, action — queries are intentionally allowed so
+    /// agent-tool functions can be defined as queries). The hook reaches
+    /// the provider via the LlmClient + applies model-allowlist gating.
+    /// When unset, `ctx.llm.complete` rejects with `LLM_NOT_CONFIGURED`.
+    pub fn set_llm_hook(&self, hook: LlmHook) {
+        *self.llm_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the `ctx.connections.*` hook. Without it, calls
+    /// reject with `CONNECTIONS_NOT_CONFIGURED`.
+    pub fn set_connection_hook(&self, hook: ConnectionHook) {
+        *self.connection_hook.lock().unwrap() = Some(hook);
     }
 
     /// Start the TypeScript process and complete the startup handshake.
@@ -791,6 +846,82 @@ impl FnRunner {
                                 ),
                             }
                         }
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::LlmComplete(req) if req.call_id == call_id => {
+                    // Codex P1-12 (host-side enforcement): queries are
+                    // reactive — re-runs would re-bill the LLM call on
+                    // every dep change AND violate the reactive purity
+                    // contract. Refuse here even if a buggy TS handler
+                    // tries to send the message from a query ctx.
+                    if matches!(fn_type, crate::protocol::FnType::Query) {
+                        let reply = DbResultMessage::err(
+                            call_id.clone(),
+                            "LLM_NOT_AVAILABLE_IN_QUERY",
+                            "ctx.llm.complete is not available in query handlers (queries are reactive — LLM calls belong in mutations or actions).",
+                        );
+                        self.send(&reply)?;
+                        continue;
+                    }
+                    // Build an AuthInfo snapshot for the hook so it can
+                    // enforce per-user model gating / spend accounting.
+                    let auth_snapshot = AuthInfo {
+                        user_id: caller_user_id.clone(),
+                        is_admin: caller_is_admin,
+                        tenant_id: caller_tenant_id.clone(),
+                        roles: gate_auth.roles.clone(),
+                    };
+                    let result: Result<serde_json::Value, (String, String)> = {
+                        let hook = self.llm_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => cb(&req.request, &auth_snapshot),
+                            None => Err((
+                                "LLM_NOT_CONFIGURED".into(),
+                                "ctx.llm.complete: no LLM provider configured (set PYLON_LLM_PROVIDER + API key)".into(),
+                            )),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(value) => DbResultMessage::ok(call_id.clone(), value),
+                        Err((code, msg)) => DbResultMessage::err(call_id.clone(), &code, &msg),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::Connection(req) if req.call_id == call_id => {
+                    // Refuse unauthenticated callers. ctx.connections.*
+                    // is bound to ctx.auth.userId — without a user
+                    // identity there's nothing to look up.
+                    if caller_user_id.is_none() && !caller_is_admin {
+                        let reply = DbResultMessage::err(
+                            call_id.clone(),
+                            "CONNECTION_REQUIRES_AUTH",
+                            "ctx.connections.* requires an authenticated user. Public callers must ctx.auth.elevate first.",
+                        );
+                        self.send(&reply)?;
+                        continue;
+                    }
+                    let auth_snapshot = AuthInfo {
+                        user_id: caller_user_id.clone(),
+                        is_admin: caller_is_admin,
+                        tenant_id: caller_tenant_id.clone(),
+                        roles: gate_auth.roles.clone(),
+                    };
+                    let result: Result<serde_json::Value, (String, String)> = {
+                        let hook = self.connection_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => cb(&req.op, &req.payload, &auth_snapshot),
+                            None => Err((
+                                "CONNECTIONS_NOT_CONFIGURED".into(),
+                                "No defineConnection(...) entries in the manifest.".into(),
+                            )),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(value) => DbResultMessage::ok(call_id.clone(), value),
+                        Err((code, msg)) => DbResultMessage::err(call_id.clone(), &code, &msg),
                     };
                     self.send(&reply)?;
                 }

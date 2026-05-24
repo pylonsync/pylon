@@ -899,6 +899,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -910,6 +911,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                     ManifestField {
                         name: "age".into(),
@@ -921,6 +923,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -938,6 +941,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -1262,6 +1267,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     }],
                     indexes: vec![],
                     relations: vec![],
@@ -1280,6 +1286,7 @@ mod tests {
                         readonly: false,
                         default: None,
                         enum_values: None,
+                        encrypted: false,
                     }],
                     indexes: vec![],
                     relations: vec![],
@@ -1292,6 +1299,8 @@ mod tests {
             actions: vec![],
             policies: vec![],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         };
 
         let plan = adapter.plan_schema(&manifest).unwrap();

@@ -100,6 +100,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }
         }
         AppManifest {
@@ -125,6 +126,8 @@ mod tests {
                 },
             ],
             auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
         }
     }
 
@@ -175,6 +178,7 @@ mod tests {
                 readonly: false,
                 default: None,
                 enum_values: None,
+                encrypted: false,
             }],
         };
         let desc = QueryDescriptor::from_manifest(&mq);
