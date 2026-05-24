@@ -80,6 +80,29 @@ export class LocalStore {
     return true;
   }
 
+  /**
+   * Per-subscriber row revocation: the server signaled that the
+   * current client lost read access to a specific row. ALWAYS
+   * records the tombstone (even when the row isn't in memory), so
+   * a stale insert/update event that arrives after the revocation
+   * can't resurrect the row.
+   *
+   * `reconcileRemove` returns early when the row is absent — that's
+   * the right behavior for "did anything change?" reconcile passes,
+   * but wrong here: a CRDT-only consumer using `useLoroDoc` without
+   * a JSON row never had the row in `tables` to begin with, and
+   * without the tombstone any future server-issued insert
+   * (legitimate re-grant or a slow stale frame) would land.
+   *
+   * Returns true if the row was present + removed; the tombstone
+   * is recorded regardless.
+   */
+  revokeRow(entity: string, id: string, tombstoneSeq: number): boolean {
+    const removed = this.tables.get(entity)?.delete(id) ?? false;
+    this.recordTombstone(entity, id, tombstoneSeq);
+    return removed;
+  }
+
   private isTombstoned(entity: string, id: string, at_seq?: number): boolean {
     if (this.optimisticTombstones.get(entity)?.has(id)) return true;
     const tombSeq = this.tombstones.get(entity)?.get(id);

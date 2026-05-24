@@ -2097,6 +2097,37 @@ pub fn maybe_project_user_row(
 /// need the value at the server-side boundary read it there; apps
 /// that need to expose it intentionally must opt back in by
 /// re-serializing the field in their own function return.
+/// Run a row through every wire-bound projection step:
+///   - User entity → `maybe_project_user_row` (allowlist + redact)
+///   - `serverOnly` fields → stripped via `strip_server_only_fields`
+///
+/// Invariant: every sync wire path (pull snapshot, pull delta, WS
+/// broadcast, SSE broadcast, synthesized Delete tombstones) must run
+/// row payloads through this helper before serialization — and BOTH
+/// `data` and `prev_data` on Update events. Without it, an entity
+/// field like `Org.stripeCustomerId.serverOnly()` is gated only by
+/// `/api/entities` and leaks through every sync surface.
+pub fn project_row_for_wire(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: serde_json::Value,
+) -> serde_json::Value {
+    let projected = maybe_project_user_row(entity, row, auth_user);
+    strip_server_only_fields(manifest, entity, projected)
+}
+
+/// Variant that operates on an `Option`, for the common case where
+/// the caller has `event.data` / `event.prev_data` in hand.
+pub fn project_row_for_wire_opt(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    row.map(|r| project_row_for_wire(manifest, auth_user, entity, r))
+}
+
 pub fn strip_server_only_fields(
     manifest: &pylon_kernel::AppManifest,
     entity: &str,

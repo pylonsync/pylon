@@ -1491,18 +1491,18 @@ export class SyncEngine {
    * Drop a row from the local replica because the server signaled
    * that the current subscriber's read policy was revoked for it.
    *
-   * Calls `LocalStore.reconcileRemove(entity, id, cursor.last_seq)`
-   * to record a tombstone at the current cursor. A future server
-   * issuing seqs strictly greater than the cursor can re-create
-   * the row if policy is re-granted; replays older than the cursor
-   * are filtered by the tombstone (closing the "WS update lands
-   * between revoke and tombstone" race).
+   * Calls `LocalStore.revokeRow(entity, id, cursor.last_seq)` —
+   * NOT `reconcileRemove` — because the latter early-returns when
+   * the row isn't in memory (common for CRDT-only consumers using
+   * `useLoroDoc` without a JSON row). `revokeRow` always records
+   * the tombstone so a stale insert/update arriving after the
+   * revocation can't resurrect the row.
    *
    * Also notifies row-eviction listeners so external row-bound
    * resources (LoroDoc registries, etc.) can unmount.
    */
   private handleRowRevocation(entity: string, rowId: string): void {
-    const removed = this.store.reconcileRemove(
+    const removed = this.store.revokeRow(
       entity,
       rowId,
       this.cursor.last_seq,
@@ -1510,6 +1510,9 @@ export class SyncEngine {
     if (removed) {
       // Persist the deletion through the same pipe as a real Delete
       // event so on-disk replica + in-memory replica stay aligned.
+      // For CRDT-only consumers `removed` is false (the row was
+      // never materialized into `tables`), but the tombstone is
+      // still recorded above so future replays are filtered.
       if (this.persistence) {
         void this.persistence.deleteRow(entity, rowId).catch(() => {
           /* best-effort */

@@ -641,17 +641,24 @@ fn start_server(
     // before the notifier so the notifier can hold a strong ref and
     // forward every change event into the registry's `on_change`.
     let reactive_registry = crate::reactive::ReactiveRegistry::new(Arc::clone(&ws_hub));
+    // Snapshot the manifest once for every component that needs to
+    // read it on the broadcast hot path. Stripping `serverOnly`
+    // fields requires walking the entity definitions per event;
+    // Arc + clone is cheaper than cloning the AppManifest itself.
+    let shared_manifest: Arc<pylon_kernel::AppManifest> =
+        Arc::new(runtime.manifest().clone());
     let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
         crate::datastore::WsSseNotifier::with_cluster_bus(
             Arc::clone(&ws_hub),
             Arc::clone(&sse_hub),
             runtime.manifest().auth.user.clone(),
+            Arc::clone(&shared_manifest),
             Arc::clone(&cluster_bus),
         )
         .with_reactive(Arc::clone(&reactive_registry))
-        // Codex P1: per-CRDT-broadcast re-auth needs the policy engine
-        // on the notifier so a subscriber whose entity-read permission
-        // is revoked mid-session stops receiving frames immediately.
+        // Per-CRDT-broadcast re-auth needs the policy engine on the
+        // notifier so a subscriber whose entity-read permission is
+        // revoked mid-session stops receiving frames immediately.
         .with_policy(Arc::clone(&policy_engine)),
     );
     // Subscriber: inbound peer events → local hubs. Idempotent —
@@ -663,6 +670,7 @@ fn start_server(
         Arc::clone(&sse_hub),
         Arc::clone(&change_log),
         runtime.manifest().auth.user.clone(),
+        Arc::clone(&shared_manifest),
         Some(Arc::clone(&reactive_registry)),
         Some(Arc::clone(&policy_engine)),
     );
@@ -1058,6 +1066,7 @@ fn start_server(
         let sh = Arc::clone(&sse_hub);
         let cb = Arc::clone(&cluster_bus);
         let rr = Arc::clone(&reactive_registry);
+        let sm = Arc::clone(&shared_manifest);
         let mc = Arc::clone(&magic_codes);
         let pr = Arc::clone(&plugin_reg);
         let rm = Arc::clone(&room_mgr);
@@ -4134,6 +4143,7 @@ fn start_server(
                     Arc::clone(&wh),
                     Arc::clone(&sh),
                     rt.manifest().auth.user.clone(),
+                    Arc::clone(&sm),
                     Arc::clone(&cb),
                 )
                 .with_reactive(Arc::clone(&rr))

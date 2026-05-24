@@ -179,11 +179,18 @@ pub(crate) fn handle(
                         ) {
                             continue;
                         }
-                        let projected_data = if entity.name == auth_user.entity {
-                            Some(crate::maybe_project_user_row(&entity.name, row, auth_user))
-                        } else {
-                            Some(row)
-                        };
+                        // Apply both projections in one pass: User
+                        // entity allowlist + `serverOnly` field
+                        // strip. Without the second one, fields
+                        // like `Org.stripeCustomerId.serverOnly()`
+                        // leak through the snapshot path even
+                        // though `/api/entities` enforces them.
+                        let projected_data = Some(crate::project_row_for_wire(
+                            manifest,
+                            auth_user,
+                            &entity.name,
+                            row,
+                        ));
                         changes.push(pylon_sync::ChangeEvent {
                             seq: current_seq,
                             entity: entity.name.clone(),
@@ -279,18 +286,26 @@ pub(crate) fn handle(
                         None
                     })
                     .collect();
-                // Field-level redaction for User rows. Without this a
-                // permissive User read policy (needed for cross-user
-                // displayName lookups in chat-style apps) leaks
-                // `passwordHash` through the change feed even though
-                // `/api/auth/session` strips it.
-                let auth_user = &ctx.store.manifest().auth.user;
+                // Wire-level projection for every kept event:
+                //   - User entity → allowlist + secret strip
+                //   - any entity → strip `serverOnly` fields
+                // Runs on both `data` and `prev_data` (a kept Update
+                // event can carry prev_data when the pull filter
+                // didn't replace it with a synthesized Delete) so
+                // server-only fields on the pre-row don't leak via
+                // the visibility-flip path either.
+                let manifest = ctx.store.manifest();
+                let auth_user = &manifest.auth.user;
                 for ev in resp.changes.iter_mut() {
-                    if ev.entity == auth_user.entity {
-                        if let Some(data) = ev.data.take() {
-                            ev.data =
-                                Some(crate::maybe_project_user_row(&ev.entity, data, auth_user));
-                        }
+                    if let Some(data) = ev.data.take() {
+                        ev.data = Some(crate::project_row_for_wire(
+                            manifest, auth_user, &ev.entity, data,
+                        ));
+                    }
+                    if let Some(prev) = ev.prev_data.take() {
+                        ev.prev_data = Some(crate::project_row_for_wire(
+                            manifest, auth_user, &ev.entity, prev,
+                        ));
                     }
                 }
                 return Some((
