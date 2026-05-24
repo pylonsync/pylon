@@ -268,9 +268,13 @@ impl SseHub {
     /// the entity's read policy. Per-client filtering happens in the
     /// shard worker.
     pub fn broadcast(&self, event: &ChangeEvent) {
-        let json = match serde_json::to_string(event) {
-            Ok(j) => j,
-            Err(_) => return,
+        // Strip `prev_data` from the wire — same rationale as
+        // `WsHub::broadcast`. The field is in-memory only; the
+        // per-subscriber filter uses it to choose between Update
+        // and synthesized Delete, but the recipient never sees it.
+        let json = match crate::ws::serialize_wire_event(event) {
+            Some(j) => j,
+            None => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
         // Pre-serialize the visibility-flip tombstone in SSE wire

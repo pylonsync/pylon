@@ -246,7 +246,14 @@ pub(crate) fn handle(
                             pylon_policy::PolicyResult::Allowed
                         );
                         if post_allowed {
-                            return Some(ev);
+                            // Strip `prev_data` before shipping —
+                            // it's a server-internal field used only
+                            // for the dual-check; pre-fix it leaked
+                            // the pre-update row to every recipient.
+                            return Some(pylon_sync::ChangeEvent {
+                                prev_data: None,
+                                ..ev
+                            });
                         }
                         if matches!(ev.kind, ChangeKind::Update) && ev.prev_data.is_some() {
                             let pre_allowed = matches!(

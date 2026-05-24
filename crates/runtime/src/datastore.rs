@@ -1095,8 +1095,24 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
             if let Some(data) = event.data.clone() {
                 let projected =
                     pylon_router::maybe_project_user_row(&event.entity, data, &self.auth_user);
+                // prev_data must run through the same projection —
+                // otherwise the visibility-flip dual-check on the
+                // per-subscriber filter would have `passwordHash` /
+                // other stripped User fields in scope. Strip + apply
+                // the same allowlist as `data`.
+                let projected_prev = event
+                    .prev_data
+                    .clone()
+                    .map(|prev| {
+                        pylon_router::maybe_project_user_row(
+                            &event.entity,
+                            prev,
+                            &self.auth_user,
+                        )
+                    });
                 let projected_event = pylon_sync::ChangeEvent {
                     data: Some(projected),
+                    prev_data: projected_prev,
                     ..event.clone()
                 };
                 self.ws.broadcast(&projected_event);
@@ -1347,8 +1363,16 @@ pub fn install_cluster_bus_subscriber(
                         data,
                         &auth_user_handler,
                     );
+                    let projected_prev = event.prev_data.clone().map(|prev| {
+                        pylon_router::maybe_project_user_row(
+                            &event.entity,
+                            prev,
+                            &auth_user_handler,
+                        )
+                    });
                     let projected_event = pylon_sync::ChangeEvent {
                         data: Some(projected),
+                        prev_data: projected_prev,
                         ..event
                     };
                     ws_handler.broadcast(&projected_event);
@@ -3107,13 +3131,17 @@ impl<'a> AutoBroadcastStore<'a> {
         data: Option<&serde_json::Value>,
         prev_data: Option<&serde_json::Value>,
     ) {
-        let seq = self
-            .change_log
-            .append(entity, row_id, kind.clone(), data.cloned());
+        let stored = self.change_log.append_with_prev(
+            entity,
+            row_id,
+            kind.clone(),
+            data.cloned(),
+            prev_data.cloned(),
+        );
         pylon_router::broadcast_change_with_crdt(
             self.notifier.as_ref(),
             self.inner,
-            seq,
+            stored.seq,
             entity,
             row_id,
             kind,
@@ -3664,16 +3692,17 @@ impl pylon_router::FnOps for FnOpsImpl {
                             // raw `append` because the events arrive
                             // pre-shaped, not as a `ChangeRecord` enum.
                             for ev in pending {
-                                let seq = self.change_log.append(
+                                let stored = self.change_log.append_with_prev(
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.clone(),
+                                    ev.prev_data.clone(),
                                 );
                                 pylon_router::broadcast_change_with_crdt(
                                     self.notifier.as_ref(),
                                     self.runtime.as_ref(),
-                                    seq,
+                                    stored.seq,
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),
@@ -3755,11 +3784,12 @@ impl pylon_router::FnOps for FnOpsImpl {
                             // pending event starts at 0; append assigns
                             // the real seq.
                             for ev in tx_store.take_pending() {
-                                let seq = self.change_log.append(
+                                let stored = self.change_log.append_with_prev(
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.clone(),
+                                    ev.prev_data.clone(),
                                 );
                                 // Route through `broadcast_change_with_crdt`
                                 // so CRDT subscribers get binary Loro frames
@@ -3768,7 +3798,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                                 pylon_router::broadcast_change_with_crdt(
                                     self.notifier.as_ref(),
                                     self.runtime.as_ref(),
-                                    seq,
+                                    stored.seq,
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),
@@ -4438,11 +4468,12 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         return match tx_result {
                             Ok((value, pending)) => {
                                 for ev in pending {
-                                    let seq = ops.change_log.append(
+                                    let stored = ops.change_log.append_with_prev(
                                         &ev.entity,
                                         &ev.row_id,
                                         ev.kind.clone(),
                                         ev.data.clone(),
+                                        ev.prev_data.clone(),
                                     );
                                     // Route through `broadcast_change_with_crdt`
                                     // so nested-mutation writes get binary
@@ -4452,7 +4483,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                     pylon_router::broadcast_change_with_crdt(
                                         ops.notifier.as_ref(),
                                         ops.runtime.as_ref(),
-                                        seq,
+                                        stored.seq,
                                         &ev.entity,
                                         &ev.row_id,
                                         ev.kind.clone(),
@@ -4523,11 +4554,12 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                             // to sync subscribers until the NEXT top-level
                             // mutation lands — streaming UIs stay empty.
                             for ev in tx_store.take_pending() {
-                                let seq = ops.change_log.append(
+                                let stored = ops.change_log.append_with_prev(
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.clone(),
+                                    ev.prev_data.clone(),
                                 );
                                 // Match the top-level flush: route
                                 // through `broadcast_change_with_crdt`
@@ -4536,7 +4568,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                 pylon_router::broadcast_change_with_crdt(
                                     ops.notifier.as_ref(),
                                     ops.runtime.as_ref(),
-                                    seq,
+                                    stored.seq,
                                     &ev.entity,
                                     &ev.row_id,
                                     ev.kind.clone(),

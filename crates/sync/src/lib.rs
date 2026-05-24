@@ -425,26 +425,14 @@ impl ChangeLog {
     pub fn record(&self, entity: &str, row_id: &str, change: ChangeRecord) -> ChangeEvent {
         let kind = change.kind();
         let (data, prev_data) = change.into_parts();
-        let seq = self.append(entity, row_id, kind.clone(), data.clone());
-        ChangeEvent {
-            seq,
-            entity: entity.to_string(),
-            row_id: row_id.to_string(),
-            kind,
-            data,
-            prev_data,
-            timestamp: now_iso8601(),
-        }
+        self.append_with_prev(entity, row_id, kind, data, prev_data)
     }
 
     /// Append a change event. Returns the assigned sequence number.
     ///
-    /// Lock order is `events` → `seq` (matches `pull()`'s order so
-    /// concurrent append + pull don't deadlock on the inverted ordering).
-    ///
-    /// Prefer `record` for new call sites — `append` is preserved
-    /// because `append_peer` and a handful of historical call sites
-    /// need the raw seq without the wrapped event.
+    /// Prefer `record` or `append_with_prev` for new call sites —
+    /// `append` is preserved for legacy code that doesn't have
+    /// `prev_data` in scope.
     pub fn append(
         &self,
         entity: &str,
@@ -452,14 +440,34 @@ impl ChangeLog {
         kind: ChangeKind,
         data: Option<serde_json::Value>,
     ) -> u64 {
+        self.append_with_prev(entity, row_id, kind, data, None).seq
+    }
+
+    /// Append a change event with optional `prev_data`. Returns the
+    /// full `ChangeEvent` so callers can hand it straight to the
+    /// broadcaster.
+    ///
+    /// Lock order is `events` → `seq` (matches `pull()`'s order so
+    /// concurrent append + pull don't deadlock).
+    ///
+    /// Invariant: `prev_data` is persisted in the retained log
+    /// entry. /api/sync/pull's visibility-flip filter reads it to
+    /// synthesize Delete tombstones for clients whose reconnect
+    /// straddled the ownership transition. Pre-fix the field was
+    /// hardcoded `None` in the stored event, so pull missed every
+    /// tombstone.
+    pub fn append_with_prev(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: ChangeKind,
+        data: Option<serde_json::Value>,
+        prev_data: Option<serde_json::Value>,
+    ) -> ChangeEvent {
         let mut events = self.events.lock().unwrap();
         let mut seq = self.seq.lock().unwrap();
         // External provider (typically Postgres SEQUENCE for cluster
-        // mode) gives globally-monotonic seqs across instances. The
-        // local counter tracks the max seen so `current_seq()` and
-        // `append_peer()` interop with the provider's space. When no
-        // provider is wired (SQLite / single-instance), increment the
-        // local counter as before.
+        // mode) gives globally-monotonic seqs across instances.
         let new_seq = if let Some(provider) = self.seq_provider.as_ref() {
             let s = provider();
             if s > *seq {
@@ -476,14 +484,15 @@ impl ChangeLog {
             row_id: row_id.to_string(),
             kind,
             data,
-            prev_data: None,
+            prev_data,
             timestamp: now_iso8601(),
         };
+        let returned = event.clone();
         events.push_back(event);
         while events.len() > self.capacity {
             events.pop_front();
         }
-        new_seq
+        returned
     }
 
     /// Append a change event RECEIVED FROM A PEER over the cluster bus,
@@ -885,6 +894,33 @@ mod tests {
         assert_eq!(event.kind, ChangeKind::Delete);
         assert!(event.data.is_some());
         assert_eq!(event.data.as_ref().unwrap()["ownerId"], "u1");
+    }
+
+    #[test]
+    fn record_update_persists_prev_data_in_log() {
+        // The retained event MUST carry prev_data so /api/sync/pull
+        // can run the visibility-flip dual-check on reconnect /
+        // missed-event recovery. Without persistence, pull saw an
+        // Update without prev_data, denied it for the previous
+        // owner, and never tombstoned the row.
+        let log = ChangeLog::new();
+        log.record(
+            "Doc",
+            "d1",
+            ChangeRecord::Update {
+                row: serde_json::json!({"id": "d1", "ownerId": "u_new"}),
+                prev: Some(serde_json::json!({"id": "d1", "ownerId": "u_old"})),
+            },
+        );
+        let resp = log.pull(&SyncCursor::beginning(), 100).unwrap();
+        assert_eq!(resp.changes.len(), 1);
+        let stored = &resp.changes[0];
+        assert_eq!(stored.kind, ChangeKind::Update);
+        assert_eq!(
+            stored.prev_data.as_ref().unwrap()["ownerId"],
+            "u_old",
+            "prev_data must round-trip through the retained log",
+        );
     }
 
     #[test]

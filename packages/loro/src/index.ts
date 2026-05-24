@@ -43,20 +43,34 @@ export type { CrdtFrame } from "./wire";
 
 let attachedSync: SyncEngine | null = null;
 let unsubscribeBinaryHandler: (() => void) | null = null;
+let unsubscribeRowEviction: (() => void) | null = null;
 
 function ensureAttached(): void {
   const sync = db.sync;
   if (attachedSync === sync) return;
 
-  // Tear down the previous engine's handler if init() swapped it
+  // Tear down the previous engine's handlers if init() swapped it
   // (test harness or re-init at runtime).
   if (unsubscribeBinaryHandler) {
     unsubscribeBinaryHandler();
     unsubscribeBinaryHandler = null;
   }
+  if (unsubscribeRowEviction) {
+    unsubscribeRowEviction();
+    unsubscribeRowEviction = null;
+  }
   unsubscribeBinaryHandler = sync.onBinaryFrame((bytes: Uint8Array) => {
     globalRegistry.applyBinaryFrame(bytes);
   });
+  // The server's `row-revoked` envelope signals that the subscriber's
+  // policy was revoked mid-session for a specific row. Drop the
+  // cached LoroDoc so the collaborative handle unmounts instead of
+  // lingering with stale state until the tab closes.
+  unsubscribeRowEviction = sync.addRowEvictionListener(
+    (entity: string, rowId: string) => {
+      globalRegistry.evict(entity, rowId);
+    },
+  );
   attachedSync = sync;
 }
 
@@ -238,6 +252,10 @@ export function detachLoro(): void {
   if (unsubscribeBinaryHandler) {
     unsubscribeBinaryHandler();
     unsubscribeBinaryHandler = null;
+  }
+  if (unsubscribeRowEviction) {
+    unsubscribeRowEviction();
+    unsubscribeRowEviction = null;
   }
   attachedSync = null;
 }

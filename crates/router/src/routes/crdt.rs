@@ -163,22 +163,25 @@ pub(crate) fn handle(
                         row_id,
                         pylon_sync::ChangeRecord::Update {
                             row: row.clone(),
-                            // CRDT merges don't carry a pre-merge
-                            // snapshot here. Visibility-flip clients
-                            // (rare for CRDT entities) reconcile on
-                            // next pull; the binary CRDT broadcast
-                            // already runs per-subscriber re-auth.
-                            prev: None,
+                            // Thread the pre-merge row (loaded at
+                            // line 83 for policy authz) through to
+                            // the JSON change event. Visibility-flip
+                            // subscribers on the JSON sync path
+                            // (db.useQuery / /api/sync/pull) get a
+                            // synthesized Delete tombstone instead
+                            // of being silently dropped.
+                            prev: existing_row.clone(),
                         },
                     );
                     crate::emit_change_seq_header(ctx, event.seq);
-                    crate::broadcast_change(
+                    crate::broadcast_change_event(
                         ctx.notifier,
                         event.seq,
                         entity,
                         row_id,
                         event.kind.clone(),
                         event.data.as_ref(),
+                        event.prev_data.as_ref(),
                     );
                 }
                 (200, serde_json::json!({"ok": true}).to_string())

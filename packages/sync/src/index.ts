@@ -275,6 +275,15 @@ export class SyncEngine {
     new Map();
 
   /**
+   * Listeners notified when the server signals a per-subscriber row
+   * revocation (`row-revoked` envelope). Used by `@pylonsync/loro`
+   * to evict the LoroDoc registry entry for a row whose policy was
+   * revoked mid-session. Plain Set so identity is the dedup key.
+   */
+  private rowEvictionListeners: Set<(entity: string, rowId: string) => void> =
+    new Set();
+
+  /**
    * Register a binary-frame handler. Returns an unsubscribe fn that
    * pulls the handler back out — call on hook unmount / module
    * teardown so handlers don't leak.
@@ -728,6 +737,28 @@ export class SyncEngine {
         // Presence event.
         if (msg.type === "presence") {
           this.store.notify();
+          return;
+        }
+
+        // Server-driven revocation: a subscriber whose read policy
+        // was revoked mid-session for a specific row. Drop the row
+        // from the local replica at the current cursor seq so the
+        // tombstone supersedes any racing late-arriving WS update
+        // for the same row, and notify any LoroDoc subscriber
+        // (registered via `addRowEvictionListener`) so collaborative
+        // doc handles unmount cleanly.
+        //
+        // Distinct from a regular Delete change event because this
+        // envelope has no global seq — the row's underlying data
+        // hasn't been deleted, only the recipient's visibility of
+        // it. Other subscribers (with matching policy) keep their
+        // row intact.
+        if (
+          msg.type === "row-revoked" &&
+          typeof msg.entity === "string" &&
+          typeof msg.row_id === "string"
+        ) {
+          this.handleRowRevocation(msg.entity, msg.row_id);
           return;
         }
 
@@ -1454,6 +1485,56 @@ export class SyncEngine {
    */
   notifySessionChanged(): Promise<void> {
     return this.refreshResolvedSession();
+  }
+
+  /**
+   * Drop a row from the local replica because the server signaled
+   * that the current subscriber's read policy was revoked for it.
+   *
+   * Calls `LocalStore.reconcileRemove(entity, id, cursor.last_seq)`
+   * to record a tombstone at the current cursor. A future server
+   * issuing seqs strictly greater than the cursor can re-create
+   * the row if policy is re-granted; replays older than the cursor
+   * are filtered by the tombstone (closing the "WS update lands
+   * between revoke and tombstone" race).
+   *
+   * Also notifies row-eviction listeners so external row-bound
+   * resources (LoroDoc registries, etc.) can unmount.
+   */
+  private handleRowRevocation(entity: string, rowId: string): void {
+    const removed = this.store.reconcileRemove(
+      entity,
+      rowId,
+      this.cursor.last_seq,
+    );
+    if (removed) {
+      // Persist the deletion through the same pipe as a real Delete
+      // event so on-disk replica + in-memory replica stay aligned.
+      if (this.persistence) {
+        void this.persistence.deleteRow(entity, rowId).catch(() => {
+          /* best-effort */
+        });
+      }
+      this.store.notify();
+    }
+    for (const listener of this.rowEvictionListeners) {
+      listener(entity, rowId);
+    }
+  }
+
+  /**
+   * Register a listener invoked when the server signals a per-
+   * subscriber row revocation. Used by `@pylonsync/loro` to evict
+   * the LoroDoc registry entry for the row so collaborative doc
+   * handles unmount cleanly. Returns an unsubscribe function.
+   */
+  addRowEvictionListener(
+    listener: (entity: string, rowId: string) => void,
+  ): () => void {
+    this.rowEvictionListeners.add(listener);
+    return () => {
+      this.rowEvictionListeners.delete(listener);
+    };
   }
 
   /**

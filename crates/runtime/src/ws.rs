@@ -794,9 +794,17 @@ impl WsHub {
     /// sees the row data. This is the v0.3.72 fix for the cross-tenant
     /// data leak the codex pass-3 audit flagged.
     pub fn broadcast(&self, event: &ChangeEvent) {
-        let json = match serde_json::to_string(event) {
-            Ok(j) => j,
-            Err(_) => return,
+        // Wire shape strips `prev_data` — that field is in-memory
+        // only, used by the per-subscriber filter to decide between
+        // shipping the Update and shipping the synthesized Delete.
+        // Pre-strip leaks the pre-update row (which may carry
+        // ownership / tenant / secret fields the recipient
+        // shouldn't see) to every allowed subscriber. Insert /
+        // Delete events already have prev_data = None so the
+        // strip is a no-op for them.
+        let json = match serialize_wire_event(event) {
+            Some(j) => j,
+            None => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
         // Pre-serialize the synthesized Delete-at-this-seq JSON for
@@ -959,24 +967,34 @@ impl WsHub {
         for id in client_ids {
             by_shard[(*id as usize) % NUM_SHARDS].push(*id);
         }
-        // For subscribers whose policy now denies them, also synthesize
-        // a JSON Delete signal so their local replica drops the row.
-        // Without this, a revoked subscriber's local Loro doc stays in
-        // place until they explicitly close and re-mount.
+        // For subscribers whose policy now denies them, also send a
+        // revocation envelope so their local replica drops the row.
+        //
+        // We use a dedicated `{ type: "row-revoked", entity, row_id }`
+        // envelope rather than a synthetic Delete change event: the
+        // client's apply pipeline filters change events by seq vs.
+        // cursor, and a synthetic event has no real seq to compare
+        // against (using 0 or current_seq either gets dropped by the
+        // seq guard or wedges the cursor). The revocation envelope
+        // bypasses seq logic entirely — the SyncEngine handles it
+        // by calling `store.reconcileRemove` at the current cursor
+        // seq, and `@pylonsync/loro` evicts the LoroDoc registry
+        // entry for that (entity, row_id) pair.
         let revocation_signal: Option<Arc<str>> = {
-            let synth = ChangeEvent {
-                seq: 0, // synthetic — pull picks up the real seq later
-                entity: entity.to_string(),
-                row_id: row_id.to_string(),
-                kind: ChangeKind::Delete,
-                data: row.cloned(),
-                prev_data: None,
-                timestamp: String::new(),
-            };
-            serde_json::to_string(&synth)
+            let envelope = serde_json::json!({
+                "type": "row-revoked",
+                "entity": entity,
+                "row_id": row_id,
+            });
+            serde_json::to_string(&envelope)
                 .ok()
                 .map(|s| Arc::from(s.into_boxed_str()))
         };
+        // `row` is unused now — revocation doesn't ship row data
+        // (the client already had whatever they had locally; we
+        // just signal "drop it"). Suppress the unused-variable
+        // warning explicitly.
+        let _ = row;
         for (idx, ids) in by_shard.iter().enumerate() {
             if ids.is_empty() {
                 continue;
@@ -1161,6 +1179,21 @@ pub type SnapshotFetcher =
 /// `crdt-subscribe`, so the new tab sees the latest converged state
 /// without waiting for the next write. When absent, subscribe is still
 /// recorded but the catch-up frame is skipped.
+/// Serialize a `ChangeEvent` for the client wire. Strips the
+/// in-memory-only `prev_data` field so the pre-update row never
+/// leaks to a subscriber whose post policy allowed them. Used by
+/// both WS and SSE broadcast paths.
+pub(crate) fn serialize_wire_event(event: &ChangeEvent) -> Option<String> {
+    if event.prev_data.is_none() {
+        return serde_json::to_string(event).ok();
+    }
+    let wire = ChangeEvent {
+        prev_data: None,
+        ..event.clone()
+    };
+    serde_json::to_string(&wire).ok()
+}
+
 pub fn start_ws_server(
     hub: Arc<WsHub>,
     auth: Arc<WsAuth>,
