@@ -419,8 +419,7 @@ fn start_server(
     // read it on the broadcast hot path. The hubs use it at the
     // wire-serialization step to project `serverOnly` fields — after
     // the per-client policy check has evaluated the raw row.
-    let shared_manifest: Arc<pylon_kernel::AppManifest> =
-        Arc::new(runtime.manifest().clone());
+    let shared_manifest: Arc<pylon_kernel::AppManifest> = Arc::new(runtime.manifest().clone());
     let ws_hub = WsHub::new(
         Arc::clone(&policy_engine),
         Arc::clone(&shared_manifest),

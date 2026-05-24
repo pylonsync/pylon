@@ -266,9 +266,7 @@ pub(crate) fn handle(
                         // Project for the wire AFTER the policy
                         // check — strips User-entity secrets and any
                         // entity's `serverOnly` fields.
-                        .map(|row| crate::project_row_for_wire(
-                            manifest, auth_user, entity, row,
-                        ))
+                        .map(|row| crate::project_row_for_wire(manifest, auth_user, entity, row))
                         .collect();
                     (
                         200,
