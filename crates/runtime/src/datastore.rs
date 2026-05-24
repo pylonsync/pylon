@@ -1003,12 +1003,6 @@ pub struct WsSseNotifier {
     pub ws: Arc<WsHub>,
     pub sse: Arc<SseHub>,
     pub auth_user: pylon_kernel::ManifestAuthUserConfig,
-    /// Full manifest, required for `serverOnly` field stripping on
-    /// every wire-bound projection. Without it, `notify()` could
-    /// only apply the User-entity allowlist; entity-level
-    /// `serverOnly` markers (e.g. `Org.stripeCustomerId.serverOnly()`)
-    /// would still leak through WS / SSE / cluster fanout.
-    pub manifest: Arc<pylon_kernel::AppManifest>,
     /// Cross-machine fanout transport. Set via
     /// [`Self::with_cluster_bus`] at construction; defaults to a
     /// no-op bus so single-machine builds pay zero overhead.
@@ -1027,17 +1021,17 @@ pub struct WsSseNotifier {
 
 impl WsSseNotifier {
     /// Construct with no cluster fanout (single-machine deploy).
+    /// Manifest now lives on the hubs (used at the wire-serialize
+    /// step), not on the notifier.
     pub fn new(
         ws: Arc<WsHub>,
         sse: Arc<SseHub>,
         auth_user: pylon_kernel::ManifestAuthUserConfig,
-        manifest: Arc<pylon_kernel::AppManifest>,
     ) -> Self {
         Self {
             ws,
             sse,
             auth_user,
-            manifest,
             cluster_bus: Arc::new(pylon_cluster::NoopBus::new()),
             reactive: None,
             policy: None,
@@ -1050,14 +1044,12 @@ impl WsSseNotifier {
         ws: Arc<WsHub>,
         sse: Arc<SseHub>,
         auth_user: pylon_kernel::ManifestAuthUserConfig,
-        manifest: Arc<pylon_kernel::AppManifest>,
         cluster_bus: Arc<dyn pylon_cluster::ClusterBus>,
     ) -> Self {
         Self {
             ws,
             sse,
             auth_user,
-            manifest,
             cluster_bus,
             reactive: None,
             policy: None,
@@ -1100,35 +1092,24 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         if let Some(reactive) = &self.reactive {
             reactive.on_change(event);
         }
-        // Wire-level projection runs on EVERY entity, not just User:
-        //   - User entity → allowlist + secret strip
-        //   - any entity → strip `serverOnly` fields
-        // Applies to both `data` and `prev_data` so visibility-flip
-        // tombstones don't leak server-only fields either. Cluster
-        // bus carries the SAME projected event so peers never see
-        // the unprojected row either.
-        let projected_data = pylon_router::project_row_for_wire_opt(
-            self.manifest.as_ref(),
-            &self.auth_user,
-            &event.entity,
-            event.data.clone(),
-        );
-        let projected_prev = pylon_router::project_row_for_wire_opt(
-            self.manifest.as_ref(),
-            &self.auth_user,
-            &event.entity,
-            event.prev_data.clone(),
-        );
-        let projected_event = pylon_sync::ChangeEvent {
-            data: projected_data,
-            prev_data: projected_prev,
-            ..event.clone()
-        };
-        self.ws.broadcast(&projected_event);
-        self.sse.broadcast(&projected_event);
+        // Pass the RAW event through to WS / SSE / cluster bus.
+        //
+        // Projection happens inside each hub's broadcast at the
+        // wire-serialization step, AFTER the per-client policy
+        // check has run against the raw row. Pre-fix this method
+        // projected upfront and the projected event was what the
+        // policy check saw — a read policy that referenced a
+        // `serverOnly` field (e.g. `auth.userId == data.ownerId`
+        // with ownerId serverOnly) would false-deny because the
+        // field was already stripped. Similarly cluster peers
+        // appended the projected row to their change log, so
+        // /api/sync/pull on the peer saw stripped data even for
+        // server-side callers.
+        self.ws.broadcast(event);
+        self.sse.broadcast(event);
         self.cluster_bus.publish(&pylon_cluster::Envelope::change(
             self.cluster_bus.instance_id(),
-            &projected_event,
+            event,
         ));
     }
 
@@ -1186,6 +1167,7 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         row_id: &str,
         snapshot: &[u8],
         row: Option<&serde_json::Value>,
+        seq: u64,
     ) {
         // P0 leak guard: never ship raw CRDT snapshots for the User
         // entity. CRDT frames carry the full Loro doc state, which
@@ -1232,6 +1214,7 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
                     entity,
                     row_id,
                     row,
+                    seq,
                     policy.as_ref(),
                 );
             }
@@ -1358,29 +1341,18 @@ pub fn install_cluster_bus_subscriber(
             if let Some(r) = &reactive_handler {
                 r.on_change(&event);
             }
-            // Apply the same wire-level projection the local
-            // notifier does. Defensive: a peer running an older
-            // version that shipped unprojected rows still has its
-            // events stripped before they hit our subscribers.
-            let projected_data = pylon_router::project_row_for_wire_opt(
-                manifest_handler.as_ref(),
-                &auth_user_handler,
-                &event.entity,
-                event.data.clone(),
-            );
-            let projected_prev = pylon_router::project_row_for_wire_opt(
-                manifest_handler.as_ref(),
-                &auth_user_handler,
-                &event.entity,
-                event.prev_data.clone(),
-            );
-            let projected_event = pylon_sync::ChangeEvent {
-                data: projected_data,
-                prev_data: projected_prev,
-                ..event
-            };
-            ws_handler.broadcast(&projected_event);
-            sse_handler.broadcast(&projected_event);
+            // Forward the RAW event to local hubs — they project at
+            // the wire-serialization step, after the per-client
+            // policy check has evaluated against the raw row.
+            // The peer's change log retention also keeps the raw
+            // event (append_peer above) so /api/sync/pull serves
+            // server-side callers with full rows.
+            ws_handler.broadcast(&event);
+            sse_handler.broadcast(&event);
+            // Suppress the now-unused manifest/auth_user warnings —
+            // they remain in scope so a future projection-shifting
+            // change can use them without re-threading.
+            let _ = (&manifest_handler, &auth_user_handler);
             return;
         }
         // Presence: opaque JSON, broadcast as-is. The originating
@@ -1422,6 +1394,13 @@ pub fn install_cluster_bus_subscriber(
                         &crdt.entity,
                         &crdt.row_id,
                         None,
+                        // Cluster-bus envelopes don't carry a seq;
+                        // use the local change log's current_seq as
+                        // a conservative high-water for the
+                        // revocation tombstone. The client will
+                        // additionally fire a catch-up pull on
+                        // receipt regardless of the seq value.
+                        change_log_handler.current_seq(),
                         p.as_ref(),
                     ),
                     None => ws_handler.broadcast_binary_to(&subs, frame),
@@ -5080,6 +5059,7 @@ mod auto_broadcast_tests {
             _row_id: &str,
             _snapshot: &[u8],
             _row: Option<&serde_json::Value>,
+            _seq: u64,
         ) {
         }
     }
@@ -5752,15 +5732,19 @@ mod user_projection_broadcast_tests {
     fn user_row_broadcast_strips_password_hash() {
         let manifest = manifest_with_user_entity();
         let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
-        let ws = WsHub::new(Arc::clone(&policy));
-        let sse = SseHub::new(Arc::clone(&policy));
-
-        let notifier = WsSseNotifier::new(
-            ws,
-            sse,
+        let manifest_arc = Arc::new(manifest.clone());
+        let ws = WsHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
             manifest.auth.user.clone(),
-            Arc::new(manifest.clone()),
         );
+        let sse = SseHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
+            manifest.auth.user.clone(),
+        );
+
+        let notifier = WsSseNotifier::new(ws, sse, manifest.auth.user.clone());
 
         // Build an event that carries `passwordHash` — emulates what
         // a TS mutation handler's `ctx.db.update("User", id, ...)`
@@ -5807,7 +5791,15 @@ mod user_projection_broadcast_tests {
                 *self.captured.lock().unwrap() = Some(ev.clone());
             }
             fn notify_presence(&self, _: &str) {}
-            fn notify_crdt(&self, _: &str, _: &str, _: &[u8], _: Option<&serde_json::Value>) {}
+            fn notify_crdt(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[u8],
+                _: Option<&serde_json::Value>,
+                _: u64,
+            ) {
+            }
         }
 
         let insp = Inspecting {
@@ -5842,13 +5834,21 @@ mod user_projection_broadcast_tests {
     fn real_ws_sse_notifier_projects_user_rows() {
         let manifest = manifest_with_user_entity();
         let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
-        let ws = WsHub::new(Arc::clone(&policy));
-        let sse = SseHub::new(Arc::clone(&policy));
+        let manifest_arc = Arc::new(manifest.clone());
+        let ws = WsHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
+            manifest.auth.user.clone(),
+        );
+        let sse = SseHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
+            manifest.auth.user.clone(),
+        );
         let notifier = WsSseNotifier::new(
             Arc::clone(&ws),
             Arc::clone(&sse),
             manifest.auth.user.clone(),
-            Arc::new(manifest.clone()),
         );
 
         // Use an unattached hub — broadcast() is a no-op when there
@@ -5889,13 +5889,21 @@ mod user_projection_broadcast_tests {
     fn notify_crdt_skips_user_entity() {
         let manifest = manifest_with_user_entity();
         let policy = Arc::new(PolicyEngine::from_manifest(&manifest));
-        let ws = WsHub::new(Arc::clone(&policy));
-        let sse = SseHub::new(Arc::clone(&policy));
+        let manifest_arc = Arc::new(manifest.clone());
+        let ws = WsHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
+            manifest.auth.user.clone(),
+        );
+        let sse = SseHub::new(
+            Arc::clone(&policy),
+            Arc::clone(&manifest_arc),
+            manifest.auth.user.clone(),
+        );
         let notifier = WsSseNotifier::new(
             Arc::clone(&ws),
             Arc::clone(&sse),
             manifest.auth.user.clone(),
-            Arc::new(manifest.clone()),
         );
 
         // Should be a no-op and not touch WsHub::broadcast_binary_to
@@ -5905,7 +5913,7 @@ mod user_projection_broadcast_tests {
         // must complete fast (the entity-name guard short-circuits
         // before the subscription HashMap lookup).
         let fake_snapshot = vec![0u8; 32];
-        notifier.notify_crdt("User", "u1", &fake_snapshot, None);
+        notifier.notify_crdt("User", "u1", &fake_snapshot, None, 1);
         // If we ever change the User entity name in the manifest,
         // the guard must follow.
         assert_eq!(notifier.auth_user.entity, "User");

@@ -54,6 +54,7 @@ pub trait ChangeNotifier: Send + Sync {
         _row_id: &str,
         _snapshot: &[u8],
         _row: Option<&serde_json::Value>,
+        _seq: u64,
     ) {
     }
 
@@ -1844,7 +1845,7 @@ pub fn broadcast_change_with_crdt(
         // on it. We pass the bytes through unchanged; the
         // delta-vs-snapshot decision was made here.
         let _ = fell_back_to_snapshot; // intentionally unused — see note above
-        notifier.notify_crdt(entity, row_id, &payload, data);
+        notifier.notify_crdt(entity, row_id, &payload, data, seq);
         // Stash the post-write VV so the NEXT write's delta is
         // computed against this point. Skip the update on
         // backends that don't support VV tracking (returns None).

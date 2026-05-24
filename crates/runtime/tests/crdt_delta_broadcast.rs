@@ -117,6 +117,7 @@ impl ChangeNotifier for CrdtCaptureNotifier {
         row_id: &str,
         snapshot: &[u8],
         _row: Option<&serde_json::Value>,
+        _seq: u64,
     ) {
         self.crdt_frames.lock().unwrap().push((
             entity.to_string(),

@@ -78,7 +78,8 @@ pub(crate) fn handle(
                 // `next_cursor` returned to the client is the last
                 // visible id (the contract callers depend on).
                 const RAW_BATCH: usize = 200;
-                let auth_user = &ctx.store.manifest().auth.user;
+                let manifest = ctx.store.manifest();
+                let auth_user = &manifest.auth.user;
                 let mut visible: Vec<serde_json::Value> = Vec::new();
                 let mut current_after: Option<String> = after.map(String::from);
                 let mut source_exhausted = false;
@@ -117,7 +118,17 @@ pub(crate) fn handle(
                         if !allowed {
                             continue;
                         }
-                        visible.push(crate::maybe_project_user_row(entity_name, row, auth_user));
+                        // Apply both wire projections: User-entity
+                        // allowlist + `serverOnly` field strip.
+                        // Pre-fix only the User-entity allowlist
+                        // ran here so server-only fields on non-User
+                        // entities leaked through cursor pagination.
+                        visible.push(crate::project_row_for_wire(
+                            manifest,
+                            auth_user,
+                            entity_name,
+                            row,
+                        ));
                         if visible.len() > limit {
                             break;
                         }

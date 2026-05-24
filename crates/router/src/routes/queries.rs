@@ -246,9 +246,14 @@ pub(crate) fn handle(
             };
             return Some(match ctx.store.query_filtered(entity, &filter) {
                 Ok(rows) => {
+                    let manifest = ctx.store.manifest();
+                    let auth_user = &manifest.auth.user;
                     let allowed: Vec<serde_json::Value> = rows
                         .into_iter()
                         .filter(|row| {
+                            // Policy check runs against the RAW row
+                            // so predicates referencing `serverOnly`
+                            // fields evaluate against actual values.
                             matches!(
                                 ctx.policy_engine.check_entity_read(
                                     entity,
@@ -258,6 +263,12 @@ pub(crate) fn handle(
                                 pylon_policy::PolicyResult::Allowed
                             )
                         })
+                        // Project for the wire AFTER the policy
+                        // check — strips User-entity secrets and any
+                        // entity's `serverOnly` fields.
+                        .map(|row| crate::project_row_for_wire(
+                            manifest, auth_user, entity, row,
+                        ))
                         .collect();
                     (
                         200,
@@ -313,9 +324,12 @@ pub(crate) fn handle(
                 );
                 return Some((403, json_error("POLICY_DENIED", "Access denied by policy")));
             }
+            let manifest = ctx.store.manifest();
+            let auth_user = &manifest.auth.user;
+            let projected = crate::project_row_for_wire(manifest, auth_user, parts[0], row);
             return Some((
                 200,
-                serde_json::to_string(&row).unwrap_or_else(|_| "{}".into()),
+                serde_json::to_string(&projected).unwrap_or_else(|_| "{}".into()),
             ));
         }
     }

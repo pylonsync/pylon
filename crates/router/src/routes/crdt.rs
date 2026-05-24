@@ -140,8 +140,20 @@ pub(crate) fn handle(
                 // subscriber policy re-checks against it. None → entity-
                 // level only (graceful degradation for row-level rules).
                 let row_for_authz = ctx.store.get_by_id(entity, row_id).ok().flatten();
-                ctx.notifier
-                    .notify_crdt(entity, row_id, &snapshot, row_for_authz.as_ref());
+                // Conservative high-water seq for the revocation
+                // tombstone (CRDT route doesn't have an
+                // event-specific seq in scope yet — the JSON change
+                // event below will get its own seq). The client also
+                // fires a catch-up pull on receipt, so being
+                // slightly behind the JSON event seq is harmless.
+                let revocation_seq = ctx.change_log.current_seq();
+                ctx.notifier.notify_crdt(
+                    entity,
+                    row_id,
+                    &snapshot,
+                    row_for_authz.as_ref(),
+                    revocation_seq,
+                );
                 // ALSO emit a JSON change event so non-CRDT subscribers
                 // (the regular `db.useQuery` path, `/api/sync/pull`
                 // callers) observe the materialized-column projection

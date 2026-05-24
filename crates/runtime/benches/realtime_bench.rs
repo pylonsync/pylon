@@ -90,9 +90,15 @@ fn main() {
     // with zero clients attached they no-op, so the rate you see here is
     // the enqueue-side ceiling. Real throughput depends on client count
     // and message size.
-    let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
-        &AppManifest::default(),
-    )));
+    let hub = {
+        let m = AppManifest::default();
+        let auth_user = m.auth.user.clone();
+        WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&m)),
+            Arc::new(m),
+            auth_user,
+        )
+    };
     let _hub_clone: Arc<WsHub> = Arc::clone(&hub);
     let mut i = 0u64;
     bench("ws_hub.broadcast (enqueue, 0 clients)", 100_000, || {

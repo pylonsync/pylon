@@ -11,6 +11,18 @@ fn empty_policy() -> Arc<PolicyEngine> {
     Arc::new(PolicyEngine::from_manifest(&AppManifest::default()))
 }
 
+fn empty_ws_hub() -> Arc<WsHub> {
+    let m = AppManifest::default();
+    let auth_user = m.auth.user.clone();
+    WsHub::new(empty_policy(), Arc::new(m), auth_user)
+}
+
+fn empty_sse_hub() -> Arc<SseHub> {
+    let m = AppManifest::default();
+    let auth_user = m.auth.user.clone();
+    SseHub::new(empty_policy(), Arc::new(m), auth_user)
+}
+
 fn bench(name: &str, iterations: u32, f: impl Fn()) {
     let start = Instant::now();
     for _ in 0..iterations {
@@ -67,7 +79,7 @@ fn main() {
     });
 
     // -- WsHub broadcast (no clients) --
-    let hub = WsHub::new(empty_policy());
+    let hub = empty_ws_hub();
     let event = ChangeEvent {
         seq: 1,
         entity: "User".into(),
@@ -83,7 +95,7 @@ fn main() {
     });
 
     // -- SseHub broadcast (no clients) --
-    let sse = SseHub::new(empty_policy());
+    let sse = empty_sse_hub();
     bench("sse broadcast (0 clients)", 100_000, || {
         sse.broadcast(&event);
     });
@@ -111,7 +123,7 @@ fn main() {
     );
 
     // Measure lock contention under simulated load.
-    let hub = WsHub::new(empty_policy());
+    let hub = empty_ws_hub();
     let hub = Arc::new(hub);
     let start = Instant::now();
     let mut handles = vec![];

@@ -712,10 +712,17 @@ pub struct WsHub {
     queue_depth: usize,
     /// Policy engine for per-client read checks on every change-event
     /// broadcast. Wrapped in Arc so worker threads can clone cheaply.
-    /// `None` is a hard error path now — change events without policy
-    /// would re-open the cross-tenant leak. Construction sites in
-    /// `server.rs` always pass one.
     policy: Arc<PolicyEngine>,
+    /// Manifest snapshot for wire projection. Held here (not on the
+    /// notifier) so projection happens at the final serialization
+    /// step AFTER the per-client policy check — policies that
+    /// reference `serverOnly` fields evaluate against the raw row.
+    /// Pre-fix the notifier projected before broadcast, stripping
+    /// fields from the policy check input.
+    manifest: Arc<pylon_kernel::AppManifest>,
+    /// Auth-user manifest config, used by `maybe_project_user_row`
+    /// inside the wire projection.
+    auth_user: pylon_kernel::ManifestAuthUserConfig,
     /// Per-client CRDT subscriptions. Reader threads register `(entity,
     /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
     /// the binary CRDT broadcast path uses `subscribers()` to filter the
@@ -725,7 +732,11 @@ pub struct WsHub {
 }
 
 impl WsHub {
-    pub fn new(policy: Arc<PolicyEngine>) -> Arc<Self> {
+    pub fn new(
+        policy: Arc<PolicyEngine>,
+        manifest: Arc<pylon_kernel::AppManifest>,
+        auth_user: pylon_kernel::ManifestAuthUserConfig,
+    ) -> Arc<Self> {
         let mut shards = Vec::with_capacity(NUM_SHARDS);
         let mut broadcast_txs = Vec::with_capacity(NUM_SHARDS);
 
@@ -773,6 +784,8 @@ impl WsHub {
             broadcast_txs,
             queue_depth: BROADCAST_QUEUE_DEPTH,
             policy,
+            manifest,
+            auth_user,
             subscriptions: CrdtSubscriptions::new(),
         })
     }
@@ -794,37 +807,52 @@ impl WsHub {
     /// sees the row data. This is the v0.3.72 fix for the cross-tenant
     /// data leak the codex pass-3 audit flagged.
     pub fn broadcast(&self, event: &ChangeEvent) {
-        // Wire shape strips `prev_data` — that field is in-memory
-        // only, used by the per-subscriber filter to decide between
-        // shipping the Update and shipping the synthesized Delete.
-        // Pre-strip leaks the pre-update row (which may carry
-        // ownership / tenant / secret fields the recipient
-        // shouldn't see) to every allowed subscriber. Insert /
-        // Delete events already have prev_data = None so the
-        // strip is a no-op for them.
-        let json = match serialize_wire_event(event) {
-            Some(j) => j,
-            None => return,
+        // Project NOW for wire serialization. The raw event in the
+        // `BroadcastJob` keeps `data` / `prev_data` intact so the
+        // per-client policy check evaluates against the unprojected
+        // row — read policies that reference `serverOnly` fields
+        // (e.g. `auth.userId == data.ownerId` where ownerId is
+        // serverOnly) need those fields to be present at auth time.
+        // Once auth passes, the worker ships the PROJECTED wire
+        // JSON: User-entity allowlist + serverOnly field strip +
+        // prev_data stripped (since prev_data is server-internal
+        // only).
+        let projected_data = pylon_router::project_row_for_wire_opt(
+            self.manifest.as_ref(),
+            &self.auth_user,
+            &event.entity,
+            event.data.clone(),
+        );
+        let wire_event_for_clients = ChangeEvent {
+            data: projected_data,
+            prev_data: None,
+            ..event.clone()
+        };
+        let json = match serde_json::to_string(&wire_event_for_clients) {
+            Ok(j) => j,
+            Err(_) => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
         // Pre-serialize the synthesized Delete-at-this-seq JSON for
         // visibility-flip subscribers. Only computed when the event
         // is an Update carrying `prev_data` — that's the only case
-        // where the dual-check might fire. Insert/Delete/non-flip
-        // updates leave this `None` and the worker just drops denied
-        // subscribers silently.
+        // where the dual-check might fire. The synth-delete uses
+        // the PROJECTED prev_data as its wire `data` so server-only
+        // fields on the pre-row don't leak via the tombstone path.
         let synth_delete_arc: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
+                let projected_prev = pylon_router::project_row_for_wire_opt(
+                    self.manifest.as_ref(),
+                    &self.auth_user,
+                    &event.entity,
+                    event.prev_data.clone(),
+                );
                 let synth = ChangeEvent {
                     seq: event.seq,
                     entity: event.entity.clone(),
                     row_id: event.row_id.clone(),
                     kind: ChangeKind::Delete,
-                    // Subscribers whose pre policy passed saw the row
-                    // with `prev_data` shape; ship that as the
-                    // tombstone payload so row-scoped read predicates
-                    // on the wire-deserialize side authorize cleanly.
-                    data: event.prev_data.clone(),
+                    data: projected_prev,
                     prev_data: None,
                     timestamp: event.timestamp.clone(),
                 };
@@ -957,6 +985,7 @@ impl WsHub {
         entity: &str,
         row_id: &str,
         row: Option<&serde_json::Value>,
+        seq: u64,
         policy: &PolicyEngine,
     ) {
         if client_ids.is_empty() {
@@ -981,10 +1010,20 @@ impl WsHub {
         // seq, and `@pylonsync/loro` evicts the LoroDoc registry
         // entry for that (entity, row_id) pair.
         let revocation_signal: Option<Arc<str>> = {
+            // `seq` is the high-water seq at the time of revocation.
+            // The client uses it as the tombstone seq so any stale
+            // in-flight WS frame with `seq <= tombstone` is filtered;
+            // anything strictly greater stays admissible (so a
+            // legitimate re-grant + re-insert at a higher seq can
+            // still land). The client ALSO fires a catch-up pull on
+            // receipt — closes the race where a stale frame with
+            // seq > tombstone arrives before the next legit event
+            // does, by forcing reconciliation against server truth.
             let envelope = serde_json::json!({
                 "type": "row-revoked",
                 "entity": entity,
                 "row_id": row_id,
+                "seq": seq,
             });
             serde_json::to_string(&envelope)
                 .ok()
@@ -2128,17 +2167,29 @@ mod tests {
 
     #[test]
     fn hub_starts_with_zero_clients() {
-        let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
-            &pylon_kernel::AppManifest::default(),
-        )));
+        let hub = {
+            let m = pylon_kernel::AppManifest::default();
+            let auth_user = m.auth.user.clone();
+            WsHub::new(
+                Arc::new(PolicyEngine::from_manifest(&m)),
+                Arc::new(m),
+                auth_user,
+            )
+        };
         assert_eq!(hub.client_count(), 0);
     }
 
     #[test]
     fn broadcast_to_empty_hub_doesnt_panic() {
-        let hub = WsHub::new(Arc::new(PolicyEngine::from_manifest(
-            &pylon_kernel::AppManifest::default(),
-        )));
+        let hub = {
+            let m = pylon_kernel::AppManifest::default();
+            let auth_user = m.auth.user.clone();
+            WsHub::new(
+                Arc::new(PolicyEngine::from_manifest(&m)),
+                Arc::new(m),
+                auth_user,
+            )
+        };
         let event = ChangeEvent {
             seq: 1,
             entity: "Test".into(),

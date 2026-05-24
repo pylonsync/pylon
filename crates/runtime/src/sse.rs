@@ -201,10 +201,21 @@ pub struct SseHub {
     /// Policy engine for per-client read checks on every change-event
     /// broadcast.
     policy: Arc<PolicyEngine>,
+    /// Manifest snapshot for wire projection at the serialization
+    /// edge — same rationale as `WsHub::manifest`. Policies that
+    /// reference `serverOnly` fields must see the raw row; projection
+    /// happens AFTER the per-client policy check.
+    manifest: Arc<pylon_kernel::AppManifest>,
+    /// Auth-user manifest config for `maybe_project_user_row`.
+    auth_user: pylon_kernel::ManifestAuthUserConfig,
 }
 
 impl SseHub {
-    pub fn new(policy: Arc<PolicyEngine>) -> Arc<Self> {
+    pub fn new(
+        policy: Arc<PolicyEngine>,
+        manifest: Arc<pylon_kernel::AppManifest>,
+        auth_user: pylon_kernel::ManifestAuthUserConfig,
+    ) -> Arc<Self> {
         let mut shards = Vec::with_capacity(NUM_SHARDS);
         let mut broadcast_txs = Vec::with_capacity(NUM_SHARDS);
 
@@ -261,6 +272,8 @@ impl SseHub {
             next_id: Mutex::new(0),
             broadcast_txs,
             policy,
+            manifest,
+            auth_user,
         })
     }
 
@@ -268,27 +281,46 @@ impl SseHub {
     /// the entity's read policy. Per-client filtering happens in the
     /// shard worker.
     pub fn broadcast(&self, event: &ChangeEvent) {
-        // Strip `prev_data` from the wire — same rationale as
-        // `WsHub::broadcast`. The field is in-memory only; the
-        // per-subscriber filter uses it to choose between Update
-        // and synthesized Delete, but the recipient never sees it.
-        let json = match crate::ws::serialize_wire_event(event) {
-            Some(j) => j,
-            None => return,
+        // Project NOW for wire serialization (User allowlist +
+        // serverOnly strip), AFTER the per-client policy check in
+        // the shard worker. The `event` in the SseJob stays raw so
+        // policies referencing `serverOnly` fields evaluate
+        // against the unprojected row. `prev_data` is stripped
+        // from the wire — server-internal only.
+        let projected_data = pylon_router::project_row_for_wire_opt(
+            self.manifest.as_ref(),
+            &self.auth_user,
+            &event.entity,
+            event.data.clone(),
+        );
+        let wire_event = ChangeEvent {
+            data: projected_data,
+            prev_data: None,
+            ..event.clone()
+        };
+        let json = match serde_json::to_string(&wire_event) {
+            Ok(j) => j,
+            Err(_) => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
         // Pre-serialize the visibility-flip tombstone in SSE wire
-        // shape (`data: {...}\n\n`). Only computed for Updates that
-        // carry a pre-row — that's the only case where the shard's
-        // dual-check might pick the synth payload over the original.
+        // shape. Synth-delete uses the PROJECTED prev_data as its
+        // wire `data` so serverOnly fields on the pre-row don't
+        // leak via the tombstone path.
         let synth_delete_sse: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
+                let projected_prev = pylon_router::project_row_for_wire_opt(
+                    self.manifest.as_ref(),
+                    &self.auth_user,
+                    &event.entity,
+                    event.prev_data.clone(),
+                );
                 let synth = ChangeEvent {
                     seq: event.seq,
                     entity: event.entity.clone(),
                     row_id: event.row_id.clone(),
                     kind: ChangeKind::Delete,
-                    data: event.prev_data.clone(),
+                    data: projected_prev,
                     prev_data: None,
                     timestamp: event.timestamp.clone(),
                 };
@@ -544,22 +576,28 @@ mod tests {
         Arc::new(PolicyEngine::from_manifest(&AppManifest::default()))
     }
 
+    fn empty_hub() -> Arc<SseHub> {
+        let manifest = AppManifest::default();
+        let auth_user = manifest.auth.user.clone();
+        SseHub::new(empty_policy(), Arc::new(manifest), auth_user)
+    }
+
     #[test]
     fn hub_starts_with_correct_shard_count() {
-        let hub = SseHub::new(empty_policy());
+        let hub = empty_hub();
         assert_eq!(hub.shards.len(), NUM_SHARDS);
         assert_eq!(hub.broadcast_txs.len(), NUM_SHARDS);
     }
 
     #[test]
     fn hub_starts_empty() {
-        let hub = SseHub::new(empty_policy());
+        let hub = empty_hub();
         assert_eq!(hub.client_count(), 0);
     }
 
     #[test]
     fn broadcast_on_empty_hub_does_not_panic() {
-        let hub = SseHub::new(empty_policy());
+        let hub = empty_hub();
         hub.broadcast_message("hello");
         thread::sleep(Duration::from_millis(50));
         assert_eq!(hub.client_count(), 0);
@@ -581,7 +619,7 @@ mod tests {
 
     #[test]
     fn client_ids_are_sequential() {
-        let hub = SseHub::new(empty_policy());
+        let hub = empty_hub();
         // Verify the ID counter increments correctly.
         let mut next_id = hub.next_id.lock().unwrap();
         assert_eq!(*next_id, 0);

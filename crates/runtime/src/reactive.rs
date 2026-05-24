@@ -712,7 +712,12 @@ mod tests {
 
     fn make_hub() -> Arc<WsHub> {
         let manifest = pylon_kernel::AppManifest::default();
-        WsHub::new(Arc::new(PolicyEngine::from_manifest(&manifest)))
+        let auth_user = manifest.auth.user.clone();
+        WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&manifest)),
+            Arc::new(manifest),
+            auth_user,
+        )
     }
 
     fn dep_set(entities: &[&str], rows: &[(&str, &str)]) -> DepSet {

@@ -758,7 +758,15 @@ export class SyncEngine {
           typeof msg.entity === "string" &&
           typeof msg.row_id === "string"
         ) {
-          this.handleRowRevocation(msg.entity, msg.row_id);
+          // Server includes its current high-water seq when known —
+          // use it as the tombstone seq so an in-flight stale frame
+          // with `seq <= server_seq` is filtered locally. A
+          // legitimate re-grant at a higher seq still lands.
+          const revokeSeq =
+            typeof msg.seq === "number" && msg.seq > 0
+              ? msg.seq
+              : this.cursor.last_seq;
+          this.handleRowRevocation(msg.entity, msg.row_id, revokeSeq);
           return;
         }
 
@@ -1491,28 +1499,28 @@ export class SyncEngine {
    * Drop a row from the local replica because the server signaled
    * that the current subscriber's read policy was revoked for it.
    *
-   * Calls `LocalStore.revokeRow(entity, id, cursor.last_seq)` —
-   * NOT `reconcileRemove` — because the latter early-returns when
-   * the row isn't in memory (common for CRDT-only consumers using
-   * `useLoroDoc` without a JSON row). `revokeRow` always records
-   * the tombstone so a stale insert/update arriving after the
-   * revocation can't resurrect the row.
+   * `tombstoneSeq` is the server's high-water seq at the time of
+   * revocation (from the envelope). Stale in-flight WS frames with
+   * `seq <= tombstoneSeq` are filtered locally; legitimate
+   * re-grant + re-insert at higher seqs still land. Also fires a
+   * catch-up pull on revocation so any frame with `seq >
+   * tombstoneSeq` that arrives before the next legitimate event
+   * gets reconciled against server truth.
+   *
+   * Uses `LocalStore.revokeRow` (not `reconcileRemove`) so the
+   * tombstone is recorded even for CRDT-only consumers whose row
+   * was never materialized into `tables`.
    *
    * Also notifies row-eviction listeners so external row-bound
    * resources (LoroDoc registries, etc.) can unmount.
    */
-  private handleRowRevocation(entity: string, rowId: string): void {
-    const removed = this.store.revokeRow(
-      entity,
-      rowId,
-      this.cursor.last_seq,
-    );
+  private handleRowRevocation(
+    entity: string,
+    rowId: string,
+    tombstoneSeq: number,
+  ): void {
+    const removed = this.store.revokeRow(entity, rowId, tombstoneSeq);
     if (removed) {
-      // Persist the deletion through the same pipe as a real Delete
-      // event so on-disk replica + in-memory replica stay aligned.
-      // For CRDT-only consumers `removed` is false (the row was
-      // never materialized into `tables`), but the tombstone is
-      // still recorded above so future replays are filtered.
       if (this.persistence) {
         void this.persistence.deleteRow(entity, rowId).catch(() => {
           /* best-effort */
@@ -1523,6 +1531,11 @@ export class SyncEngine {
     for (const listener of this.rowEvictionListeners) {
       listener(entity, rowId);
     }
+    // Fire a catch-up pull so any in-flight frame with seq above
+    // the revocation tombstone is resolved against server truth.
+    // Fire-and-forget — pull is internally serialized so concurrent
+    // triggers coalesce.
+    void this.pull();
   }
 
   /**

@@ -415,8 +415,22 @@ fn start_server(
             }
         }
     }
-    let ws_hub = WsHub::new(Arc::clone(&policy_engine));
-    let sse_hub = SseHub::new(Arc::clone(&policy_engine));
+    // Snapshot the manifest once for every component that needs to
+    // read it on the broadcast hot path. The hubs use it at the
+    // wire-serialization step to project `serverOnly` fields — after
+    // the per-client policy check has evaluated the raw row.
+    let shared_manifest: Arc<pylon_kernel::AppManifest> =
+        Arc::new(runtime.manifest().clone());
+    let ws_hub = WsHub::new(
+        Arc::clone(&policy_engine),
+        Arc::clone(&shared_manifest),
+        runtime.manifest().auth.user.clone(),
+    );
+    let sse_hub = SseHub::new(
+        Arc::clone(&policy_engine),
+        Arc::clone(&shared_manifest),
+        runtime.manifest().auth.user.clone(),
+    );
     // Default-register the rate-limit plugin when no custom registry was
     // supplied. Without this, self-hosted deployments would launch with
     // auth endpoints (/api/auth/magic/send, /api/auth/magic/verify,
@@ -641,17 +655,11 @@ fn start_server(
     // before the notifier so the notifier can hold a strong ref and
     // forward every change event into the registry's `on_change`.
     let reactive_registry = crate::reactive::ReactiveRegistry::new(Arc::clone(&ws_hub));
-    // Snapshot the manifest once for every component that needs to
-    // read it on the broadcast hot path. Stripping `serverOnly`
-    // fields requires walking the entity definitions per event;
-    // Arc + clone is cheaper than cloning the AppManifest itself.
-    let shared_manifest: Arc<pylon_kernel::AppManifest> = Arc::new(runtime.manifest().clone());
     let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
         crate::datastore::WsSseNotifier::with_cluster_bus(
             Arc::clone(&ws_hub),
             Arc::clone(&sse_hub),
             runtime.manifest().auth.user.clone(),
-            Arc::clone(&shared_manifest),
             Arc::clone(&cluster_bus),
         )
         .with_reactive(Arc::clone(&reactive_registry))
@@ -4142,11 +4150,11 @@ fn start_server(
                     Arc::clone(&wh),
                     Arc::clone(&sh),
                     rt.manifest().auth.user.clone(),
-                    Arc::clone(&sm),
                     Arc::clone(&cb),
                 )
                 .with_reactive(Arc::clone(&rr))
                 .with_policy(Arc::clone(&pe));
+                let _ = &sm; // sm is plumbed through for future use; hubs own projection now
                 let openapi_gen = RuntimeOpenApiGenerator {
                     manifest: rt.manifest(),
                 };
