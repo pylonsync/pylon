@@ -645,8 +645,7 @@ fn start_server(
     // read it on the broadcast hot path. Stripping `serverOnly`
     // fields requires walking the entity definitions per event;
     // Arc + clone is cheaper than cloning the AppManifest itself.
-    let shared_manifest: Arc<pylon_kernel::AppManifest> =
-        Arc::new(runtime.manifest().clone());
+    let shared_manifest: Arc<pylon_kernel::AppManifest> = Arc::new(runtime.manifest().clone());
     let fn_notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
         crate::datastore::WsSseNotifier::with_cluster_bus(
             Arc::clone(&ws_hub),
