@@ -747,6 +747,7 @@ mod tests {
             row_id: row_id.into(),
             kind,
             data: None,
+            prev_data: None,
             timestamp: "".into(),
         }
     }

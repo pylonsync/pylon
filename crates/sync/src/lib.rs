@@ -20,6 +20,25 @@ pub struct ChangeEvent {
     /// The data after the change (None for deletes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// Pre-update row snapshot for `Update` events whose visibility
+    /// transitions across the read-policy boundary (e.g.
+    /// `allowRead: "auth.userId == data.userId"` + an ownership
+    /// change).
+    ///
+    /// Invariant: when set on an Update, the broadcast filter runs a
+    /// two-stage check per subscriber — first against `data` (post),
+    /// then against `prev_data` (pre) if the post check denied. A
+    /// subscriber whose policy allowed them to see the row PRE-update
+    /// but denies them POST-update receives a synthesized Delete at
+    /// this seq instead of being silently dropped — closing the
+    /// stale-row ghost where a row that "moved away" from a viewer
+    /// stayed in their local replica indefinitely.
+    ///
+    /// Default `None` — `Insert` and `Delete` events don't need it,
+    /// and `Update` events that don't change visibility don't need
+    /// to ship the extra bytes either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_data: Option<serde_json::Value>,
     /// Timestamp of the change.
     pub timestamp: String,
 }
@@ -52,6 +71,12 @@ pub enum ChangeRecord {
     },
     Update {
         row: serde_json::Value,
+        /// Pre-update row snapshot. Drives the dual-check on the WS
+        /// broadcast and pull filter — see `ChangeEvent::prev_data`.
+        /// `None` is permitted but means subscribers whose visibility
+        /// was revoked by this update won't get a tombstone and may
+        /// keep a stale local row until the next reconcile.
+        prev: Option<serde_json::Value>,
     },
     Delete {
         /// The pre-delete row snapshot. `None` is permitted but
@@ -74,15 +99,16 @@ impl ChangeRecord {
 
     pub fn data(&self) -> Option<&serde_json::Value> {
         match self {
-            ChangeRecord::Insert { row } | ChangeRecord::Update { row } => Some(row),
+            ChangeRecord::Insert { row } | ChangeRecord::Update { row, .. } => Some(row),
             ChangeRecord::Delete { snapshot } => snapshot.as_ref(),
         }
     }
 
-    pub fn into_data(self) -> Option<serde_json::Value> {
+    pub fn into_parts(self) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
         match self {
-            ChangeRecord::Insert { row } | ChangeRecord::Update { row } => Some(row),
-            ChangeRecord::Delete { snapshot } => snapshot,
+            ChangeRecord::Insert { row } => (Some(row), None),
+            ChangeRecord::Update { row, prev } => (Some(row), prev),
+            ChangeRecord::Delete { snapshot } => (snapshot, None),
         }
     }
 }
@@ -398,7 +424,7 @@ impl ChangeLog {
     /// silently desynced.
     pub fn record(&self, entity: &str, row_id: &str, change: ChangeRecord) -> ChangeEvent {
         let kind = change.kind();
-        let data = change.into_data();
+        let (data, prev_data) = change.into_parts();
         let seq = self.append(entity, row_id, kind.clone(), data.clone());
         ChangeEvent {
             seq,
@@ -406,6 +432,7 @@ impl ChangeLog {
             row_id: row_id.to_string(),
             kind,
             data,
+            prev_data,
             timestamp: now_iso8601(),
         }
     }
@@ -449,6 +476,7 @@ impl ChangeLog {
             row_id: row_id.to_string(),
             kind,
             data,
+            prev_data: None,
             timestamp: now_iso8601(),
         };
         events.push_back(event);
@@ -688,6 +716,7 @@ mod tests {
             row_id: "u1".into(),
             kind: ChangeKind::Insert,
             data: Some(serde_json::json!({"name": "Test"})),
+            prev_data: None,
             timestamp: "2024-01-01T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&event).unwrap();

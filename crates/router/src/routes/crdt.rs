@@ -161,7 +161,15 @@ pub(crate) fn handle(
                     let event = ctx.change_log.record(
                         entity,
                         row_id,
-                        pylon_sync::ChangeRecord::Update { row: row.clone() },
+                        pylon_sync::ChangeRecord::Update {
+                            row: row.clone(),
+                            // CRDT merges don't carry a pre-merge
+                            // snapshot here. Visibility-flip clients
+                            // (rare for CRDT entities) reconcile on
+                            // next pull; the binary CRDT broadcast
+                            // already runs per-subscriber re-auth.
+                            prev: None,
+                        },
                     );
                     crate::emit_change_seq_header(ctx, event.seq);
                     crate::broadcast_change(

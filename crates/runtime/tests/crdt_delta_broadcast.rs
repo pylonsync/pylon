@@ -111,7 +111,13 @@ impl CrdtCaptureNotifier {
 impl ChangeNotifier for CrdtCaptureNotifier {
     fn notify(&self, _event: &ChangeEvent) {}
     fn notify_presence(&self, _json: &str) {}
-    fn notify_crdt(&self, entity: &str, row_id: &str, snapshot: &[u8]) {
+    fn notify_crdt(
+        &self,
+        entity: &str,
+        row_id: &str,
+        snapshot: &[u8],
+        _row: Option<&serde_json::Value>,
+    ) {
         self.crdt_frames.lock().unwrap().push((
             entity.to_string(),
             row_id.to_string(),
@@ -151,6 +157,7 @@ fn second_crdt_broadcast_ships_delta_not_snapshot() {
         row_id,
         ChangeKind::Insert,
         Some(&serde_json::json!({"title": "first-version", "qty": 1})),
+        None,
     );
 
     // Second write — should ship a delta (incremental ops only).
@@ -164,6 +171,7 @@ fn second_crdt_broadcast_ships_delta_not_snapshot() {
         row_id,
         ChangeKind::Update,
         Some(&serde_json::json!({"qty": 99})),
+        None,
     );
 
     let frames = notifier.frames_for(entity, row_id);
@@ -228,6 +236,7 @@ fn first_broadcast_for_fresh_row_is_a_full_snapshot() {
         row_id,
         ChangeKind::Insert,
         Some(&serde_json::json!({"title": "hello", "qty": 42})),
+        None,
     );
 
     let frames = notifier.frames_for(entity, row_id);
@@ -268,6 +277,7 @@ fn deletes_skip_the_crdt_broadcast_path() {
         row_id,
         ChangeKind::Delete,
         None,
+        None,
     );
 
     assert_eq!(
@@ -303,6 +313,7 @@ fn noop_notifier_doesnt_crash_the_broadcast_path() {
         row_id,
         ChangeKind::Insert,
         Some(&serde_json::json!({"title": "x", "qty": 1})),
+        None,
     );
     // No assert needed — the test passing means we didn't panic.
 }

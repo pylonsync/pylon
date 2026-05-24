@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pylon_auth::{AuthContext, SessionStore};
 use pylon_policy::{PolicyEngine, PolicyResult};
-use pylon_sync::ChangeEvent;
+use pylon_sync::{ChangeEvent, ChangeKind};
 
 use crate::ip_limit::{IpConnCounter, IpConnGuard};
 
@@ -95,19 +95,53 @@ impl SseShard {
     /// connected SSE client used to receive every change event from
     /// every tenant. Now each client only sees rows it's allowed to
     /// read. Admins bypass the gate so internal tooling stays unblocked.
-    fn broadcast_change(&self, event: &ChangeEvent, json: &str, policy: &PolicyEngine) -> Vec<u64> {
+    fn broadcast_change(
+        &self,
+        event: &ChangeEvent,
+        json: &str,
+        synth_delete_sse: Option<&str>,
+        policy: &PolicyEngine,
+    ) -> Vec<u64> {
         let sse_data = format!("data: {json}\n\n");
         let mut clients = self.clients.lock().unwrap();
         let mut dead = Vec::new();
         for (id, client) in clients.iter_mut() {
-            if !client.auth.is_admin {
-                let row = event.data.as_ref();
-                match policy.check_entity_read(&event.entity, &client.auth, row) {
-                    PolicyResult::Allowed => {}
-                    PolicyResult::Denied { .. } => continue,
+            // Match the WS dual-check: if post denies AND a synth-
+            // delete payload is available AND pre allows, ship the
+            // synthesized Delete instead so the subscriber drops
+            // the stale row from their local replica.
+            let payload: &str = if client.auth.is_admin {
+                &sse_data
+            } else {
+                let post_allowed = matches!(
+                    policy.check_entity_read(
+                        &event.entity,
+                        &client.auth,
+                        event.data.as_ref(),
+                    ),
+                    PolicyResult::Allowed
+                );
+                if post_allowed {
+                    &sse_data
+                } else if let Some(synth) = synth_delete_sse {
+                    let pre_allowed = matches!(
+                        policy.check_entity_read(
+                            &event.entity,
+                            &client.auth,
+                            event.prev_data.as_ref(),
+                        ),
+                        PolicyResult::Allowed
+                    );
+                    if pre_allowed {
+                        synth
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
                 }
-            }
-            if client.stream.write_all(sse_data.as_bytes()).is_err()
+            };
+            if client.stream.write_all(payload.as_bytes()).is_err()
                 || client.stream.flush().is_err()
             {
                 dead.push(*id);
@@ -148,6 +182,10 @@ pub enum SseJob {
     Change {
         event: Arc<ChangeEvent>,
         json: Arc<str>,
+        /// Pre-serialized SSE-framed `data: {...}\n\n` for the
+        /// synthesized Delete (visibility-flip tombstone). See
+        /// `BroadcastJob::Change::synth_delete_json` in `ws.rs`.
+        synth_delete_sse: Option<Arc<str>>,
     },
     Plain(Arc<str>),
 }
@@ -187,8 +225,17 @@ impl SseHub {
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
                         match job {
-                            SseJob::Change { event, json } => {
-                                shard_clone.broadcast_change(&event, &json, &policy_clone);
+                            SseJob::Change {
+                                event,
+                                json,
+                                synth_delete_sse,
+                            } => {
+                                shard_clone.broadcast_change(
+                                    &event,
+                                    &json,
+                                    synth_delete_sse.as_deref(),
+                                    &policy_clone,
+                                );
                             }
                             SseJob::Plain(msg) => {
                                 shard_clone.broadcast(&msg);
@@ -230,11 +277,33 @@ impl SseHub {
             Err(_) => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
+        // Pre-serialize the visibility-flip tombstone in SSE wire
+        // shape (`data: {...}\n\n`). Only computed for Updates that
+        // carry a pre-row — that's the only case where the shard's
+        // dual-check might pick the synth payload over the original.
+        let synth_delete_sse: Option<Arc<str>> =
+            if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
+                let synth = ChangeEvent {
+                    seq: event.seq,
+                    entity: event.entity.clone(),
+                    row_id: event.row_id.clone(),
+                    kind: ChangeKind::Delete,
+                    data: event.prev_data.clone(),
+                    prev_data: None,
+                    timestamp: event.timestamp.clone(),
+                };
+                serde_json::to_string(&synth)
+                    .ok()
+                    .map(|s| Arc::from(format!("data: {s}\n\n").into_boxed_str()))
+            } else {
+                None
+            };
         let event_arc: Arc<ChangeEvent> = Arc::new(event.clone());
         for tx in &self.broadcast_txs {
             let _ = tx.try_send(SseJob::Change {
                 event: Arc::clone(&event_arc),
                 json: Arc::clone(&json_arc),
+                synth_delete_sse: synth_delete_sse.clone(),
             });
         }
     }

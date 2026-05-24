@@ -25,7 +25,7 @@ pub struct WsAuth {
     pub jwt_secret: Option<String>,
     pub jwt_issuer: Option<String>,
 }
-use pylon_sync::ChangeEvent;
+use pylon_sync::{ChangeEvent, ChangeKind};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::protocol::Role;
 use tungstenite::{accept_hdr_with_config, protocol::WebSocketConfig, Message, WebSocket};
@@ -320,69 +320,74 @@ impl Shard {
     /// Send a change event to clients in this shard whose stored
     /// `AuthContext` passes the entity's read policy. Skips clients
     /// without permission so client A never sees client B's tenant
-    /// data. The pre-serialized `json` is reused across allowed
-    /// clients; serialization happened once at the hub level.
-    fn broadcast_change(&self, event: &ChangeEvent, json: &Arc<str>, policy: &PolicyEngine) {
+    /// data.
+    ///
+    /// For Update events with `event.prev_data`, runs a two-stage
+    /// check per subscriber: post first (against `event.data`); on
+    /// deny, pre (against `event.prev_data`). When pre allowed and
+    /// post denied (the visibility-flip case), the subscriber gets
+    /// the pre-serialized synthesized Delete JSON instead of being
+    /// silently dropped — closing the stale-row ghost where a row
+    /// that "moves away" stays in the replica indefinitely.
+    fn broadcast_change(
+        &self,
+        event: &ChangeEvent,
+        json: &Arc<str>,
+        synth_delete_json: Option<&Arc<str>>,
+        policy: &PolicyEngine,
+    ) {
         let handles: Vec<(u64, ClientSocket)> = {
             let clients = self.clients.lock().unwrap();
             clients.iter().map(|(id, h)| (*id, Arc::clone(h))).collect()
         };
-        tracing::debug!(
-            entity = %event.entity,
-            kind = ?event.kind,
-            seq = event.seq,
-            clients_in_shard = handles.len(),
-            "[ws.broadcast_change] starting fanout"
-        );
         let mut dead: Vec<u64> = Vec::new();
         let mut delivered = 0u32;
         let mut denied = 0u32;
+        let mut tombstoned = 0u32;
         for (id, handle) in handles {
-            tracing::debug!(
-                client_id = id,
-                entity = %event.entity,
-                "[ws.broadcast_change] entering loop body for client"
-            );
-            // Per-client policy check. The event's `data` field carries
-            // the row payload (or None for deletes — policy still
-            // evaluates against entity-level rules). `is_admin`
-            // bypasses everything (admins legitimately see all
-            // tenants). All other clients run through the engine.
-            //
-            // Read-lock the per-client auth so a concurrent
-            // session-changed update doesn't tear the AuthContext
-            // mid-check. The lock is held only across the policy call.
+            // Per-client policy check. Read-lock the per-client auth
+            // so a concurrent session-changed update doesn't tear
+            // the AuthContext mid-check.
             let auth = match handle.auth.read() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tracing::debug!(
-                client_id = id,
-                auth_user = ?auth.user_id,
-                is_admin = auth.is_admin,
-                "[ws.broadcast_change] auth read complete"
-            );
-            if !auth.is_admin {
-                let row = event.data.as_ref();
-                match policy.check_entity_read(&event.entity, &auth, row) {
-                    PolicyResult::Allowed => {}
-                    PolicyResult::Denied {
-                        policy_name,
-                        reason,
-                    } => {
-                        tracing::debug!(
-                            client_id = id,
-                            auth_user = ?auth.user_id,
-                            policy = %policy_name,
-                            reason = %reason,
-                            entity = %event.entity,
-                            "[ws.broadcast_change] policy denied — skipping client"
-                        );
+            // `is_admin` bypasses every policy gate.
+            let payload: &Arc<str> = if auth.is_admin {
+                json
+            } else {
+                let post_allowed = matches!(
+                    policy.check_entity_read(&event.entity, &auth, event.data.as_ref()),
+                    PolicyResult::Allowed
+                );
+                if post_allowed {
+                    json
+                } else if let Some(synth) = synth_delete_json {
+                    // Two-stage: check if PRE was allowed. If so this
+                    // subscriber WAS visible to the row before the
+                    // update — send the tombstone so their local
+                    // replica drops it. If pre also denied, the
+                    // subscriber never had visibility; skip silently.
+                    let pre_allowed = matches!(
+                        policy.check_entity_read(
+                            &event.entity,
+                            &auth,
+                            event.prev_data.as_ref(),
+                        ),
+                        PolicyResult::Allowed
+                    );
+                    if pre_allowed {
+                        tombstoned += 1;
+                        synth
+                    } else {
                         denied += 1;
                         continue;
                     }
+                } else {
+                    denied += 1;
+                    continue;
                 }
-            }
+            };
             drop(auth);
             // Push to the per-client outbound channel rather than
             // grabbing the socket mutex. The reader thread drains the
@@ -390,7 +395,7 @@ impl Shard {
             // never contend.
             match handle
                 .outbound_tx
-                .try_send(Message::Text((**json).to_string()))
+                .try_send(Message::Text((**payload).to_string()))
             {
                 Ok(()) => delivered += 1,
                 Err(mpsc::TrySendError::Disconnected(_)) => dead.push(id),
@@ -404,6 +409,7 @@ impl Shard {
                 }
             }
         }
+        let _ = tombstoned;
         tracing::debug!(
             entity = %event.entity,
             delivered,
@@ -671,7 +677,16 @@ impl Shard {
 pub enum BroadcastJob {
     Change {
         event: Arc<ChangeEvent>,
+        /// Pre-serialized JSON for the "post-allowed" case (subscribers
+        /// whose policy passes against `event.data`).
         json: Arc<str>,
+        /// Pre-serialized JSON of a synthesized Delete event at the
+        /// same seq, used for subscribers whose policy passed against
+        /// `event.prev_data` but denies `event.data` (visibility-flip).
+        /// `None` when the event has no `prev_data` (Insert/Delete or
+        /// Update without a captured pre-row) — those events just
+        /// drop denied subscribers without a tombstone.
+        synth_delete_json: Option<Arc<str>>,
     },
     Plain(Arc<str>),
     /// Per-user text fanout: deliver `msg` to every client in this
@@ -729,8 +744,17 @@ impl WsHub {
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
                         match job {
-                            BroadcastJob::Change { event, json } => {
-                                shard_clone.broadcast_change(&event, &json, &policy_clone);
+                            BroadcastJob::Change {
+                                event,
+                                json,
+                                synth_delete_json,
+                            } => {
+                                shard_clone.broadcast_change(
+                                    &event,
+                                    &json,
+                                    synth_delete_json.as_ref(),
+                                    &policy_clone,
+                                );
                             }
                             BroadcastJob::Plain(msg) => {
                                 shard_clone.broadcast(&msg);
@@ -779,11 +803,39 @@ impl WsHub {
             Err(_) => return,
         };
         let json_arc: Arc<str> = Arc::from(json.into_boxed_str());
+        // Pre-serialize the synthesized Delete-at-this-seq JSON for
+        // visibility-flip subscribers. Only computed when the event
+        // is an Update carrying `prev_data` — that's the only case
+        // where the dual-check might fire. Insert/Delete/non-flip
+        // updates leave this `None` and the worker just drops denied
+        // subscribers silently.
+        let synth_delete_arc: Option<Arc<str>> =
+            if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
+                let synth = ChangeEvent {
+                    seq: event.seq,
+                    entity: event.entity.clone(),
+                    row_id: event.row_id.clone(),
+                    kind: ChangeKind::Delete,
+                    // Subscribers whose pre policy passed saw the row
+                    // with `prev_data` shape; ship that as the
+                    // tombstone payload so row-scoped read predicates
+                    // on the wire-deserialize side authorize cleanly.
+                    data: event.prev_data.clone(),
+                    prev_data: None,
+                    timestamp: event.timestamp.clone(),
+                };
+                serde_json::to_string(&synth)
+                    .ok()
+                    .map(|s| Arc::from(s.into_boxed_str()))
+            } else {
+                None
+            };
         let event_arc: Arc<ChangeEvent> = Arc::new(event.clone());
         for tx in &self.broadcast_txs {
             let job = BroadcastJob::Change {
                 event: Arc::clone(&event_arc),
                 json: Arc::clone(&json_arc),
+                synth_delete_json: synth_delete_arc.clone(),
             };
             match tx.try_send(job) {
                 Ok(()) => {}
@@ -911,6 +963,24 @@ impl WsHub {
         for id in client_ids {
             by_shard[(*id as usize) % NUM_SHARDS].push(*id);
         }
+        // For subscribers whose policy now denies them, also synthesize
+        // a JSON Delete signal so their local replica drops the row.
+        // Without this, a revoked subscriber's local Loro doc stays in
+        // place until they explicitly close and re-mount.
+        let revocation_signal: Option<Arc<str>> = {
+            let synth = ChangeEvent {
+                seq: 0, // synthetic — pull picks up the real seq later
+                entity: entity.to_string(),
+                row_id: row_id.to_string(),
+                kind: ChangeKind::Delete,
+                data: row.cloned(),
+                prev_data: None,
+                timestamp: String::new(),
+            };
+            serde_json::to_string(&synth)
+                .ok()
+                .map(|s| Arc::from(s.into_boxed_str()))
+        };
         for (idx, ids) in by_shard.iter().enumerate() {
             if ids.is_empty() {
                 continue;
@@ -927,6 +997,12 @@ impl WsHub {
                 // not all-subs — a client may still be a legitimate
                 // subscriber to OTHER rows under different policies.
                 self.subscriptions.unsubscribe(revoked_id, entity, row_id);
+                // Ship the revocation signal so the client drops the
+                // row's Loro doc locally. Best-effort: if the send
+                // fails the next reconcile will catch up.
+                if let Some(ref signal) = revocation_signal {
+                    self.shards[idx].send_text_to_one(revoked_id, signal);
+                }
             }
             if !allowed.is_empty() {
                 for dead_id in self.shards[idx].send_binary_to(&allowed, &shared) {
@@ -2040,6 +2116,7 @@ mod tests {
             row_id: "1".into(),
             kind: pylon_sync::ChangeKind::Insert,
             data: None,
+            prev_data: None,
             timestamp: String::new(),
         };
         hub.broadcast(&event);

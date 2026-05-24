@@ -74,6 +74,7 @@ fn main() {
         row_id: "u1".into(),
         kind: ChangeKind::Insert,
         data: Some(serde_json::json!({"name":"Alice","email":"alice@test.com"})),
+        prev_data: None,
         timestamp: "2024-01-01T00:00:00Z".into(),
     };
 

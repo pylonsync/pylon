@@ -1740,12 +1740,31 @@ pub(crate) fn broadcast_change(
     kind: ChangeKind,
     data: Option<&serde_json::Value>,
 ) {
+    broadcast_change_event(notifier, seq, entity, row_id, kind, data, None);
+}
+
+/// Variant of `broadcast_change` that also threads the pre-update
+/// row snapshot through. For Update events whose visibility flips
+/// across the read-policy boundary, the per-subscriber filter uses
+/// `prev_data` to synthesize a Delete tombstone for clients whose
+/// policy passed pre but denies post. Insert/Delete events ignore
+/// `prev_data`.
+pub(crate) fn broadcast_change_event(
+    notifier: &dyn ChangeNotifier,
+    seq: u64,
+    entity: &str,
+    row_id: &str,
+    kind: ChangeKind,
+    data: Option<&serde_json::Value>,
+    prev_data: Option<&serde_json::Value>,
+) {
     let event = pylon_sync::ChangeEvent {
         seq,
         entity: entity.to_string(),
         row_id: row_id.to_string(),
         kind,
         data: data.cloned(),
+        prev_data: prev_data.cloned(),
         timestamp: String::new(),
     };
     notifier.notify(&event);
@@ -1768,8 +1787,9 @@ pub fn broadcast_change_with_crdt(
     row_id: &str,
     kind: ChangeKind,
     data: Option<&serde_json::Value>,
+    prev_data: Option<&serde_json::Value>,
 ) {
-    broadcast_change(notifier, seq, entity, row_id, kind.clone(), data);
+    broadcast_change_event(notifier, seq, entity, row_id, kind.clone(), data, prev_data);
     if matches!(kind, ChangeKind::Delete) {
         return;
     }

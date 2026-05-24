@@ -50,6 +50,7 @@ fn sample_event(i: u64) -> ChangeEvent {
         row_id: format!("row_{i}"),
         kind: ChangeKind::Insert,
         data: Some(serde_json::json!({"title": format!("todo {i}"), "done": false})),
+        prev_data: None,
         timestamp: String::new(),
     }
 }

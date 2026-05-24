@@ -190,6 +190,7 @@ pub(crate) fn handle(
                             row_id,
                             kind: ChangeKind::Insert,
                             data: projected_data,
+                            prev_data: None,
                             timestamp: String::new(),
                         });
                         if changes.len() >= SNAPSHOT_BATCH_LIMIT {
@@ -225,19 +226,52 @@ pub(crate) fn handle(
         }
         match ctx.change_log.pull(&SyncCursor { last_seq: since }, 100) {
             Ok(mut resp) => {
-                // Filter changes through the read-policy fence. Previously a
-                // caller could pull every mutation regardless of which entities
-                // their policy permitted — a silent bypass of read gates.
-                resp.changes.retain(|ev| {
-                    matches!(
-                        ctx.policy_engine.check_entity_read(
-                            &ev.entity,
-                            ctx.auth_ctx,
-                            ev.data.as_ref()
-                        ),
-                        pylon_policy::PolicyResult::Allowed
-                    )
-                });
+                // Filter changes through the read-policy fence with
+                // visibility-flip handling. For each event:
+                //   - post allowed → keep as-is
+                //   - post denied AND Update AND prev allowed →
+                //     replace with a synthesized Delete at the same
+                //     seq so the caller drops the stale row
+                //   - post denied otherwise → drop silently
+                resp.changes = resp
+                    .changes
+                    .into_iter()
+                    .filter_map(|ev| {
+                        let post_allowed = matches!(
+                            ctx.policy_engine.check_entity_read(
+                                &ev.entity,
+                                ctx.auth_ctx,
+                                ev.data.as_ref(),
+                            ),
+                            pylon_policy::PolicyResult::Allowed
+                        );
+                        if post_allowed {
+                            return Some(ev);
+                        }
+                        if matches!(ev.kind, ChangeKind::Update) && ev.prev_data.is_some() {
+                            let pre_allowed = matches!(
+                                ctx.policy_engine.check_entity_read(
+                                    &ev.entity,
+                                    ctx.auth_ctx,
+                                    ev.prev_data.as_ref(),
+                                ),
+                                pylon_policy::PolicyResult::Allowed
+                            );
+                            if pre_allowed {
+                                return Some(pylon_sync::ChangeEvent {
+                                    seq: ev.seq,
+                                    entity: ev.entity.clone(),
+                                    row_id: ev.row_id.clone(),
+                                    kind: ChangeKind::Delete,
+                                    data: ev.prev_data.clone(),
+                                    prev_data: None,
+                                    timestamp: ev.timestamp.clone(),
+                                });
+                            }
+                        }
+                        None
+                    })
+                    .collect();
                 // Field-level redaction for User rows. Without this a
                 // permissive User read policy (needed for cross-user
                 // displayName lookups in chat-style apps) leaks

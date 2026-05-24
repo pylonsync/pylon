@@ -2102,12 +2102,27 @@ impl<'a> TxStore<'a> {
         kind: pylon_sync::ChangeKind,
         data: Option<&serde_json::Value>,
     ) {
+        self.record_with_prev(entity, row_id, kind, data, None);
+    }
+
+    /// Variant that also captures the pre-update row snapshot.
+    /// Used by `update` to enable the per-subscriber visibility-
+    /// transition tombstone (see `ChangeEvent::prev_data`).
+    fn record_with_prev(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: pylon_sync::ChangeKind,
+        data: Option<&serde_json::Value>,
+        prev_data: Option<&serde_json::Value>,
+    ) {
         self.pending.borrow_mut().push(pylon_sync::ChangeEvent {
             seq: 0, // assigned by ChangeLog::append after commit
             entity: entity.to_string(),
             row_id: row_id.to_string(),
             kind,
             data: data.cloned(),
+            prev_data: prev_data.cloned(),
             timestamp: String::new(),
         });
     }
@@ -2190,17 +2205,22 @@ impl<'a> DataStore for TxStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        // Snapshot the row BEFORE the update so the buffered event
+        // carries `prev_data`. The per-subscriber broadcast filter
+        // uses it to synthesize a Delete tombstone for clients whose
+        // policy passed pre-update but denies post-update (e.g.
+        // ownership transferred away). Without this they'd keep a
+        // stale local row indefinitely.
+        let pre_row = self
+            .runtime
+            .get_by_id_with_conn(self.conn, entity, id)
+            .ok()
+            .flatten();
         let updated = self
             .runtime
             .update_with_conn(self.conn, entity, id, data)
             .map_err(into_data_error)?;
         if updated {
-            // Re-read so the broadcast event carries the full row state
-            // post-update, not just the partial patch. See the same
-            // commentary on `insert` above — partial broadcasts trip the
-            // per-client policy filter when the rule references a field
-            // not in the patch. Re-read errors don't bubble (would force
-            // an unwanted rollback); log + fall back to the partial.
             let payload = match self.runtime.get_by_id_with_conn(self.conn, entity, id) {
                 Ok(Some(full)) => full,
                 Ok(None) => {
@@ -2217,7 +2237,13 @@ impl<'a> DataStore for TxStore<'a> {
                     return Ok(updated);
                 }
             };
-            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
+            self.record_with_prev(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Update,
+                Some(&payload),
+                pre_row.as_ref(),
+            );
         }
         Ok(updated)
     }
@@ -2761,6 +2787,20 @@ impl<'a> PgBufferedTxStore<'a> {
         kind: pylon_sync::ChangeKind,
         data: Option<&serde_json::Value>,
     ) {
+        self.record_with_prev(entity, row_id, kind, data, None);
+    }
+
+    /// Variant that also captures the pre-update row snapshot.
+    /// Used by `update` to enable the per-subscriber visibility-
+    /// transition tombstone (see `ChangeEvent::prev_data`).
+    fn record_with_prev(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: pylon_sync::ChangeKind,
+        data: Option<&serde_json::Value>,
+        prev_data: Option<&serde_json::Value>,
+    ) {
         if let Ok(mut p) = self.pending.lock() {
             p.push(pylon_sync::ChangeEvent {
                 seq: 0,
@@ -2768,6 +2808,7 @@ impl<'a> PgBufferedTxStore<'a> {
                 row_id: row_id.to_string(),
                 kind,
                 data: data.cloned(),
+                prev_data: prev_data.cloned(),
                 timestamp: String::new(),
             });
         }
@@ -2827,11 +2868,12 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        // Snapshot pre-update so the buffered event carries
+        // `prev_data` for the visibility-transition tombstone.
+        // Matches the SQLite TxStore::update fix.
+        let pre_row = self.inner.get_by_id(entity, id).ok().flatten();
         let updated = self.inner.update(entity, id, data)?;
         if updated {
-            // Re-read post-update so the broadcast carries every field
-            // the policy filter might key on, not just the partial
-            // patch. Same rationale as TxStore::update.
             let payload = match self.inner.get_by_id(entity, id) {
                 Ok(Some(full)) => full,
                 Ok(None) => {
@@ -2848,7 +2890,13 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                     return Ok(updated);
                 }
             };
-            self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
+            self.record_with_prev(
+                entity,
+                id,
+                pylon_sync::ChangeKind::Update,
+                Some(&payload),
+                pre_row.as_ref(),
+            );
         }
         Ok(updated)
     }
@@ -3044,16 +3092,24 @@ impl<'a> AutoBroadcastStore<'a> {
         kind: pylon_sync::ChangeKind,
         data: Option<&serde_json::Value>,
     ) {
+        self.emit_with_prev(entity, row_id, kind, data, None);
+    }
+
+    /// Variant that also carries the pre-update row snapshot.
+    /// Used by `transact` to pass the captured pre-row through so
+    /// visibility-flip subscribers can tombstone (matches the router
+    /// mutation pipeline's invariant).
+    fn emit_with_prev(
+        &self,
+        entity: &str,
+        row_id: &str,
+        kind: pylon_sync::ChangeKind,
+        data: Option<&serde_json::Value>,
+        prev_data: Option<&serde_json::Value>,
+    ) {
         let seq = self
             .change_log
             .append(entity, row_id, kind.clone(), data.cloned());
-        // Route through `broadcast_change_with_crdt` so CRDT
-        // subscribers get binary Loro frames alongside the JSON
-        // event. Matches the router mutation pipeline's invariant —
-        // pre-fix this path called notifier.notify() only and
-        // server-side writes through `AutoBroadcastStore` (used by
-        // some non-function backends) silently skipped the CRDT
-        // fanout, leaving collaborative Loro docs stale.
         pylon_router::broadcast_change_with_crdt(
             self.notifier.as_ref(),
             self.inner,
@@ -3062,6 +3118,7 @@ impl<'a> AutoBroadcastStore<'a> {
             row_id,
             kind,
             data,
+            prev_data,
         );
     }
 }
@@ -3271,11 +3328,30 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
         // would silently bypass sync — the inner Runtime::transact
         // never touches ChangeLog or the WS notifier.
         //
-        // The broadcast doesn't need to be inside the atomic boundary
-        // — emitting after commit (durable) means a rollback drops
-        // every event because we never reach this branch. On
-        // commit-failure the inner returns `committed = false` and
-        // we skip the fanout entirely.
+        // Pre-snapshot delete + update targets BEFORE the atomic
+        // commit so the post-commit broadcast can attach the pre-
+        // row payload. For delete, that's the row scoped read
+        // policies use to authorize delivery; for update, that's
+        // `prev_data` for the visibility-flip tombstone. Skipped
+        // for inserts (no pre-row exists yet).
+        let mut pre_snapshots: std::collections::HashMap<
+            (String, String),
+            serde_json::Value,
+        > = std::collections::HashMap::new();
+        for op in ops {
+            let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            if !matches!(op_type, "delete" | "update") {
+                continue;
+            }
+            let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+            let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if entity.is_empty() || id.is_empty() {
+                continue;
+            }
+            if let Ok(Some(row)) = self.inner.get_by_id(entity, id) {
+                pre_snapshots.insert((entity.to_string(), id.to_string()), row);
+            }
+        }
         let (committed, results) = self.inner.transact(ops)?;
         if !committed {
             return Ok((committed, results));
@@ -3310,7 +3386,16 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                     // don't resurrect it client-side.
                     match self.inner.get_by_id(entity, id) {
                         Ok(Some(full)) => {
-                            self.emit(entity, id, kind, Some(&full));
+                            // For Updates, pass the captured pre-row
+                            // so visibility-flip subscribers get a
+                            // tombstone instead of a silent drop.
+                            // Inserts have no pre-row.
+                            let prev = if matches!(kind, pylon_sync::ChangeKind::Update) {
+                                pre_snapshots.remove(&(entity.to_string(), id.to_string()))
+                            } else {
+                                None
+                            };
+                            self.emit_with_prev(entity, id, kind, Some(&full), prev.as_ref());
                         }
                         Ok(None) => {
                             tracing::warn!(
@@ -3330,15 +3415,19 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                     if id.is_empty() {
                         continue;
                     }
-                    // We didn't pre-snapshot the row before transact()
-                    // committed (the inner storage owns the tx — by
-                    // the time we'd capture, the row is gone). So
-                    // emit `data: None` here. Callers that need
-                    // row-scoped read policies on transact-deletes
-                    // should drive the writes through the router's
-                    // `/api/transact` route, which snapshots BEFORE
-                    // calling the inner transact. Documented exception.
-                    self.emit(entity, id, pylon_sync::ChangeKind::Delete, None);
+                    // Pre-snapshot captured BEFORE the inner transact
+                    // committed. Row-scoped read policies on
+                    // subscribers can authorize delivery against the
+                    // pre-delete snapshot. Falls back to `None` when
+                    // the snapshot couldn't be captured (concurrent
+                    // delete before transact ran, missing row).
+                    let snapshot = pre_snapshots.remove(&(entity.to_string(), id.to_string()));
+                    self.emit(
+                        entity,
+                        id,
+                        pylon_sync::ChangeKind::Delete,
+                        snapshot.as_ref(),
+                    );
                 }
                 _ => {}
             }
@@ -3591,6 +3680,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.as_ref(),
+                                    ev.prev_data.as_ref(),
                                 );
                             }
                             // Flush scheduled jobs after the commit lands.
@@ -3685,6 +3775,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.as_ref(),
+                                    ev.prev_data.as_ref(),
                                 );
                             }
                             // Same flush as the PG path — durable commit,
@@ -4368,6 +4459,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                         &ev.row_id,
                                         ev.kind.clone(),
                                         ev.data.as_ref(),
+                                        ev.prev_data.as_ref(),
                                     );
                                 }
                                 ops.flush_pending_schedules(sched_guard.take());
@@ -4451,6 +4543,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                     &ev.row_id,
                                     ev.kind.clone(),
                                     ev.data.as_ref(),
+                                    ev.prev_data.as_ref(),
                                 );
                             }
                             ops.flush_pending_schedules(sched_guard.take());
@@ -5646,6 +5739,7 @@ mod user_projection_broadcast_tests {
             data: Some(
                 serde_json::json!({"id": "u1", "email": "x@y", "passwordHash": "argon2-secret"}),
             ),
+            prev_data: None,
             timestamp: String::new(),
         };
 

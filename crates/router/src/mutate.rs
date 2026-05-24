@@ -426,13 +426,21 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
     // Delete needs the pre-delete snapshot. When post_row is None for
     // insert/update (concurrent delete), skip both append and
     // broadcast — the concurrent delete fires its own event.
+    //
+    // Update events carry `prev_data` so the per-subscriber broadcast
+    // filter can synthesize a Delete tombstone for clients whose
+    // read policy passed pre-update but denies post-update (e.g.
+    // ownership transferred away). Without this, those subscribers
+    // would silently lose visibility of the update and keep the
+    // stale row in their local replica.
     let record: Option<ChangeRecord> = match kind {
         ChangeKind::Insert => post_row
             .as_ref()
             .map(|r| ChangeRecord::Insert { row: r.clone() }),
-        ChangeKind::Update => post_row
-            .as_ref()
-            .map(|r| ChangeRecord::Update { row: r.clone() }),
+        ChangeKind::Update => post_row.as_ref().map(|r| ChangeRecord::Update {
+            row: r.clone(),
+            prev: pre_row.clone(),
+        }),
         ChangeKind::Delete => Some(ChangeRecord::Delete {
             snapshot: post_row.clone(),
         }),
@@ -448,6 +456,7 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
             &row_id,
             event.kind.clone(),
             event.data.as_ref(),
+            event.prev_data.as_ref(),
         );
 
         // after_* hook: prefer the post-write row, fall back to the

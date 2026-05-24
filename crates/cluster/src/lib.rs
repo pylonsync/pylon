@@ -251,6 +251,7 @@ mod tests {
             row_id: "r_1".to_string(),
             kind: ChangeKind::Update,
             data: Some(serde_json::json!({"id": "r_1", "title": "hi"})),
+            prev_data: None,
             timestamp: "2026-05-17T00:00:00Z".to_string(),
         }
     }

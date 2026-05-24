@@ -34,24 +34,37 @@ pub(crate) fn handle(
                 ));
             }
         };
-        // Pre-snapshot delete targets BEFORE the transact runs, so we
-        // can attach the row payload to the per-op broadcast below.
-        // Without this, delete broadcasts go out with `data: None` and
-        // every tenant-scoped read policy denies the owner — ghost
-        // rows in their replicas (codex P1 — same class as the normal
-        // DELETE path, missed for /api/transact).
+        // Pre-snapshot targets BEFORE the transact runs:
+        //   - Delete: attach the row to the broadcast so row-scoped
+        //     read policies on subscribers can authorize delivery.
+        //   - Update: attach the row as `prev_data` so visibility-
+        //     flip subscribers (whose policy passed pre-update but
+        //     denies post) get a synthesized Delete tombstone.
         let mut delete_snapshots: std::collections::HashMap<(String, String), serde_json::Value> =
             std::collections::HashMap::new();
+        let mut update_pre_snapshots: std::collections::HashMap<
+            (String, String),
+            serde_json::Value,
+        > = std::collections::HashMap::new();
         for op in &ops {
-            if op.get("op").and_then(|v| v.as_str()) == Some("delete") {
-                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
-                let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                if entity.is_empty() || id.is_empty() {
-                    continue;
+            let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+            let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if entity.is_empty() || id.is_empty() {
+                continue;
+            }
+            match op_type {
+                "delete" => {
+                    if let Ok(Some(row)) = ctx.store.get_by_id(entity, id) {
+                        delete_snapshots.insert((entity.to_string(), id.to_string()), row);
+                    }
                 }
-                if let Ok(Some(row)) = ctx.store.get_by_id(entity, id) {
-                    delete_snapshots.insert((entity.to_string(), id.to_string()), row);
+                "update" => {
+                    if let Ok(Some(row)) = ctx.store.get_by_id(entity, id) {
+                        update_pre_snapshots.insert((entity.to_string(), id.to_string()), row);
+                    }
                 }
+                _ => {}
             }
         }
         return Some(match ctx.store.transact(&ops) {
@@ -121,7 +134,11 @@ pub(crate) fn handle(
                                 let record = if op_type == "insert" {
                                     ChangeRecord::Insert { row: row.clone() }
                                 } else {
-                                    ChangeRecord::Update { row: row.clone() }
+                                    ChangeRecord::Update {
+                                        row: row.clone(),
+                                        prev: update_pre_snapshots
+                                            .remove(&(entity.to_string(), id.to_string())),
+                                    }
                                 };
                                 let event = ctx.change_log.record(entity, id, record);
                                 broadcast_change_with_crdt(
@@ -132,6 +149,7 @@ pub(crate) fn handle(
                                     id,
                                     event.kind.clone(),
                                     event.data.as_ref(),
+                                    event.prev_data.as_ref(),
                                 );
                                 // after_* hook with the post-write row,
                                 // matching the entity-API + push path.
@@ -165,6 +183,7 @@ pub(crate) fn handle(
                                     delete_id,
                                     ChangeKind::Delete,
                                     event.data.as_ref(),
+                                    None,
                                 );
                                 ctx.plugin_hooks
                                     .after_delete(entity, delete_id, ctx.auth_ctx);

@@ -276,6 +276,7 @@ mod tests {
                     row_id: "1".into(),
                     kind: pylon_sync::ChangeKind::Insert,
                     data: None,
+                    prev_data: None,
                     timestamp: "".into(),
                 },
             );
@@ -307,6 +308,7 @@ mod tests {
                 row_id: "9".into(),
                 kind: pylon_sync::ChangeKind::Update,
                 data: Some(serde_json::json!({"k": "v"})),
+                prev_data: None,
                 timestamp: "".into(),
             },
         );
