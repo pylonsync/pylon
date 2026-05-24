@@ -114,11 +114,7 @@ impl SseShard {
                 &sse_data
             } else {
                 let post_allowed = matches!(
-                    policy.check_entity_read(
-                        &event.entity,
-                        &client.auth,
-                        event.data.as_ref(),
-                    ),
+                    policy.check_entity_read(&event.entity, &client.auth, event.data.as_ref(),),
                     PolicyResult::Allowed
                 );
                 if post_allowed {

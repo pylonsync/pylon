@@ -369,11 +369,7 @@ impl Shard {
                     // replica drops it. If pre also denied, the
                     // subscriber never had visibility; skip silently.
                     let pre_allowed = matches!(
-                        policy.check_entity_read(
-                            &event.entity,
-                            &auth,
-                            event.prev_data.as_ref(),
-                        ),
+                        policy.check_entity_read(&event.entity, &auth, event.prev_data.as_ref(),),
                         PolicyResult::Allowed
                     );
                     if pre_allowed {

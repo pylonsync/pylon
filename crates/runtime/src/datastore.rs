@@ -3334,10 +3334,8 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
         // policies use to authorize delivery; for update, that's
         // `prev_data` for the visibility-flip tombstone. Skipped
         // for inserts (no pre-row exists yet).
-        let mut pre_snapshots: std::collections::HashMap<
-            (String, String),
-            serde_json::Value,
-        > = std::collections::HashMap::new();
+        let mut pre_snapshots: std::collections::HashMap<(String, String), serde_json::Value> =
+            std::collections::HashMap::new();
         for op in ops {
             let op_type = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
             if !matches!(op_type, "delete" | "update") {
