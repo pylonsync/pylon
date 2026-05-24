@@ -1100,16 +1100,9 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
                 // per-subscriber filter would have `passwordHash` /
                 // other stripped User fields in scope. Strip + apply
                 // the same allowlist as `data`.
-                let projected_prev = event
-                    .prev_data
-                    .clone()
-                    .map(|prev| {
-                        pylon_router::maybe_project_user_row(
-                            &event.entity,
-                            prev,
-                            &self.auth_user,
-                        )
-                    });
+                let projected_prev = event.prev_data.clone().map(|prev| {
+                    pylon_router::maybe_project_user_row(&event.entity, prev, &self.auth_user)
+                });
                 let projected_event = pylon_sync::ChangeEvent {
                     data: Some(projected),
                     prev_data: projected_prev,
