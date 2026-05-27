@@ -13,6 +13,13 @@ export interface SessionResponse {
 	expires_at?: number;
 }
 
+export interface OrgSummary {
+	id: string;
+	name: string;
+	role: "owner" | "admin" | "member" | string;
+	created_at: number;
+}
+
 class ApiError extends Error {
 	code: string;
 	status: number;
@@ -103,6 +110,18 @@ export function persistSession(session: SessionResponse): void {
 		// and let the sync engine pick up the token on next start.
 	}
 	void db.sync.notifySessionChanged();
+}
+
+export async function listOrgs(): Promise<OrgSummary[]> {
+	try {
+		return await get<OrgSummary[]>("/api/auth/orgs");
+	} catch {
+		return [];
+	}
+}
+
+export async function createOrg(name: string): Promise<OrgSummary> {
+	return post<OrgSummary>("/api/auth/orgs", { name });
 }
 
 export { ApiError };

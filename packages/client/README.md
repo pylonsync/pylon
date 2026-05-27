@@ -40,9 +40,24 @@ export function App() {
 - `<SignUp />` — password registration with email validation.
 - `<UserButton />` — avatar dropdown with sign-out.
 - `<SignOutButton />` — bare sign-out trigger.
+- `<OrganizationSwitcher />` — list + switch + inline create.
+- `<CreateOrganization />` — standalone create form.
 - `<SignedIn>` / `<SignedOut>` — render-gates.
 - `<Protect admin>` / `<Protect predicate={...}>` — predicate gate.
 - `useAuth()` — `{isSignedIn, userId, isAdmin, signOut, ...}`.
+
+## Orgs
+
+Pylon ships org/membership endpoints (`/api/auth/orgs`) when your
+manifest declares `Org` and `OrgMember` entities. `<OrganizationSwitcher />`
+reads + writes through those endpoints — no app-side glue needed.
+
+```tsx
+<OrganizationSwitcher
+	onSwitched={(orgId) => router.push("/")}
+	onCreated={(org) => analytics.track("org_created", org)}
+/>
+```
 
 ## Theming
 

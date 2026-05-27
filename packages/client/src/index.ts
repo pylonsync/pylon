@@ -10,6 +10,15 @@ export type { UserButtonProps } from "./components/UserButton";
 export { SignOutButton } from "./components/SignOutButton";
 export type { SignOutButtonProps } from "./components/SignOutButton";
 
+export {
+	OrganizationSwitcher,
+	CreateOrganization,
+} from "./components/OrganizationSwitcher";
+export type {
+	OrganizationSwitcherProps,
+	CreateOrganizationProps,
+} from "./components/OrganizationSwitcher";
+
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthReturn } from "./hooks/useAuth";
 
@@ -18,11 +27,13 @@ export type { UseAuthReturn } from "./hooks/useAuth";
 // + error-mapping logic the built-in components use.
 export {
 	ApiError,
+	createOrg,
 	listAuthProviders,
+	listOrgs,
 	passwordLogin,
 	passwordRegister,
 	persistSession,
 	sendMagicLink,
 	verifyMagicLink,
 } from "./lib/api";
-export type { AuthProvider, SessionResponse } from "./lib/api";
+export type { AuthProvider, OrgSummary, SessionResponse } from "./lib/api";
