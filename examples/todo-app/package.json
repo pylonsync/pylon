@@ -7,16 +7,8 @@
     "dev": "pylon dev"
   },
   "dependencies": {
-    "@pylonsync/client": "workspace:*",
     "@pylonsync/functions": "workspace:*",
     "@pylonsync/react": "workspace:*",
-    "@pylonsync/sdk": "workspace:*",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "typescript": "^5.9.3"
+    "@pylonsync/sdk": "workspace:*"
   }
 }
