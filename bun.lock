@@ -164,6 +164,7 @@
       "name": "chat-web",
       "version": "0.1.0",
       "dependencies": {
+        "@pylonsync/client": "workspace:*",
         "@pylonsync/example-ui": "workspace:*",
         "@pylonsync/loro": "workspace:*",
         "@pylonsync/react": "workspace:*",
@@ -315,6 +316,7 @@
       "name": "todo-app-web",
       "version": "0.1.0",
       "dependencies": {
+        "@pylonsync/client": "workspace:*",
         "@pylonsync/example-ui": "workspace:*",
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",

@@ -11,6 +11,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@pylonsync/client": "workspace:*",
     "@pylonsync/example-ui": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sync": "workspace:*",

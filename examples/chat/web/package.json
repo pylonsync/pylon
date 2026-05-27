@@ -11,9 +11,11 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@pylonsync/client": "workspace:*",
     "@pylonsync/example-ui": "workspace:*",
+    "@pylonsync/loro": "workspace:*",
     "@pylonsync/react": "workspace:*",
-    "@pylonsync/sync": "workspace:*","@pylonsync/loro": "workspace:*",
+    "@pylonsync/sync": "workspace:*",
     "next": "^16.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

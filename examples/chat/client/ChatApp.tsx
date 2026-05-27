@@ -17,6 +17,8 @@ import {
   configureClient,
   storageKey,
 } from "@pylonsync/react";
+import { SignIn as ClientSignIn } from "@pylonsync/client";
+import "@pylonsync/client/theme.css";
 import {
   Loader2,
   Hash,
@@ -513,143 +515,56 @@ const UIContext = React.createContext<{
 // Login
 // ---------------------------------------------------------------------------
 
+// Drop-in @pylonsync/client SignIn handles the password + magic-link
+// flows. We still need to fetch the User row after auth lands — the
+// chat app uses it for currentUser everywhere — so the onSignedIn
+// callback resolves /api/auth/me + the User entity row and hands
+// `onReady` the same shape the rest of the app expects.
 function Login({ onReady }: { onReady: (u: User) => void }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  async function go() {
-    setLoading(true);
-    setErr(null);
+  async function afterSignedIn() {
+    const token = localStorage.getItem(storageKey("token"));
+    if (!token) return;
     try {
-      const path =
-        mode === "signup"
-          ? "/api/auth/password/register"
-          : "/api/auth/password/login";
-      const body =
-        mode === "signup" ? { email, password, displayName: name } : { email, password };
-      const res = await fetch(`${BASE_URL}${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json?.error?.message ?? `HTTP ${res.status}`);
-      }
-      const token: string = json.token;
-      localStorage.setItem(storageKey("token"), token);
-      configureClient({ baseUrl: BASE_URL });
-      // Server returns user_id; fetch the row for the cached User shape
-      // the rest of the app expects in localStorage.
-      const me = await fetch(`${BASE_URL}/api/entities/User/${json.user_id}`, {
+      const me = await fetch(`${BASE_URL}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
-      }).then((r) => r.json());
-      localStorage.setItem(storageKey("user"), JSON.stringify(me));
+      }).then((r) => r.json() as Promise<{ user_id: string | null }>);
+      if (!me.user_id) return;
+      const row = await fetch(
+        `${BASE_URL}/api/entities/User/${me.user_id}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      ).then((r) => r.json());
+      localStorage.setItem(storageKey("user"), JSON.stringify(row));
       void db.sync.pull();
-      onReady(me as User);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      onReady(row as User);
+    } catch {
+      // Sync engine will retry — leave the user on the SignIn screen so
+      // they can try again instead of dropping them into a half-state.
     }
   }
-
   return (
     <div className="grid min-h-screen place-items-center bg-gradient-to-br from-primary/15 via-background to-background p-6">
-      <Card className="w-full max-w-sm">
-        <CardContent className="p-7">
-          <div className="mb-6 grid size-10 place-items-center rounded-lg bg-primary text-primary-foreground">
+      <div className="w-full max-w-sm space-y-5">
+        <div className="flex items-center justify-center gap-3">
+          <div className="grid size-10 place-items-center rounded-lg bg-primary text-primary-foreground">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M4 7l8-4 8 4v10l-8 4-8-4V7z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
               <path d="M12 11v10M4 7l8 4 8-4" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
             </svg>
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">
-            {mode === "signup" ? "Create your account" : "Sign in to Pylon"}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Local-first chat, powered by live sync.
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void go();
-            }}
-            className="mt-5 flex flex-col gap-3"
-          >
-            <div className="grid gap-1.5">
-              <Label htmlFor="login-email">Email</Label>
-              <Input
-                id="login-email"
-                type="email"
-                autoComplete="email"
-                autoFocus
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-              />
-            </div>
-            {mode === "signup" && (
-              <div className="grid gap-1.5">
-                <Label htmlFor="login-name">Display name</Label>
-                <Input
-                  id="login-name"
-                  autoComplete="name"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Alice"
-                />
-              </div>
-            )}
-            <div className="grid gap-1.5">
-              <Label htmlFor="login-password">Password</Label>
-              <Input
-                id="login-password"
-                type="password"
-                autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                required
-                minLength={8}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={mode === "signup" ? "At least 8 characters" : "Your password"}
-              />
-            </div>
-            {err && (
-              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {err}
-              </div>
-            )}
-            <Button type="submit" disabled={loading} className="mt-1">
-              {loading && <Loader2 className="size-4 animate-spin" />}
-              {loading
-                ? mode === "signup"
-                  ? "Creating account…"
-                  : "Signing in…"
-                : mode === "signup"
-                  ? "Create account"
-                  : "Sign in"}
-            </Button>
-            <button
-              type="button"
-              className="pt-1 text-center text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => {
-                setErr(null);
-                setMode((m) => (m === "signin" ? "signup" : "signin"));
-              }}
-            >
-              {mode === "signin"
-                ? "Don't have an account? Create one"
-                : "Already have an account? Sign in"}
-            </button>
-          </form>
-        </CardContent>
-      </Card>
+          <div className="text-left">
+            <div className="font-semibold">Pylon Chat</div>
+            <p className="text-xs text-muted-foreground">
+              Local-first chat, powered by live sync.
+            </p>
+          </div>
+        </div>
+        <ClientSignIn
+          method="password"
+          onSignedIn={() => {
+            void afterSignedIn();
+          }}
+        />
+      </div>
     </div>
   );
 }
