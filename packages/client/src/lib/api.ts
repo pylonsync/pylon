@@ -230,6 +230,77 @@ export async function connectionAuthUrl(
 	);
 }
 
+export interface ActiveSession {
+	token_prefix: string;
+	user_id: string;
+	device?: string;
+	created_at: number;
+	expires_at: number;
+}
+
+export async function listActiveSessions(): Promise<ActiveSession[]> {
+	try {
+		return await get<ActiveSession[]>("/api/auth/sessions");
+	} catch {
+		return [];
+	}
+}
+
+export async function revokeAllSessions(): Promise<{ revoked_count: number }> {
+	return req<{ revoked_count: number }>("DELETE", "/api/auth/sessions");
+}
+
+export async function changePassword(input: {
+	currentPassword: string;
+	newPassword: string;
+}): Promise<{ ok: true }> {
+	return post("/api/auth/password/change", input);
+}
+
+export interface ApiKeySummary {
+	id: string;
+	prefix: string;
+	name: string;
+	scopes?: string | null;
+	expires_at?: number | null;
+	last_used_at?: number | null;
+	created_at: number;
+}
+
+export interface ApiKeyCreated extends ApiKeySummary {
+	/** Shown once on creation. Never returned again. */
+	key: string;
+}
+
+export async function listApiKeys(): Promise<ApiKeySummary[]> {
+	try {
+		return await get<ApiKeySummary[]>("/api/auth/api-keys");
+	} catch {
+		return [];
+	}
+}
+
+export async function createApiKey(input: {
+	name: string;
+	scopes?: string;
+	expiresAt?: number;
+}): Promise<ApiKeyCreated> {
+	return post<ApiKeyCreated>("/api/auth/api-keys", {
+		name: input.name,
+		scopes: input.scopes,
+		expires_at: input.expiresAt,
+	});
+}
+
+export async function revokeApiKey(
+	id: string,
+): Promise<{ revoked: boolean }> {
+	return req<{ revoked: boolean }>(
+		"DELETE",
+		`/api/auth/api-keys/${encodeURIComponent(id)}`,
+	);
+}
+
 async function req<T>(
 	method: "PUT" | "DELETE",
 	path: string,

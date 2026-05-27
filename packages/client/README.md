@@ -41,6 +41,7 @@ export function App() {
 - `<SignUp />` — password registration with email validation.
 - `<UserButton />` — avatar dropdown with sign-out.
 - `<SignOutButton />` — bare sign-out trigger.
+- `<UserProfile />` — account management: identity, password, sessions, API keys.
 
 **Org surfaces**
 - `<OrganizationSwitcher />` — list + switch + inline create.

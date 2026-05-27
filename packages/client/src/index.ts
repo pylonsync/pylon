@@ -46,6 +46,9 @@ export type {
 	FileUploadResult,
 } from "./components/FileUpload";
 
+export { UserProfile } from "./components/UserProfile";
+export type { UserProfileProps } from "./components/UserProfile";
+
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthReturn } from "./hooks/useAuth";
 
@@ -55,9 +58,13 @@ export type { UseAuthReturn } from "./hooks/useAuth";
 export {
 	acceptInvite,
 	ApiError,
+	changePassword,
 	connectionAuthUrl,
+	createApiKey,
 	createInvite,
 	createOrg,
+	listActiveSessions,
+	listApiKeys,
 	listAuthProviders,
 	listInvites,
 	listOrgMembers,
@@ -66,12 +73,17 @@ export {
 	passwordRegister,
 	persistSession,
 	removeMember,
+	revokeAllSessions,
+	revokeApiKey,
 	revokeInvite,
 	sendMagicLink,
 	updateMemberRole,
 	verifyMagicLink,
 } from "./lib/api";
 export type {
+	ActiveSession,
+	ApiKeyCreated,
+	ApiKeySummary,
 	AuthProvider,
 	InviteResult,
 	OrgMember,
