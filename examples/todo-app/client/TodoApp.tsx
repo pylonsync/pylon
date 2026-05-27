@@ -20,27 +20,21 @@ import {
   storageKey,
 } from "@pylonsync/react";
 import {
-  Check,
-  ChevronDown,
-  ListTodo,
   Loader2,
   LogOut,
   Plus,
+  SignalHigh,
+  SignalLow,
+  SignalMedium,
   Trash2,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Label } from "@pylonsync/example-ui/label";
 import { Card, CardContent } from "@pylonsync/example-ui/card";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Checkbox } from "@pylonsync/example-ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@pylonsync/example-ui/select";
 import { cn } from "@pylonsync/example-ui/utils";
 
 const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
@@ -67,11 +61,15 @@ type AuthState = { token: string; userId: string } | null;
 
 type Filter = "all" | "active" | "completed";
 
-const PRIORITIES = [
-  { id: "low", label: "Low" },
-  { id: "med", label: "Medium" },
-  { id: "high", label: "High" },
-] as const;
+const PRIORITIES: Array<{
+  id: "low" | "med" | "high";
+  label: string;
+  Icon: LucideIcon;
+}> = [
+  { id: "low", label: "Low", Icon: SignalLow },
+  { id: "med", label: "Medium", Icon: SignalMedium },
+  { id: "high", label: "High", Icon: SignalHigh },
+];
 
 // ---------------------------------------------------------------------------
 // Auth helpers
@@ -159,21 +157,9 @@ function Login() {
   };
 
   return (
-    <div className="grid min-h-screen place-items-center bg-gradient-to-br from-primary/10 via-background to-background p-6">
+    <div className="grid min-h-screen place-items-center bg-background p-6">
       <Card className="w-full max-w-sm">
         <CardContent className="p-7">
-          <div className="mb-6 flex items-center gap-2">
-            <div className="grid size-9 place-items-center rounded-lg bg-primary text-primary-foreground">
-              <ListTodo className="size-5" />
-            </div>
-            <div>
-              <div className="font-semibold">Pylon Todo</div>
-              <div className="text-xs text-muted-foreground">
-                Live, multi-device, per-user todos.
-              </div>
-            </div>
-          </div>
-
           <h1 className="text-xl font-semibold tracking-tight">
             {mode === "login" ? "Welcome back" : "Create your account"}
           </h1>
@@ -334,20 +320,15 @@ function List({ userId }: { userId: string }) {
   return (
     <div className="mx-auto max-w-2xl px-4 py-10 md:px-6">
       <header className="mb-8 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="grid size-10 place-items-center rounded-lg bg-primary text-primary-foreground">
-            <ListTodo className="size-5" />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">
-              Hi {greet} 👋
-            </h1>
-            <p className="text-xs text-muted-foreground">
-              {counts.active === 0
-                ? "Inbox zero. Nice."
-                : `${counts.active} thing${counts.active === 1 ? "" : "s"} to do`}
-            </p>
-          </div>
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">
+            Hi {greet} 👋
+          </h1>
+          <p className="text-xs text-muted-foreground">
+            {counts.active === 0
+              ? "Inbox zero. Nice."
+              : `${counts.active} thing${counts.active === 1 ? "" : "s"} to do`}
+          </p>
         </div>
         <Button
           variant="ghost"
@@ -371,23 +352,31 @@ function List({ userId }: { userId: string }) {
               autoFocus
               className="flex-1"
             />
-            <Select
-              value={draftPriority}
-              onValueChange={(v) =>
-                setDraftPriority(v as "low" | "med" | "high")
-              }
+            <div
+              role="radiogroup"
+              aria-label="Priority"
+              className="inline-flex rounded-md border bg-card p-0.5"
             >
-              <SelectTrigger className="w-28">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {PRIORITIES.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              {PRIORITIES.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={draftPriority === id}
+                  aria-label={label}
+                  title={label}
+                  onClick={() => setDraftPriority(id)}
+                  className={cn(
+                    "grid size-7 place-items-center rounded-sm transition-colors",
+                    draftPriority === id
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <Icon className="size-4" />
+                </button>
+              ))}
+            </div>
             <Button type="submit" disabled={!draftTitle.trim()}>
               <Plus className="size-4" />
               Add

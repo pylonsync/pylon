@@ -1118,35 +1118,51 @@ fn start_server(
             .find(|h| h.field.equiv("Origin"))
             .map(|h| h.value.as_str().to_string());
         let cors_origin: String = {
-            if cors_allowlist.iter().any(|o| o == "*") {
-                "*".to_string()
-            } else {
-                match &req_origin_header {
-                    Some(o)
-                        if pylon_auth::is_localhost_origin(o)
-                            || cors_allowlist.iter().any(|a| a == o) =>
-                    {
-                        o.clone()
-                    }
-                    Some(o) => {
-                        tracing::warn!(
-                            "[cors] gate rejected origin {o:?} — add to \
-                             manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN"
-                        );
-                        cors_allowlist
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "null".to_string())
-                    }
-                    None => cors_allowlist
+            // Always reflect the request's Origin when it matches the
+            // allowlist OR is a localhost origin — even in dev mode
+            // where the allowlist contains "*". Browsers refuse to
+            // combine `Access-Control-Allow-Origin: *` with
+            // `Access-Control-Allow-Credentials: true`, so the literal
+            // "*" path silently breaks every credentialed request
+            // (db.useQuery with cookie-auth, /api/auth/me on prod-style
+            // setups, every request the SyncEngine makes). Reflecting
+            // the origin keeps credentials working and stays equally
+            // permissive — `is_localhost_origin` already covers every
+            // dev origin we care about.
+            let wildcard = cors_allowlist.iter().any(|o| o == "*");
+            match &req_origin_header {
+                Some(o)
+                    if pylon_auth::is_localhost_origin(o)
+                        || cors_allowlist.iter().any(|a| a == o) =>
+                {
+                    o.clone()
+                }
+                Some(o) if wildcard => o.clone(),
+                Some(o) => {
+                    tracing::warn!(
+                        "[cors] gate rejected origin {o:?} — add to \
+                         manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN"
+                    );
+                    cors_allowlist
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "null".to_string()),
+                        .unwrap_or_else(|| "null".to_string())
                 }
+                None if wildcard => "*".to_string(),
+                None => cors_allowlist
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "null".to_string()),
             }
         };
         let cookie_config = Arc::clone(&cookie_config);
-        let allow_credentials = allow_credentials;
+        // Credentials can ride only when the response Origin is a
+        // concrete value, never literal "*". The boot-time
+        // `allow_credentials` flag captured "no `*` in the static
+        // allowlist"; with the dev-mode origin reflection above we also
+        // need to allow credentials whenever the per-request resolved
+        // `cors_origin` isn't `*`.
+        let allow_credentials = allow_credentials || cors_origin != "*";
         let is_dev = is_dev;
 
         let method = request.method().clone();
