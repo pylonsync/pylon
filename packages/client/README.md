@@ -69,6 +69,26 @@ export function App() {
 - `<Protect admin>` / `<Protect predicate={...}>` — predicate gate.
 - `<RedirectToSignIn signInUrl="/sign-in" />` — client redirect.
 
+**Routing**
+- `<Router routes={...} />` — SPA router with nested layouts via `<Outlet />`.
+- `<Link href />` — SPA link (intercepts left-click, lets cmd-click through).
+- `useRouter()` / `useParams()` / `useSearchParams()` / `usePathname()`.
+
+```tsx
+<Router routes={[
+  { path: "/", component: Home },
+  {
+    path: "/app",
+    component: AppLayout, // contains an <Outlet />
+    requireAuth: true,
+    children: [
+      { path: "/", component: Dashboard },
+      { path: "/posts/:id", component: PostDetail },
+    ],
+  },
+]} />
+```
+
 **Hooks**
 - `useAuth()` — `{isSignedIn, userId, tenantId, isAdmin, session, signOut, ...}`.
 

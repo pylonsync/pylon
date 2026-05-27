@@ -70,6 +70,16 @@ export type {
 	EntityFormField,
 } from "./components/EntityForm";
 
+export { Router, Link, Outlet } from "./router/Router";
+export type { RouterProps, LinkProps } from "./router/Router";
+export type { RouteSpec, MatchedRoute } from "./router/match";
+export {
+	useRouter,
+	useParams,
+	useSearchParams,
+	usePathname,
+} from "./router/useRouter";
+
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthReturn } from "./hooks/useAuth";
 
