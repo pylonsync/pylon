@@ -58,6 +58,10 @@ export function App() {
 **Files**
 - `<FileUpload />` — drag-and-drop, multi-file, server-side via `/api/files/upload`.
 
+**Data scaffolds**
+- `<EntityList entity columns where orderBy />` — reactive table.
+- `<EntityForm entity fields row onSubmitted />` — create + edit form.
+
 **Control components**
 - `<SignedIn>` / `<SignedOut>` — auth render-gates.
 - `<InOrg>` / `<NoOrg>` — active-org render-gates.
