@@ -38,6 +38,12 @@ const Todo = entity(
     dueAt: field.datetime().optional(),
     completedAt: field.datetime().optional(),
     createdAt: field.datetime(),
+    // Manual sort key — set by the client when reordering via DnD.
+    // Floats let inserts between two adjacent rows reuse the midpoint
+    // without renumbering the whole list (`(a.sortKey + b.sortKey) / 2`).
+    // New todos seed with createdAt's epoch millis so the default
+    // ordering still feels chronological.
+    sortKey: field.float().optional(),
   },
   {
     indexes: [

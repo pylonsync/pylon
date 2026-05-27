@@ -20,6 +20,7 @@ import {
   storageKey,
 } from "@pylonsync/react";
 import {
+  GripVertical,
   Loader2,
   LogOut,
   Plus,
@@ -55,6 +56,11 @@ type Todo = {
   dueAt?: string | null;
   completedAt?: string | null;
   createdAt: string;
+  /** Manual sort key set when reordering via drag-and-drop. Missing →
+   *  row is implicitly sorted by `createdAt`. Floats let inserts
+   *  between two adjacent rows reuse the midpoint without renumbering
+   *  the whole list. */
+  sortKey?: number | null;
 };
 
 type AuthState = { token: string; userId: string } | null;
@@ -265,6 +271,47 @@ function List({ userId }: { userId: string }) {
     orderBy: { createdAt: "desc" },
   });
   const todoMut = db.useEntity("Todo");
+  // Sort by manual sortKey when present, falling back to createdAt
+  // for any row that hasn't been reordered yet. Active rows on top,
+  // completed at the bottom — toggling done is a soft archive.
+  const sorted = useMemo<Todo[]>(() => {
+    const rows = todos.data.slice();
+    const keyOf = (t: Todo) =>
+      typeof t.sortKey === "number" ? t.sortKey : new Date(t.createdAt).getTime();
+    rows.sort((a, b) => {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      return keyOf(b) - keyOf(a);
+    });
+    return rows;
+  }, [todos.data]);
+  const [dragId, setDragId] = useState<string | null>(null);
+
+  function onReorder(draggedId: string, targetId: string, before: boolean) {
+    if (draggedId === targetId) return;
+    // Find dragged + target in the CURRENT sorted view so the
+    // sortKey we mint sits between the right neighbours, not whatever
+    // db.useQuery emitted in.
+    const idx = sorted.findIndex((t) => t.id === targetId);
+    if (idx < 0) return;
+    const targetKey =
+      typeof sorted[idx]!.sortKey === "number"
+        ? sorted[idx]!.sortKey!
+        : new Date(sorted[idx]!.createdAt).getTime();
+    // The neighbour on the "other side" of the insertion point.
+    // before=true → user dropped above target → new key is BIGGER
+    // than target (we sort desc by key). before=false → below.
+    const neighbourIdx = before ? idx - 1 : idx + 1;
+    const neighbour = sorted[neighbourIdx];
+    const neighbourKey = neighbour
+      ? typeof neighbour.sortKey === "number"
+        ? neighbour.sortKey
+        : new Date(neighbour.createdAt).getTime()
+      : before
+        ? targetKey + 1000
+        : targetKey - 1000;
+    const newKey = (targetKey + neighbourKey) / 2;
+    todoMut.update(draggedId, { sortKey: newKey });
+  }
   const me = db.useQueryOne<{ displayName?: string; email?: string }>(
     "User",
     userId,
@@ -280,11 +327,11 @@ function List({ userId }: { userId: string }) {
     return { total, completed, active: total - completed };
   }, [todos.data]);
 
-  const filtered = useMemo(() => {
-    if (filter === "active") return todos.data.filter((t) => !t.done);
-    if (filter === "completed") return todos.data.filter((t) => t.done);
-    return todos.data;
-  }, [todos.data, filter]);
+  const filtered = useMemo<Todo[]>(() => {
+    if (filter === "active") return sorted.filter((t) => !t.done);
+    if (filter === "completed") return sorted.filter((t) => t.done);
+    return sorted;
+  }, [sorted, filter]);
 
   const addTodo = (e: React.FormEvent) => {
     e.preventDefault();
@@ -446,6 +493,13 @@ function List({ userId }: { userId: string }) {
                 todo={todo}
                 onToggle={() => toggle(todo)}
                 onRemove={() => remove(todo.id)}
+                isDragging={dragId === todo.id}
+                onDragStart={() => setDragId(todo.id)}
+                onDragEnd={() => setDragId(null)}
+                onDropOn={(before) => {
+                  if (dragId) onReorder(dragId, todo.id, before);
+                  setDragId(null);
+                }}
               />
             ))}
           </ul>
@@ -473,13 +527,64 @@ function Row({
   todo,
   onToggle,
   onRemove,
+  isDragging,
+  onDragStart,
+  onDragEnd,
+  onDropOn,
 }: {
   todo: Todo;
   onToggle: () => void;
   onRemove: () => void;
+  isDragging: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  /** Called when another row was dropped onto this one. `before=true`
+   *  means the cursor was in the top half (drop above), false → bottom. */
+  onDropOn: (before: boolean) => void;
 }) {
+  const [hoverEdge, setHoverEdge] = useState<"top" | "bottom" | null>(null);
   return (
-    <li className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40">
+    <li
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        // Required for Firefox to honor the drag at all.
+        e.dataTransfer.setData("text/plain", todo.id);
+        onDragStart();
+      }}
+      onDragEnd={() => {
+        setHoverEdge(null);
+        onDragEnd();
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const rect = e.currentTarget.getBoundingClientRect();
+        const inTopHalf = e.clientY < rect.top + rect.height / 2;
+        setHoverEdge(inTopHalf ? "top" : "bottom");
+      }}
+      onDragLeave={() => setHoverEdge(null)}
+      onDrop={(e) => {
+        e.preventDefault();
+        const before = hoverEdge === "top";
+        setHoverEdge(null);
+        onDropOn(before);
+      }}
+      className={cn(
+        "group relative flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/40",
+        isDragging && "opacity-40",
+        hoverEdge === "top" &&
+          "before:absolute before:inset-x-2 before:top-0 before:h-0.5 before:rounded-full before:bg-primary",
+        hoverEdge === "bottom" &&
+          "after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-primary",
+      )}
+    >
+      <span
+        aria-hidden
+        className="cursor-grab text-muted-foreground/50 transition-colors group-hover:text-muted-foreground active:cursor-grabbing"
+      >
+        <GripVertical className="size-4" />
+      </span>
       <Checkbox
         checked={todo.done}
         onCheckedChange={onToggle}
