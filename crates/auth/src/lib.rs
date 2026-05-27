@@ -3093,10 +3093,7 @@ mod tests {
         assert_eq!(refreshed.tenant_id, Some("org-42".into()));
         assert_ne!(refreshed.token, original.token);
         // The refreshed session's auth context must also see the tenant.
-        assert_eq!(
-            refreshed.to_auth_context().tenant_id,
-            Some("org-42".into())
-        );
+        assert_eq!(refreshed.to_auth_context().tenant_id, Some("org-42".into()));
     }
 
     // -- Admin context --
