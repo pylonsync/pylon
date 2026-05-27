@@ -22,6 +22,9 @@ export type { UserButtonProps } from "./components/UserButton";
 export { SignOutButton } from "./components/SignOutButton";
 export type { SignOutButtonProps } from "./components/SignOutButton";
 
+export { EnsureGuest } from "./components/EnsureGuest";
+export type { EnsureGuestProps } from "./components/EnsureGuest";
+
 export {
 	OrganizationSwitcher,
 	CreateOrganization,
@@ -91,6 +94,7 @@ export {
 	ApiError,
 	changePassword,
 	completePasswordReset,
+	ensureGuestSession,
 	connectionAuthUrl,
 	createApiKey,
 	createInvite,

@@ -56,6 +56,36 @@ async function get<T>(path: string): Promise<T> {
 	return res.json() as Promise<T>;
 }
 
+/**
+ * Mint a guest session if the browser doesn't already have a Pylon
+ * token. Idempotent — calling repeatedly is a no-op once a session
+ * exists. Designed for zero-auth demos (`<EnsureGuest>` is the
+ * component wrapper); apps that need real users should use `<SignIn>`
+ * instead.
+ *
+ * Each browser gets its own anonymous `user_id`, so multi-tab demos
+ * still observe live sync across tabs sharing the same guest. To
+ * reset (e.g. "switch identity"), clear the token from storage and
+ * call this again.
+ */
+export async function ensureGuestSession(): Promise<SessionResponse | null> {
+	if (typeof window === "undefined") return null;
+	const existing = window.localStorage?.getItem(storageKey("token"));
+	if (existing) return null;
+	try {
+		const res = await fetch(`${getBaseUrl()}/api/auth/guest`, {
+			method: "POST",
+			credentials: "include",
+		});
+		if (!res.ok) return null;
+		const body = (await res.json()) as SessionResponse;
+		persistSession(body);
+		return body;
+	} catch {
+		return null;
+	}
+}
+
 export async function listAuthProviders(): Promise<AuthProvider[]> {
 	try {
 		return await get<AuthProvider[]>("/api/auth/providers");

@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@pylonsync/client": "workspace:*",
-    "@pylonsync/example-ui": "workspace:*",
     "@pylonsync/react": "workspace:*",
     "@pylonsync/sync": "workspace:*",
     "next": "^16.0.0",
