@@ -39,6 +39,8 @@ export function App() {
 **Auth surfaces**
 - `<SignIn />` — magic link + password + OAuth, two-step code flow.
 - `<SignUp />` — password registration with email validation.
+- `<ForgotPassword />` — request a reset link.
+- `<ResetPassword token={...} />` — landing page for the reset email.
 - `<UserButton />` — avatar dropdown with sign-out.
 - `<SignOutButton />` — bare sign-out trigger.
 - `<UserProfile />` — account management: identity, password, sessions, API keys.
@@ -51,6 +53,7 @@ export function App() {
 
 **Integrations**
 - `<ConnectAccount name="slack" />` — start OAuth for a `defineConnection(...)`.
+- `<ChatBot fn="chat" />` — streaming UI over a server-side `ctx.llm` handler.
 
 **Files**
 - `<FileUpload />` — drag-and-drop, multi-file, server-side via `/api/files/upload`.

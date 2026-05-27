@@ -257,6 +257,19 @@ export async function changePassword(input: {
 	return post("/api/auth/password/change", input);
 }
 
+export async function requestPasswordReset(
+	email: string,
+): Promise<{ sent: true }> {
+	return post("/api/auth/password/reset/request", { email });
+}
+
+export async function completePasswordReset(input: {
+	token: string;
+	newPassword: string;
+}): Promise<{ ok: true }> {
+	return post("/api/auth/password/reset/complete", input);
+}
+
 export interface ApiKeySummary {
 	id: string;
 	prefix: string;

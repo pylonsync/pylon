@@ -49,6 +49,15 @@ export type {
 export { UserProfile } from "./components/UserProfile";
 export type { UserProfileProps } from "./components/UserProfile";
 
+export { ForgotPassword, ResetPassword } from "./components/PasswordReset";
+export type {
+	ForgotPasswordProps,
+	ResetPasswordProps,
+} from "./components/PasswordReset";
+
+export { ChatBot } from "./components/ChatBot";
+export type { ChatBotProps, ChatMessage } from "./components/ChatBot";
+
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthReturn } from "./hooks/useAuth";
 
@@ -59,6 +68,7 @@ export {
 	acceptInvite,
 	ApiError,
 	changePassword,
+	completePasswordReset,
 	connectionAuthUrl,
 	createApiKey,
 	createInvite,
@@ -73,6 +83,7 @@ export {
 	passwordRegister,
 	persistSession,
 	removeMember,
+	requestPasswordReset,
 	revokeAllSessions,
 	revokeApiKey,
 	revokeInvite,

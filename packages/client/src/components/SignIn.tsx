@@ -24,6 +24,8 @@ export interface SignInProps {
 	afterSignInUrl?: string;
 	/** Optional callback once a session is minted. */
 	onSignedIn?: () => void;
+	/** Forgot-password landing route shown when the password tab is active. */
+	forgotPasswordUrl?: string;
 	/** Text shown above the form. */
 	title?: ReactNode;
 	/** Subtitle / call-to-action. */
@@ -36,6 +38,7 @@ export function SignIn({
 	method = "magic",
 	afterSignInUrl,
 	onSignedIn,
+	forgotPasswordUrl = "/forgot-password",
 	title = "Sign in",
 	subtitle,
 	className,
@@ -56,6 +59,7 @@ export function SignIn({
 					mode="login"
 					afterSignInUrl={afterSignInUrl}
 					onSignedIn={onSignedIn}
+					forgotPasswordUrl={forgotPasswordUrl}
 				/>
 			)}
 			<OAuthButtons />
@@ -271,10 +275,12 @@ function PasswordPanel({
 	mode,
 	afterSignInUrl,
 	onSignedIn,
+	forgotPasswordUrl,
 }: {
 	mode: "login" | "register";
 	afterSignInUrl?: string;
 	onSignedIn?: () => void;
+	forgotPasswordUrl?: string;
 }) {
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
@@ -341,6 +347,14 @@ function PasswordPanel({
 				pending={pending}
 				label={mode === "login" ? "Sign in" : "Create account"}
 			/>
+			{mode === "login" && forgotPasswordUrl ? (
+				<a
+					href={forgotPasswordUrl}
+					className="block text-center text-xs text-[var(--pylon-ink-3,#71717a)] hover:underline"
+				>
+					Forgot password?
+				</a>
+			) : null}
 			<ErrorText message={error} />
 		</form>
 	);
