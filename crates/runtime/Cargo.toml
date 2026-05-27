@@ -14,25 +14,25 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.199" }
-pylon-http = { path = "../http", version = "0.3.199" }
-pylon-router = { path = "../router", version = "0.3.199" }
-pylon-auth = { path = "../auth", version = "0.3.199" }
-pylon-policy = { path = "../policy", version = "0.3.199" }
-pylon-plugin = { path = "../plugin", version = "0.3.199" }
-pylon-sync = { path = "../sync", version = "0.3.199" }
-pylon-studio-api = { path = "../studio_api", version = "0.3.199" }
-pylon-storage = { path = "../storage", version = "0.3.199", features = ["postgres-live"] }
-pylon-crdt = { path = "../crdt", version = "0.3.199" }
-pylon-functions = { path = "../functions", version = "0.3.199" }
-pylon-migrate = { path = "../migrate", version = "0.3.199" }
-pylon-observability = { path = "../observability", version = "0.3.199" }
-pylon-realtime = { path = "../realtime", version = "0.3.199" }
+pylon-kernel = { path = "../core", version = "0.3.200" }
+pylon-http = { path = "../http", version = "0.3.200" }
+pylon-router = { path = "../router", version = "0.3.200" }
+pylon-auth = { path = "../auth", version = "0.3.200" }
+pylon-policy = { path = "../policy", version = "0.3.200" }
+pylon-plugin = { path = "../plugin", version = "0.3.200" }
+pylon-sync = { path = "../sync", version = "0.3.200" }
+pylon-studio-api = { path = "../studio_api", version = "0.3.200" }
+pylon-storage = { path = "../storage", version = "0.3.200", features = ["postgres-live"] }
+pylon-crdt = { path = "../crdt", version = "0.3.200" }
+pylon-functions = { path = "../functions", version = "0.3.200" }
+pylon-migrate = { path = "../migrate", version = "0.3.200" }
+pylon-observability = { path = "../observability", version = "0.3.200" }
+pylon-realtime = { path = "../realtime", version = "0.3.200" }
 # Cross-machine fanout. Default build links the Noop bus only; the
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...
 # without a separate build.
-pylon-cluster = { path = "../cluster", version = "0.3.199", features = ["redis-bus"] }
+pylon-cluster = { path = "../cluster", version = "0.3.200", features = ["redis-bus"] }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
