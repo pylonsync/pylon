@@ -112,7 +112,16 @@ export function useQuery<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { rows: filtered as T[], sig };
     }
-    if (rows.length > 0 && loading.current) loading.current = false;
+    // Loading is false the moment hydration finishes — even when the
+    // disk replica is empty (a real "no rows yet" state, not "still
+    // fetching"). The previous gate only flipped when rows arrived,
+    // so an entity with zero cached rows stayed in loading=true
+    // forever until a server pull / WS event populated it. After:
+    // hydration completion fires store.notify() → getSnapshot re-runs
+    // → loading goes false immediately, the empty state renders.
+    if (loading.current && (rows.length > 0 || sync.isHydrated())) {
+      loading.current = false;
+    }
     return snapshotCache.current.rows;
   }, [sync, entity, optionsKey, options]);
 
@@ -178,7 +187,13 @@ export function useQueryOne<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { row: (row as T) ?? null, sig };
     }
-    if (row !== null && loading.current) loading.current = false;
+    // Mirror useQuery: loading flips false on hydration completion
+    // even when the row is missing (not "still fetching" — genuinely
+    // not present yet). Without the isHydrated() check, a missing
+    // row stuck loading=true forever.
+    if (loading.current && (row !== null || sync.isHydrated())) {
+      loading.current = false;
+    }
     return snapshotCache.current.row;
   }, [sync, entity, id]);
 
