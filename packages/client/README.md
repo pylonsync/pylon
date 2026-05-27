@@ -36,15 +36,26 @@ export function App() {
 
 ## Components
 
+**Auth surfaces**
 - `<SignIn />` — magic link + password + OAuth, two-step code flow.
 - `<SignUp />` — password registration with email validation.
 - `<UserButton />` — avatar dropdown with sign-out.
 - `<SignOutButton />` — bare sign-out trigger.
+
+**Org surfaces**
 - `<OrganizationSwitcher />` — list + switch + inline create.
 - `<CreateOrganization />` — standalone create form.
-- `<SignedIn>` / `<SignedOut>` — render-gates.
+- `<InviteMembers />` — invite by email, pending list, role mgmt.
+
+**Control components**
+- `<SignedIn>` / `<SignedOut>` — auth render-gates.
+- `<InOrg>` / `<NoOrg>` — active-org render-gates.
+- `<HasRole role="owner">` — role render-gate (single or array).
 - `<Protect admin>` / `<Protect predicate={...}>` — predicate gate.
-- `useAuth()` — `{isSignedIn, userId, isAdmin, signOut, ...}`.
+- `<RedirectToSignIn signInUrl="/sign-in" />` — client redirect.
+
+**Hooks**
+- `useAuth()` — `{isSignedIn, userId, tenantId, isAdmin, session, signOut, ...}`.
 
 ## Orgs
 

@@ -124,4 +124,108 @@ export async function createOrg(name: string): Promise<OrgSummary> {
 	return post<OrgSummary>("/api/auth/orgs", { name });
 }
 
+export interface OrgMember {
+	user_id: string;
+	role: string;
+	joined_at: number;
+}
+
+export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {
+	try {
+		return await get<OrgMember[]>(`/api/auth/orgs/${orgId}/members`);
+	} catch {
+		return [];
+	}
+}
+
+export async function updateMemberRole(
+	orgId: string,
+	userId: string,
+	role: string,
+): Promise<{ updated: boolean }> {
+	return req<{ updated: boolean }>(
+		"PUT",
+		`/api/auth/orgs/${orgId}/members/${userId}`,
+		{ role },
+	);
+}
+
+export async function removeMember(
+	orgId: string,
+	userId: string,
+): Promise<{ removed: boolean }> {
+	return req<{ removed: boolean }>(
+		"DELETE",
+		`/api/auth/orgs/${orgId}/members/${userId}`,
+	);
+}
+
+export interface PendingInvite {
+	id: string;
+	email: string;
+	role: string;
+	token_prefix: string;
+	invited_by: string;
+	created_at: number;
+	expires_at: number;
+}
+
+export interface InviteResult {
+	id: string;
+	email: string;
+	role: string;
+	expires_at: number;
+	accept_url: string;
+	/** Dev mode only — full token so the inviter can copy/paste when
+	 *  the email transport isn't configured. */
+	token?: string;
+}
+
+export async function listInvites(orgId: string): Promise<PendingInvite[]> {
+	try {
+		return await get<PendingInvite[]>(`/api/auth/orgs/${orgId}/invites`);
+	} catch {
+		return [];
+	}
+}
+
+export async function createInvite(
+	orgId: string,
+	email: string,
+	role: string,
+): Promise<InviteResult> {
+	return post<InviteResult>(`/api/auth/orgs/${orgId}/invites`, { email, role });
+}
+
+export async function revokeInvite(
+	orgId: string,
+	inviteId: string,
+): Promise<{ revoked: boolean }> {
+	return req<{ revoked: boolean }>(
+		"DELETE",
+		`/api/auth/orgs/${orgId}/invites/${inviteId}`,
+	);
+}
+
+async function req<T>(
+	method: "PUT" | "DELETE",
+	path: string,
+	body?: unknown,
+): Promise<T> {
+	const res = await fetch(`${getBaseUrl()}${path}`, {
+		method,
+		credentials: "include",
+		headers: body ? { "content-type": "application/json" } : undefined,
+		body: body ? JSON.stringify(body) : undefined,
+	});
+	if (!res.ok) {
+		const payload = await res.json().catch(() => ({}) as Record<string, unknown>);
+		const code = (payload?.error as string) ?? `HTTP_${res.status}`;
+		const message =
+			(payload?.message as string) ?? res.statusText ?? "request failed";
+		throw new ApiError(code, message, res.status);
+	}
+	return res.json() as Promise<T>;
+}
+
 export { ApiError };
