@@ -483,10 +483,21 @@ export class SyncEngine {
     // the local IndexedDB has rows the server doesn't (deletes made by
     // another surface while this tab was closed, or events that fell
     // off the in-memory ChangeLog before this tab's cursor caught up).
-    // Fires after pull so we don't reconcile against rows that pull
-    // would have applied anyway. Errors are swallowed inside
-    // reconcileInner so a failed reconcile doesn't take down startup.
-    void this.reconcile();
+    //
+    // Deliberately NOT fired here anymore. Apps that select-org from
+    // a bootstrap effect race against this reconcile pass: the engine
+    // resolves /api/auth/me before selectOrg lands, tenant=null, the
+    // entity fetch returns 0 rows, every cached row gets tombstoned,
+    // and the user sees a "rows render then flash away" gap until
+    // selectOrg fires the session-changed envelope and the engine
+    // re-pulls. The visibility-change + WS-reconnect reconcile triggers
+    // below STILL run, so deletes made while the tab was closed
+    // converge on the next focus / reconnect — just not in the narrow
+    // window where the session might still be unresolved. Net effect:
+    // identical safety, no flash.
+    //
+    // The session-flip guard in reconcileInner is the second line of
+    // defense; this is the first. Belt + braces.
 
     // Wire the visibility-change reconcile so a tab that returns from
     // the background (laptop wakes, tab unhidden) catches up against
