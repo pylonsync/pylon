@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "pylon",
@@ -420,6 +421,21 @@
       "name": "@pylonsync/cli-linux-x64",
       "version": "0.3.198",
     },
+    "packages/client": {
+      "name": "@pylonsync/client",
+      "version": "0.3.198",
+      "dependencies": {
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sync": "workspace:*",
+        "clsx": "^2.1.1",
+      },
+      "devDependencies": {
+        "@types/react": "^19.0.0",
+      },
+      "peerDependencies": {
+        "react": ">=19.0.0",
+      },
+    },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
       "version": "0.3.198",
@@ -715,6 +731,8 @@
     "@pylonsync/cli-linux-arm64": ["@pylonsync/cli-linux-arm64@workspace:packages/cli-linux-arm64"],
 
     "@pylonsync/cli-linux-x64": ["@pylonsync/cli-linux-x64@workspace:packages/cli-linux-x64"],
+
+    "@pylonsync/client": ["@pylonsync/client@workspace:packages/client"],
 
     "@pylonsync/create-pylon": ["@pylonsync/create-pylon@workspace:packages/create-pylon"],
 

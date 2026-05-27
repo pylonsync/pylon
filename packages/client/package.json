@@ -1,0 +1,25 @@
+{
+  "name": "@pylonsync/client",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.3.198",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sync": "workspace:*",
+    "clsx": "^2.1.1"
+  },
+  "peerDependencies": {
+    "react": ">=19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0"
+  }
+}

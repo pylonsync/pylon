@@ -1,0 +1,30 @@
+/* @pylonsync/client — default theme tokens.
+   Override any of these CSS vars at the document root (or any ancestor
+   of the auth components) to restyle the entire suite. Tailwind classes
+   in the components reference these via var(--pylon-*) fallbacks so the
+   package works zero-config without Tailwind too. */
+:root {
+	--pylon-ink: #0a0a0a;
+	--pylon-ink-2: #52525b;
+	--pylon-ink-3: #71717a;
+	--pylon-paper: #ffffff;
+	--pylon-paper-2: #f4f4f5;
+	--pylon-rule: #e5e7eb;
+	--pylon-error-ink: #b91c1c;
+	--pylon-error-bg: #fef2f2;
+	--pylon-error-rule: #fecaca;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--pylon-ink: #fafafa;
+		--pylon-ink-2: #a1a1aa;
+		--pylon-ink-3: #71717a;
+		--pylon-paper: #0a0a0a;
+		--pylon-paper-2: #18181b;
+		--pylon-rule: #27272a;
+		--pylon-error-ink: #fca5a5;
+		--pylon-error-bg: #450a0a;
+		--pylon-error-rule: #7f1d1d;
+	}
+}
