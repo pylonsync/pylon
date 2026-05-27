@@ -1217,13 +1217,29 @@ export class SyncEngine {
     // bypass the tombstone — re-creation server-side still propagates.
     const tombstoneSeq = this.cursor.last_seq;
     for (const entity of names) {
-      // Capture cursor BEFORE the fetch so we can detect drift mid-
-      // reconcile. If a WS event lands while this entity is being
-      // pulled, our snapshot is already stale — applying it would
-      // overwrite a newer authoritative row. Skip apply in that case
-      // and rely on the WS event plus the next reconcile trigger to
-      // converge.
+      // Capture cursor + resolved session BEFORE the fetch so we can
+      // detect drift mid-reconcile. Two distinct races:
+      //
+      //   1. Cursor moves: a WS event for this (or another) entity
+      //      landed while the page-paginated fetch was in flight. Our
+      //      snapshot is stale; applying it would clobber the fresher
+      //      WS-delivered row.
+      //
+      //   2. Session flips: the resolved tenant/user changed while
+      //      the fetch was in flight (e.g., the app called
+      //      /api/auth/select-org just after we issued the fetch).
+      //      The server filtered the response under the OLD tenant
+      //      context, so applying the result would tombstone rows
+      //      that ARE visible under the NEW tenant. This is the
+      //      "dashboard flashes data away on first load" bug — the
+      //      engine starts before the app calls selectOrg, fetches
+      //      under tenant=null, returns 0 rows, then the apply pass
+      //      nukes every locally-cached row. Skip the apply when
+      //      the session signature changed; the next reconcile
+      //      (triggered by session-changed envelope) will re-fetch
+      //      under the new context.
       const cursorBeforeFetch = this.cursor.last_seq;
+      const sessionBeforeFetch = sessionSignature(this._resolvedSession);
       let serverRows: Row[];
       try {
         serverRows = await this.fetchEntityRows(entity);
@@ -1246,6 +1262,14 @@ export class SyncEngine {
         // entity; reconcile() is triggered again on visibility-change
         // and reconnect, and the WS event already carried the latest
         // state for the affected row.
+        continue;
+      }
+      if (sessionSignature(this._resolvedSession) !== sessionBeforeFetch) {
+        // Session changed (token flipped, tenant switched, user
+        // signed out → in, etc.). The rows we fetched reflect the
+        // OLD session's policy view; applying them now would
+        // tombstone rows visible under the NEW session. Bail and let
+        // the session-changed envelope drive the next reconcile.
         continue;
       }
       await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);
@@ -2130,6 +2154,19 @@ export async function getServerData(
  */
 function rowsDiffer(a: Row, b: Row): boolean {
   return stableStringify(a) !== stableStringify(b);
+}
+
+/**
+ * Compact, comparable fingerprint of a resolved session. Used by
+ * reconcile() to detect mid-fetch identity flips — if the signature
+ * differs, the rows we just fetched were policy-filtered under a
+ * stale auth context and applying them would tombstone rows visible
+ * under the new context. Roles array is sorted+joined so insertion
+ * order doesn't trip the equality check.
+ */
+function sessionSignature(s: ResolvedSession): string {
+  const roles = (s.roles ?? []).slice().sort().join(",");
+  return `${s.userId ?? ""}|${s.tenantId ?? ""}|${s.isAdmin ? "1" : "0"}|${roles}`;
 }
 
 function stableStringify(value: unknown): string {

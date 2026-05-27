@@ -2351,9 +2351,9 @@ impl SessionStore {
         }
     }
 
-    /// Refresh a session — issues a new token, copies user/device, extends expiry.
-    /// The old token is revoked. Returns the new session or None if the old
-    /// token is missing/expired.
+    /// Refresh a session — issues a new token, copies user/device/tenant,
+    /// extends expiry. The old token is revoked. Returns the new session or
+    /// None if the old token is missing/expired.
     pub fn refresh(&self, old_token: &str) -> Option<Session> {
         let mut sessions = self.sessions.lock().unwrap();
         let old = sessions.remove(old_token)?;
@@ -2370,6 +2370,17 @@ impl SessionStore {
         // first sign-in and lost it on the next refresh.
         let mut new = Session::with_lifetime(old.user_id.clone(), self.default_lifetime_secs);
         new.device = old.device.clone();
+        // Carry the active tenant forward. Without this, multi-tenant
+        // apps lose the user's selected org on every token rotation
+        // (every ~24h in default configs as the 30-day window rolls).
+        // The /api/auth/me probe then returns tenant_id: null, which
+        // makes the SyncEngine's reconcile pass run with no tenant
+        // context — its policy-filtered fetch returns 0 rows under
+        // `auth.tenantId == data.orgId` policies, and the local replica
+        // gets tombstoned. App-visible symptom: dashboards "flash data
+        // away" after working briefly, fixed only by a fresh
+        // /api/auth/select-org call.
+        new.tenant_id = old.tenant_id.clone();
         sessions.insert(new.token.clone(), new.clone());
         if let Some(b) = &self.backend {
             b.save(&new);
@@ -3062,6 +3073,30 @@ mod tests {
         let session = Session::new("user-42".into());
         let ctx = session.to_auth_context();
         assert_eq!(ctx.user_id, Some("user-42".into()));
+    }
+
+    /// Regression for the "dashboard flashes data away after token
+    /// rotation" bug. SessionStore::refresh used to drop tenant_id on the
+    /// new session, which silently un-selected the user's org and made
+    /// every tenant-scoped reconcile return zero rows. The new token
+    /// must carry the tenant forward so multi-tenant apps stay stable
+    /// across the ~24h refresh window.
+    #[test]
+    fn session_refresh_preserves_tenant() {
+        let store = SessionStore::new();
+        let original = store.create("user-7".into());
+        assert!(store.set_tenant(&original.token, Some("org-42".into())));
+        let refreshed = store
+            .refresh(&original.token)
+            .expect("refresh returned None for a live session");
+        assert_eq!(refreshed.user_id, original.user_id);
+        assert_eq!(refreshed.tenant_id, Some("org-42".into()));
+        assert_ne!(refreshed.token, original.token);
+        // The refreshed session's auth context must also see the tenant.
+        assert_eq!(
+            refreshed.to_auth_context().tenant_id,
+            Some("org-42".into())
+        );
     }
 
     // -- Admin context --

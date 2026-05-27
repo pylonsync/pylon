@@ -284,6 +284,77 @@ describe("LocalStore.reconcileRemove", () => {
   });
 });
 
+describe("SyncEngine.reconcile session guard", () => {
+  // Regression for the "dashboard flashes data away on first load" bug.
+  // The engine starts before the app calls /api/auth/select-org, runs
+  // its initial pull + reconcile under tenant=null, and the
+  // policy-filtered entity fetch returns 0 rows — which then tombstones
+  // every IndexedDB-hydrated row from the previous session. Once the
+  // app calls selectOrg the rows reappear, but the user has already
+  // seen them flash.
+  //
+  // The guard: if the resolved session changes mid-fetch (token, tenant,
+  // user, isAdmin, or roles), reconcile MUST discard the result. The
+  // session-changed envelope queues another reconcile under the new
+  // identity.
+  test("skips apply when tenant flips during entity fetch", async () => {
+    let restore: (() => void) | null = null;
+    try {
+      restore = installFetch(async (url) => {
+        if (url.includes("/api/entities/Recording/cursor")) {
+          // Server filtered under stale tenant — returns empty. Without
+          // the guard, applyEntityReconcile would tombstone r1.
+          return {
+            status: 200,
+            body: { data: [], next_cursor: null, has_more: false },
+          };
+        }
+        return { status: 404, body: {} };
+      });
+
+      const engine = makeEngine();
+      seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
+      expect(engine.store.list("Recording").length).toBe(1);
+
+      // Simulate the app calling select-org WHILE reconcile is mid-flight.
+      // The implementation reads `_resolvedSession` directly; we override
+      // via the engine's internal store mutation surface to match how the
+      // session-changed handler would update it during a real flip.
+      const engineWithSession = engine as unknown as {
+        _resolvedSession: {
+          userId: string | null;
+          tenantId: string | null;
+          isAdmin: boolean;
+          roles: string[];
+        };
+      };
+      engineWithSession._resolvedSession = {
+        userId: "u1",
+        tenantId: null,
+        isAdmin: false,
+        roles: [],
+      };
+      const reconcilePromise = engine.reconcile(["Recording"]);
+      // Flip the tenant before the fetch resolves. The microtask queue
+      // already has the in-flight fetch; this just changes the field
+      // they'll compare against.
+      engineWithSession._resolvedSession = {
+        userId: "u1",
+        tenantId: "org-42",
+        isAdmin: false,
+        roles: [],
+      };
+      await reconcilePromise;
+
+      // Row must survive — the stale fetch result was discarded.
+      expect(engine.store.list("Recording").length).toBe(1);
+      expect(engine.store.get("Recording", "r1")).not.toBeNull();
+    } finally {
+      restore?.();
+    }
+  });
+});
+
 describe("LocalStore.entityNames", () => {
   test("returns only entities with at least one row", () => {
     const engine = makeEngine();
