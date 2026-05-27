@@ -165,6 +165,23 @@ export class SyncEngine {
   private reconnectAttempts = 0;
   private persistence: import("./persistence").IndexedDBPersistence | null = null;
 
+  /**
+   * Flips true once `start()` has either:
+   *   - drained IndexedDB into the in-memory store (data path), OR
+   *   - decided the engine has no persistence layer (test / SSR / explicit opt-out).
+   *
+   * `useQuery`'s `loading` flag consumes this so apps don't render a
+   * "Loading…" flash on every page refresh when the disk replica
+   * already has the data. Without it, even returning visits show the
+   * spinner for the 50–200ms gap between component mount and IndexedDB
+   * `loadAllEntities()` resolving — visually identical to a true
+   * cold-start fetch.
+   */
+  private _hydrated = false;
+  isHydrated(): boolean {
+    return this._hydrated;
+  }
+
   readonly store: LocalStore;
   readonly mutations: MutationQueue;
 
@@ -395,7 +412,10 @@ export class SyncEngine {
         // subscribers re-read. Without this, if the subsequent pull returns
         // no changes (replica already at cursor), subscribers stay stuck on
         // their initial empty snapshot until the first WS event arrives.
+        this._hydrated = true;
         if (hydrated) this.store.notify();
+        else this.store.notify(); // notify even on empty cache so useQuery
+        // sees `isHydrated()` flip and can drop its initial loading state.
 
         // Load cursor.
         const savedCursor = await this.persistence.loadCursor();
@@ -439,6 +459,11 @@ export class SyncEngine {
         // IndexedDB not available — continue without persistence.
       }
     }
+    // Always flip `_hydrated` true by this point — even when persist
+    // was off or IndexedDB threw. useQuery's loading semantics depend
+    // on it; leaving false would pin every app with persist:false
+    // into a permanent "Loading…" state.
+    this._hydrated = true;
 
     // Seed the server-resolved session before the first pull so
     // `useSession` subscribers see the right tenant from frame one, and

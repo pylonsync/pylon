@@ -5,6 +5,7 @@
     "": {
       "name": "pylon",
       "devDependencies": {
+        "bun-types": "^1.3.14",
         "turbo": "^2.5.0",
         "typescript": "^5.9.3",
       },
@@ -164,7 +165,6 @@
       "name": "chat-web",
       "version": "0.1.0",
       "dependencies": {
-        "@pylonsync/client": "workspace:*",
         "@pylonsync/example-ui": "workspace:*",
         "@pylonsync/loro": "workspace:*",
         "@pylonsync/react": "workspace:*",
@@ -307,24 +307,16 @@
       "name": "todo-app-example",
       "version": "0.1.0",
       "dependencies": {
-        "@pylonsync/client": "workspace:*",
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
-        "react": "^19.2.0",
-        "react-dom": "^19.2.0",
-      },
-      "devDependencies": {
-        "@types/react": "^19.2.0",
-        "@types/react-dom": "^19.2.0",
-        "typescript": "^5.9.3",
       },
     },
     "examples/todo-app/web": {
       "name": "todo-app-web",
       "version": "0.1.0",
       "dependencies": {
-        "@pylonsync/client": "workspace:*",
+        "@pylonsync/example-ui": "workspace:*",
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
         "next": "^16.0.0",

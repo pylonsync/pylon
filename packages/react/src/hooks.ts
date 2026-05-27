@@ -74,7 +74,15 @@ export function useQuery<T = Row>(
   entity: string,
   options?: QueryOptions
 ): UseQueryReturn<T> {
-  const loading = useRef<boolean>(sync.store.list(entity).length === 0);
+  // `loading` is true only while we genuinely don't know yet — i.e.,
+  // the engine hasn't drained IndexedDB into the in-memory store. Once
+  // hydrated, an empty list is a real empty (not "still fetching"), so
+  // refreshes with cached data don't flash "Loading…" before the rows
+  // render. The engine's `isHydrated()` exposes a synchronous gate that
+  // flips true after `loadAllEntities()` settles.
+  const loading = useRef<boolean>(
+    !sync.isHydrated() && sync.store.list(entity).length === 0,
+  );
   const error = useRef<Error | null>(null);
   const optionsKey = JSON.stringify(options || {});
 
@@ -140,7 +148,12 @@ export function useQueryOne<T = Row>(
   entity: string,
   id: string
 ): UseQueryOneReturn<T> {
-  const loading = useRef<boolean>(sync.store.get(entity, id) === null);
+  // Same hydration-aware loading semantics as useQuery — see the
+  // comment there. Without this, a refreshed page flashes "Loading…"
+  // for the row even when it's already in IndexedDB.
+  const loading = useRef<boolean>(
+    !sync.isHydrated() && sync.store.get(entity, id) === null,
+  );
   const error = useRef<Error | null>(null);
 
   const subscribe = useMemo(
