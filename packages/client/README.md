@@ -46,6 +46,13 @@ export function App() {
 - `<OrganizationSwitcher />` — list + switch + inline create.
 - `<CreateOrganization />` — standalone create form.
 - `<InviteMembers />` — invite by email, pending list, role mgmt.
+- `<AcceptInvite token={...} />` — landing page for invite emails.
+
+**Integrations**
+- `<ConnectAccount name="slack" />` — start OAuth for a `defineConnection(...)`.
+
+**Files**
+- `<FileUpload />` — drag-and-drop, multi-file, server-side via `/api/files/upload`.
 
 **Control components**
 - `<SignedIn>` / `<SignedOut>` — auth render-gates.

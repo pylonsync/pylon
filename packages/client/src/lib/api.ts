@@ -207,6 +207,29 @@ export async function revokeInvite(
 	);
 }
 
+export async function acceptInvite(
+	token: string,
+): Promise<{ org_id: string; role: string }> {
+	return post<{ org_id: string; role: string }>(
+		`/api/auth/invites/${encodeURIComponent(token)}/accept`,
+		{},
+	);
+}
+
+export interface ConnectionAuthUrl {
+	url: string;
+}
+
+export async function connectionAuthUrl(
+	name: string,
+	postRedirect?: string,
+): Promise<ConnectionAuthUrl> {
+	return post<ConnectionAuthUrl>(
+		`/api/connections/${encodeURIComponent(name)}/auth-url`,
+		postRedirect ? { post_redirect: postRedirect } : {},
+	);
+}
+
 async function req<T>(
 	method: "PUT" | "DELETE",
 	path: string,

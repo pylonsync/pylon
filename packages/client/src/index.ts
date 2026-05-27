@@ -34,6 +34,18 @@ export type {
 export { InviteMembers } from "./components/InviteMembers";
 export type { InviteMembersProps } from "./components/InviteMembers";
 
+export { AcceptInvite } from "./components/AcceptInvite";
+export type { AcceptInviteProps } from "./components/AcceptInvite";
+
+export { ConnectAccount } from "./components/ConnectAccount";
+export type { ConnectAccountProps } from "./components/ConnectAccount";
+
+export { FileUpload } from "./components/FileUpload";
+export type {
+	FileUploadProps,
+	FileUploadResult,
+} from "./components/FileUpload";
+
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthReturn } from "./hooks/useAuth";
 
@@ -41,7 +53,9 @@ export type { UseAuthReturn } from "./hooks/useAuth";
 // surfaces can drive the same endpoints without duplicating the fetch
 // + error-mapping logic the built-in components use.
 export {
+	acceptInvite,
 	ApiError,
+	connectionAuthUrl,
 	createInvite,
 	createOrg,
 	listAuthProviders,
