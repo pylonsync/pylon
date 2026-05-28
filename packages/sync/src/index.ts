@@ -19,6 +19,12 @@ import { MultiTabBroker } from "./multi-tab";
 import { OpQueue } from "./op-queue";
 import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
+import {
+  createTransport,
+  type Transport,
+  type TransportHost,
+  type TransportKind,
+} from "./transports";
 import { generateClientId, generateId } from "./ids";
 export { IndexedDBPersistence, persistChange } from "./persistence";
 export {
@@ -169,13 +175,13 @@ export class SyncEngine {
   private config: SyncEngineConfig;
   private cursor: SyncCursor = { last_seq: 0 };
   private running = false;
-  private ws: WebSocket | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Real-time transport — owns its own socket / timers / backoff.
+   *  The engine just calls start/stop/send and consumes inbound events
+   *  via the TransportHost callbacks (set up below in `transportHost`).
+   *  Constructed in start() because followers don't open a transport
+   *  at all and SSR-only consumers never reach start(). */
+  private transport: Transport | null = null;
   private _connectionStatus: SyncConnectionStatus = "offline";
-  /** Monotonic attempt counter for exponential backoff. Reset to 0 on a
-   *  successful connection so the next reconnect starts fresh rather than
-   *  inheriting the previous storm's cooldown. */
-  private reconnectAttempts = 0;
   private persistence: import("./persistence").IndexedDBPersistence | null = null;
 
   /**
@@ -246,15 +252,6 @@ export class SyncEngine {
    *  (`multiTab: false`, BroadcastChannel unavailable) flip it true
    *  explicitly inside `initMultiTab`. */
   private isMultiTabLeader = false;
-
-  /**
-   * Timer for the "stable connection" check. On `onopen` we start a 5s
-   * timer; if the socket stays up that long we reset reconnectAttempts.
-   * If it closes first, the timer gets cleared and the backoff grows so
-   * the client can't hammer the server on auth failures.
-   */
-  private wsStableTimer: ReturnType<typeof setTimeout> | null = null;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Serialized apply queue. Every change-event apply — from WS onmessage,
@@ -615,14 +612,8 @@ export class SyncEngine {
     // webhook on a sibling Fly machine" / "missed WS event" gap.
     this.attachVisibilityListener();
 
-    const transport = this.config.transport ?? "websocket";
-    if (transport === "websocket") {
-      this.connectWs();
-    } else if (transport === "sse") {
-      this.connectSse();
-    } else if (transport === "poll") {
-      this.startPolling();
-    }
+    this.transport = createTransport(this.transportKind(), this.transportHost());
+    this.transport.start();
   }
 
   /**
@@ -751,10 +742,13 @@ export class SyncEngine {
         void this.push();
       }
       this.attachVisibilityListener();
-      const transport = this.config.transport ?? "websocket";
-      if (transport === "websocket") this.connectWs();
-      else if (transport === "sse") this.connectSse();
-      else if (transport === "poll") this.startPolling();
+      // Late promotion: build a transport (if one doesn't exist yet — a
+      // tab might have spent its whole life as follower with no
+      // transport at all) and start it.
+      if (!this.transport) {
+        this.transport = createTransport(this.transportKind(), this.transportHost());
+      }
+      this.transport.start();
     } catch {
       /* best-effort — next reconnect cycle catches up */
     }
@@ -833,25 +827,15 @@ export class SyncEngine {
     }
   }
 
-  /** Demotion: another tab took over as leader. Close our WS and
-   *  stop driving network ops; the new leader will broadcast applied
-   *  changes that our followers-mirror path picks up. */
+  /** Demotion: another tab took over as leader. Tear down our
+   *  transport (WS socket, ping timer, reconnect timer, poll timer —
+   *  whichever applies) and stop driving network ops; the new leader
+   *  will broadcast applied changes that our followers-mirror path
+   *  picks up. */
   private onMultiTabDemoted(): void {
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        /* best-effort */
-      }
-      this.ws = null;
-    }
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
+    if (this.transport) {
+      this.transport.stop();
+      this.transport = null;
     }
   }
 
@@ -1114,8 +1098,6 @@ export class SyncEngine {
     document.addEventListener("visibilitychange", this.visibilityHandler);
   }
 
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-
   /**
    * Serialize a batch of change applies behind any in-flight applies, and
    * advance the cursor monotonically when the batch lands. Both the WS
@@ -1226,31 +1208,12 @@ export class SyncEngine {
     return next;
   }
 
-  private startPolling(): void {
-    const interval = this.config.pollInterval ?? 1000;
-    this.pollTimer = setInterval(() => {
-      this.push().then(() => this.pull());
-    }, interval);
-  }
-
   /** Stop the sync engine. */
   stop(): void {
     this.running = false;
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
+    if (this.transport) {
+      this.transport.stop();
+      this.transport = null;
     }
     if (this.visibilityHandler && typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.visibilityHandler);
@@ -1263,352 +1226,6 @@ export class SyncEngine {
     this.setConnectionStatus("offline");
   }
 
-  /** Connect to the WebSocket server for real-time updates. */
-  private connectWs(): void {
-    if (!this.running) return;
-    // Followers never open a WS — the leader's fanout is mirrored
-    // over the BroadcastChannel.
-    if (!this.isMultiTabLeader) return;
-
-    const wsUrl = this.config.wsUrl ?? this.deriveWsUrl();
-    // Browser WebSocket has no header API — the server accepts the token
-    // as a `bearer.<percent-encoded-token>` subprotocol (RFC 6455 §1.9).
-    // Native clients can still set Authorization: Bearer via headers.
-    const token =
-      this.config.token ??
-      this.storage.get(this.tokenStorageKey()) ??
-      undefined;
-    try {
-      if (token) {
-        const proto = `bearer.${encodeURIComponent(token)}`;
-        this.ws = new WebSocket(wsUrl, proto);
-      } else {
-        this.ws = new WebSocket(wsUrl);
-      }
-    } catch {
-      this.scheduleReconnect();
-      return;
-    }
-
-    // Backoff reset is delayed — a socket that opens then closes inside
-    // a few seconds (auth failure, server 1008) would otherwise let the
-    // reconnect loop fire at ~2/sec forever. Only call the connection
-    // "stable" after it's stayed up long enough to have been doing work.
-    this.ws.onopen = () => {
-      // We only flip to "connected" once the socket actually opens.
-      // The 5s stable-window timer below decides when to RESET the
-      // backoff; status flips immediately because UI consumers want
-      // to clear the "reconnecting" indicator the moment data starts
-      // flowing again.
-      this.setConnectionStatus("connected");
-      if (this.wsStableTimer) clearTimeout(this.wsStableTimer);
-      this.wsStableTimer = setTimeout(() => {
-        this.reconnectAttempts = 0;
-        this.wsStableTimer = null;
-      }, 5_000);
-      // Client-side keepalive ping. Default 25s — pure liveness, since
-      // the dedicated :port+1 server uses a dual-thread design that
-      // wakes the writer instantly on every broadcast (no mutex
-      // contention with the reader, no ping-bounded latency).
-      //
-      // The HTTP-multiplexed `/api/sync/ws` fallback path is still
-      // single-threaded (tiny_http's CustomStream hides the TcpStream
-      // so we can't set a kernel-level read timeout). On that path,
-      // broadcast latency IS bounded by this interval — apps that
-      // can't route to the :port+1 listener can pass
-      // `init({ pingIntervalMs: 200 })` to trade traffic for latency.
-      const pingIntervalMs = this.config.pingIntervalMs ?? 25_000;
-      if (this.pingTimer) clearInterval(this.pingTimer);
-      this.pingTimer = setInterval(() => {
-        if (this.ws?.readyState !== WebSocket.OPEN) return;
-        try {
-          this.ws.send('{"type":"ping"}');
-        } catch {
-          // ignore — onclose will trigger reconnect
-        }
-      }, pingIntervalMs);
-      // Re-send every active server-subscription (CRDT rows, reactive
-      // queries, future kinds) across the new socket. The server
-      // purges per-client subscription state on disconnect, so without
-      // this resync the subscriber's first event would never arrive.
-      this.serverSubs.replay();
-      // Pull-on-open catches every event broadcast in the gap between
-      // the prior `pull()` returning and this socket actually opening.
-      // The WS has no replay-on-connect (it's just a fanout), so events
-      // emitted to other live clients during that window would otherwise
-      // be lost forever to this tab. Reconcile fires after the pull
-      // since pull is the cheap incremental path; reconcile is the
-      // server-truth backstop for anything pull couldn't replay.
-      void this.pull().then(() => this.reconcile());
-    };
-
-    // Bind binaryType BEFORE installing the handler so the first
-    // server-pushed binary frame (CRDT snapshot or update) decodes
-    // correctly. Default in browsers is "blob"; we want raw bytes
-    // synchronously available so the binary-handler closure doesn't
-    // need to await a Blob.arrayBuffer() round-trip.
-    this.ws.binaryType = "arraybuffer";
-
-    this.ws.onmessage = (event) => {
-      // Binary frame: route to whatever consumer registered via
-      // onBinaryFrame(). Pylon's CRDT broadcast (server-side
-      // notify_crdt) ships every CRDT-mode write as a binary
-      // [type|entity|row_id|payload] frame; @pylonsync/loro is the
-      // intended decoder. SyncEngine itself stays binary-agnostic so
-      // the next binary use case (file streaming, video chunks…)
-      // can register without churning this layer.
-      if (event.data instanceof ArrayBuffer) {
-        const bytes = new Uint8Array(event.data);
-        for (const handler of this.binaryHandlers) {
-          try {
-            handler(bytes);
-          } catch (err) {
-            console.warn("[sync] binary handler threw:", err);
-          }
-        }
-        // Forward to follower tabs ONLY when at least one follower
-        // is currently forwarded for a CRDT row. The engine is
-        // binary-agnostic — it can't peek inside the frame to route
-        // per-row — so this is a tab-level gate: no forwarders = no
-        // broadcast. Saves bandwidth in the common single-tab case.
-        //
-        // Trade-off: when ANY follower has forwarded a CRDT sub on
-        // ANY key, we broadcast EVERY binary frame regardless of
-        // which row it's for. A multi-CRDT-entity app with one
-        // leader-only chatty doc + one shared follower-forwarded
-        // doc pays for both. Acceptable for now; the lever to pull
-        // if it shows up in profiling is a binaryRoutes map keyed
-        // by the Loro doc id parsed from the frame header.
-        if (this.crdtForwarders.size > 0) {
-          this.broadcastToTabs({ type: "binary", bytes });
-        }
-        return;
-      }
-
-      try {
-        const msg = JSON.parse(event.data as string);
-
-        // Sync change event. Persist BEFORE advancing the cursor so a
-        // crash can't leave `last_seq` ahead of the replica on disk.
-        // The shared apply queue serializes WS messages with each other
-        // AND with concurrent pull() calls, so seq order is preserved
-        // and the cursor only advances monotonically.
-        if (msg.seq && msg.entity && msg.kind) {
-          const change = msg as ChangeEvent;
-          void this.enqueueApply([change]);
-          return;
-        }
-
-        // Presence event.
-        if (msg.type === "presence") {
-          this.store.notify();
-          return;
-        }
-
-        // Server-driven revocation: a subscriber whose read policy
-        // was revoked mid-session for a specific row. Drop the row
-        // from the local replica at the current cursor seq so the
-        // tombstone supersedes any racing late-arriving WS update
-        // for the same row, and notify any LoroDoc subscriber
-        // (registered via `addRowEvictionListener`) so collaborative
-        // doc handles unmount cleanly.
-        //
-        // Distinct from a regular Delete change event because this
-        // envelope has no global seq — the row's underlying data
-        // hasn't been deleted, only the recipient's visibility of
-        // it. Other subscribers (with matching policy) keep their
-        // row intact.
-        if (
-          msg.type === "row-revoked" &&
-          typeof msg.entity === "string" &&
-          typeof msg.row_id === "string"
-        ) {
-          // Server includes its current high-water seq when known —
-          // use it as the tombstone seq so an in-flight stale frame
-          // with `seq <= server_seq` is filtered locally. A
-          // legitimate re-grant at a higher seq still lands.
-          const revokeSeq =
-            typeof msg.seq === "number" && msg.seq > 0
-              ? msg.seq
-              : this.cursor.last_seq;
-          this.handleRowRevocation(msg.entity, msg.row_id, revokeSeq);
-          return;
-        }
-
-        // Session mutated server-side. Fires for select-org / clear-org
-        // / session revoke — every tab connected as this user gets the
-        // envelope (cross-machine too via the cluster bus). Trigger
-        // a fresh /api/auth/me read which updates the cached session
-        // AND, on tenant flip, resets the replica so stale rows from
-        // the previous tenant disappear. App code calling
-        // /api/auth/select-org via raw fetch no longer needs the
-        // manual `notifySessionChanged()` step.
-        if (msg.type === "session-changed") {
-          void this.refreshResolvedSession();
-          return;
-        }
-
-        // Reactive query push: the server-side ReactiveRegistry re-ran
-        // a subscribed handler and the result hash changed. Route to
-        // the local handler if we own the subscription, AND forward
-        // to follower tabs via the multi-tab channel so a follower's
-        // `useReactiveQuery` handler fires too (the follower
-        // registered through us via `sub-register`).
-        if (msg.type === "reactive-result" && typeof msg.sub_id === "string") {
-          const handler = this.reactiveHandlers.get(msg.sub_id);
-          if (handler) {
-            handler({ kind: "result", result: msg.result });
-          }
-          this.broadcastToTabs({
-            type: "reactive-msg",
-            sub_id: msg.sub_id,
-            payload: { kind: "result", result: msg.result },
-          });
-          return;
-        }
-        if (msg.type === "reactive-error" && typeof msg.sub_id === "string") {
-          const errPayload = {
-            kind: "error" as const,
-            code: typeof msg.code === "string" ? msg.code : "REACTIVE_ERROR",
-            message: typeof msg.message === "string" ? msg.message : "",
-          };
-          const handler = this.reactiveHandlers.get(msg.sub_id);
-          if (handler) handler(errPayload);
-          this.broadcastToTabs({
-            type: "reactive-msg",
-            sub_id: msg.sub_id,
-            payload: errPayload,
-          });
-          return;
-        }
-      } catch {
-        // Ignore malformed messages.
-      }
-    };
-
-    this.ws.onclose = () => {
-      this.ws = null;
-      // Socket closed before the stable-window timer fired — treat this
-      // as an unstable connection and DO NOT reset reconnectAttempts.
-      // The growing backoff protects the server from a tight loop.
-      if (this.wsStableTimer) {
-        clearTimeout(this.wsStableTimer);
-        this.wsStableTimer = null;
-      }
-      if (this.pingTimer) {
-        clearInterval(this.pingTimer);
-        this.pingTimer = null;
-      }
-      // Surface the disconnect to UI consumers immediately. If
-      // `running` flipped to false (engine stopped), `stop()` already
-      // set "offline" — don't override that.
-      if (this.running) {
-        this.setConnectionStatus("reconnecting");
-      }
-      this.scheduleReconnect();
-    };
-
-    this.ws.onerror = () => {
-      // onclose will fire after this.
-    };
-  }
-
-  private scheduleReconnect(): void {
-    if (!this.running) return;
-    this.reconnectAttempts += 1;
-    const delay = this.computeBackoff();
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      // Pull any missed changes, then reconnect.
-      this.pull().then(() => this.connectWs());
-    }, delay);
-  }
-
-  /**
-   * Exponential backoff with full jitter for reconnects.
-   *
-   * Thundering-herd fix: when the server restarts, every connected client
-   * fires `onclose` at nearly the same instant. Without jitter they all
-   * reconnect at `baseDelay` and hammer the newly-booted server; after a
-   * few cycles the reconnect waves align and the server never recovers.
-   *
-   * Full-jitter (`delay = random(0, exp)`) spreads clients evenly across
-   * the backoff window so the second-wave load is flat, not spiky.
-   * Algorithm from AWS Architecture Blog "Exponential Backoff and Jitter"
-   * — the "Full Jitter" variant, which has the lowest collision rate.
-   *
-   * The `reconnectDelay` config value seeds the exponential base. Max
-   * delay caps at 30s so users don't wait minutes on a long outage.
-   */
-  private computeBackoff(): number {
-    const base = this.config.reconnectDelay ?? 1000;
-    const maxDelay = 30_000;
-    // exp = base * 2^(attempts-1), clamped to maxDelay
-    const attempt = Math.max(1, this.reconnectAttempts);
-    const exp = Math.min(maxDelay, base * Math.pow(2, attempt - 1));
-    // Full jitter: delay is uniform random in [0, exp].
-    return Math.floor(Math.random() * exp);
-  }
-
-  /** Connect via Server-Sent Events. */
-  private connectSse(): void {
-    if (!this.running) return;
-
-    const base = this.config.baseUrl;
-    const url = new URL(base);
-    const port = parseInt(url.port || "4321", 10);
-    const sseUrl = `http://${url.hostname}:${port + 2}/events`;
-
-    try {
-      const es = new EventSource(sseUrl);
-      es.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.seq && msg.entity && msg.kind) {
-            const change = msg as ChangeEvent;
-            void this.enqueueApply([change]);
-          }
-        } catch {
-          // Ignore malformed events.
-        }
-      };
-      es.onerror = () => {
-        es.close();
-        // Same jittered backoff as the WS path so SSE clients don't form
-        // a second reconnect wave on server restart.
-        this.reconnectAttempts += 1;
-        setTimeout(() => {
-          if (this.running) {
-            this.pull().then(() => this.connectSse());
-          }
-        }, this.computeBackoff());
-      };
-    } catch {
-      // EventSource not available — fall back to polling.
-      this.startPolling();
-    }
-  }
-
-  private deriveWsUrl(): string {
-    const base = this.config.baseUrl;
-    const url = new URL(base);
-    const scheme = url.protocol === "https:" ? "wss" : "ws";
-
-    // Always multiplex WS on the same origin via `/api/sync/ws`. The
-    // Pylon runtime accepts the Upgrade on its main HTTP port (4321),
-    // so any reverse proxy that already forwards `/api/*` carries the
-    // WebSocket through too (Vite's `ws: true` proxy, Next.js rewrites,
-    // CDNs with WS support).
-    //
-    // The legacy port+1 fallback (`:4322` for a `:4321` API) is still
-    // available on the runtime, but we don't derive it client-side
-    // anymore: any setup where the page origin (e.g. Vite on :3000)
-    // wasn't equal to the API origin would compute ws://localhost:3001
-    // — which doesn't exist and bypasses the dev-server proxy. The
-    // `/api/sync/ws` path goes through whatever proxies `/api/*`,
-    // which is the same code path prod already relies on.
-    return `${scheme}://${url.host}/api/sync/ws`;
-  }
 
   /**
    * Drop local cursor + store + notify. Safe to call from any state.
@@ -1806,7 +1423,11 @@ export class SyncEngine {
       // tight loop that the server reads as abuse.
       const status = (err as { status?: number })?.status;
       if (status === 429) {
-        this.reconnectAttempts += 3;
+        // Push the next reconnect noticeably further out so a rate-
+        // limited pull doesn't drive a tight 429 / reconnect / pull
+        // / 429 loop the server reads as abuse. The +3 attempts skips
+        // straight to a longer backoff window.
+        this.transport?.bumpReconnect(3);
       }
       // 410 RESYNC_REQUIRED: cursor is from a previous server lifetime, or
       // it fell off the retention window. Drop local state + cursor and
@@ -2626,9 +2247,11 @@ export class SyncEngine {
     return { ...this.cursor };
   }
 
-  /** Whether the WebSocket is currently connected. */
+  /** Whether the real-time transport is currently open. True for an
+   *  open WebSocket / EventSource and for a running poll loop; false
+   *  for a follower tab (no transport) or before start() / after stop(). */
   get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.transport?.isOpen() ?? false;
   }
 
   // -----------------------------------------------------------------------
@@ -2843,9 +2466,176 @@ export class SyncEngine {
     }
   }
 
+  /** Send a JSON message via the active transport. No-op when no
+   *  transport exists (follower tab) or the transport doesn't support
+   *  uplink (SSE, polling). Subscribe / presence / topic / ping frames
+   *  all route here. */
   private sendWs(msg: unknown): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+    this.transport?.send(msg);
+  }
+
+  /** Resolved transport kind, with the websocket default applied. */
+  private transportKind(): TransportKind {
+    return this.config.transport ?? "websocket";
+  }
+
+  /** Build the host surface the transport calls back into. One object
+   *  shared across transport lifetime — the engine fields it reads (
+   *  config, transport state, callbacks) are stable references. */
+  private transportHost(): TransportHost {
+    return {
+      baseUrl: this.config.baseUrl,
+      wsUrl: this.config.wsUrl,
+      pingIntervalMs: this.config.pingIntervalMs,
+      reconnectDelayMs: this.config.reconnectDelay,
+      pollIntervalMs: this.config.pollInterval,
+      getToken: () => this.currentToken() ?? undefined,
+      isLeader: () => this.isMultiTabLeader,
+      isRunning: () => this.running,
+      onChangeEvent: (ev) => {
+        void this.enqueueApply([ev]);
+      },
+      onJsonMessage: (msg) => this.dispatchInboundMessage(msg),
+      onBinaryFrame: (bytes) => this.dispatchBinaryFrame(bytes),
+      onConnected: () => {
+        // Re-send every active server-subscription (CRDT rows,
+        // reactive queries, future kinds) across the new socket. The
+        // server purges per-client subscription state on disconnect,
+        // so without this resync the subscriber's first event would
+        // never arrive.
+        this.serverSubs.replay();
+        // Pull-on-open catches every event broadcast in the gap
+        // between the prior pull() returning and the socket actually
+        // opening. Reconcile fires after the pull since pull is the
+        // cheap incremental path; reconcile is the server-truth
+        // backstop for anything pull couldn't replay.
+        void this.pull().then(() => this.reconcile());
+      },
+      onDisconnected: () => {
+        /* Engine has no work on disconnect — the transport's own
+         *  reconnect loop drives the recovery. The connection-status
+         *  flip already happened inside the transport. */
+      },
+      setStatus: (s) => this.setConnectionStatus(s),
+      performPollTick: async () => {
+        await this.push().then(() => this.pull());
+      },
+      performReconnectPull: async () => {
+        // Wrapped in try so a transient pull failure doesn't kill the
+        // reconnect chain; the next attempt will retry.
+        try {
+          await this.pull();
+        } catch {
+          /* best-effort */
+        }
+      },
+    };
+  }
+
+  /** Dispatch a typed JSON envelope inbound from the transport. The
+   *  transport already filtered out ChangeEvents (those go through
+   *  onChangeEvent → enqueueApply). Anything else lands here. */
+  private dispatchInboundMessage(msg: Record<string, unknown>): void {
+    // Presence event.
+    if (msg.type === "presence") {
+      this.store.notify();
+      return;
+    }
+
+    // Server-driven revocation: a subscriber whose read policy was
+    // revoked mid-session for a specific row. Drop the row from the
+    // local replica at the current cursor seq so the tombstone
+    // supersedes any racing late-arriving WS update for the same
+    // row, and notify any LoroDoc subscriber (registered via
+    // `addRowEvictionListener`) so collaborative doc handles unmount
+    // cleanly.
+    //
+    // Distinct from a regular Delete change event because this
+    // envelope has no global seq — the row's underlying data hasn't
+    // been deleted, only the recipient's visibility of it. Other
+    // subscribers (with matching policy) keep their row intact.
+    if (
+      msg.type === "row-revoked" &&
+      typeof msg.entity === "string" &&
+      typeof msg.row_id === "string"
+    ) {
+      const revokeSeq =
+        typeof msg.seq === "number" && msg.seq > 0
+          ? (msg.seq as number)
+          : this.cursor.last_seq;
+      this.handleRowRevocation(msg.entity, msg.row_id, revokeSeq);
+      return;
+    }
+
+    // Session mutated server-side. Fires for select-org / clear-org
+    // / session revoke — every tab connected as this user gets the
+    // envelope (cross-machine too via the cluster bus). Trigger a
+    // fresh /api/auth/me read which updates the cached session AND,
+    // on tenant flip, resets the replica so stale rows from the
+    // previous tenant disappear.
+    if (msg.type === "session-changed") {
+      void this.refreshResolvedSession();
+      return;
+    }
+
+    // Reactive query push: the server-side ReactiveRegistry re-ran a
+    // subscribed handler and the result hash changed. Route to the
+    // local handler if we own the subscription AND forward to follower
+    // tabs via the multi-tab channel so a follower's
+    // `useReactiveQuery` handler fires too.
+    if (msg.type === "reactive-result" && typeof msg.sub_id === "string") {
+      const handler = this.reactiveHandlers.get(msg.sub_id);
+      if (handler) {
+        handler({ kind: "result", result: msg.result });
+      }
+      this.broadcastToTabs({
+        type: "reactive-msg",
+        sub_id: msg.sub_id,
+        payload: { kind: "result", result: msg.result },
+      });
+      return;
+    }
+    if (msg.type === "reactive-error" && typeof msg.sub_id === "string") {
+      const errPayload = {
+        kind: "error" as const,
+        code: typeof msg.code === "string" ? msg.code : "REACTIVE_ERROR",
+        message: typeof msg.message === "string" ? msg.message : "",
+      };
+      const handler = this.reactiveHandlers.get(msg.sub_id);
+      if (handler) handler(errPayload);
+      this.broadcastToTabs({
+        type: "reactive-msg",
+        sub_id: msg.sub_id,
+        payload: errPayload,
+      });
+      return;
+    }
+  }
+
+  /** Route a binary frame to local consumers AND, when at least one
+   *  follower tab forwarded a CRDT sub, mirror over the multi-tab
+   *  channel so followers see Loro updates too. */
+  private dispatchBinaryFrame(bytes: Uint8Array): void {
+    for (const handler of this.binaryHandlers) {
+      try {
+        handler(bytes);
+      } catch (err) {
+        console.warn("[sync] binary handler threw:", err);
+      }
+    }
+    // Forward to follower tabs ONLY when at least one follower is
+    // currently forwarded for a CRDT row. The engine is binary-
+    // agnostic — it can't peek inside the frame to route per-row —
+    // so this is a tab-level gate: no forwarders = no broadcast.
+    // Saves bandwidth in the common single-tab case.
+    //
+    // Trade-off: when ANY follower has forwarded a CRDT sub on ANY
+    // key, we broadcast EVERY binary frame regardless of which row
+    // it's for. Acceptable for now; the lever to pull if it shows
+    // up in profiling is a binaryRoutes map keyed by the Loro doc
+    // id parsed from the frame header.
+    if (this.crdtForwarders.size > 0) {
+      this.broadcastToTabs({ type: "binary", bytes });
     }
   }
 
