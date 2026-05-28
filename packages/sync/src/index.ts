@@ -16,6 +16,7 @@ import {
 import { LocalStore } from "./local-store";
 import { MutationQueue } from "./mutation-queue";
 import { OpQueue } from "./op-queue";
+import { SessionResolver } from "./session-resolver";
 import { generateClientId, generateId } from "./ids";
 export { IndexedDBPersistence, persistChange } from "./persistence";
 export {
@@ -204,29 +205,16 @@ export class SyncEngine {
    * changes — so the cursor from the previous identity is meaningless.
    * Compared on every pull; a mismatch triggers an automatic resync.
    *
-   * Uses `undefined` as the "never observed" sentinel so we can distinguish
-   * "first pull ever" from "explicitly anonymous". A first pull doesn't
-   * reset (nothing to reset), but every later transition — including
-   * null→token → does.
-   */
-  private lastSeenToken: string | null | undefined = undefined;
-
-  /**
-   * Latest server-resolved auth/session state. Refreshed on every pull()
-   * by fetching /api/auth/me in parallel. Exposed to consumers via
-   * `resolvedSession` so React hooks can subscribe via the store.
+   * Owns the resolved session, the last-seen token, the last-seen
+   * tenant, and the null→X / X→Y / token-flip verdicts that used to
+   * be inlined across pull / refresh / reconcile. The engine acts on
+   * the verdicts (reset, pull, notify); the resolver decides nothing
+   * on its own. See session-resolver.ts.
    *
-   * Subscribers re-render when this updates — we reuse the store's
-   * notifier rather than introduce a second pub/sub so every change the
-   * app cares about goes through one channel.
+   * Exposed (read-only) so tests and plugins can inspect or simulate
+   * identity transitions without re-implementing the comparison.
    */
-  private _resolvedSession: ResolvedSession = {
-    userId: null,
-    tenantId: null,
-    isAdmin: false,
-    roles: [],
-  };
-  private lastSeenTenant: string | null | undefined = undefined;
+  readonly session: SessionResolver = new SessionResolver();
 
   /**
    * Timer for the "stable connection" check. On `onopen` we start a 5s
@@ -330,7 +318,7 @@ export class SyncEngine {
 
   /** Read the cached resolved session. Null user = anonymous. */
   resolvedSession(): ResolvedSession {
-    return this._resolvedSession;
+    return this.session.resolved();
   }
 
   /**
@@ -477,9 +465,9 @@ export class SyncEngine {
     this._hydrated = true;
 
     // Seed the server-resolved session before the first pull so
-    // `useSession` subscribers see the right tenant from frame one, and
-    // `lastSeenTenant` is populated before any subsequent flip can race
-    // with it.
+    // `useSession` subscribers see the right tenant from frame one,
+    // and the resolver's lastSeenTenant is populated before any
+    // subsequent flip can race with it.
     await this.refreshResolvedSession();
 
     // Pull from server, then connect real-time transport.
@@ -1115,11 +1103,8 @@ export class SyncEngine {
     // the server's visible set changed under us and the cursor we saved
     // reflects the previous identity. Reset before pulling so we rebuild
     // the replica from seq=0 under the new identity.
-    const tokenNow = this.currentToken();
-    if (
-      this.lastSeenToken !== undefined &&
-      this.lastSeenToken !== tokenNow
-    ) {
+    const { tokenChanged } = this.session.observeToken(this.currentToken());
+    if (tokenChanged) {
       // We're holding the "pull" slot in the op queue — bypass the
       // queue's reset path to avoid self-deadlock.
       await this.resetReplicaInner();
@@ -1127,7 +1112,6 @@ export class SyncEngine {
       // the fresh session in parallel with the cursor catch-up below.
       void this.refreshResolvedSession();
     }
-    this.lastSeenToken = tokenNow;
 
     try {
       // Snapshot pagination: when the cursor is 0 and the server's
@@ -1306,7 +1290,7 @@ export class SyncEngine {
       //      (triggered by session-changed envelope) will re-fetch
       //      under the new context.
       const cursorBeforeFetch = this.cursor.last_seq;
-      const sessionBeforeFetch = sessionSignature(this._resolvedSession);
+      const sessionBeforeFetch = this.session.signature();
       let serverRows: Row[];
       try {
         serverRows = await this.fetchEntityRows(entity);
@@ -1331,7 +1315,7 @@ export class SyncEngine {
         // state for the affected row.
         continue;
       }
-      if (sessionSignature(this._resolvedSession) !== sessionBeforeFetch) {
+      if (this.session.signature() !== sessionBeforeFetch) {
         // Session changed (token flipped, tenant switched, user
         // signed out → in, etc.). The rows we fetched reflect the
         // OLD session's policy view; applying them now would
@@ -1485,7 +1469,9 @@ export class SyncEngine {
   }
 
   /**
-   * Fetch `/api/auth/me` and update the cached `_resolvedSession`. Callers:
+   * Fetch `/api/auth/me` and feed the result into the SessionResolver,
+   * acting on the verdict it returns (reset replica + pull on a real
+   * tenant flip, notify subscribers if any field changed). Callers:
    *   - `start()` — initial load
    *   - the token-flip branch in `pull()`
    *   - `notifySessionChanged()` — app code invokes this after it mutates
@@ -1512,54 +1498,21 @@ export class SyncEngine {
         isAdmin: raw.is_admin ?? false,
         roles: raw.roles ?? [],
       };
-      const tenantNow = next.tenantId;
-      // First observation seeds lastSeenTenant without a reset — we have
-      // nothing to invalidate yet. Subsequent changes flip the replica
-      // AND immediately re-pull so subscribers see the new tenant's
-      // rows. Without the re-pull, resetReplica() leaves the store
-      // empty until the next periodic poll, and `db.useQuery` returns
-      // [] for the entire interval — exactly the "I switched orgs
-      // but the dashboard is empty" symptom the cloud team reported.
-      // The 410 RESYNC_REQUIRED path (see ~line 1499) does the same
-      // dance for the same reason.
-      if (
-        this.lastSeenTenant !== undefined &&
-        this.lastSeenTenant !== tenantNow
-      ) {
-        // Two flavors of "tenant changed":
-        //
-        //   - null → X  : session first-resolution. The engine started
-        //                 before the app called /api/auth/select-org;
-        //                 /api/auth/me returned tenant_id=null at start
-        //                 and is only now reporting the real value.
-        //                 The cached IndexedDB rows ARE for tenant X
-        //                 (that's where the user's data lives), so
-        //                 wiping them would tombstone valid state and
-        //                 produce the "rows render then flash away"
-        //                 symptom multi-tenant apps were hitting. Skip
-        //                 the reset; pull under the new tenant fills
-        //                 any gaps via the existing cursor catch-up.
-        //
-        //   - X → Y     : actual org switch. Cached rows belong to
-        //                 the OLD tenant and must not bleed into the
-        //                 new context, so resetReplica is correct.
-        const firstResolution = this.lastSeenTenant === null && tenantNow !== null;
-        if (!firstResolution) {
+      // Defer the null→X / X→Y / first-resolution distinction to the
+      // resolver. The engine just acts on the verdict: reset the
+      // replica if a tenant move invalidated cached rows, pull on any
+      // tenant move so subscribers see the new tenant's rows, and
+      // notify if anything in the resolved session changed.
+      const verdict = this.session.observeSession(next);
+      if (verdict.tenantChanged) {
+        if (verdict.replicaInvalidated) {
           await this.resetReplica();
         }
         await this.pull();
       }
-      this.lastSeenTenant = tenantNow;
-      const prev = this._resolvedSession;
-      const changed =
-        prev.userId !== next.userId ||
-        prev.tenantId !== next.tenantId ||
-        prev.isAdmin !== next.isAdmin ||
-        prev.roles.join(",") !== next.roles.join(",");
-      if (changed) {
-        this._resolvedSession = next;
-        // Piggy-back on the store notifier so `useSession` re-renders via
-        // useSyncExternalStore without a second pub/sub channel.
+      if (verdict.identityChanged) {
+        // Piggy-back on the store notifier so `useSession` re-renders
+        // via useSyncExternalStore without a second pub/sub channel.
         this.store.notify();
       }
     } catch {
@@ -2228,19 +2181,6 @@ export async function getServerData(
  */
 function rowsDiffer(a: Row, b: Row): boolean {
   return stableStringify(a) !== stableStringify(b);
-}
-
-/**
- * Compact, comparable fingerprint of a resolved session. Used by
- * reconcile() to detect mid-fetch identity flips — if the signature
- * differs, the rows we just fetched were policy-filtered under a
- * stale auth context and applying them would tombstone rows visible
- * under the new context. Roles array is sorted+joined so insertion
- * order doesn't trip the equality check.
- */
-function sessionSignature(s: ResolvedSession): string {
-  const roles = (s.roles ?? []).slice().sort().join(",");
-  return `${s.userId ?? ""}|${s.tenantId ?? ""}|${s.isAdmin ? "1" : "0"}|${roles}`;
 }
 
 function stableStringify(value: unknown): string {

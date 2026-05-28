@@ -301,35 +301,28 @@ describe("SyncEngine.reconcile session guard", () => {
     let restore: (() => void) | null = null;
     try {
       const engine = makeEngine();
-      const engineWithSession = engine as unknown as {
-        _resolvedSession: {
-          userId: string | null;
-          tenantId: string | null;
-          isAdmin: boolean;
-          roles: string[];
-        };
-      };
-      engineWithSession._resolvedSession = {
+      // Seed the resolver with a tenant=null session — every call to
+      // session.signature() through the rest of this test reflects
+      // this value until the fetch handler flips it below.
+      engine.session.observeSession({
         userId: "u1",
         tenantId: null,
         isAdmin: false,
         roles: [],
-      };
+      });
 
       restore = installFetch(async (url) => {
         if (url.includes("/api/entities/Recording/cursor")) {
           // Flip the session signature WHILE the fetch is "in flight"
-          // — i.e., between the engine's `sessionBeforeFetch` capture
-          // and the apply pass. The engine's reconcile op runs through
-          // the op queue, so the snapshot is taken inside the queued
-          // body. Mutating here exactly models the WS session-changed
-          // envelope landing while we're awaiting the response.
-          engineWithSession._resolvedSession = {
+          // — between the engine's `sessionBeforeFetch` capture and
+          // the apply pass. Models a WS session-changed envelope
+          // landing in the gap.
+          engine.session.observeSession({
             userId: "u1",
             tenantId: "org-42",
             isAdmin: false,
             roles: [],
-          };
+          });
           return {
             status: 200,
             body: { data: [], next_cursor: null, has_more: false },
