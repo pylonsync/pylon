@@ -74,10 +74,13 @@ export class SseTransport implements Transport {
         this.scheduleReconnect();
       };
     } catch {
-      // EventSource unavailable in this environment (Node, jsdom
-      // without a polyfill). Surface as a no-op — the engine's
-      // connect-status stays at whatever it was, and the caller can
-      // notice and switch transports.
+      // EventSource constructor threw at runtime — rare, but a buggy
+      // polyfill or a malformed URL can land here. The `transport: "sse"`
+      // → polling fallback for the "EventSource undefined" case lives in
+      // `createTransport`; this catch covers the narrower "exists but
+      // failed to construct" case. Schedule a reconnect so we retry
+      // rather than silently giving up.
+      this.scheduleReconnect();
     }
   }
 

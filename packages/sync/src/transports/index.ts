@@ -14,7 +14,16 @@ export { PollingTransport } from "./polling";
 
 /** Build the right transport for a given kind. The host supplies all
  *  config + the inbound dispatch callbacks; the transport hides the
- *  underlying mechanism. */
+ *  underlying mechanism.
+ *
+ *  Fallback rule: `transport: "sse"` in an environment without a
+ *  native EventSource (Node, jsdom without a polyfill, old browsers)
+ *  silently downgrades to polling. The pre-refactor `connectSse()`
+ *  did this inside its constructor catch — we lift the decision to
+ *  the factory so the engine never sees an SseTransport that can
+ *  never connect. Clients that NEED SSE specifically can detect this
+ *  by feature-checking `typeof EventSource` themselves before calling
+ *  `init()`. */
 export function createTransport(
   kind: TransportKind,
   host: TransportHost,
@@ -23,6 +32,9 @@ export function createTransport(
     case "websocket":
       return new WebSocketTransport(host);
     case "sse":
+      if (typeof EventSource === "undefined") {
+        return new PollingTransport(host);
+      }
       return new SseTransport(host);
     case "poll":
       return new PollingTransport(host);
