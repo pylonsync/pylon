@@ -86,7 +86,16 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     match positional.first().copied() {
         Some("entities") | None => run_entities(&creds, &project_id, json_mode),
-        Some("list") => run_list(&creds, &project_id, positional.get(1).copied(), json_mode),
+        Some("list") => {
+            let limit = parse_limit_flag(args).unwrap_or(50).clamp(1, 1000);
+            run_list(
+                &creds,
+                &project_id,
+                positional.get(1).copied(),
+                limit,
+                json_mode,
+            )
+        }
         Some("get") => run_get(
             &creds,
             &project_id,
@@ -139,14 +148,30 @@ fn run_entities(creds: &Credentials, project_id: &str, json_mode: bool) -> ExitC
     ExitCode::Ok
 }
 
+/// Parse `--limit N` or `--limit=N` from the raw argv slice. None
+/// when the flag is absent OR the value doesn't parse — caller picks
+/// the default. Lives here (instead of project_context) because every
+/// data-shaped subcommand wants the same shape.
+fn parse_limit_flag(args: &[String]) -> Option<u32> {
+    args.windows(2)
+        .find(|w| w[0] == "--limit")
+        .and_then(|w| w[1].parse().ok())
+        .or_else(|| {
+            args.iter()
+                .find(|a| a.starts_with("--limit="))
+                .and_then(|a| a.trim_start_matches("--limit=").parse().ok())
+        })
+}
+
 fn run_list(
     creds: &Credentials,
     project_id: &str,
     entity: Option<&str>,
+    limit: u32,
     json_mode: bool,
 ) -> ExitCode {
     let Some(entity) = entity else {
-        output::print_error("Usage: pylon data list <Entity>");
+        output::print_error("Usage: pylon data list <Entity> [--limit N]");
         return ExitCode::Usage;
     };
     #[derive(serde::Serialize)]
@@ -162,7 +187,7 @@ fn run_list(
         &Args {
             project_id,
             entity,
-            limit: 50,
+            limit,
         },
     ) {
         Ok(r) => r,
