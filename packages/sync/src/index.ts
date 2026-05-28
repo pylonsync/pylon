@@ -16,6 +16,7 @@ import {
 import { LocalStore } from "./local-store";
 import { MutationQueue } from "./mutation-queue";
 import { OpQueue } from "./op-queue";
+import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
 import { generateClientId, generateId } from "./ids";
 export { IndexedDBPersistence, persistChange } from "./persistence";
@@ -261,32 +262,26 @@ export class SyncEngine {
   private binaryHandlers: Set<(bytes: Uint8Array) => void> = new Set();
 
   /**
-   * Active CRDT subscriptions, keyed `${entity}\x00${rowId}`. Tracked
-   * here so a WS reconnect can re-send the same subscriptions to the
-   * fresh socket — the server clears its per-client subscription state
-   * on disconnect (in `WsHub::handle_ws_connection`'s Close path), so
-   * without re-sending the binary frames would stop arriving on the
-   * new connection.
-   *
-   * Refcount-aware via `crdtSubscribers` so two `useLoroDoc` callers on
-   * the same row don't unsubscribe each other when one unmounts.
+   * Server-side ephemeral subscriptions (CRDT row subs, reactive query
+   * subs, future kinds). Owns the WS replay bookkeeping — each kind
+   * registers the message that re-creates its server-side state, and
+   * `ws.onopen` replays the bundle on reconnect. Kind-specific concerns
+   * (CRDT refcount, reactive handler routing) stay below as their own
+   * maps. See server-subscriptions.ts.
    */
-  private crdtSubscriptions: Set<string> = new Set();
+  private serverSubs!: ServerSubscriptions;
+
+  /** Per-row refcount for CRDT subscriptions — two `useLoroDoc`
+   *  consumers on the same `(entity, rowId)` share a single server
+   *  subscription. ServerSubscriptions itself is idempotent; the
+   *  refcount lives here so the engine knows when the LAST consumer
+   *  is gone and the WS unsubscribe should fire. */
   private crdtSubscribers: Map<string, number> = new Map();
 
-  /**
-   * Reactive query subscriptions registered via `subscribeReactive`.
-   * Two maps:
-   *  - `reactiveSpecs`: sub_id → {fn_name, args} for re-registration
-   *    on WS reconnect. Server-side state evaporates on disconnect.
-   *  - `reactiveHandlers`: sub_id → handler that receives result + error
-   *    pushes. The React hook owns these handlers and unsubscribes on
-   *    unmount.
-   *
-   * Both maps are keyed by the same client-minted `sub_id` so they
-   * stay in sync. Cleared together by `unsubscribeReactive`.
-   */
-  private reactiveSpecs: Map<string, ReactiveSpec> = new Map();
+  /** Inbound message routing for reactive subscriptions — server pushes
+   *  `reactive-result` / `reactive-error` envelopes keyed by sub_id,
+   *  and the React hook's handler lives here. ServerSubscriptions
+   *  doesn't route messages; this map does. */
   private reactiveHandlers: Map<string, (msg: ReactiveMessage) => void> =
     new Map();
 
@@ -351,6 +346,10 @@ export class SyncEngine {
     this.mutations = new MutationQueue();
     this.storage = config.storage ?? defaultStorage();
     this.clientId = generateClientId(this.storage);
+    // ServerSubscriptions defers sending until the WS is open (the
+    // sendWs helper short-circuits otherwise) so registering before
+    // start() is safe — the spec gets replayed on `ws.onopen`.
+    this.serverSubs = new ServerSubscriptions((msg) => this.sendWs(msg));
   }
 
   /**
@@ -706,26 +705,11 @@ export class SyncEngine {
           // ignore — onclose will trigger reconnect
         }
       }, pingIntervalMs);
-      // Re-send any active CRDT subscriptions across the new socket.
-      // The server purged them on disconnect (`unsubscribe_all`), so
-      // without this resync a tab that was subscribed before a network
-      // blip would silently stop receiving binary CRDT frames.
-      for (const key of this.crdtSubscriptions) {
-        const [entity, rowId] = key.split("\x00");
-        this.sendWs({ type: "crdt-subscribe", entity, rowId });
-      }
-      // Re-register every reactive subscription on the fresh socket.
-      // The server's ReactiveRegistry tears down on disconnect (via
-      // `disconnect_client`) so without this resync the handlers
-      // would silently stop receiving result pushes.
-      for (const [sub_id, spec] of this.reactiveSpecs) {
-        this.sendWs({
-          type: "reactive-subscribe",
-          sub_id,
-          fn_name: spec.fn_name,
-          args: spec.args,
-        });
-      }
+      // Re-send every active server-subscription (CRDT rows, reactive
+      // queries, future kinds) across the new socket. The server
+      // purges per-client subscription state on disconnect, so without
+      // this resync the subscriber's first event would never arrive.
+      this.serverSubs.replay();
       // Pull-on-open catches every event broadcast in the gap between
       // the prior `pull()` returning and this socket actually opening.
       // The WS has no replay-on-connect (it's just a fanout), so events
@@ -1946,8 +1930,7 @@ export class SyncEngine {
     const prev = this.crdtSubscribers.get(key) ?? 0;
     this.crdtSubscribers.set(key, prev + 1);
     if (prev === 0) {
-      this.crdtSubscriptions.add(key);
-      this.sendWs({ type: "crdt-subscribe", entity, rowId });
+      this.serverSubs.register(key, { type: "crdt-subscribe", entity, rowId });
     }
   }
 
@@ -1966,8 +1949,11 @@ export class SyncEngine {
     if (prev <= 0) return;
     if (prev === 1) {
       this.crdtSubscribers.delete(key);
-      this.crdtSubscriptions.delete(key);
-      this.sendWs({ type: "crdt-unsubscribe", entity, rowId });
+      this.serverSubs.unregister(key, {
+        type: "crdt-unsubscribe",
+        entity,
+        rowId,
+      });
     } else {
       this.crdtSubscribers.set(key, prev - 1);
     }
@@ -2005,19 +1991,25 @@ export class SyncEngine {
     args: unknown,
     handler: (msg: ReactiveMessage) => void,
   ): void {
-    this.reactiveSpecs.set(sub_id, { fn_name, args });
     this.reactiveHandlers.set(sub_id, handler);
-    this.sendWs({ type: "reactive-subscribe", sub_id, fn_name, args });
+    this.serverSubs.register(sub_id, {
+      type: "reactive-subscribe",
+      sub_id,
+      fn_name,
+      args,
+    });
   }
 
   /** Tear down a reactive subscription. Sends the unsubscribe to the
    *  server and clears local state. No-op for unknown sub_ids — React
    *  StrictMode double-unmount won't error. */
   unsubscribeReactive(sub_id: string): void {
-    if (!this.reactiveSpecs.has(sub_id)) return;
-    this.reactiveSpecs.delete(sub_id);
+    if (!this.serverSubs.has(sub_id)) return;
     this.reactiveHandlers.delete(sub_id);
-    this.sendWs({ type: "reactive-unsubscribe", sub_id });
+    this.serverSubs.unregister(sub_id, {
+      type: "reactive-unsubscribe",
+      sub_id,
+    });
   }
 
   private sendWs(msg: unknown): void {
