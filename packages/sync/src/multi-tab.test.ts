@@ -106,6 +106,39 @@ describe("MultiTabBroker", () => {
     expect(appEvents.length).toBe(0);
   });
 
+  test("here.leaderTabId is rejected when sender isn't the computed winner", async () => {
+    // A tab with a (legitimately) larger startTime broadcasts `here`
+    // claiming itself as leader. A late joiner with a smaller-start
+    // peer in its roster must NOT honor the bogus claim.
+    const ch = channel("here-validation");
+    const a = await makeTab(ch);
+    tabs.push(a);
+    await new Promise((r) => setTimeout(r, 20));
+    const b = await makeTab(ch);
+    tabs.push(b);
+    await new Promise((r) => setTimeout(r, 200));
+
+    // A is the legitimate leader (earlier startTime). Have B forge
+    // a `here` claiming itself as leader. The internal channel send
+    // is private; we reach into the broker.
+    const bInternal = b.broker as unknown as {
+      send(msg: unknown): void;
+      self: { tabId: string; startTime: number };
+    };
+    bInternal.send({
+      type: "here",
+      tab: bInternal.self,
+      leaderTabId: bInternal.self.tabId,
+      roster: [bInternal.self],
+    });
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    // A remains leader because its lead validation rejects B's claim
+    // (B is not the smallest startTime in A's roster).
+    expect(a.broker.isLeader()).toBe(true);
+  });
+
   test("when the leader stops, a follower is promoted", async () => {
     const ch = channel("promote-on-stop");
     const a = await makeTab(ch);

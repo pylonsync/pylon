@@ -311,11 +311,23 @@ export class SyncEngine {
    *  is gone and the WS unsubscribe should fire. */
   private crdtSubscribers: Map<string, number> = new Map();
 
-  /** Per-sub_id refcount for reactive subscriptions, used by the
-   *  leader to track how many consumers (its own + forwarded from
-   *  followers) want a given sub_id alive. Without this, a single
-   *  unsubscribe in either tab would dark the peer. */
-  private reactiveSubscribers: Map<string, number> = new Map();
+  /** Sentinel for "this leader tab subscribed locally" — used as a
+   *  refcount-bearer key in subscription owner sets so the leader's
+   *  own subs don't get conflated with forwarded follower subs. */
+  private static readonly OWN_TAB = "__self__";
+
+  /** Per-sub_id ownership set for reactive subscriptions on the
+   *  leader: which tabs (self + forwarders) want this sub alive.
+   *  A SET, not a count, so a follower crash + late `sub-unregister`
+   *  storm can't underflow the count, and a remount/StrictMode
+   *  double-subscribe from one tab still counts as one owner.
+   *
+   *  Without per-tab tracking, two `subscribeReactive` calls from
+   *  the same tab (e.g., React StrictMode's intentional double-
+   *  invocation) would push the count to 2; the matching double-
+   *  unsubscribe only decrements once (the second early-returns on
+   *  StrictMode-safe semantics), leaking one ref per cycle. */
+  private reactiveSubOwners: Map<string, Set<string>> = new Map();
 
   /** Inbound message routing for reactive subscriptions — server pushes
    *  `reactive-result` / `reactive-error` envelopes keyed by sub_id,
@@ -618,7 +630,8 @@ export class SyncEngine {
           this.isMultiTabLeader = false;
           this.onMultiTabDemoted();
         },
-        onAppMessage: (payload) => this.handleMultiTabMessage(payload),
+        onAppMessage: (payload, from) =>
+          this.handleMultiTabMessage(payload, from.tabId),
       });
       // Bound the settle wait — if no other tab claims leader within
       // the election window, this tab takes the role.
@@ -745,7 +758,7 @@ export class SyncEngine {
   /** Inbound message from another tab in this origin. The leader's
    *  broadcasts feed follower replicas; followers' requests feed the
    *  leader's mutation queue + subscription registry. */
-  private handleMultiTabMessage(payload: unknown): void {
+  private handleMultiTabMessage(payload: unknown, fromTabId: string): void {
     if (!payload || typeof payload !== "object") return;
     const msg = payload as { type?: string } & Record<string, unknown>;
     switch (msg.type) {
@@ -848,8 +861,15 @@ export class SyncEngine {
           const sub_id = msg.sub_id as string;
           const fn_name = msg.fn_name as string;
           const args = msg.args;
-          const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
-          this.reactiveSubscribers.set(sub_id, prev + 1);
+          // Per-tab ownership: the forwarding follower adds itself
+          // to the owner set. Re-broadcasts from the SAME tab (e.g.,
+          // StrictMode remount + sub-register) leave the size at 1.
+          let owners = this.reactiveSubOwners.get(sub_id);
+          if (!owners) {
+            owners = new Set();
+            this.reactiveSubOwners.set(sub_id, owners);
+          }
+          owners.add(fromTabId);
           this.serverSubs.register(sub_id, {
             type: "reactive-subscribe",
             sub_id,
@@ -880,17 +900,18 @@ export class SyncEngine {
           }
         } else if (kind === "reactive") {
           const sub_id = msg.sub_id as string;
-          const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
-          if (prev <= 1) {
-            this.reactiveSubscribers.delete(sub_id);
-            if (this.serverSubs.has(sub_id)) {
-              this.serverSubs.unregister(sub_id, {
-                type: "reactive-unsubscribe",
-                sub_id,
-              });
+          const owners = this.reactiveSubOwners.get(sub_id);
+          if (owners) {
+            owners.delete(fromTabId);
+            if (owners.size === 0) {
+              this.reactiveSubOwners.delete(sub_id);
+              if (this.serverSubs.has(sub_id)) {
+                this.serverSubs.unregister(sub_id, {
+                  type: "reactive-unsubscribe",
+                  sub_id,
+                });
+              }
             }
-          } else {
-            this.reactiveSubscribers.set(sub_id, prev - 1);
           }
         }
         break;
@@ -1951,7 +1972,11 @@ export class SyncEngine {
     broadcast: boolean,
   ): Promise<void> {
     const prev = this.sessionChain;
-    const next$ = prev.then(async () => {
+    // Swallow errors when storing back to the chain so a single
+    // thrown transition doesn't poison the FIFO for everyone after.
+    // Callers receive the swallowed chain — they shouldn't see (or
+    // need to handle) errors from a session refresh.
+    this.sessionChain = prev.then(async () => {
       // Defer the null→X / X→Y / first-resolution distinction to the
       // resolver, but DON'T commit the new resolved session until
       // after the engine has finished acting on the verdict — that
@@ -1960,11 +1985,14 @@ export class SyncEngine {
       const verdict = this.session.inspectSession(next);
       if (verdict.tenantChanged) {
         if (verdict.replicaInvalidated) {
-          // Reset directly when this tab is the leader (we already
-          // serialize via sessionChain — re-queuing through opQueue
-          // is unnecessary). Follower path uses the inner variant
-          // too since followers don't hold any opQueue slot here.
-          await this.resetReplicaInner();
+          // Route reset through the public (queued) method so the
+          // wipe serializes against in-flight pulls / WS-event
+          // applies / pushes. sessionChain serializes session
+          // transitions but NOT the apply queue — without queuing
+          // the reset, a concurrent applyChangesAsync could write
+          // rows AFTER we clear the store, leaving stale data under
+          // the new identity.
+          await this.resetReplica();
         }
         if (this.isMultiTabLeader) {
           // Only the leader pulls — followers receive subsequent
@@ -1979,9 +2007,8 @@ export class SyncEngine {
       if (broadcast && this.isMultiTabLeader) {
         this.broadcastToTabs({ type: "session", resolved: next });
       }
-    });
-    this.sessionChain = next$.catch(() => {});
-    return next$;
+    }).catch(() => {});
+    return this.sessionChain;
   }
 
   private async rawFetch(path: string): Promise<Response> {
@@ -2562,6 +2589,11 @@ export class SyncEngine {
     args: unknown,
     handler: (msg: ReactiveMessage) => void,
   ): void {
+    // True idempotency under remount / StrictMode double-invocation:
+    // sets carry their own dedupe, and the matching double-unmount
+    // only decrements once (the second unmount early-returns because
+    // we delete the handler on the first), so the math balances
+    // without a second-subscribe guard.
     this.reactiveHandlers.set(sub_id, handler);
     this.wantedReactiveSpecs.set(sub_id, { fn_name, args });
     if (!this.isMultiTabLeader) {
@@ -2579,11 +2611,15 @@ export class SyncEngine {
       });
       return;
     }
-    // Leader path: refcount + register. If a follower has already
-    // forwarded this sub_id, our own subscribe just bumps the count;
-    // the WS frame was already sent and is still live.
-    const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
-    this.reactiveSubscribers.set(sub_id, prev + 1);
+    // Leader path: register own ownership (idempotent via the
+    // Set) and forward to the WS. ServerSubscriptions re-sends on
+    // payload change, so an args update lands.
+    let owners = this.reactiveSubOwners.get(sub_id);
+    if (!owners) {
+      owners = new Set();
+      this.reactiveSubOwners.set(sub_id, owners);
+    }
+    owners.add(SyncEngine.OWN_TAB);
     this.serverSubs.register(sub_id, {
       type: "reactive-subscribe",
       sub_id,
@@ -2608,18 +2644,20 @@ export class SyncEngine {
       });
       return;
     }
-    // Leader path: decrement refcount, only unsubscribe at zero.
-    const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
-    if (prev <= 1) {
-      this.reactiveSubscribers.delete(sub_id);
-      if (this.serverSubs.has(sub_id)) {
-        this.serverSubs.unregister(sub_id, {
-          type: "reactive-unsubscribe",
-          sub_id,
-        });
+    // Leader path: drop self from the owner set; unsubscribe only
+    // when no owner (self or forwarder) remains.
+    const owners = this.reactiveSubOwners.get(sub_id);
+    if (owners) {
+      owners.delete(SyncEngine.OWN_TAB);
+      if (owners.size === 0) {
+        this.reactiveSubOwners.delete(sub_id);
+        if (this.serverSubs.has(sub_id)) {
+          this.serverSubs.unregister(sub_id, {
+            type: "reactive-unsubscribe",
+            sub_id,
+          });
+        }
       }
-    } else {
-      this.reactiveSubscribers.set(sub_id, prev - 1);
     }
   }
 
