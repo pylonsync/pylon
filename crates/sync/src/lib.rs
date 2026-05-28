@@ -259,9 +259,9 @@ impl OpTracker {
     }
 
     fn complete(&mut self, op_id: &str, seq: u64) {
-        // Always overwrite to Applied even if not Pending — a stale
-        // pre-fix call site that called `remember_op_id` without first
-        // claiming still ends up in the right terminal state.
+        // Always overwrite to Applied even if not Pending — a caller
+        // that completes without claiming first still ends up in the
+        // right terminal state.
         self.state
             .insert(op_id.to_string(), OpEntry::Applied { seq });
         if !self.order.iter().any(|s| s == op_id) {
@@ -296,8 +296,9 @@ impl OpTracker {
 
 /// State of a tracked op_id. Used by the push handler to disambiguate
 /// "concurrent retry of an in-flight write" (Pending) from "retry after
-/// a confirmed apply" (Applied) — pre-fix the two looked identical
-/// because we stored a flat seen-set with no per-entry result.
+/// a confirmed apply" (Applied) — flattening them into one "seen"
+/// signal would let a retry that arrived during Pending fail and lose
+/// the write when the first writer rolled back.
 #[derive(Debug, Clone)]
 pub enum OpEntry {
     /// Claim succeeded; the writer is currently mutating the store. A
@@ -473,9 +474,7 @@ impl ChangeLog {
     /// Invariant: `prev_data` is persisted in the retained log
     /// entry. /api/sync/pull's visibility-flip filter reads it to
     /// synthesize Delete tombstones for clients whose reconnect
-    /// straddled the ownership transition. Pre-fix the field was
-    /// hardcoded `None` in the stored event, so pull missed every
-    /// tombstone.
+    /// straddled the ownership transition.
     pub fn append_with_prev(
         &self,
         entity: &str,
@@ -520,14 +519,13 @@ impl ChangeLog {
     /// max(local_seq, event.seq) so `current_seq()` reflects the most
     /// recent globally-observed seq across all instances.
     ///
-    /// Codex P1: pre-fix, peer events were rebroadcast to local WS/SSE
-    /// clients without touching the local log. A client connected to
-    /// machine B would advance its cursor to a seq machine A had
-    /// assigned (say 1000) and then re-pulling from B (whose local
-    /// counter was at 200) hit `cursor.last_seq > current_seq` and
-    /// resync-required'd. Mirroring the peer's seq into the local log
-    /// closes that gap: B's `current_seq` now reflects A's seq=1000
-    /// once it's observed, and pulls return the correct tail.
+    /// Invariant: every peer event MUST be appended to the local log
+    /// (not just rebroadcast). A client connected to machine B that
+    /// advances its cursor to a seq machine A assigned (say 1000)
+    /// then re-pulls from B (local counter at 200) would otherwise
+    /// hit `cursor.last_seq > current_seq` and resync. Mirroring
+    /// peer seqs into the local log closes the gap: B's
+    /// `current_seq` reflects A's 1000 once observed.
     ///
     /// This is NOT a substitute for a truly globally-monotonic seq
     /// (Postgres SERIAL or similar) — concurrent appends on A and B
