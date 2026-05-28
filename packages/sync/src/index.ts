@@ -304,12 +304,24 @@ export class SyncEngine {
    */
   private serverSubs!: ServerSubscriptions;
 
-  /** Per-row refcount for CRDT subscriptions — two `useLoroDoc`
-   *  consumers on the same `(entity, rowId)` share a single server
-   *  subscription. ServerSubscriptions itself is idempotent; the
-   *  refcount lives here so the engine knows when the LAST consumer
-   *  is gone and the WS unsubscribe should fire. */
+  /** Per-row local refcount for CRDT subscriptions — N `useLoroDoc`
+   *  components on the same `(entity, rowId)` in THIS tab share a
+   *  single server subscription. Distinct from reactiveSubOwners
+   *  because CRDT keys are per-row (many consumers per tab) while
+   *  reactive sub_ids are per-consumer-instance (typically one).
+   *  StrictMode double-subscribe still bumps the count by one each
+   *  call; the matching double-unsubscribe early-returns when the
+   *  count is already zero, so the math balances. */
   private crdtSubscribers: Map<string, number> = new Map();
+
+  /** Per-row set of FOLLOWER tabIds that have forwarded a
+   *  `sub-register` for this key. Leader-only. Used to:
+   *    (a) skip the WS unsubscribe until both `crdtSubscribers`
+   *        and this set are empty, and
+   *    (b) skip the cross-tab binary broadcast when no follower
+   *        cares about CRDT (saves bandwidth when the leader is
+   *        the only CRDT consumer). */
+  private crdtForwarders: Map<string, Set<string>> = new Map();
 
   /** Sentinel for "this leader tab subscribed locally" — used as a
    *  refcount-bearer key in subscription owner sets so the leader's
@@ -766,10 +778,12 @@ export class SyncEngine {
         // Leader → followers: a batch of change events just landed.
         // Run through our own apply path so the seq filter dedupes
         // anything that also reached us via our own (defunct) WS.
+        // `fromBroadcast: true` suppresses re-broadcast in case a
+        // promotion lands between this enqueue and the apply.
         const changes = msg.changes as ChangeEvent[] | undefined;
         const targetCursor = msg.targetCursor as SyncCursor | undefined;
         if (Array.isArray(changes) && changes.length > 0) {
-          void this.enqueueApply(changes, targetCursor);
+          void this.enqueueApply(changes, targetCursor, { fromBroadcast: true });
         } else if (targetCursor && targetCursor.last_seq > this.cursor.last_seq) {
           this.cursor = targetCursor;
         }
@@ -788,7 +802,9 @@ export class SyncEngine {
           Array.isArray(removalIds) &&
           typeof tombstoneSeq === "number"
         ) {
-          void this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq);
+          void this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq, {
+            fromBroadcast: true,
+          });
         }
         break;
       }
@@ -846,11 +862,21 @@ export class SyncEngine {
         if (kind === "crdt") {
           const entity = msg.entity as string;
           const rowId = msg.rowId as string;
-          // Bump the leader's refcount too so a local subscribe +
-          // a follower subscribe both unsubscribe cleanly.
-          const prev = this.crdtSubscribers.get(key) ?? 0;
-          this.crdtSubscribers.set(key, prev + 1);
-          if (prev === 0) {
+          // Track the forwarding follower in a separate set (NOT
+          // the local refcount) — repeated sub-register from the
+          // same follower stays idempotent, and a follower crash
+          // before sub-unregister leaks at most one entry that the
+          // next election drops from the roster.
+          let fwd = this.crdtForwarders.get(key);
+          if (!fwd) {
+            fwd = new Set();
+            this.crdtForwarders.set(key, fwd);
+          }
+          fwd.add(fromTabId);
+          // Register if nothing else owned this key — local count
+          // and forwarder set together gate the WS subscribe.
+          const localCount = this.crdtSubscribers.get(key) ?? 0;
+          if (localCount === 0 && fwd.size === 1) {
             this.serverSubs.register(key, {
               type: "crdt-subscribe",
               entity,
@@ -886,17 +912,23 @@ export class SyncEngine {
         if (kind === "crdt") {
           const entity = msg.entity as string;
           const rowId = msg.rowId as string;
-          const prev = this.crdtSubscribers.get(key) ?? 0;
-          if (prev <= 0) break;
-          if (prev === 1) {
-            this.crdtSubscribers.delete(key);
-            this.serverSubs.unregister(key, {
-              type: "crdt-unsubscribe",
-              entity,
-              rowId,
-            });
-          } else {
-            this.crdtSubscribers.set(key, prev - 1);
+          const fwd = this.crdtForwarders.get(key);
+          if (fwd) {
+            fwd.delete(fromTabId);
+            if (fwd.size === 0) this.crdtForwarders.delete(key);
+          }
+          // Unsubscribe only when neither local consumers nor any
+          // forwarding follower still wants this row.
+          const localCount = this.crdtSubscribers.get(key) ?? 0;
+          const remainingFwd = this.crdtForwarders.get(key)?.size ?? 0;
+          if (localCount === 0 && remainingFwd === 0) {
+            if (this.serverSubs.has(key)) {
+              this.serverSubs.unregister(key, {
+                type: "crdt-unsubscribe",
+                entity,
+                rowId,
+              });
+            }
           }
         } else if (kind === "reactive") {
           const sub_id = msg.sub_id as string;
@@ -969,8 +1001,10 @@ export class SyncEngine {
       if (!this.running) return;
       // Reconcile fires only on tab-becomes-visible; the debounce in
       // reconcile() collapses bursts from rapid background/foreground
-      // flips. Pull runs alongside so cursor catches up to anything
-      // emitted while the tab was hidden.
+      // flips. Pull is enqueued FIRST so the opQueue runs it before
+      // reconcile — that way reconcile sees the fresh cursor and
+      // doesn't duplicate the cursor-catch-up work pull is already
+      // doing. They're serial via the queue, not concurrent.
       void this.pull();
       void this.reconcile();
     };
@@ -995,6 +1029,7 @@ export class SyncEngine {
   private enqueueApply(
     changes: ChangeEvent[],
     targetCursor?: SyncCursor,
+    opts: { fromBroadcast?: boolean } = {},
   ): Promise<void> {
     const prev = this.applyQueue;
     const next = prev.then(async () => {
@@ -1023,12 +1058,17 @@ export class SyncEngine {
           await this.persistence.saveCursor(this.cursor);
         }
       }
-      // Multi-tab: when the leader applies a batch, fan it out so
-      // every follower's local replica converges without its own
-      // WS. Followers are read-only network-wise, so it's safe to
-      // broadcast unconditionally — they filter via the same seq
-      // guard above when they receive it.
-      if (this.isMultiTabLeader && filtered.length > 0) {
+      // Multi-tab: leader fans the batch out so follower replicas
+      // converge without their own WS. Skip when we ourselves
+      // RECEIVED this batch from another tab — otherwise a tab that
+      // was promoted between receiving and applying would re-broadcast
+      // its own copy, and even though the seq filter dedupes on
+      // arrival the round-trip is wasted bandwidth.
+      if (
+        this.isMultiTabLeader &&
+        !opts.fromBroadcast &&
+        filtered.length > 0
+      ) {
         this.broadcastToTabs({
           type: "applied",
           changes: filtered,
@@ -1055,6 +1095,7 @@ export class SyncEngine {
     upserts: Row[],
     removalIds: string[],
     tombstoneSeq: number,
+    opts: { fromBroadcast?: boolean } = {},
   ): Promise<void> {
     const prev = this.applyQueue;
     const next = prev.then(async () => {
@@ -1064,10 +1105,11 @@ export class SyncEngine {
         removalIds,
         tombstoneSeq,
       );
-      // Multi-tab: leader fans the reconcile batch out so each
-      // follower can converge its local replica without its own
-      // reconcile fetch.
-      if (this.isMultiTabLeader) {
+      // Leader fans the reconcile batch out so each follower can
+      // converge without its own fetch. Suppress when we ourselves
+      // received this batch via the channel (promotion mid-flight
+      // would otherwise echo it).
+      if (this.isMultiTabLeader && !opts.fromBroadcast) {
         this.broadcastToTabs({
           type: "reconciled",
           entity,
@@ -1221,12 +1263,15 @@ export class SyncEngine {
             console.warn("[sync] binary handler threw:", err);
           }
         }
-        // Forward to follower tabs — a follower that registered a
-        // CRDT subscription via the channel still needs the binary
-        // frames the leader receives on its WS. BroadcastChannel
-        // structured-clones the Uint8Array; the receiving tab
-        // dispatches to its own binaryHandlers.
-        this.broadcastToTabs({ type: "binary", bytes });
+        // Forward to follower tabs ONLY when at least one follower
+        // is currently forwarded for a CRDT row. The engine is
+        // binary-agnostic — it can't peek inside the frame to route
+        // per-row — so this is a tab-level gate: no forwarders = no
+        // broadcast. Saves bandwidth when the leader is the only
+        // CRDT consumer (the common single-tab case).
+        if (this.crdtForwarders.size > 0) {
+          this.broadcastToTabs({ type: "binary", bytes });
+        }
         return;
       }
 
@@ -2513,11 +2558,17 @@ export class SyncEngine {
           rowId,
         });
       } else {
-        this.serverSubs.register(key, {
-          type: "crdt-subscribe",
-          entity,
-          rowId,
-        });
+        // Leader path: only send the WS subscribe if no follower had
+        // already forwarded one for this key (in which case the WS
+        // sub is already alive).
+        const hasFwd = (this.crdtForwarders.get(key)?.size ?? 0) > 0;
+        if (!hasFwd) {
+          this.serverSubs.register(key, {
+            type: "crdt-subscribe",
+            entity,
+            rowId,
+          });
+        }
       }
     }
   }
@@ -2546,11 +2597,16 @@ export class SyncEngine {
           rowId,
         });
       } else {
-        this.serverSubs.unregister(key, {
-          type: "crdt-unsubscribe",
-          entity,
-          rowId,
-        });
+        // Leader: only tear down the WS sub if no follower is still
+        // forwarded for this key.
+        const remainingFwd = this.crdtForwarders.get(key)?.size ?? 0;
+        if (remainingFwd === 0 && this.serverSubs.has(key)) {
+          this.serverSubs.unregister(key, {
+            type: "crdt-unsubscribe",
+            entity,
+            rowId,
+          });
+        }
       }
     } else {
       this.crdtSubscribers.set(key, prev - 1);

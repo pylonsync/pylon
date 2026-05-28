@@ -94,7 +94,8 @@ describe("reactive subscription refcount under remount", () => {
     // Second unsubscribe (the StrictMode double-unmount) is a no-op
     // because the handler is already gone — must NOT throw, must
     // not decrement anything further.
-    expect(() => env.engine.unsubscribeReactive("sub-1")).not.toThrow();
+    const e = env!;
+    expect(() => e.engine.unsubscribeReactive("sub-1")).not.toThrow();
     void calls;
   });
 
