@@ -120,6 +120,12 @@ export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
     // engine's reconcile debounce is also relaxed so back-to-back
     // visibility-change triggers don't get coalesced away in tests.
     reconcileMinIntervalMs: 0,
+    // Disable multi-tab coordination by default — each scenario is a
+    // single isolated engine, and the broker's 400ms settle window
+    // would add seconds of wait across the suite. Scenarios that need
+    // the multi-tab path opt in by creating two envs with a shared
+    // appName + multiTab:true.
+    multiTab: false,
   });
 
   let token: string | undefined;

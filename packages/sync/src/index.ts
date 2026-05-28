@@ -14,7 +14,8 @@ import {
   type TransportConfig,
 } from "./transport";
 import { LocalStore } from "./local-store";
-import { MutationQueue } from "./mutation-queue";
+import { MutationQueue, type PendingMutation } from "./mutation-queue";
+import { MultiTabBroker } from "./multi-tab";
 import { OpQueue } from "./op-queue";
 import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
@@ -129,6 +130,15 @@ export interface SyncEngineConfig {
    * edge proxy to forward to the dual-thread listener instead.
    */
   pingIntervalMs?: number;
+  /**
+   * Multi-tab coordination via BroadcastChannel. When multiple tabs of
+   * the same origin run the engine, one is elected leader and owns
+   * the WebSocket, pull/push/reconcile, and IndexedDB writes;
+   * follower tabs mirror state via cross-tab broadcasts. Default
+   * `true` in browsers. Set `false` to force every tab to behave as
+   * its own leader (the pre-multi-tab semantics).
+   */
+  multiTab?: boolean;
 }
 
 /**
@@ -216,6 +226,18 @@ export class SyncEngine {
    * identity transitions without re-implementing the comparison.
    */
   readonly session: SessionResolver = new SessionResolver();
+
+  /**
+   * Multi-tab coordinator. One tab in this origin owns the WS + the
+   * network ops; the rest are passive mirrors that receive applied
+   * changes via BroadcastChannel and forward their mutations to the
+   * leader for pushing. Initialized in `start()` so apps that never
+   * call `start()` (SSR snapshots, hydrate-only) don't pay for it.
+   */
+  private multiTab: MultiTabBroker | null = null;
+  /** True after the broker has decided this tab is the leader. Used
+   *  to gate WS / pull / push / poll. Followers stay passive. */
+  private isMultiTabLeader = true;
 
   /**
    * Timer for the "stable connection" check. On `onopen` we start a 5s
@@ -463,6 +485,20 @@ export class SyncEngine {
     // into a permanent "Loading…" state.
     this._hydrated = true;
 
+    // Multi-tab coordination: elect a leader before deciding whether
+    // to open the WS / pull / poll. Followers stay passive and mirror
+    // applied changes broadcast by the leader. The election settles
+    // in ~250ms; if the broker is unavailable (no BroadcastChannel)
+    // every tab is implicitly its own leader.
+    await this.initMultiTab();
+
+    if (!this.isMultiTabLeader) {
+      // Follower path: rely on the leader's broadcasts for session +
+      // applied changes. Nothing else to do here — the broker is
+      // wired to forward inbound messages into the engine.
+      return;
+    }
+
     // Seed the server-resolved session before the first pull so
     // `useSession` subscribers see the right tenant from frame one,
     // and the resolver's lastSeenTenant is populated before any
@@ -511,6 +547,197 @@ export class SyncEngine {
     } else if (transport === "poll") {
       this.startPolling();
     }
+  }
+
+  /**
+   * Multi-tab election. Sets `isMultiTabLeader` and (when leader)
+   * wires up a broker that broadcasts every applied change so
+   * follower tabs converge without their own WS.
+   *
+   * On platforms without BroadcastChannel (Node, jsdom, very old
+   * Safari) every tab is implicitly its own leader and this method
+   * returns immediately.
+   */
+  private async initMultiTab(): Promise<void> {
+    if (this.config.multiTab === false) {
+      this.isMultiTabLeader = true;
+      return;
+    }
+    if (!MultiTabBroker.available()) {
+      this.isMultiTabLeader = true;
+      return;
+    }
+    const channelName = `pylon:${this.config.appName ?? "default"}:multitab`;
+    this.multiTab = new MultiTabBroker();
+    let settled = false;
+    let promotedDuringStart = false;
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      this.multiTab!.start(channelName, {
+        onPromote: () => {
+          this.isMultiTabLeader = true;
+          if (!settled) {
+            promotedDuringStart = true;
+            finish();
+          } else {
+            void this.onMultiTabPromoted();
+          }
+        },
+        onDemote: () => {
+          this.isMultiTabLeader = false;
+          this.onMultiTabDemoted();
+        },
+        onAppMessage: (payload) => this.handleMultiTabMessage(payload),
+      });
+      // Bound the settle wait — if no other tab claims leader within
+      // the election window, this tab takes the role.
+      setTimeout(() => {
+        if (!settled) {
+          // Broker hasn't fired onPromote yet (e.g., it's still
+          // waiting for the settle timer). Force it: ask broker for
+          // current status; if it says we're leader, treat as promoted.
+          if (this.multiTab!.isLeader()) {
+            this.isMultiTabLeader = true;
+            promotedDuringStart = true;
+          }
+          finish();
+        }
+      }, 400);
+    });
+    void promotedDuringStart;
+  }
+
+  /** Late promotion: the previous leader dropped while we were
+   *  running as a follower. Take over network ops now. */
+  private async onMultiTabPromoted(): Promise<void> {
+    if (!this.running) return;
+    try {
+      await this.refreshResolvedSession();
+      await this.pull();
+      this.attachVisibilityListener();
+      const transport = this.config.transport ?? "websocket";
+      if (transport === "websocket") this.connectWs();
+      else if (transport === "sse") this.connectSse();
+      else if (transport === "poll") this.startPolling();
+    } catch {
+      /* best-effort — next reconnect cycle catches up */
+    }
+  }
+
+  /** Demotion: another tab took over as leader. Close our WS and
+   *  stop driving network ops; the new leader will broadcast applied
+   *  changes that our followers-mirror path picks up. */
+  private onMultiTabDemoted(): void {
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        /* best-effort */
+      }
+      this.ws = null;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  /** Inbound message from another tab in this origin. The leader's
+   *  broadcasts feed follower replicas; followers' requests feed the
+   *  leader's mutation queue + subscription registry. */
+  private handleMultiTabMessage(payload: unknown): void {
+    if (!payload || typeof payload !== "object") return;
+    const msg = payload as { type?: string } & Record<string, unknown>;
+    switch (msg.type) {
+      case "applied": {
+        // Leader → followers: a batch of change events just landed.
+        // Run through our own apply path so the seq filter dedupes
+        // anything that also reached us via our own (defunct) WS.
+        const changes = msg.changes as ChangeEvent[] | undefined;
+        const targetCursor = msg.targetCursor as SyncCursor | undefined;
+        if (Array.isArray(changes) && changes.length > 0) {
+          void this.enqueueApply(changes, targetCursor);
+        } else if (targetCursor && targetCursor.last_seq > this.cursor.last_seq) {
+          this.cursor = targetCursor;
+        }
+        break;
+      }
+      case "reconciled": {
+        // Leader → followers: a reconcile batch landed for this
+        // entity. Apply locally with the same tombstone semantics.
+        const entity = msg.entity as string | undefined;
+        const upserts = msg.upserts as Row[] | undefined;
+        const removalIds = msg.removalIds as string[] | undefined;
+        const tombstoneSeq = msg.tombstoneSeq as number | undefined;
+        if (
+          typeof entity === "string" &&
+          Array.isArray(upserts) &&
+          Array.isArray(removalIds) &&
+          typeof tombstoneSeq === "number"
+        ) {
+          void this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq);
+        }
+        break;
+      }
+      case "reset": {
+        // Leader → followers: replica was reset (identity flip).
+        void this.resetReplicaInner();
+        break;
+      }
+      case "session": {
+        // Leader → followers: /api/auth/me result. Feed into the
+        // resolver and let it produce the same verdict on each tab.
+        const resolved = msg.resolved as ResolvedSession | undefined;
+        if (resolved) {
+          const verdict = this.session.observeSession(resolved);
+          if (verdict.replicaInvalidated) {
+            void this.resetReplicaInner();
+          }
+          if (verdict.identityChanged) this.store.notify();
+        }
+        break;
+      }
+      case "mutations": {
+        // Follower → leader: ops the follower wants pushed. Add to
+        // our queue and trigger a push. The op_ids ensure server-side
+        // dedupe is intact even if the follower also retries.
+        if (!this.isMultiTabLeader) return;
+        const ops = msg.ops as PendingMutation[] | undefined;
+        if (Array.isArray(ops)) {
+          for (const op of ops) {
+            this.mutations.add(op.change);
+          }
+          void this.push();
+        }
+        break;
+      }
+      case "mutations-acked": {
+        // Leader → followers: these op_ids were pushed successfully.
+        // Followers may carry the same ops in their local queue (their
+        // optimistic apply seeded them); clearing prevents re-forwarding
+        // on the next push trigger.
+        const opIds = msg.opIds as string[] | undefined;
+        if (Array.isArray(opIds)) {
+          for (const id of opIds) this.mutations.markApplied(id);
+          this.mutations.clear();
+        }
+        break;
+      }
+    }
+  }
+
+  /** Broadcast a payload to other tabs in this origin. No-op when
+   *  the broker isn't running. */
+  private broadcastToTabs(payload: unknown): void {
+    this.multiTab?.broadcastApp(payload);
   }
 
   private visibilityHandler: (() => void) | null = null;
@@ -577,6 +804,18 @@ export class SyncEngine {
           await this.persistence.saveCursor(this.cursor);
         }
       }
+      // Multi-tab: when the leader applies a batch, fan it out so
+      // every follower's local replica converges without its own
+      // WS. Followers are read-only network-wise, so it's safe to
+      // broadcast unconditionally — they filter via the same seq
+      // guard above when they receive it.
+      if (this.isMultiTabLeader && filtered.length > 0) {
+        this.broadcastToTabs({
+          type: "applied",
+          changes: filtered,
+          targetCursor: candidate ?? undefined,
+        });
+      }
     });
     // Errors stay scoped to this batch — don't poison the chain for
     // future applies.
@@ -606,6 +845,18 @@ export class SyncEngine {
         removalIds,
         tombstoneSeq,
       );
+      // Multi-tab: leader fans the reconcile batch out so each
+      // follower can converge its local replica without its own
+      // reconcile fetch.
+      if (this.isMultiTabLeader) {
+        this.broadcastToTabs({
+          type: "reconciled",
+          entity,
+          upserts,
+          removalIds,
+          tombstoneSeq,
+        });
+      }
     });
     this.applyQueue = next.catch(() => {});
     return next;
@@ -641,12 +892,19 @@ export class SyncEngine {
       document.removeEventListener("visibilitychange", this.visibilityHandler);
       this.visibilityHandler = null;
     }
+    if (this.multiTab) {
+      this.multiTab.stop();
+      this.multiTab = null;
+    }
     this.setConnectionStatus("offline");
   }
 
   /** Connect to the WebSocket server for real-time updates. */
   private connectWs(): void {
     if (!this.running) return;
+    // Followers never open a WS — the leader's fanout is mirrored
+    // over the BroadcastChannel.
+    if (!this.isMultiTabLeader) return;
 
     const wsUrl = this.config.wsUrl ?? this.deriveWsUrl();
     // Browser WebSocket has no header API — the server accepts the token
@@ -995,6 +1253,12 @@ export class SyncEngine {
         /* best-effort */
       }
     }
+    // Leader broadcasts the reset so follower replicas wipe their
+    // own copies in lockstep — otherwise a follower keeps stale
+    // rows under the old identity until its own pull catches up.
+    if (this.isMultiTabLeader) {
+      this.broadcastToTabs({ type: "reset" });
+    }
   }
 
   /**
@@ -1089,6 +1353,10 @@ export class SyncEngine {
   }
 
   private async pullInner(): Promise<void> {
+    // Followers don't talk to the network — the leader broadcasts
+    // every applied change over the multi-tab channel, and our local
+    // applyQueue picks it up there.
+    if (!this.isMultiTabLeader) return;
     // Identity change detection. If the token flipped since the last pull
     // (anonymous → signed in, user A → user B, signed in → signed out),
     // the server's visible set changed under us and the cursor we saved
@@ -1252,6 +1520,9 @@ export class SyncEngine {
   }
 
   private async reconcileInner(entities?: string[]): Promise<void> {
+    // Same reasoning as pullInner: the leader reconciles, broadcasts
+    // results, and follower replicas converge via the channel.
+    if (!this.isMultiTabLeader) return;
     const names = entities ?? this.store.entityNames();
     if (names.length === 0) return;
     // Tombstone seq for any local row the server doesn't return. Using
@@ -1422,6 +1693,10 @@ export class SyncEngine {
    * token-flip path, for the same reason (visible set changed).
    */
   async refreshResolvedSession(): Promise<void> {
+    // Followers don't fetch /api/auth/me — the leader does and
+    // broadcasts the result, which `handleMultiTabMessage` routes
+    // into the resolver.
+    if (!this.isMultiTabLeader) return;
     try {
       const res = await this.rawFetch("/api/auth/me");
       if (!res.ok) return;
@@ -1454,6 +1729,9 @@ export class SyncEngine {
         // via useSyncExternalStore without a second pub/sub channel.
         this.store.notify();
       }
+      // Broadcast the canonical session to followers so they observe
+      // the same verdict and stay in sync without their own fetch.
+      this.broadcastToTabs({ type: "session", resolved: next });
     } catch {
       // Swallow — /api/auth/me errors are transient and the next pull
       // will retry. Don't take down the sync loop for this.
@@ -1654,6 +1932,17 @@ export class SyncEngine {
     const pending = this.mutations.pending();
     if (pending.length === 0) return;
 
+    // Multi-tab follower: we don't own the network. Forward the
+    // pending batch to the leader and let it push. The leader
+    // broadcasts `mutations-acked` when the server confirms; that
+    // path clears our queue. Note we don't clear locally here — if
+    // the leader dies before pushing, on promotion we still have
+    // the queue and can ship it ourselves.
+    if (!this.isMultiTabLeader) {
+      this.broadcastToTabs({ type: "mutations", ops: pending });
+      return;
+    }
+
     try {
       const resp = await this.request<PushResponse>("POST", "/api/sync/push", {
         changes: pending.map((m) => m.change),
@@ -1716,6 +2005,15 @@ export class SyncEngine {
             );
           }
         }
+      }
+
+      // Broadcast acks BEFORE clearing locally so followers can match
+      // op_ids against their pending queues.
+      const ackedOpIds = pending
+        .map((m) => m.change.op_id)
+        .filter((id): id is string => typeof id === "string");
+      if (ackedOpIds.length > 0) {
+        this.broadcastToTabs({ type: "mutations-acked", opIds: ackedOpIds });
       }
 
       this.mutations.clear();
