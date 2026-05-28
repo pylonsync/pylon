@@ -15,7 +15,7 @@ import {
 } from "./transport";
 import { LocalStore } from "./local-store";
 import { MutationQueue, type PendingMutation } from "./mutation-queue";
-import { MultiTabBroker } from "./multi-tab";
+import { MultiTabOrchestrator } from "./multi-tab-orchestrator";
 import { OpQueue } from "./op-queue";
 import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
@@ -235,23 +235,21 @@ export class SyncEngine {
   readonly session: SessionResolver = new SessionResolver();
 
   /**
-   * Multi-tab coordinator. One tab in this origin owns the WS + the
-   * network ops; the rest are passive mirrors that receive applied
-   * changes via BroadcastChannel and forward their mutations to the
-   * leader for pushing. Initialized in `start()` so apps that never
-   * call `start()` (SSR snapshots, hydrate-only) don't pay for it.
-   */
-  private multiTab: MultiTabBroker | null = null;
-  /** True after the broker has decided this tab is the leader. Used
-   *  to gate WS / pull / push / poll. Followers stay passive.
+   * Multi-tab orchestrator — owns the cross-tab protocol: broker
+   * lifecycle, election, inbound message dispatch, outbound broadcasts.
+   * Engine receives inbound events via hooks (see `multiTabHooks()`).
    *
-   *  Defaults to false so a tab joining an existing election stays a
-   *  passive follower until onPromote explicitly fires. A `true`
-   *  default would let a late joiner whose broker never fires onPromote
-   *  (because it was never leader) silently run as a leader and open
-   *  its own WS, defeating coordination. The non-broker paths
-   *  (`multiTab: false`, BroadcastChannel unavailable) flip it true
-   *  explicitly inside `initMultiTab`. */
+   * Constructed lazily in `start()` because SSR-only consumers that
+   * never reach start() shouldn't pay for the broker. */
+  private orchestrator: MultiTabOrchestrator | null = null;
+  /** Mirror of `orchestrator.isLeader()` kept on the engine for the
+   *  many `if (this.isMultiTabLeader)` gates throughout the codebase.
+   *  Updated via the orchestrator's onInitialLeader / onLatePromote /
+   *  onDemote hooks. Defaults to false so a tab joining an existing
+   *  election stays a passive follower until the orchestrator
+   *  explicitly promotes us — a `true` default would let a late
+   *  joiner whose orchestrator never fires onPromote (because it was
+   *  never leader) silently run as a leader. */
   private isMultiTabLeader = false;
 
   /**
@@ -577,67 +575,104 @@ export class SyncEngine {
   }
 
   /**
-   * Multi-tab election. Sets `isMultiTabLeader` and (when leader)
-   * wires up a broker that broadcasts every applied change so
-   * follower tabs converge without their own WS.
+   * Multi-tab election. Brings up the orchestrator and runs the
+   * initial election. Sets `isMultiTabLeader` via the orchestrator's
+   * hooks (onInitialLeader / onLatePromote / onDemote).
    *
    * On platforms without BroadcastChannel (Node, jsdom, very old
-   * Safari) every tab is implicitly its own leader and this method
-   * returns immediately.
+   * Safari) the orchestrator declares self leader and returns
+   * immediately.
    */
   private async initMultiTab(): Promise<void> {
-    if (this.config.multiTab === false) {
-      this.isMultiTabLeader = true;
-      return;
-    }
-    if (!MultiTabBroker.available()) {
-      this.isMultiTabLeader = true;
-      return;
-    }
-    const channelName = `pylon:${this.config.appName ?? "default"}:multitab`;
-    this.multiTab = new MultiTabBroker();
-    let settled = false;
-    let promotedDuringStart = false;
-    await new Promise<void>((resolve) => {
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      this.multiTab!.start(channelName, {
-        onPromote: () => {
-          this.isMultiTabLeader = true;
-          if (!settled) {
-            promotedDuringStart = true;
-            finish();
-          } else {
-            void this.onMultiTabPromoted();
-          }
-        },
-        onDemote: () => {
-          this.isMultiTabLeader = false;
-          this.onMultiTabDemoted();
-        },
-        onAppMessage: (payload, from) =>
-          this.handleMultiTabMessage(payload, from.tabId),
-        onLeave: (tabId) => this.onMultiTabPeerLeft(tabId),
-      });
-      // Bound the settle wait — if no other tab claims leader within
-      // the election window, this tab takes the role.
-      setTimeout(() => {
-        if (!settled) {
-          // Broker hasn't fired onPromote yet (e.g., it's still
-          // waiting for the settle timer). Force it: ask broker for
-          // current status; if it says we're leader, treat as promoted.
-          if (this.multiTab!.isLeader()) {
-            this.isMultiTabLeader = true;
-            promotedDuringStart = true;
-          }
-          finish();
+    this.orchestrator = new MultiTabOrchestrator(
+      {
+        enabled: this.config.multiTab !== false,
+        appName: this.config.appName,
+      },
+      this.subscriptions,
+      this.multiTabHooks(),
+    );
+    await this.orchestrator.init();
+  }
+
+  /** Hooks the orchestrator calls back into for inbound multi-tab
+   *  events that need engine state. Cases that only touch
+   *  subscriptions are dispatched directly by the orchestrator. */
+  private multiTabHooks() {
+    return {
+      onInitialLeader: () => {
+        this.isMultiTabLeader = true;
+      },
+      onLatePromote: () => {
+        this.isMultiTabLeader = true;
+        void this.onMultiTabPromoted();
+      },
+      onDemote: () => {
+        this.isMultiTabLeader = false;
+        this.onMultiTabDemoted();
+      },
+      onAppliedReceived: (
+        changes: ChangeEvent[],
+        targetCursor: SyncCursor | undefined,
+      ) => {
+        // `fromBroadcast: true` suppresses re-broadcast in case a
+        // promotion lands between this enqueue and the apply.
+        if (changes.length > 0) {
+          void this.enqueueApply(changes, targetCursor, { fromBroadcast: true });
+        } else if (targetCursor && targetCursor.last_seq > this.cursor.last_seq) {
+          this.cursor = targetCursor;
         }
-      }, 400);
-    });
-    void promotedDuringStart;
+      },
+      onReconciledReceived: (
+        entity: string,
+        upserts: Row[],
+        removalIds: string[],
+        tombstoneSeq: number,
+      ) => {
+        void this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq, {
+          fromBroadcast: true,
+        });
+      },
+      onResetReceived: () => {
+        void this.resetReplicaInner();
+      },
+      onSessionReceived: (resolved: ResolvedSession) => {
+        // Funnel through the shared session chain so concurrent triggers
+        // (broadcast + local notifySessionChanged) commit in arrival
+        // order. Without that the older tenant could win and pin the
+        // engine to a stale session.
+        void this.applySessionTransition(resolved, /* broadcast */ false);
+      },
+      onMutationsForwarded: (ops: PendingMutation[]) => {
+        for (const op of ops) {
+          this.mutations.add(op.change);
+        }
+        void this.push();
+      },
+      onMutationsAcked: (opIds: string[]) => {
+        for (const id of opIds) this.mutations.markApplied(id);
+        this.mutations.clear();
+      },
+      onMutationsFailed: (ops: { opId: string; error: string }[]) => {
+        for (const op of ops) {
+          this.mutations.markFailed(op.opId, op.error);
+        }
+      },
+      onBinaryReceived: (bytes: Uint8Array) => {
+        for (const h of this.binaryHandlers) {
+          try {
+            h(bytes);
+          } catch (err) {
+            console.warn("[sync] binary handler threw:", err);
+          }
+        }
+      },
+      onPeerLeft: (_tabId: string) => {
+        // Orchestrator already scrubbed subscription state for the
+        // departed tab. The engine has no additional cleanup, but the
+        // hook exists for future needs (e.g., per-peer presence).
+      },
+    };
   }
 
   /** Seed serverSubs with every subscription this tab currently wants.
@@ -689,23 +724,6 @@ export class SyncEngine {
     }
   }
 
-  /** A peer tab left the coordination group gracefully. Only meaningful
-   *  on the leader side — we own the forwarded-sub state. Delegates to
-   *  the coordinator, which scrubs forwarder/owner entries and
-   *  unregisters server subscriptions that no longer have any owner. */
-  private onMultiTabPeerLeft(tabId: string): void {
-    if (!this.isMultiTabLeader) return;
-    this.subscriptions.scrubPeer(tabId);
-  }
-
-  /** Replay every server-subscription this tab is interested in by
-   *  re-broadcasting `sub-register` messages. Triggered by a new
-   *  leader asking via `request-sub-replay`. The leader's handler
-   *  registers them with its serverSubs. */
-  private replayForwardedSubs(): void {
-    this.subscriptions.replayForwardedSubs();
-  }
-
   /** Demotion: another tab took over as leader. Tear down our
    *  transport (WS socket, ping timer, reconnect timer, poll timer —
    *  whichever applies) and stop driving network ops; the new leader
@@ -718,159 +736,11 @@ export class SyncEngine {
     }
   }
 
-  /** Inbound message from another tab in this origin. The leader's
-   *  broadcasts feed follower replicas; followers' requests feed the
-   *  leader's mutation queue + subscription registry. */
-  private handleMultiTabMessage(payload: unknown, fromTabId: string): void {
-    if (!payload || typeof payload !== "object") return;
-    const msg = payload as { type?: string } & Record<string, unknown>;
-    switch (msg.type) {
-      case "applied": {
-        // Leader → followers: a batch of change events just landed.
-        // Run through our own apply path so the seq filter dedupes
-        // anything that also reached us via our own (defunct) WS.
-        // `fromBroadcast: true` suppresses re-broadcast in case a
-        // promotion lands between this enqueue and the apply.
-        const changes = msg.changes as ChangeEvent[] | undefined;
-        const targetCursor = msg.targetCursor as SyncCursor | undefined;
-        if (Array.isArray(changes) && changes.length > 0) {
-          void this.enqueueApply(changes, targetCursor, { fromBroadcast: true });
-        } else if (targetCursor && targetCursor.last_seq > this.cursor.last_seq) {
-          this.cursor = targetCursor;
-        }
-        break;
-      }
-      case "reconciled": {
-        // Leader → followers: a reconcile batch landed for this
-        // entity. Apply locally with the same tombstone semantics.
-        const entity = msg.entity as string | undefined;
-        const upserts = msg.upserts as Row[] | undefined;
-        const removalIds = msg.removalIds as string[] | undefined;
-        const tombstoneSeq = msg.tombstoneSeq as number | undefined;
-        if (
-          typeof entity === "string" &&
-          Array.isArray(upserts) &&
-          Array.isArray(removalIds) &&
-          typeof tombstoneSeq === "number"
-        ) {
-          void this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq, {
-            fromBroadcast: true,
-          });
-        }
-        break;
-      }
-      case "reset": {
-        // Leader → followers: replica was reset (identity flip).
-        void this.resetReplicaInner();
-        break;
-      }
-      case "session": {
-        // Leader → followers: /api/auth/me result. Funnel through
-        // the shared session chain so concurrent broadcasts (or a
-        // broadcast racing with a local notifySessionChanged) commit
-        // in arrival order — without that, the older tenant could
-        // win and pin the engine to a stale session.
-        const resolved = msg.resolved as ResolvedSession | undefined;
-        if (resolved) {
-          void this.applySessionTransition(resolved, /* broadcast */ false);
-        }
-        break;
-      }
-      case "mutations": {
-        // Follower → leader: ops the follower wants pushed. Add to
-        // our queue and trigger a push. The op_ids ensure server-side
-        // dedupe is intact even if the follower also retries.
-        if (!this.isMultiTabLeader) return;
-        const ops = msg.ops as PendingMutation[] | undefined;
-        if (Array.isArray(ops)) {
-          for (const op of ops) {
-            this.mutations.add(op.change);
-          }
-          void this.push();
-        }
-        break;
-      }
-      case "mutations-acked": {
-        // Leader → followers: these op_ids were pushed successfully.
-        // Followers may carry the same ops in their local queue (their
-        // optimistic apply seeded them); clearing prevents re-forwarding
-        // on the next push trigger.
-        const opIds = msg.opIds as string[] | undefined;
-        if (Array.isArray(opIds)) {
-          for (const id of opIds) this.mutations.markApplied(id);
-          this.mutations.clear();
-        }
-        break;
-      }
-      case "mutations-failed": {
-        // Leader → followers: these op_ids hit a validation/auth error
-        // server-side. Mark each one failed on the originating follower
-        // so the UI can surface it. The follower keeps the entry in the
-        // queue (markFailed doesn't prune) for retry / user-ack.
-        const ops = msg.ops as
-          | { opId: string; error: string }[]
-          | undefined;
-        if (Array.isArray(ops)) {
-          for (const op of ops) {
-            this.mutations.markFailed(op.opId, op.error);
-          }
-        }
-        break;
-      }
-      case "sub-register": {
-        // Follower → leader: register a WS subscription on the
-        // follower's behalf. The leader's serverSubs sends the
-        // subscribe frame; inbound `reactive-result` / binary frames
-        // already broadcast back to all tabs (see WS onmessage).
-        if (!this.isMultiTabLeader) return;
-        this.subscriptions.handleForwardedRegister(msg, fromTabId);
-        break;
-      }
-      case "sub-unregister": {
-        if (!this.isMultiTabLeader) return;
-        this.subscriptions.handleForwardedUnregister(msg, fromTabId);
-        break;
-      }
-      case "reactive-msg": {
-        // Leader → followers: a reactive-result/error envelope landed
-        // on the leader's WS. Route to our local handler if we have
-        // one registered (we will, if this tab is the follower that
-        // requested the subscription).
-        const sub_id = msg.sub_id as string;
-        const payload = msg.payload as ReactiveMessage;
-        this.subscriptions.handleReactiveMessage(sub_id, payload);
-        break;
-      }
-      case "binary": {
-        // Leader → followers: a binary frame landed on the leader's
-        // WS. Dispatch to local binaryHandlers (the CRDT consumer
-        // registers one of these via `onBinaryFrame`).
-        const bytes = msg.bytes as Uint8Array | undefined;
-        if (bytes instanceof Uint8Array) {
-          for (const h of this.binaryHandlers) {
-            try {
-              h(bytes);
-            } catch (err) {
-              console.warn("[sync] binary handler threw:", err);
-            }
-          }
-        }
-        break;
-      }
-      case "request-sub-replay": {
-        // New leader is asking every follower to re-forward its subs.
-        // Only respond if we're a follower — if we're the leader
-        // ourselves, we already have them in our serverSubs.
-        if (!this.isMultiTabLeader) this.replayForwardedSubs();
-        break;
-      }
-    }
-  }
-
-  /** Broadcast a payload to other tabs in this origin. No-op when
-   *  the broker isn't running. */
+  /** Broadcast a payload to other tabs in this origin. Delegates to
+   *  the orchestrator; no-op when the orchestrator isn't running
+   *  (SSR-only consumers that never reach `start()`). */
   private broadcastToTabs(payload: unknown): void {
-    this.multiTab?.broadcastApp(payload);
+    this.orchestrator?.broadcastRaw(payload);
   }
 
   private visibilityHandler: (() => void) | null = null;
@@ -1014,9 +884,9 @@ export class SyncEngine {
       document.removeEventListener("visibilitychange", this.visibilityHandler);
       this.visibilityHandler = null;
     }
-    if (this.multiTab) {
-      this.multiTab.stop();
-      this.multiTab = null;
+    if (this.orchestrator) {
+      this.orchestrator.stop();
+      this.orchestrator = null;
     }
     this.setConnectionStatus("offline");
   }

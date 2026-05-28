@@ -167,9 +167,14 @@ describe("codex round-6: mutations-acked broadcast filters by status", () => {
       data: { id: "x", text: "y" },
     });
 
-    // Leader → follower envelope. handleMultiTabMessage is the entry
-    // point exposed by the engine for broker app-message dispatch.
-    engine.handleMultiTabMessage(
+    // Leader → follower envelope. Drive through the orchestrator's
+    // public message dispatch — same path the BroadcastChannel
+    // onmessage hits in production.
+    (engine as unknown as {
+      orchestrator: {
+        handleMessage(msg: unknown, from: string): void;
+      };
+    }).orchestrator.handleMessage(
       {
         type: "mutations-failed",
         ops: [{ opId: "op-x", error: "server rejected" }],
@@ -198,15 +203,18 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
 
   // Helper: reach into the SubscriptionCoordinator that the engine
   // delegates to. The state these tests pin lives on the coordinator
-  // now, not the engine itself.
+  // now, not the engine itself. The orchestrator's inbound dispatch
+  // is bypassed by calling subscriptions.handleForwardedRegister /
+  // scrubPeer directly — that's the same path the orchestrator takes
+  // when a real broker message arrives, just driven by the test.
   function internals(env: TestEnv) {
     return env.engine as unknown as {
-      handleMultiTabMessage(msg: unknown, from: string): void;
-      onMultiTabPeerLeft(tabId: string): void;
       serverSubs: { has(k: string): boolean };
       subscriptions: {
         crdtForwarders: Map<string, Set<string>>;
         reactiveSubOwners: Map<string, Set<string>>;
+        handleForwardedRegister(msg: unknown, fromTabId: string): void;
+        scrubPeer(tabId: string): void;
       };
     };
   }
@@ -221,7 +229,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     // Simulate a follower forwarding a CRDT sub via the broker
     // app-message path. The leader's handler creates an entry in
     // crdtForwarders and registers with serverSubs.
-    engine.handleMultiTabMessage(
+    engine.subscriptions.handleForwardedRegister(
       {
         type: "sub-register",
         kind: "crdt",
@@ -238,7 +246,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(true);
 
     // Now the follower disappears (broker fires onLeave).
-    engine.onMultiTabPeerLeft("follower-1");
+    engine.subscriptions.scrubPeer("follower-1");
 
     expect(engine.subscriptions.crdtForwarders.has("Todo\x00row-1")).toBe(false);
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(false);
@@ -253,7 +261,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
 
     // Two followers forward the SAME crdt key. The leader keeps a
     // single server sub with two entries in the forwarder set.
-    engine.handleMultiTabMessage(
+    engine.subscriptions.handleForwardedRegister(
       {
         type: "sub-register",
         kind: "crdt",
@@ -263,7 +271,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
       },
       "follower-a",
     );
-    engine.handleMultiTabMessage(
+    engine.subscriptions.handleForwardedRegister(
       {
         type: "sub-register",
         kind: "crdt",
@@ -279,7 +287,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
 
     // Only follower-a leaves. The sub stays alive because follower-b
     // still owns it.
-    engine.onMultiTabPeerLeft("follower-a");
+    engine.subscriptions.scrubPeer("follower-a");
 
     expect(engine.subscriptions.crdtForwarders.get("Todo\x00row-1")?.size).toBe(1);
     expect(
@@ -295,7 +303,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
 
     const engine = internals(env);
 
-    engine.handleMultiTabMessage(
+    engine.subscriptions.handleForwardedRegister(
       {
         type: "sub-register",
         kind: "reactive",
@@ -312,7 +320,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     );
     expect(engine.serverSubs.has("sub-1")).toBe(true);
 
-    engine.onMultiTabPeerLeft("follower-x");
+    engine.subscriptions.scrubPeer("follower-x");
 
     expect(engine.subscriptions.reactiveSubOwners.has("sub-1")).toBe(false);
     expect(engine.serverSubs.has("sub-1")).toBe(false);
