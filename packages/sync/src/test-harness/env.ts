@@ -24,14 +24,44 @@
 // synchronous.
 
 import { SyncEngine } from "../index";
+import type { Storage } from "../storage";
 import { TestServer, type TestServerOptions, type VisibilityFilter } from "./server";
 import { installTransport, type TransportHandle } from "./transport";
+
+/** Bare in-memory storage adapter — same shape as the localStorage
+ *  one but isolated per test so signIn() can plant a token the engine
+ *  picks up via currentToken(). */
+class MemoryStorage implements Storage {
+  private map = new Map<string, string>();
+  get(key: string): string | null {
+    return this.map.get(key) ?? null;
+  }
+  set(key: string, value: string): void {
+    this.map.set(key, value);
+  }
+  remove(key: string): void {
+    this.map.delete(key);
+  }
+}
 
 export interface CreateTestEnvOptions {
   /** Override visibility per-entity (tenant scoping, RLS, etc.). */
   visible?: VisibilityFilter;
   /** Override the appName the engine uses for storage keys. */
   appName?: string;
+  /** Mid-fetch hook fired before /api/entities/<E>/cursor responds.
+   *  Lets a scenario flip server state to drive the reconcile
+   *  session-guard race. */
+  beforeListEntityRows?: import("./server").BeforeListEntityHook;
+  /** Mid-fetch hook fired before /api/sync/pull responds. */
+  beforePull?: import("./server").BeforePullHook;
+  /** Field projector — strips serverOnly-style fields before the
+   *  row leaves the server. */
+  projectRow?: import("./server").FieldProjector;
+  /** Transport mode passed to the engine. Default "websocket". Use
+   *  "poll" to disable the WS-onopen reconcile race in scenarios
+   *  that only want to pin the in-start pipeline. */
+  transport?: "websocket" | "poll" | "sse";
 }
 
 export interface TestEnv {
@@ -64,26 +94,33 @@ export interface TestEnv {
 }
 
 export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
-  const server = new TestServer({ visible: opts.visible } as TestServerOptions);
+  const server = new TestServer({
+    visible: opts.visible,
+    beforeListEntityRows: opts.beforeListEntityRows,
+    beforePull: opts.beforePull,
+    projectRow: opts.projectRow,
+  } as TestServerOptions);
   const transport = installTransport(server);
+  // Per-scenario in-memory storage so signIn() can plant a token the
+  // engine actually reads via currentToken(). Without this the engine
+  // falls back to the default localStorage adapter (or no-op outside
+  // a browser), which means every fetch goes anonymous and tenant-
+  // scoped tests can't distinguish "right session" from "no session."
+  const storage = new MemoryStorage();
+  const appName = opts.appName ?? "harness";
+  const tokenStorageKey =
+    appName === "default" ? "pylon_token" : `pylon:${appName}:token`;
   const engine = new SyncEngine({
     baseUrl: "http://test.invalid",
-    appName: opts.appName ?? "harness",
+    appName,
     persist: false,
+    storage,
+    transport: opts.transport ?? "websocket",
     // Tight timings so scenarios don't have to sleep seconds. The
     // engine's reconcile debounce is also relaxed so back-to-back
     // visibility-change triggers don't get coalesced away in tests.
     reconcileMinIntervalMs: 0,
   });
-
-  // The engine reads tokens via its storage adapter. With persist:false
-  // there's still an in-memory default storage; we don't reach into
-  // it here. Instead, the transport mock pulls the active token from
-  // a shared variable set by signIn(). The Engine's
-  // currentToken() returns undefined in tests (no storage write); the
-  // mock fetch + mock WebSocket honor our `token` directly. This
-  // shortcut keeps the engine code path unchanged while still
-  // exercising the auth-context flow.
 
   let token: string | undefined;
 
@@ -97,6 +134,11 @@ export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
     signIn(input) {
       token = server.signIn(input);
       transport.setToken(token);
+      // Plant the token in the engine's storage adapter so
+      // currentToken() returns it on the very next fetch — matches
+      // what `pylon login` / cookie-set / persistSession() do in a
+      // real browser.
+      storage.set(tokenStorageKey, token);
       return token;
     },
     selectOrg(tenantId) {
@@ -106,6 +148,7 @@ export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
     signOut() {
       token = undefined;
       transport.setToken(undefined);
+      storage.remove(tokenStorageKey);
     },
     async start() {
       await engine.start();

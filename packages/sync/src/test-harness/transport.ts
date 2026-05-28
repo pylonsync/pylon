@@ -6,6 +6,7 @@
 // a new branch here (which is the point: forces the harness to stay
 // honest about what the engine sends).
 
+import type { Row } from "../types";
 import type { TestServer } from "./server";
 
 export interface TransportHandle {
@@ -51,7 +52,7 @@ export function installTransport(server: TestServer): TransportHandle {
     // adapter we'd otherwise need to mock.
     const effectiveToken = authHeader ?? token;
 
-    const result = handle(server, method, url, effectiveToken, init);
+    const result = await handle(server, method, url, effectiveToken, init);
     const json = result.body == null ? "" : JSON.stringify(result.body);
     return new Response(json, {
       status: result.status,
@@ -67,21 +68,32 @@ export function installTransport(server: TestServer): TransportHandle {
   // change events. We hand it a controllable EventTarget the
   // TestServer subscribes to.
   class MockWebSocket extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
     readyState = 0;
+    binaryType: "blob" | "arraybuffer" = "blob";
     url: string;
+    protocol = "";
     onopen: ((ev: Event) => void) | null = null;
     onclose: ((ev: Event) => void) | null = null;
     onmessage: ((ev: MessageEvent) => void) | null = null;
     onerror: ((ev: Event) => void) | null = null;
     private unsubscribe: (() => void) | null = null;
+    private boundToken: string | undefined;
 
-    constructor(url: string) {
+    constructor(url: string, protocols?: string | string[]) {
       super();
       this.url = url;
       wsConnectCount += 1;
-      // Resolve user_id from the engine's current token so we can
-      // route this connection to the right subscriber bucket.
-      const auth = server.authContextFor(effectiveTokenForWs(token));
+      // The engine encodes the token as `bearer.<percent-encoded>` in
+      // the WS subprotocol when one is set. Decode it so the harness
+      // can route this connection to the right subscriber bucket
+      // independently of any localStorage state.
+      const protoToken = extractBearerFromProtocols(protocols);
+      this.boundToken = protoToken ?? token;
+      const auth = server.authContextFor(this.boundToken);
       if (auth.userId) {
         this.unsubscribe = server.subscribe(auth.userId, (msg) => {
           const event = new MessageEvent("message", {
@@ -101,10 +113,17 @@ export function installTransport(server: TestServer): TransportHandle {
       });
     }
 
-    send(_data: string): void {
-      // Engine sends subscription messages over WS for reactive
-      // queries. The harness ignores them unless a scenario tests
-      // reactive specifically — most don't.
+    send(data: string): void {
+      // Capture outbound client messages so tests can assert that
+      // `reactive-subscribe`, `crdt-subscribe`, etc., were actually
+      // emitted by the engine. The real server would dispatch on
+      // these; the harness just records them.
+      try {
+        const parsed = JSON.parse(data);
+        server.recordClientWsMessage(this.boundToken, parsed);
+      } catch {
+        server.recordClientWsMessage(this.boundToken, data);
+      }
     }
 
     close(): void {
@@ -117,10 +136,6 @@ export function installTransport(server: TestServer): TransportHandle {
     }
   }
   (globalThis as { WebSocket?: unknown }).WebSocket = MockWebSocket;
-
-  function effectiveTokenForWs(t: string | undefined): string | undefined {
-    return t;
-  }
 
   return {
     currentToken: () => token,
@@ -142,30 +157,77 @@ export function installTransport(server: TestServer): TransportHandle {
 
 function readAuthHeader(init: RequestInit | undefined): string | undefined {
   if (!init?.headers) return undefined;
-  const h = init.headers as Record<string, string> | Headers;
-  const raw =
-    h instanceof Headers ? h.get("Authorization") : (h.Authorization ?? h.authorization);
+  const headersInit = init.headers;
+  let raw: string | null = null;
+  if (headersInit instanceof Headers) {
+    raw = headersInit.get("Authorization") ?? headersInit.get("authorization");
+  } else if (Array.isArray(headersInit)) {
+    for (const [k, v] of headersInit) {
+      if (k.toLowerCase() === "authorization") {
+        raw = v;
+        break;
+      }
+    }
+  } else {
+    const h = headersInit as Record<string, string>;
+    raw = h.Authorization ?? h.authorization ?? null;
+  }
   if (!raw) return undefined;
   return raw.startsWith("Bearer ") ? raw.slice("Bearer ".length) : raw;
 }
 
-function handle(
+function extractBearerFromProtocols(
+  protocols: string | string[] | undefined,
+): string | undefined {
+  if (!protocols) return undefined;
+  const list = Array.isArray(protocols) ? protocols : [protocols];
+  for (const p of list) {
+    if (typeof p !== "string") continue;
+    if (p.startsWith("bearer.")) {
+      try {
+        return decodeURIComponent(p.slice("bearer.".length));
+      } catch {
+        return p.slice("bearer.".length);
+      }
+    }
+  }
+  return undefined;
+}
+
+async function handle(
   server: TestServer,
   method: string,
   url: string,
   token: string | undefined,
   _init: RequestInit | undefined,
-): MockResponse {
-  // /api/auth/me — cheap auth context probe.
+): Promise<MockResponse> {
+  // /api/auth/me — cheap auth context probe. Engine expects snake_case
+  // keys here (user_id / tenant_id / is_admin); the TestServer holds
+  // them as camelCase internally so we re-key on the way out.
   if (url.endsWith("/api/auth/me") && method === "GET") {
     const ctx = server.authContextFor(token);
-    return { status: 200, body: ctx };
+    return {
+      status: 200,
+      body: {
+        user_id: ctx.userId,
+        tenant_id: ctx.tenantId,
+        is_admin: ctx.isAdmin,
+        roles: ctx.roles,
+      },
+    };
   }
 
   // /api/sync/pull?since=N — incremental change pull.
   if (url.includes("/api/sync/pull") && method === "GET") {
+    const primed = server.consumeNextPullStatus();
+    if (primed) {
+      return {
+        status: primed,
+        body: { error: { code: "RESYNC_REQUIRED" } },
+      };
+    }
     const since = Number(new URL(url, "http://test").searchParams.get("since") ?? "0");
-    const resp = server.pull(token, since);
+    const resp = await server.pull(token, since);
     return { status: 200, body: resp };
   }
 
@@ -173,14 +235,14 @@ function handle(
   const cursorMatch = url.match(/\/api\/entities\/([^/?]+)\/cursor/);
   if (cursorMatch && method === "GET") {
     const entity = cursorMatch[1]!;
-    const rows = server.listEntityRows(entity, token);
+    const rows: Row[] = await server.listEntityRows(entity, token);
     return {
       status: 200,
       body: { data: rows, next_cursor: null, has_more: false },
     };
   }
 
-  // /api/sync/push — not exercised by current scenarios.
+  // /api/sync/push — accept ops from optimistic mutations.
   if (url.endsWith("/api/sync/push") && method === "POST") {
     return { status: 200, body: { ops: [] } };
   }

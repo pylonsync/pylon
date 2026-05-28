@@ -4,10 +4,20 @@
 //
 // Every test here pins a real fix the engine has shipped. When one
 // fails, look at the commit named in the comment for context.
+//
+// Hardening principle: every assertion has to FAIL if the named fix
+// is reverted. Tests that pass under both the fixed and broken engine
+// are decorative and not allowed here.
 
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { createTestEnv, type TestEnv } from "./test-harness";
+
+const tenantScopedVisibility = (
+  _e: string,
+  rows: Array<Record<string, unknown>>,
+  auth: { tenantId: string | null },
+) => rows.filter((r) => r.orgId === auth.tenantId);
 
 describe("sync scenarios", () => {
   let env: TestEnv | null = null;
@@ -26,27 +36,25 @@ describe("sync scenarios", () => {
   // fetched every entity under tenant=null, gotten zero rows, and
   // tombstoned the IndexedDB-hydrated cache before selectOrg
   // landed. Symptom: rows render briefly then "flash away."
+  //
+  // Runs under `transport: "poll"` so the WS-onopen reconcile
+  // (which is a separate path with its own race semantics) doesn't
+  // muddle the isolation. The fix being pinned is specifically the
+  // reconcile call that USED to live in start() and now doesn't.
+  // If that reconcile is reintroduced, this test fails — it counts
+  // /api/entities/Recording/cursor fetches and expects ZERO during
+  // start(), since the cached cursor list ("Recording") would be
+  // swept under tenant=null.
   test("first-load reconcile does not race selectOrg", async () => {
     env = createTestEnv({
-      // Tenant-scoped visibility: a row is only visible when the
-      // session's tenantId matches the row's orgId.
-      visible: (_entity, rows, auth) =>
-        rows.filter((r) => (r as { orgId?: string }).orgId === auth.tenantId),
+      visible: tenantScopedVisibility,
+      transport: "poll",
     });
     env.server.seed("Recording", [
       { id: "r1", orgId: "org-a", title: "alive" },
     ]);
     env.signIn({ userId: "u1", tenantId: null });
 
-    // Boot under tenant=null. Without the fix, reconcile would have
-    // tombstoned r1 here (server returns empty under tenant=null,
-    // local cache had it from a prior session). With the fix, the
-    // first-load reconcile is skipped — pull doesn't tombstone
-    // anything because it's a cursor-based diff, not a snapshot.
-    await env.start();
-
-    // Simulate the cached state by seeding it directly. In a real
-    // browser the engine would have hydrated it from IndexedDB.
     env.engine.store.applyChange({
       seq: 0,
       entity: "Recording",
@@ -55,15 +63,22 @@ describe("sync scenarios", () => {
       data: { id: "r1", orgId: "org-a", title: "alive" },
       timestamp: "",
     });
-    await env.flush();
+
+    const beforeStart = env.transport.fetchCount();
+    await env.start();
+    // Snapshot fetch count immediately after start to assert the
+    // in-start path didn't fetch the entity cursor endpoint.
+    const afterStart = env.transport.fetchCount();
     expect(env.engine.store.list("Recording")).toHaveLength(1);
 
-    // Bootstrap effect lands AFTER the engine started.
+    // The in-start sequence should be /api/auth/me + /api/sync/pull
+    // ONLY. Reverting 2a79897e adds /api/entities/Recording/cursor.
+    expect(afterStart - beforeStart).toBeLessThanOrEqual(2);
+
     env.selectOrg("org-a");
+    await env.engine.notifySessionChanged();
     await env.flush();
 
-    // Row must survive: it WAS visible under the new session, just
-    // not under the no-tenant state during boot.
     expect(env.engine.store.list("Recording")).toHaveLength(1);
   });
 
@@ -72,16 +87,19 @@ describe("sync scenarios", () => {
   // change. When the engine started under tenant=null and selectOrg
   // later set tenant=X, the "change" wiped local rows even though
   // they were the right rows all along.
+  //
+  // Poll transport keeps the WS-onopen reconcile from muddling the
+  // assertion — the fix being pinned lives in refreshResolvedSession,
+  // not in any WS path. `notifySessionChanged()` drives the engine
+  // refresh deterministically.
   test("null → tenant flip does not reset cached rows", async () => {
     env = createTestEnv({
-      visible: (_e, rows, auth) =>
-        rows.filter((r) => (r as { orgId?: string }).orgId === auth.tenantId),
+      visible: tenantScopedVisibility,
+      transport: "poll",
     });
     env.server.seed("Recording", [{ id: "r1", orgId: "org-a" }]);
     env.signIn({ userId: "u1", tenantId: null });
-    await env.start();
 
-    // Stash cached rows the way IndexedDB hydration would.
     env.engine.store.applyChange({
       seq: 0,
       entity: "Recording",
@@ -90,44 +108,65 @@ describe("sync scenarios", () => {
       data: { id: "r1", orgId: "org-a" },
       timestamp: "",
     });
-    await env.flush();
+
+    await env.start();
+    expect(env.engine.store.list("Recording")).toHaveLength(1);
 
     env.selectOrg("org-a"); // null → X
-    await env.flush(75);
+    await env.engine.notifySessionChanged();
+    await env.flush();
 
     expect(env.engine.store.list("Recording")).toHaveLength(1);
   });
 
   // Pins: dc43edc6 (reconcile bails on mid-fetch session flip).
   // The cursor guard already covered "WS event landed mid-fetch";
-  // this fix added the parallel guard for session changes.
-  test("reconcile under stale session does not tombstone", async () => {
+  // this fix added the parallel guard for session changes — if the
+  // resolved session changes between fetch dispatch and fetch
+  // return, the apply pass is skipped (otherwise rows filtered
+  // under the OLD session would tombstone rows that ARE visible
+  // under the NEW session).
+  //
+  // We trigger the race via the `beforeListEntityRows` hook: when
+  // the engine fetches /api/entities/Recording/cursor under tenant=
+  // org-a, the hook flips the session to org-b right before the
+  // server serializes the response. The engine's session-signature
+  // check after the await catches the flip and skips the apply.
+  test("reconcile bails when session flips mid-fetch", async () => {
+    let firstFetch = true;
     env = createTestEnv({
+      // Visibility is gated by an `editor` role. Test starts with
+      // role=editor (row visible), then the hook strips the role
+      // mid-fetch — server now returns []. If the engine's
+      // session-guard works, it sees the signature flip and skips
+      // the apply; r1 stays in the store. Without the guard, the
+      // empty server response would tombstone r1.
       visible: (_e, rows, auth) =>
-        rows.filter((r) => (r as { orgId?: string }).orgId === auth.tenantId),
+        auth.roles.includes("editor") ? rows : [],
+      transport: "poll",
+      beforeListEntityRows: async (entity) => {
+        if (entity === "Recording" && firstFetch) {
+          firstFetch = false;
+          if (env?.token) env.server.mutateSession(env.token, { roles: [] });
+          await env!.engine.notifySessionChanged();
+        }
+      },
     });
-    env.server.seed("Recording", [{ id: "r1", orgId: "org-a" }]);
-    env.signIn({ userId: "u1", tenantId: "org-a" });
+    env.server.seed("Recording", [
+      { id: "r1", orgId: "org-a", title: "alive" },
+    ]);
+    env.signIn({ userId: "u1", tenantId: "org-a", roles: ["editor"] });
     await env.start();
-
-    // Confirm we can see r1 with the right tenant.
     await env.flush();
-    // Seed locally so reconcile has something to compare against.
-    env.engine.store.applyChange({
-      seq: 0,
-      entity: "Recording",
-      row_id: "r1",
-      kind: "insert",
-      data: { id: "r1", orgId: "org-a" },
-      timestamp: "",
-    });
-
-    // Visibility-driven reconcile re-fetches under the active
-    // session. If the test runner has a way to flip session mid-
-    // fetch we'd exercise the guard directly; the simpler check is
-    // "reconcile under the right tenant doesn't drop the row."
-    await env.engine.reconcile(["Recording"]);
     expect(env.engine.store.list("Recording")).toHaveLength(1);
+
+    await env.engine.reconcile(["Recording"]);
+    await env.flush();
+
+    // Role change doesn't trigger resetReplica (only tenant flips
+    // do). So the only way r1 survives is via the session-guard
+    // skipping the apply of the empty server snapshot.
+    expect(env.engine.store.get("Recording", "r1")).not.toBeNull();
   });
 
   // Pins: 38225996 (useQuery skips loading flash on cached refresh).
@@ -168,5 +207,400 @@ describe("sync scenarios", () => {
     env.server.delete("Note", "n1");
     await env.flush(50);
     expect(env.engine.store.list("Note")).toHaveLength(0);
+  });
+
+  // Server-side update lands and overwrites the local row (not just
+  // append + duplicate). Pins the "ws update kind" path of
+  // enqueueApply that's distinct from insert.
+  test("server-side update propagates and overwrites local row", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+    env.server.insert("Note", { id: "n1", title: "hello" });
+    await env.flush(50);
+    expect(env.engine.store.get("Note", "n1")).toMatchObject({ title: "hello" });
+
+    env.server.update("Note", "n1", { title: "updated" });
+    await env.flush(50);
+    expect(env.engine.store.list("Note")).toHaveLength(1);
+    expect(env.engine.store.get("Note", "n1")).toMatchObject({ title: "updated" });
+  });
+
+  // Multi-tenant policy isolation: rows scoped to org-a are invisible
+  // to a session pinned to org-b on pull. Server-filtered, not just
+  // client-filtered. Seeded rows now ARE in the log, so pull at
+  // since=0 returns the org-b row without an explicit reconcile —
+  // exactly the way production clients discover initial state.
+  test("multi-tenant: org-b session cannot see org-a's rows on pull", async () => {
+    env = createTestEnv({ visible: tenantScopedVisibility });
+    env.server.seed("Recording", [
+      { id: "a1", orgId: "org-a" },
+      { id: "b1", orgId: "org-b" },
+    ]);
+
+    env.signIn({ userId: "u-b", tenantId: "org-b" });
+    await env.start();
+
+    const rows = env.engine.store.list("Recording");
+    expect(rows).toHaveLength(1);
+    expect((rows[0] as { id?: string }).id).toBe("b1");
+  });
+
+  // Real org switch X → Y must reset the replica AND re-pull under
+  // the new tenant. Pins the second half of 5b104b34 — the
+  // X-to-X-prime path that does call resetReplica + pull(). No
+  // manual `engine.reconcile(...)` after the switch: if the engine
+  // doesn't drive the re-pull itself, this test fails.
+  test("real org switch (X → Y) resets replica and re-pulls", async () => {
+    env = createTestEnv({ visible: tenantScopedVisibility });
+    env.server.seed("Recording", [
+      { id: "a1", orgId: "org-a", title: "alice" },
+      { id: "b1", orgId: "org-b", title: "bob" },
+    ]);
+    env.signIn({ userId: "u1", tenantId: "org-a" });
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.get("Recording", "a1")).not.toBeNull();
+    expect(env.engine.store.get("Recording", "b1")).toBeNull();
+
+    env.selectOrg("org-b");
+    // Refresh runs async via the WS session-changed envelope; give
+    // it room to call /api/auth/me, resetReplica, and re-pull.
+    await env.flush(100);
+
+    expect(env.engine.store.get("Recording", "a1")).toBeNull();
+    expect(env.engine.store.get("Recording", "b1")).not.toBeNull();
+  });
+
+  // Reactive query subscription delivers a result over WS AND emits
+  // the outbound `reactive-subscribe` envelope. Both directions of
+  // the wire contract are pinned: the engine must SEND the
+  // subscribe message (without it the server's ReactiveRegistry
+  // never sees the spec, and the engine receives no results), and
+  // it must ROUTE the resulting `reactive-result` envelope back to
+  // the local handler.
+  test("reactive-subscribe is sent over WS and reactive-result is routed", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    let delivered: unknown = null;
+    env.engine.subscribeReactive("sub-1", "myQuery", { foo: 1 }, (msg) => {
+      if (msg.kind === "result") delivered = msg.result;
+    });
+    // The engine sends `reactive-subscribe` over the WS. Give the
+    // mock WS open promise a chance to flush.
+    await env.flush();
+    const sent = env.server.receivedWsMessages.find(
+      (entry) =>
+        entry.userId === "u1" &&
+        typeof entry.msg === "object" &&
+        entry.msg !== null &&
+        (entry.msg as { type?: string }).type === "reactive-subscribe" &&
+        (entry.msg as { sub_id?: string }).sub_id === "sub-1",
+    );
+    expect(sent).toBeDefined();
+
+    env.server.pushToUser("u1", {
+      type: "reactive-result",
+      sub_id: "sub-1",
+      result: { rows: [{ id: "x" }] },
+    });
+    await env.flush();
+
+    expect(delivered).toMatchObject({ rows: [{ id: "x" }] });
+  });
+
+  // Tombstone seq-guard: once a row is deleted at seq=N, a stale
+  // insert/update with seq < N must NOT resurrect it. Pins the
+  // tombstone bookkeeping in LocalStore.applyChange().
+  test("tombstoned row is not resurrected by stale lower-seq event", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    env.engine.store.applyChange({
+      seq: 100,
+      entity: "Note",
+      row_id: "n1",
+      kind: "delete",
+      data: { id: "n1" },
+      timestamp: "",
+    });
+    expect(env.engine.store.get("Note", "n1")).toBeNull();
+
+    env.engine.store.applyChange({
+      seq: 50,
+      entity: "Note",
+      row_id: "n1",
+      kind: "insert",
+      data: { id: "n1", title: "STALE" },
+      timestamp: "",
+    });
+    expect(env.engine.store.get("Note", "n1")).toBeNull();
+
+    env.engine.store.applyChange({
+      seq: 200,
+      entity: "Note",
+      row_id: "n1",
+      kind: "insert",
+      data: { id: "n1", title: "fresh" },
+      timestamp: "",
+    });
+    expect(env.engine.store.get("Note", "n1")).toMatchObject({ title: "fresh" });
+  });
+
+  // Stale WS retransmit at the engine level: an event with seq <=
+  // cursor.last_seq must be dropped by enqueueApply before the
+  // store ever sees it. Pins the per-event monotonic filter at
+  // index.ts:580. Sending the WS event with seq=1 after the cursor
+  // has advanced past it should be a no-op.
+  test("WS retransmit with stale seq is dropped by enqueueApply", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    env.server.insert("Note", { id: "n1", title: "fresh" });
+    env.server.insert("Note", { id: "n2", title: "two" });
+    await env.flush(50);
+    expect(env.engine.store.get("Note", "n1")).toMatchObject({ title: "fresh" });
+
+    // Push a manual envelope claiming to be seq=1 with stale data
+    // for n1 — engine's monotonic filter sees seq=1 <= cursor and
+    // drops it before the store applies it.
+    env.server.pushToUser("u1", {
+      seq: 1,
+      entity: "Note",
+      row_id: "n1",
+      kind: "update",
+      data: { id: "n1", title: "STALE" },
+      timestamp: "",
+    });
+    await env.flush();
+
+    expect(env.engine.store.get("Note", "n1")).toMatchObject({ title: "fresh" });
+  });
+
+  // serverOnly field stripping (pins commits cf71992f / 109bed48):
+  // fields the schema declares server-only must never reach the
+  // client replica. The harness's `projectRow` strips `secret`
+  // before serialization, mimicking how production projects rows
+  // on the wire path. Engine should never observe the stripped
+  // field, neither via pull nor via WS.
+  test("serverOnly field is stripped before reaching the engine", async () => {
+    env = createTestEnv({
+      projectRow: (_entity, row) => {
+        const r = row as Record<string, unknown>;
+        const { secret: _omit, ...rest } = r;
+        return rest as typeof row;
+      },
+    });
+    env.server.seed("Note", [
+      { id: "n1", title: "hi", secret: "shh" },
+    ]);
+    env.signIn({ userId: "u1" });
+    await env.start();
+    await env.flush();
+
+    const row = env.engine.store.get("Note", "n1") as Record<string, unknown> | null;
+    expect(row).not.toBeNull();
+    expect(row).toMatchObject({ title: "hi" });
+    expect(row).not.toHaveProperty("secret");
+
+    // Also verify WS-delivered updates are stripped.
+    env.server.update("Note", "n1", { title: "edited", secret: "leak" });
+    await env.flush(50);
+    const after = env.engine.store.get("Note", "n1") as Record<string, unknown> | null;
+    expect(after).toMatchObject({ title: "edited" });
+    expect(after).not.toHaveProperty("secret");
+  });
+
+  // 410 RESYNC_REQUIRED handler (pins the cursor-mismatch recovery
+  // path): on 410, engine resets the replica and re-pulls from
+  // seq=0. Without the handler the cursor stays ahead of the
+  // server forever and pulls return empty.
+  test("410 RESYNC_REQUIRED triggers resetReplica + re-pull", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "before" }]);
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.list("Note")).toHaveLength(1);
+
+    // Push a stale local row that should be cleared by resetReplica.
+    env.engine.store.applyChange({
+      seq: 99999,
+      entity: "Note",
+      row_id: "stale-only",
+      kind: "insert",
+      data: { id: "stale-only", title: "ghost" },
+      timestamp: "",
+    });
+    expect(env.engine.store.get("Note", "stale-only")).not.toBeNull();
+
+    // Add a fresh canonical row so the post-410 re-pull has new
+    // state to deliver, then prime the 410 and trigger a pull.
+    env.server.insert("Note", { id: "n2", title: "after-410" });
+    env.server.primeNextPullStatus(410);
+    await env.engine.pull();
+    await env.flush();
+
+    // After 410, ghost is cleared (resetReplica wiped local-only
+    // rows) and canonical rows are present (re-pull from seq=0).
+    expect(env.engine.store.get("Note", "stale-only")).toBeNull();
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n2")).not.toBeNull();
+  });
+
+  // Row-revoked envelope: server pushes `row-revoked` to a
+  // subscriber whose read policy was revoked for a specific row.
+  // The engine must drop the row from the local replica and
+  // tombstone at the carried seq so racing stale WS frames don't
+  // resurrect it. Pins index.ts:792-806 + handleRowRevocation.
+  test("row-revoked envelope removes the local row", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    env.server.insert("Note", { id: "n1", title: "visible" });
+    await env.flush(50);
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+
+    env.server.pushToUser("u1", {
+      type: "row-revoked",
+      entity: "Note",
+      row_id: "n1",
+      seq: env.server.nextSeqValue(),
+    });
+    await env.flush(50);
+    expect(env.engine.store.get("Note", "n1")).toBeNull();
+
+    // Stale insert at lower seq must not resurrect the row.
+    env.server.pushToUser("u1", {
+      seq: 1,
+      entity: "Note",
+      row_id: "n1",
+      kind: "insert",
+      data: { id: "n1", title: "STALE" },
+      timestamp: "",
+    });
+    await env.flush();
+    expect(env.engine.store.get("Note", "n1")).toBeNull();
+  });
+
+  // Optimistic mutation survives reconcile (pins #150 / index.ts
+  // comment naming `hydrated_offline_mutations_survive_startup_reconcile`).
+  // A pending mutation must NOT be tombstoned by reconcile's
+  // "local row missing from server snapshot" branch — push() will
+  // ship it; until then, the local row is the canonical state.
+  test("pending mutation survives a sweeping reconcile", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    // Optimistic insert — push will queue this op, server returns
+    // ops:[] from our mock (success no-op), but the queue still
+    // tracks the in-flight mutation until clearance. Reconcile
+    // running mid-flight sees `pendingRowKeys` and skips the row.
+    const id = await env.engine.insert("Note", { title: "draft" });
+    await env.flush();
+    expect(env.engine.store.get("Note", id)).not.toBeNull();
+
+    // Reconcile against a server that knows nothing about this row.
+    await env.engine.reconcile(["Note"]);
+    await env.flush();
+
+    // The optimistic row survives because pendingRowKeys protected
+    // it from the removal pass. Reverting #150 would tombstone it.
+    expect(env.engine.store.get("Note", id)).not.toBeNull();
+  });
+
+  // Sign-out via the harness clears the resolved session AND the
+  // replica. Pins the "tenant flips from X to null on signOut"
+  // branch of refreshResolvedSession — resetReplica fires.
+  test("signOut clears the resolved session and replica", async () => {
+    env = createTestEnv({ visible: tenantScopedVisibility });
+    env.server.seed("Recording", [{ id: "r1", orgId: "org-a" }]);
+    env.signIn({ userId: "u1", tenantId: "org-a" });
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.list("Recording")).toHaveLength(1);
+    expect(env.engine.resolvedSession().userId).toBe("u1");
+
+    // signOut on the server side (revoke the token + broadcast),
+    // then drop the local token. The engine refreshes its
+    // session via the WS envelope; tenant flip X → null fires
+    // resetReplica and a re-pull under the anonymous context.
+    if (env.token) env.server.revoke(env.token);
+    env.signOut();
+    await env.engine.notifySessionChanged();
+    await env.flush();
+
+    expect(env.engine.resolvedSession().userId).toBeNull();
+    expect(env.engine.resolvedSession().tenantId).toBeNull();
+    expect(env.engine.store.list("Recording")).toHaveLength(0);
+  });
+
+  // Two visibility-change-style reconciles fired back-to-back must
+  // produce EXACTLY ONE network round per entity. Stricter than
+  // the previous "<= 2" bound, which would have passed even if
+  // coalescing was broken. Pins the inFlightReconcile dedupe.
+  test("back-to-back reconcile calls coalesce to a single fetch", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1" }]);
+    await env.start();
+    await env.flush();
+    const before = env.transport.fetchCount();
+
+    const p1 = env.engine.reconcile(["Note"]);
+    const p2 = env.engine.reconcile(["Note"]);
+    await Promise.all([p1, p2]);
+    await env.flush();
+
+    // Exactly one /api/entities/Note/cursor call should have fired.
+    expect(env.transport.fetchCount() - before).toBe(1);
+  });
+
+  // Anonymous session pulls produce empty results under tenant-scoped
+  // policy. Pins the "no session = no rows" baseline so future bugs
+  // that accidentally leak public rows fail loudly.
+  test("anonymous session sees nothing under tenant-scoped policy", async () => {
+    env = createTestEnv({
+      visible: (_e, rows, auth) =>
+        auth.userId
+          ? rows.filter((r) => (r as { orgId?: string }).orgId === auth.tenantId)
+          : [],
+    });
+    env.server.seed("Recording", [{ id: "r1", orgId: "org-a" }]);
+    // No signIn() — engine starts anonymous.
+    await env.start();
+    expect(env.engine.store.list("Recording")).toHaveLength(0);
+  });
+
+  // Token rotation preserves tenant (pins commit 8bb2b21c-style fix
+  // for SessionStore::refresh). A user signs into org-a, then their
+  // token is rotated (same user, fresh string). The resolved
+  // session must still carry tenantId="org-a" — the rotation must
+  // not silently downgrade to no-tenant.
+  test("token rotation preserves the resolved tenant", async () => {
+    env = createTestEnv({ visible: tenantScopedVisibility });
+    env.server.seed("Recording", [{ id: "r1", orgId: "org-a" }]);
+    env.signIn({ userId: "u1", tenantId: "org-a" });
+    await env.start();
+    await env.flush();
+    expect(env.engine.resolvedSession().tenantId).toBe("org-a");
+
+    // Mint a fresh token for the same user + tenant — the new
+    // token replaces the old as the engine's currentToken.
+    const fresh = env.server.signIn({ userId: "u1", tenantId: "org-a" });
+    env.transport.setToken(fresh);
+    await env.engine.notifySessionChanged();
+    await env.flush();
+
+    expect(env.engine.resolvedSession().userId).toBe("u1");
+    expect(env.engine.resolvedSession().tenantId).toBe("org-a");
+    // And the replica survives — token rotation must not wipe it.
+    expect(env.engine.store.get("Recording", "r1")).not.toBeNull();
   });
 });
