@@ -48,6 +48,42 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return run_with_code(&cloud, &code, json_mode);
     }
 
+    // Non-interactive paths for agents / CI:
+    //   --token <token>     direct
+    //   --token-stdin       read from stdin (single line; works under pipes)
+    //   PYLON_CLI_TOKEN=…   env var
+    let token_flag = args
+        .windows(2)
+        .find(|w| w[0] == "--token")
+        .map(|w| w[1].clone())
+        .or_else(|| {
+            args.iter()
+                .find(|a| a.starts_with("--token="))
+                .map(|a| a.trim_start_matches("--token=").to_string())
+        });
+    let token_stdin = args.iter().any(|a| a == "--token-stdin");
+    let env_token = std::env::var("PYLON_CLI_TOKEN").ok().filter(|s| !s.is_empty());
+
+    if let Some(token) = token_flag.or(env_token) {
+        return run_with_token(&cloud, &token, json_mode);
+    }
+    if token_stdin {
+        let stdin = io::stdin();
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).is_err() {
+            output::print_error("Failed to read token from stdin.");
+            return ExitCode::Usage;
+        }
+        let token = line.trim().to_string();
+        if token.is_empty() {
+            output::print_error("Empty token on stdin.");
+            return ExitCode::Usage;
+        }
+        return run_with_token(&cloud, &token, json_mode);
+    }
+
+    // Interactive fallback for humans at a terminal. Agents should
+    // never reach this — they'll get a paste prompt that hangs.
     let token_url = format!(
         "{}/dashboard/account/cli-tokens",
         cloud.trim_end_matches('/')
@@ -57,6 +93,9 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         println!();
         println!("→ Sign in at: {token_url}");
         println!("  Click \"Create CLI token\", copy the value, and paste it below.");
+        println!("  Non-interactive: pylon login --token <token>");
+        println!("                   PYLON_CLI_TOKEN=<token> pylon login");
+        println!("                   echo <token> | pylon login --token-stdin");
         println!();
     }
 
@@ -112,6 +151,42 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         println!("✓ Signed in as {email}");
         println!("  Cloud: {cloud}");
         println!("  You can now run `pylon deploy --target cloud` from any Pylon project.");
+    }
+    ExitCode::Ok
+}
+
+/// `pylon login --token <token>` (or via stdin / env var) — validate
+/// the token against the cloud and persist credentials, fully
+/// non-interactive. Agents and CI use this; the paste-prompt path is
+/// the human fallback.
+fn run_with_token(cloud: &str, token: &str, json_mode: bool) -> ExitCode {
+    let email = match validate_token(cloud, token) {
+        Ok(email) => email,
+        Err(e) => {
+            output::print_error(&format!("Token did not validate: {e}"));
+            return ExitCode::Usage;
+        }
+    };
+    let creds = Credentials {
+        cloud_url: cloud.to_string(),
+        token: token.to_string(),
+        user_email: Some(email.clone()),
+    };
+    if let Err(e) = save_credentials(&creds) {
+        output::print_error(&format!("Failed to save credentials: {e}"));
+        return ExitCode::Error;
+    }
+    if json_mode {
+        let out = serde_json::json!({
+            "ok": true,
+            "cloud_url": cloud,
+            "user_email": email,
+            "via": "token",
+        });
+        println!("{}", serde_json::to_string(&out).unwrap_or_default());
+    } else {
+        println!("✓ Signed in as {email}");
+        println!("  Cloud: {cloud}");
     }
     ExitCode::Ok
 }

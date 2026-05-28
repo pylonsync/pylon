@@ -58,19 +58,59 @@ enum TailResponse {
 }
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && *a != "logs")
-        .map(|s| s.as_str())
-        .collect();
+    // --help / -h should ALWAYS print help, not start streaming. Agents
+    // that invoke `pylon logs --help` to discover usage otherwise get
+    // stuck in a never-ending log stream.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return ExitCode::Ok;
+    }
+    // Walk the args dropping flag values too (--project <slug>,
+    // --limit N, etc.). Previously the positional filter only
+    // skipped dash-prefixed tokens, so `--project yapless` left
+    // `yapless` floating and got mistaken for a subcommand.
+    let flag_takes_value = |s: &str| {
+        matches!(s, "--project" | "--limit" | "--token") && !s.contains('=')
+    };
+    let mut positional: Vec<&str> = Vec::new();
+    let mut iter = args.iter().enumerate();
+    while let Some((_, a)) = iter.next() {
+        if a == "logs" {
+            continue;
+        }
+        if a.starts_with('-') {
+            if flag_takes_value(a) {
+                let _ = iter.next();
+            }
+            continue;
+        }
+        positional.push(a.as_str());
+    }
     match positional.first().copied() {
         Some("tail") | None => run_tail(args, json_mode),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
-            eprintln!("Usage: pylon logs [tail]");
+            eprintln!("Usage: pylon logs [tail] [--limit N] [--follow]");
             ExitCode::Usage
         }
     }
+}
+
+fn print_help() {
+    println!("pylon logs — stream the project's request log");
+    println!();
+    println!("USAGE");
+    println!("  pylon logs [tail] [--limit N] [--follow] [--json]");
+    println!();
+    println!("FLAGS");
+    println!("  --limit N    Fetch the most recent N rows and exit. Default: stream.");
+    println!("  --follow     Force streaming mode even if --limit is set.");
+    println!("  --json       One JSON object per line (timestamp/method/path/status/...).");
+    println!("  --project    Override the active project slug.");
+    println!();
+    println!("EXAMPLES");
+    println!("  pylon logs --limit 100 --json     # one-shot fetch, agent-safe");
+    println!("  pylon logs tail                   # interactive stream (Ctrl-C to stop)");
 }
 
 fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
@@ -97,17 +137,42 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    if !json_mode {
+    // Agent-safe one-shot mode: --limit N fetches the most recent
+    // chunk and exits. --follow overrides if both are passed.
+    let limit: Option<usize> = args
+        .windows(2)
+        .find(|w| w[0] == "--limit")
+        .and_then(|w| w[1].parse().ok())
+        .or_else(|| {
+            args.iter()
+                .find(|a| a.starts_with("--limit="))
+                .and_then(|a| a.trim_start_matches("--limit=").parse().ok())
+        });
+    let follow = args.iter().any(|a| a == "--follow");
+    let one_shot = limit.is_some() && !follow;
+
+    if !json_mode && !one_shot {
         eprintln!("→ Tailing logs for {project_slug}. Ctrl-C to stop.");
     }
 
     let mut cursor: Option<String> = None;
     let mut printed_unavailable = false;
+    let mut emitted: usize = 0;
     loop {
         match fetch_chunk(&creds, &project_id, cursor.as_deref()) {
             Ok(TailResponse::Ok { rows, cursor: next }) => {
                 printed_unavailable = false;
-                for row in &rows {
+                // In one-shot mode, show the tail of the buffer (the
+                // user almost always wants "the last N", not "the first
+                // N since boot"). The server returns chronological asc,
+                // so slice from the back.
+                let to_print: &[LogRow] = if let Some(n) = limit.filter(|_| one_shot) {
+                    let start = rows.len().saturating_sub(n);
+                    &rows[start..]
+                } else {
+                    &rows[..]
+                };
+                for row in to_print {
                     if json_mode {
                         println!(
                             "{}",
@@ -126,8 +191,12 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
                     } else {
                         print_human(row);
                     }
+                    emitted += 1;
                 }
                 let _ = std::io::stdout().flush();
+                if one_shot {
+                    return ExitCode::Ok;
+                }
                 if let Some(c) = next {
                     cursor = Some(c);
                 }
