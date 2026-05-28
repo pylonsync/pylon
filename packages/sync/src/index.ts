@@ -1495,7 +1495,27 @@ export class SyncEngine {
         this.lastSeenTenant !== undefined &&
         this.lastSeenTenant !== tenantNow
       ) {
-        await this.resetReplica();
+        // Two flavors of "tenant changed":
+        //
+        //   - null → X  : session first-resolution. The engine started
+        //                 before the app called /api/auth/select-org;
+        //                 /api/auth/me returned tenant_id=null at start
+        //                 and is only now reporting the real value.
+        //                 The cached IndexedDB rows ARE for tenant X
+        //                 (that's where the user's data lives), so
+        //                 wiping them would tombstone valid state and
+        //                 produce the "rows render then flash away"
+        //                 symptom multi-tenant apps were hitting. Skip
+        //                 the reset; pull under the new tenant fills
+        //                 any gaps via the existing cursor catch-up.
+        //
+        //   - X → Y     : actual org switch. Cached rows belong to
+        //                 the OLD tenant and must not bleed into the
+        //                 new context, so resetReplica is correct.
+        const firstResolution = this.lastSeenTenant === null && tenantNow !== null;
+        if (!firstResolution) {
+          await this.resetReplica();
+        }
         await this.pull();
       }
       this.lastSeenTenant = tenantNow;
