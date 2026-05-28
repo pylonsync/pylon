@@ -78,17 +78,20 @@ describe("reactive subscription refcount under remount", () => {
     });
 
     // Internal owner set should have size 1 (self only, idempotent
-    // because Set.add).
+    // because Set.add). Reach into the SubscriptionCoordinator that
+    // the engine delegates to.
     const engine = env.engine as unknown as {
-      reactiveSubOwners: Map<string, Set<string>>;
       serverSubs: { has(k: string): boolean };
+      subscriptions: {
+        reactiveSubOwners: Map<string, Set<string>>;
+      };
     };
-    expect(engine.reactiveSubOwners.get("sub-1")?.size).toBe(1);
+    expect(engine.subscriptions.reactiveSubOwners.get("sub-1")?.size).toBe(1);
     expect(engine.serverSubs.has("sub-1")).toBe(true);
 
     // First unsubscribe: handler removed, owner count → 0 → unsub.
     env.engine.unsubscribeReactive("sub-1");
-    expect(engine.reactiveSubOwners.has("sub-1")).toBe(false);
+    expect(engine.subscriptions.reactiveSubOwners.has("sub-1")).toBe(false);
     expect(engine.serverSubs.has("sub-1")).toBe(false);
 
     // Second unsubscribe (the StrictMode double-unmount) is a no-op

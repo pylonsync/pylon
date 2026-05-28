@@ -19,6 +19,7 @@ import { MultiTabBroker } from "./multi-tab";
 import { OpQueue } from "./op-queue";
 import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
+import { SubscriptionCoordinator } from "./subscription-coordinator";
 import {
   createTransport,
   type Transport,
@@ -309,59 +310,14 @@ export class SyncEngine {
    */
   private serverSubs!: ServerSubscriptions;
 
-  /** Per-row local refcount for CRDT subscriptions — N `useLoroDoc`
-   *  components on the same `(entity, rowId)` in THIS tab share a
-   *  single server subscription. Distinct from reactiveSubOwners
-   *  because CRDT keys are per-row (many consumers per tab) while
-   *  reactive sub_ids are per-consumer-instance (typically one).
-   *  StrictMode double-subscribe still bumps the count by one each
-   *  call; the matching double-unsubscribe early-returns when the
-   *  count is already zero, so the math balances. */
-  private crdtSubscribers: Map<string, number> = new Map();
-
-  /** Per-row set of FOLLOWER tabIds that have forwarded a
-   *  `sub-register` for this key. Leader-only. Used to:
-   *    (a) skip the WS unsubscribe until both `crdtSubscribers`
-   *        and this set are empty, and
-   *    (b) skip the cross-tab binary broadcast when no follower
-   *        cares about CRDT (saves bandwidth when the leader is
-   *        the only CRDT consumer). */
-  private crdtForwarders: Map<string, Set<string>> = new Map();
-
-  /** Sentinel for "this leader tab subscribed locally" — used as a
-   *  refcount-bearer key in subscription owner sets so the leader's
-   *  own subs don't get conflated with forwarded follower subs. */
-  private static readonly OWN_TAB = "__self__";
-
-  /** Per-sub_id ownership set for reactive subscriptions on the
-   *  leader: which tabs (self + forwarders) want this sub alive.
-   *  A SET, not a count, so a follower crash + late `sub-unregister`
-   *  storm can't underflow the count, and a remount/StrictMode
-   *  double-subscribe from one tab still counts as one owner.
-   *
-   *  Without per-tab tracking, two `subscribeReactive` calls from
-   *  the same tab (e.g., React StrictMode's intentional double-
-   *  invocation) would push the count to 2; the matching double-
-   *  unsubscribe only decrements once (the second early-returns on
-   *  StrictMode-safe semantics), leaking one ref per cycle. */
-  private reactiveSubOwners: Map<string, Set<string>> = new Map();
-
-  /** Inbound message routing for reactive subscriptions — server pushes
-   *  `reactive-result` / `reactive-error` envelopes keyed by sub_id,
-   *  and the React hook's handler lives here. ServerSubscriptions
-   *  doesn't route messages; this map does. */
-  private reactiveHandlers: Map<string, (msg: ReactiveMessage) => void> =
-    new Map();
-
-  /** Specs (fn_name + args) for every reactive subscription this tab
-   *  has registered, regardless of leader/follower role. On promotion
-   *  the new leader uses these to register with serverSubs; on a
-   *  leader change while we stay a follower, we use them to
-   *  re-forward `sub-register` to the new leader. */
-  private wantedReactiveSpecs: Map<
-    string,
-    { fn_name: string; args: unknown }
-  > = new Map();
+  /** Coordinator for every "this tab wants live updates" subscription —
+   *  CRDT row subs + reactive query subs, leader bookkeeping + follower
+   *  forwarding. The engine delegates `subscribeCrdt` / `unsubscribeCrdt`
+   *  / `subscribeReactive` / `unsubscribeReactive` to it, and routes
+   *  inbound multi-tab `sub-register` / `sub-unregister` / `reactive-msg`
+   *  envelopes through it. Constructed lazily in start() because
+   *  serverSubs isn't built until then. */
+  private subscriptions!: SubscriptionCoordinator;
 
   /**
    * Listeners notified when the server signals a per-subscriber row
@@ -428,6 +384,10 @@ export class SyncEngine {
     // sendWs helper short-circuits otherwise) so registering before
     // start() is safe — the spec gets replayed on `ws.onopen`.
     this.serverSubs = new ServerSubscriptions((msg) => this.sendWs(msg));
+    this.subscriptions = new SubscriptionCoordinator(this.serverSubs, {
+      isLeader: () => this.isMultiTabLeader,
+      broadcastToTabs: (payload) => this.broadcastToTabs(payload),
+    });
     // When multi-tab coordination is explicitly disabled, this engine
     // is always its own sole leader — even before start(). Tests that
     // construct an engine and call reconcile()/pull() directly without
@@ -681,38 +641,13 @@ export class SyncEngine {
   }
 
   /** Seed serverSubs with every subscription this tab currently wants.
-   *  Called from both the initial-leader path (when start() lands here
-   *  as leader and there might be subscribes that happened before
-   *  start() — those took the follower branch which broadcasts to a
-   *  not-yet-running broker, so the registers were lost) and the
-   *  late-promotion path (where the previous leader owned the subs
-   *  and we need to claim them). Idempotent: serverSubs.register
-   *  dedupes by payload equality. */
+   *  Called from both the initial-leader path (subscribes that
+   *  happened before start() took the follower branch and broadcast
+   *  to a not-yet-running broker, so the registers were lost) and the
+   *  late-promotion path (the previous leader owned the subs and we
+   *  need to claim them). */
   private seedServerSubsFromLocalInterest(): void {
-    for (const [sub_id, spec] of this.wantedReactiveSpecs) {
-      this.serverSubs.register(sub_id, {
-        type: "reactive-subscribe",
-        sub_id,
-        fn_name: spec.fn_name,
-        args: spec.args,
-      });
-      let owners = this.reactiveSubOwners.get(sub_id);
-      if (!owners) {
-        owners = new Set();
-        this.reactiveSubOwners.set(sub_id, owners);
-      }
-      owners.add(SyncEngine.OWN_TAB);
-    }
-    for (const key of this.crdtSubscribers.keys()) {
-      const [entity, rowId] = key.split("\x00");
-      if (entity && rowId !== undefined) {
-        this.serverSubs.register(key, {
-          type: "crdt-subscribe",
-          entity,
-          rowId,
-        });
-      }
-    }
+    this.subscriptions.seedFromLocalInterest();
   }
 
   /** Late promotion: the previous leader dropped while we were
@@ -755,47 +690,12 @@ export class SyncEngine {
   }
 
   /** A peer tab left the coordination group gracefully. Only meaningful
-   *  on the leader side — we own the forwarded-sub state. Scrub every
-   *  forwarder/owner entry for the departed tab; when a key drops to
-   *  zero remaining owners (no local consumer, no forwarder) we
-   *  unregister the server subscription so the WS stops fanning data
-   *  at a tab that no longer exists. */
+   *  on the leader side — we own the forwarded-sub state. Delegates to
+   *  the coordinator, which scrubs forwarder/owner entries and
+   *  unregisters server subscriptions that no longer have any owner. */
   private onMultiTabPeerLeft(tabId: string): void {
     if (!this.isMultiTabLeader) return;
-    // CRDT forwarders: each key holds a Set<tabId>. Remove the departed
-    // tab; if the set is now empty AND there's no local consumer for
-    // the same row, unregister.
-    for (const [key, fwd] of this.crdtForwarders) {
-      if (!fwd.delete(tabId)) continue;
-      if (fwd.size === 0) {
-        this.crdtForwarders.delete(key);
-        const localCount = this.crdtSubscribers.get(key) ?? 0;
-        if (localCount === 0 && this.serverSubs.has(key)) {
-          const [entity, rowId] = key.split("\x00");
-          if (entity && rowId !== undefined) {
-            this.serverSubs.unregister(key, {
-              type: "crdt-unsubscribe",
-              entity,
-              rowId,
-            });
-          }
-        }
-      }
-    }
-    // Reactive owners: each sub_id holds a Set<tabId>. Same pattern —
-    // a self-owned sub keeps the entry alive via the OWN_TAB sentinel.
-    for (const [sub_id, owners] of this.reactiveSubOwners) {
-      if (!owners.delete(tabId)) continue;
-      if (owners.size === 0) {
-        this.reactiveSubOwners.delete(sub_id);
-        if (this.serverSubs.has(sub_id)) {
-          this.serverSubs.unregister(sub_id, {
-            type: "reactive-unsubscribe",
-            sub_id,
-          });
-        }
-      }
-    }
+    this.subscriptions.scrubPeer(tabId);
   }
 
   /** Replay every server-subscription this tab is interested in by
@@ -803,28 +703,7 @@ export class SyncEngine {
    *  leader asking via `request-sub-replay`. The leader's handler
    *  registers them with its serverSubs. */
   private replayForwardedSubs(): void {
-    for (const [sub_id, spec] of this.wantedReactiveSpecs) {
-      this.broadcastToTabs({
-        type: "sub-register",
-        kind: "reactive",
-        key: sub_id,
-        sub_id,
-        fn_name: spec.fn_name,
-        args: spec.args,
-      });
-    }
-    for (const key of this.crdtSubscribers.keys()) {
-      const [entity, rowId] = key.split("\x00");
-      if (entity && rowId !== undefined) {
-        this.broadcastToTabs({
-          type: "sub-register",
-          kind: "crdt",
-          key,
-          entity,
-          rowId,
-        });
-      }
-    }
+    this.subscriptions.replayForwardedSubs();
   }
 
   /** Demotion: another tab took over as leader. Tear down our
@@ -944,95 +823,12 @@ export class SyncEngine {
         // subscribe frame; inbound `reactive-result` / binary frames
         // already broadcast back to all tabs (see WS onmessage).
         if (!this.isMultiTabLeader) return;
-        const kind = msg.kind as string;
-        const key = msg.key as string;
-        if (kind === "crdt") {
-          const entity = msg.entity as string;
-          const rowId = msg.rowId as string;
-          // Track the forwarding follower in a separate set (NOT
-          // the local refcount) — repeated sub-register from the
-          // same follower stays idempotent, and a follower crash
-          // before sub-unregister leaks at most one entry that the
-          // next election drops from the roster.
-          let fwd = this.crdtForwarders.get(key);
-          if (!fwd) {
-            fwd = new Set();
-            this.crdtForwarders.set(key, fwd);
-          }
-          fwd.add(fromTabId);
-          // Register if nothing else owned this key — local count
-          // and forwarder set together gate the WS subscribe.
-          const localCount = this.crdtSubscribers.get(key) ?? 0;
-          if (localCount === 0 && fwd.size === 1) {
-            this.serverSubs.register(key, {
-              type: "crdt-subscribe",
-              entity,
-              rowId,
-            });
-          }
-        } else if (kind === "reactive") {
-          const sub_id = msg.sub_id as string;
-          const fn_name = msg.fn_name as string;
-          const args = msg.args;
-          // Per-tab ownership: the forwarding follower adds itself
-          // to the owner set. Re-broadcasts from the SAME tab (e.g.,
-          // StrictMode remount + sub-register) leave the size at 1.
-          let owners = this.reactiveSubOwners.get(sub_id);
-          if (!owners) {
-            owners = new Set();
-            this.reactiveSubOwners.set(sub_id, owners);
-          }
-          owners.add(fromTabId);
-          this.serverSubs.register(sub_id, {
-            type: "reactive-subscribe",
-            sub_id,
-            fn_name,
-            args,
-          });
-        }
+        this.subscriptions.handleForwardedRegister(msg, fromTabId);
         break;
       }
       case "sub-unregister": {
         if (!this.isMultiTabLeader) return;
-        const kind = msg.kind as string;
-        const key = msg.key as string;
-        if (kind === "crdt") {
-          const entity = msg.entity as string;
-          const rowId = msg.rowId as string;
-          const fwd = this.crdtForwarders.get(key);
-          if (fwd) {
-            fwd.delete(fromTabId);
-            if (fwd.size === 0) this.crdtForwarders.delete(key);
-          }
-          // Unsubscribe only when neither local consumers nor any
-          // forwarding follower still wants this row.
-          const localCount = this.crdtSubscribers.get(key) ?? 0;
-          const remainingFwd = this.crdtForwarders.get(key)?.size ?? 0;
-          if (localCount === 0 && remainingFwd === 0) {
-            if (this.serverSubs.has(key)) {
-              this.serverSubs.unregister(key, {
-                type: "crdt-unsubscribe",
-                entity,
-                rowId,
-              });
-            }
-          }
-        } else if (kind === "reactive") {
-          const sub_id = msg.sub_id as string;
-          const owners = this.reactiveSubOwners.get(sub_id);
-          if (owners) {
-            owners.delete(fromTabId);
-            if (owners.size === 0) {
-              this.reactiveSubOwners.delete(sub_id);
-              if (this.serverSubs.has(sub_id)) {
-                this.serverSubs.unregister(sub_id, {
-                  type: "reactive-unsubscribe",
-                  sub_id,
-                });
-              }
-            }
-          }
-        }
+        this.subscriptions.handleForwardedUnregister(msg, fromTabId);
         break;
       }
       case "reactive-msg": {
@@ -1042,8 +838,7 @@ export class SyncEngine {
         // requested the subscription).
         const sub_id = msg.sub_id as string;
         const payload = msg.payload as ReactiveMessage;
-        const handler = this.reactiveHandlers.get(sub_id);
-        if (handler) handler(payload);
+        this.subscriptions.handleReactiveMessage(sub_id, payload);
         break;
       }
       case "binary": {
@@ -2291,35 +2086,7 @@ export class SyncEngine {
    * intervening unsubscribe just bumps the refcount.
    */
   subscribeCrdt(entity: string, rowId: string): void {
-    const key = `${entity}\x00${rowId}`;
-    const prev = this.crdtSubscribers.get(key) ?? 0;
-    this.crdtSubscribers.set(key, prev + 1);
-    if (prev === 0) {
-      if (!this.isMultiTabLeader) {
-        // Followers don't have a WS — ask the leader to subscribe on
-        // our behalf. The leader echoes binary frames back over the
-        // broadcast channel so our local binaryHandlers fire normally.
-        this.broadcastToTabs({
-          type: "sub-register",
-          kind: "crdt",
-          key,
-          entity,
-          rowId,
-        });
-      } else {
-        // Leader path: only send the WS subscribe if no follower had
-        // already forwarded one for this key (in which case the WS
-        // sub is already alive).
-        const hasFwd = (this.crdtForwarders.get(key)?.size ?? 0) > 0;
-        if (!hasFwd) {
-          this.serverSubs.register(key, {
-            type: "crdt-subscribe",
-            entity,
-            rowId,
-          });
-        }
-      }
-    }
+    this.subscriptions.subscribeCrdt(entity, rowId);
   }
 
   /**
@@ -2332,34 +2099,7 @@ export class SyncEngine {
    * invocation in dev from over-decrementing past zero.
    */
   unsubscribeCrdt(entity: string, rowId: string): void {
-    const key = `${entity}\x00${rowId}`;
-    const prev = this.crdtSubscribers.get(key) ?? 0;
-    if (prev <= 0) return;
-    if (prev === 1) {
-      this.crdtSubscribers.delete(key);
-      if (!this.isMultiTabLeader) {
-        this.broadcastToTabs({
-          type: "sub-unregister",
-          kind: "crdt",
-          key,
-          entity,
-          rowId,
-        });
-      } else {
-        // Leader: only tear down the WS sub if no follower is still
-        // forwarded for this key.
-        const remainingFwd = this.crdtForwarders.get(key)?.size ?? 0;
-        if (remainingFwd === 0 && this.serverSubs.has(key)) {
-          this.serverSubs.unregister(key, {
-            type: "crdt-unsubscribe",
-            entity,
-            rowId,
-          });
-        }
-      }
-    } else {
-      this.crdtSubscribers.set(key, prev - 1);
-    }
+    this.subscriptions.unsubscribeCrdt(entity, rowId);
   }
 
   // -----------------------------------------------------------------------
@@ -2394,76 +2134,14 @@ export class SyncEngine {
     args: unknown,
     handler: (msg: ReactiveMessage) => void,
   ): void {
-    // True idempotency under remount / StrictMode double-invocation:
-    // sets carry their own dedupe, and the matching double-unmount
-    // only decrements once (the second unmount early-returns because
-    // we delete the handler on the first), so the math balances
-    // without a second-subscribe guard.
-    this.reactiveHandlers.set(sub_id, handler);
-    this.wantedReactiveSpecs.set(sub_id, { fn_name, args });
-    if (!this.isMultiTabLeader) {
-      // Follower path: the WS lives on the leader. Forward the spec
-      // there; the leader registers with its own serverSubs and
-      // echoes inbound `reactive-result` / `reactive-error` envelopes
-      // back to us via the channel so our local handler fires.
-      this.broadcastToTabs({
-        type: "sub-register",
-        kind: "reactive",
-        key: sub_id,
-        sub_id,
-        fn_name,
-        args,
-      });
-      return;
-    }
-    // Leader path: register own ownership (idempotent via the
-    // Set) and forward to the WS. ServerSubscriptions re-sends on
-    // payload change, so an args update lands.
-    let owners = this.reactiveSubOwners.get(sub_id);
-    if (!owners) {
-      owners = new Set();
-      this.reactiveSubOwners.set(sub_id, owners);
-    }
-    owners.add(SyncEngine.OWN_TAB);
-    this.serverSubs.register(sub_id, {
-      type: "reactive-subscribe",
-      sub_id,
-      fn_name,
-      args,
-    });
+    this.subscriptions.subscribeReactive(sub_id, fn_name, args, handler);
   }
 
   /** Tear down a reactive subscription. Sends the unsubscribe to the
    *  server and clears local state. No-op for unknown sub_ids — React
    *  StrictMode double-unmount won't error. */
   unsubscribeReactive(sub_id: string): void {
-    if (!this.reactiveHandlers.has(sub_id)) return;
-    this.reactiveHandlers.delete(sub_id);
-    this.wantedReactiveSpecs.delete(sub_id);
-    if (!this.isMultiTabLeader) {
-      this.broadcastToTabs({
-        type: "sub-unregister",
-        kind: "reactive",
-        key: sub_id,
-        sub_id,
-      });
-      return;
-    }
-    // Leader path: drop self from the owner set; unsubscribe only
-    // when no owner (self or forwarder) remains.
-    const owners = this.reactiveSubOwners.get(sub_id);
-    if (owners) {
-      owners.delete(SyncEngine.OWN_TAB);
-      if (owners.size === 0) {
-        this.reactiveSubOwners.delete(sub_id);
-        if (this.serverSubs.has(sub_id)) {
-          this.serverSubs.unregister(sub_id, {
-            type: "reactive-unsubscribe",
-            sub_id,
-          });
-        }
-      }
-    }
+    this.subscriptions.unsubscribeReactive(sub_id);
   }
 
   /** Send a JSON message via the active transport. No-op when no
@@ -2584,14 +2262,12 @@ export class SyncEngine {
     // tabs via the multi-tab channel so a follower's
     // `useReactiveQuery` handler fires too.
     if (msg.type === "reactive-result" && typeof msg.sub_id === "string") {
-      const handler = this.reactiveHandlers.get(msg.sub_id);
-      if (handler) {
-        handler({ kind: "result", result: msg.result });
-      }
+      const payload = { kind: "result" as const, result: msg.result };
+      this.subscriptions.handleReactiveMessage(msg.sub_id, payload);
       this.broadcastToTabs({
         type: "reactive-msg",
         sub_id: msg.sub_id,
-        payload: { kind: "result", result: msg.result },
+        payload,
       });
       return;
     }
@@ -2601,8 +2277,7 @@ export class SyncEngine {
         code: typeof msg.code === "string" ? msg.code : "REACTIVE_ERROR",
         message: typeof msg.message === "string" ? msg.message : "",
       };
-      const handler = this.reactiveHandlers.get(msg.sub_id);
-      if (handler) handler(errPayload);
+      this.subscriptions.handleReactiveMessage(msg.sub_id, errPayload);
       this.broadcastToTabs({
         type: "reactive-msg",
         sub_id: msg.sub_id,
@@ -2634,7 +2309,7 @@ export class SyncEngine {
     // it's for. Acceptable for now; the lever to pull if it shows
     // up in profiling is a binaryRoutes map keyed by the Loro doc
     // id parsed from the frame header.
-    if (this.crdtForwarders.size > 0) {
+    if (this.subscriptions.hasCrdtForwarders()) {
       this.broadcastToTabs({ type: "binary", bytes });
     }
   }

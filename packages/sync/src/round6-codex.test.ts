@@ -196,18 +196,27 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     env = null;
   });
 
+  // Helper: reach into the SubscriptionCoordinator that the engine
+  // delegates to. The state these tests pin lives on the coordinator
+  // now, not the engine itself.
+  function internals(env: TestEnv) {
+    return env.engine as unknown as {
+      handleMultiTabMessage(msg: unknown, from: string): void;
+      onMultiTabPeerLeft(tabId: string): void;
+      serverSubs: { has(k: string): boolean };
+      subscriptions: {
+        crdtForwarders: Map<string, Set<string>>;
+        reactiveSubOwners: Map<string, Set<string>>;
+      };
+    };
+  }
+
   test("onMultiTabPeerLeft removes the tab from crdtForwarders + unregisters WS sub", async () => {
     env = createTestEnv();
     env.signIn({ userId: "u1" });
     await env.start();
 
-    const engine = env.engine as unknown as {
-      handleMultiTabMessage(msg: unknown, from: string): void;
-      onMultiTabPeerLeft(tabId: string): void;
-      crdtForwarders: Map<string, Set<string>>;
-      crdtSubscribers: Map<string, number>;
-      serverSubs: { has(k: string): boolean };
-    };
+    const engine = internals(env);
 
     // Simulate a follower forwarding a CRDT sub via the broker
     // app-message path. The leader's handler creates an entry in
@@ -223,15 +232,15 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
       "follower-1",
     );
 
-    expect(engine.crdtForwarders.get("Todo\x00row-1")?.has("follower-1")).toBe(
-      true,
-    );
+    expect(
+      engine.subscriptions.crdtForwarders.get("Todo\x00row-1")?.has("follower-1"),
+    ).toBe(true);
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(true);
 
     // Now the follower disappears (broker fires onLeave).
     engine.onMultiTabPeerLeft("follower-1");
 
-    expect(engine.crdtForwarders.has("Todo\x00row-1")).toBe(false);
+    expect(engine.subscriptions.crdtForwarders.has("Todo\x00row-1")).toBe(false);
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(false);
   });
 
@@ -240,12 +249,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     env.signIn({ userId: "u1" });
     await env.start();
 
-    const engine = env.engine as unknown as {
-      handleMultiTabMessage(msg: unknown, from: string): void;
-      onMultiTabPeerLeft(tabId: string): void;
-      crdtForwarders: Map<string, Set<string>>;
-      serverSubs: { has(k: string): boolean };
-    };
+    const engine = internals(env);
 
     // Two followers forward the SAME crdt key. The leader keeps a
     // single server sub with two entries in the forwarder set.
@@ -270,17 +274,17 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
       "follower-b",
     );
 
-    expect(engine.crdtForwarders.get("Todo\x00row-1")?.size).toBe(2);
+    expect(engine.subscriptions.crdtForwarders.get("Todo\x00row-1")?.size).toBe(2);
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(true);
 
     // Only follower-a leaves. The sub stays alive because follower-b
     // still owns it.
     engine.onMultiTabPeerLeft("follower-a");
 
-    expect(engine.crdtForwarders.get("Todo\x00row-1")?.size).toBe(1);
-    expect(engine.crdtForwarders.get("Todo\x00row-1")?.has("follower-b")).toBe(
-      true,
-    );
+    expect(engine.subscriptions.crdtForwarders.get("Todo\x00row-1")?.size).toBe(1);
+    expect(
+      engine.subscriptions.crdtForwarders.get("Todo\x00row-1")?.has("follower-b"),
+    ).toBe(true);
     expect(engine.serverSubs.has("Todo\x00row-1")).toBe(true);
   });
 
@@ -289,12 +293,7 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     env.signIn({ userId: "u1" });
     await env.start();
 
-    const engine = env.engine as unknown as {
-      handleMultiTabMessage(msg: unknown, from: string): void;
-      onMultiTabPeerLeft(tabId: string): void;
-      reactiveSubOwners: Map<string, Set<string>>;
-      serverSubs: { has(k: string): boolean };
-    };
+    const engine = internals(env);
 
     engine.handleMultiTabMessage(
       {
@@ -308,12 +307,14 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
       "follower-x",
     );
 
-    expect(engine.reactiveSubOwners.get("sub-1")?.has("follower-x")).toBe(true);
+    expect(engine.subscriptions.reactiveSubOwners.get("sub-1")?.has("follower-x")).toBe(
+      true,
+    );
     expect(engine.serverSubs.has("sub-1")).toBe(true);
 
     engine.onMultiTabPeerLeft("follower-x");
 
-    expect(engine.reactiveSubOwners.has("sub-1")).toBe(false);
+    expect(engine.subscriptions.reactiveSubOwners.has("sub-1")).toBe(false);
     expect(engine.serverSubs.has("sub-1")).toBe(false);
   });
 });
