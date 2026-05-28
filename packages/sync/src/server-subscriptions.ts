@@ -19,13 +19,20 @@ export class ServerSubscriptions {
   constructor(private readonly sendWs: (msg: unknown) => void) {}
 
   /** Register a subscription. Sends `subscribeMessage` over WS and
-   *  remembers it so the next reconnect re-sends it. Idempotent —
-   *  registering the same key twice replaces the message and does
-   *  NOT re-send (the prior subscribe is still live on the server). */
+   *  remembers it so the next reconnect re-sends it.
+   *
+   *  Re-registering the same key with the SAME payload is a no-op
+   *  (the prior subscribe is still live on the server). But a
+   *  re-register with a DIFFERENT payload re-sends — that's the
+   *  intended behavior of `useReactiveQuery(name, args)` when args
+   *  change: same sub_id, new args, server must observe the change
+   *  or the handler keeps running against stale arguments. */
   register(key: string, subscribeMessage: unknown): void {
-    const wasNew = !this.specs.has(key);
+    const prev = this.specs.get(key);
+    const changed =
+      prev === undefined || !sameJson(prev, subscribeMessage);
     this.specs.set(key, subscribeMessage);
-    if (wasNew) this.sendWs(subscribeMessage);
+    if (changed) this.sendWs(subscribeMessage);
   }
 
   /** Unregister. Sends `unsubscribeMessage` over WS and forgets the
@@ -51,4 +58,21 @@ export class ServerSubscriptions {
       this.sendWs(msg);
     }
   }
+}
+
+/** Stable structural equality. Used to skip the WS round-trip when a
+ *  re-register has the same payload — and to trigger one when it
+ *  doesn't. Cheap enough on the small JSON shapes these messages use. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+function canonical(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  if (Array.isArray(v)) return v.map(canonical);
+  const obj = v as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const k of Object.keys(obj).sort()) sorted[k] = canonical(obj[k]);
+  return sorted;
 }

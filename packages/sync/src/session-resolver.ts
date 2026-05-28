@@ -67,10 +67,17 @@ export class SessionResolver {
     return sessionSignature(this._resolved);
   }
 
-  /** Feed in a freshly resolved session (from /api/auth/me). Returns
-   *  the verdict the engine acts on. Mutates internal state to reflect
-   *  the new observation. */
-  observeSession(next: ResolvedSession): SessionTransition {
+  /** Compute the verdict for a freshly resolved session WITHOUT
+   *  mutating internal state. The engine inspects the verdict to
+   *  decide whether to reset the replica + pull, then calls
+   *  `commitObservation(next)` once it's safe for `useSession`
+   *  subscribers to see the new tenant.
+   *
+   *  Splitting compute from commit prevents the "useSession reports
+   *  new tenant + useQuery shows old tenant's rows" inconsistency
+   *  window that existed when the resolved session was mutated
+   *  before `resetReplica()` finished. */
+  inspectSession(next: ResolvedSession): SessionTransition {
     const prev = this._resolved;
     const tenantNow = next.tenantId;
 
@@ -81,15 +88,29 @@ export class SessionResolver {
       this.lastSeenTenant === null && tenantNow !== null;
     const replicaInvalidated = tenantChanged && !isFirstResolution;
 
-    this.lastSeenTenant = tenantNow;
-    this._resolved = next;
-
     return {
       identityChanged,
       replicaInvalidated,
       isFirstResolution,
       tenantChanged,
     };
+  }
+
+  /** Commit a previously-inspected session as the current truth.
+   *  Engine calls this AFTER acting on the verdict (replica reset,
+   *  pull) so subscribers never observe a half-applied transition. */
+  commitObservation(next: ResolvedSession): void {
+    this.lastSeenTenant = next.tenantId;
+    this._resolved = next;
+  }
+
+  /** Convenience for tests / migration: inspect + commit in one call.
+   *  Production callers should use `inspectSession` + `commitObservation`
+   *  to control the timing of state mutation. */
+  observeSession(next: ResolvedSession): SessionTransition {
+    const verdict = this.inspectSession(next);
+    this.commitObservation(next);
+    return verdict;
   }
 
   /** Feed in the current bearer token. Returns whether it flipped

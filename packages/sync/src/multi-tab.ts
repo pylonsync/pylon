@@ -51,7 +51,15 @@ interface TabIdentity {
 
 type BrokerMessage =
   | { type: "hello"; tab: TabIdentity }
-  | { type: "here"; tab: TabIdentity; leaderTabId: string | null }
+  | {
+      type: "here";
+      tab: TabIdentity;
+      leaderTabId: string | null;
+      /** Full known roster, including self. Late joiners pick up
+       *  every tab they need to consider in the election from a
+       *  single `here` rather than waiting for N separate replies. */
+      roster: TabIdentity[];
+    }
   | { type: "lead"; tab: TabIdentity }
   | { type: "bye"; tabId: string }
   | { type: "app"; tab: TabIdentity; payload: unknown };
@@ -194,12 +202,15 @@ export class MultiTabBroker {
     switch (msg.type) {
       case "hello": {
         // Someone new showed up. Add to roster and reply with `here`
-        // so they can include us in their election.
+        // carrying the full roster + current leader so the joiner can
+        // converge from a single message rather than collecting N
+        // separate replies.
         this.roster.set(msg.tab.tabId, msg.tab);
         this.send({
           type: "here",
           tab: this.self,
           leaderTabId: this.leaderTabId,
+          roster: Array.from(this.roster.values()),
         });
         // The new tab may have a smaller (startTime, tabId) — re-elect
         // after a settle window so we converge on the same winner.
@@ -207,18 +218,33 @@ export class MultiTabBroker {
         break;
       }
       case "here": {
+        // Absorb the full roster so we elect against the same set as
+        // the responder, not just self + responder.
+        for (const t of msg.roster) {
+          if (!this.roster.has(t.tabId)) this.roster.set(t.tabId, t);
+        }
         this.roster.set(msg.tab.tabId, msg.tab);
         if (msg.leaderTabId) this.leaderTabId = msg.leaderTabId;
         break;
       }
       case "lead": {
         this.roster.set(msg.tab.tabId, msg.tab);
-        // Trust the heartbeat: whichever tab claims `lead` is leader
-        // until we see otherwise. Elections only fire on hello/bye/
-        // monitor-timeout, so this is steady-state.
+        this.lastLeaderHeartbeat = Date.now();
+        // Don't trust a `lead` claim blindly. If the sender isn't the
+        // minimum (startTime, tabId) in OUR known roster, ignore it —
+        // a tab whose clock jumped backwards (macOS sleep/wake on a
+        // VM) could otherwise convince its peers it's leader and
+        // produce a ping-pong demote/promote loop. The next election
+        // will reconcile.
+        const winner = this.computeWinner();
+        if (winner && winner.tabId !== msg.tab.tabId) {
+          // Schedule an election so the misbehaving tab eventually
+          // sees the correct winner via its own `here`/`lead` flow.
+          this.scheduleElection();
+          break;
+        }
         const wasLeader = this.isLeader();
         this.leaderTabId = msg.tab.tabId;
-        this.lastLeaderHeartbeat = Date.now();
         if (wasLeader && !this.isLeader()) {
           this.demote();
         }
@@ -250,8 +276,21 @@ export class MultiTabBroker {
   }
 
   private electLeader(): void {
-    // Smallest (startTime, tabId) wins. Deterministic across every
-    // tab that has the same roster, so we converge without voting.
+    const winner = this.computeWinner() ?? this.self;
+    const wasLeader = this.isLeader();
+    this.leaderTabId = winner.tabId;
+    if (this.isLeader() && !wasLeader) {
+      this.promote();
+    } else if (!this.isLeader() && wasLeader) {
+      this.demote();
+    }
+  }
+
+  /** Smallest (startTime, tabId) wins. Deterministic across every
+   *  tab that has the same roster, so peers converge without voting.
+   *  Used both for the initial election and for sanity-checking
+   *  `lead` claims against our local view. */
+  private computeWinner(): TabIdentity | null {
     let winner: TabIdentity | null = null;
     for (const t of this.roster.values()) {
       if (!winner) {
@@ -265,14 +304,7 @@ export class MultiTabBroker {
         winner = t;
       }
     }
-    if (!winner) winner = this.self;
-    const wasLeader = this.isLeader();
-    this.leaderTabId = winner.tabId;
-    if (this.isLeader() && !wasLeader) {
-      this.promote();
-    } else if (!this.isLeader() && wasLeader) {
-      this.demote();
-    }
+    return winner;
   }
 
   private promote(): void {

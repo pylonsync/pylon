@@ -73,9 +73,19 @@ export class MutationQueue {
   }
 
   /** Add a pending mutation. Returns the op_id used for server
-   *  idempotency. */
+   *  idempotency. If the change ALREADY carries an op_id (e.g., it
+   *  was forwarded from another tab via multi-tab broadcast), reuse
+   *  that id so the leader and follower agree on the identifier the
+   *  server will dedupe against. Likewise we skip the add when an
+   *  entry with the same op_id is already queued — a follower
+   *  retrying its forward of the same op shouldn't double-queue on
+   *  the leader. */
   add(change: ClientChange): string {
-    const id = `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const id =
+      typeof change.op_id === "string" && change.op_id.length > 0
+        ? change.op_id
+        : `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    if (this.queue.some((m) => m.id === id)) return id;
     const changeWithOp: ClientChange = { ...change, op_id: id };
     this.queue.push({ id, change: changeWithOp, status: "pending" });
     this.flush();

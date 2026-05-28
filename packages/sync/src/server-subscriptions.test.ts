@@ -14,16 +14,38 @@ describe("ServerSubscriptions", () => {
     expect(sent).toEqual([{ type: "sub", k: "k1" }]);
   });
 
-  test("re-registering the same key replaces but does NOT re-send", () => {
+  test("re-registering the same key with identical payload does NOT re-send", () => {
+    const sent: unknown[] = [];
+    const subs = new ServerSubscriptions((m) => sent.push(m));
+    subs.register("k1", { type: "sub", k: "k1", v: 1 });
+    subs.register("k1", { type: "sub", k: "k1", v: 1 });
+    expect(sent.length).toBe(1);
+  });
+
+  test("re-registering with a CHANGED payload re-sends", () => {
+    // The intended path for useReactiveQuery(name, args) when args
+    // change: same sub_id, different args; the server has to learn.
     const sent: unknown[] = [];
     const subs = new ServerSubscriptions((m) => sent.push(m));
     subs.register("k1", { type: "sub", k: "k1", v: 1 });
     subs.register("k1", { type: "sub", k: "k1", v: 2 });
-    expect(sent.length).toBe(1);
-    // The most recent spec wins on replay.
+    expect(sent).toEqual([
+      { type: "sub", k: "k1", v: 1 },
+      { type: "sub", k: "k1", v: 2 },
+    ]);
+    // Most recent payload wins on replay.
     sent.length = 0;
     subs.replay();
     expect(sent).toEqual([{ type: "sub", k: "k1", v: 2 }]);
+  });
+
+  test("payload equality is structural (key order, nested)", () => {
+    const sent: unknown[] = [];
+    const subs = new ServerSubscriptions((m) => sent.push(m));
+    subs.register("k1", { type: "sub", args: { a: 1, b: 2 } });
+    // Same logical payload, different key insertion order.
+    subs.register("k1", { type: "sub", args: { b: 2, a: 1 } });
+    expect(sent.length).toBe(1);
   });
 
   test("unregister sends the unsubscribe and forgets the spec", () => {
