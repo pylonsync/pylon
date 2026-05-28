@@ -1267,8 +1267,15 @@ export class SyncEngine {
         // is currently forwarded for a CRDT row. The engine is
         // binary-agnostic — it can't peek inside the frame to route
         // per-row — so this is a tab-level gate: no forwarders = no
-        // broadcast. Saves bandwidth when the leader is the only
-        // CRDT consumer (the common single-tab case).
+        // broadcast. Saves bandwidth in the common single-tab case.
+        //
+        // Trade-off: when ANY follower has forwarded a CRDT sub on
+        // ANY key, we broadcast EVERY binary frame regardless of
+        // which row it's for. A multi-CRDT-entity app with one
+        // leader-only chatty doc + one shared follower-forwarded
+        // doc pays for both. Acceptable for now; the lever to pull
+        // if it shows up in profiling is a binaryRoutes map keyed
+        // by the Loro doc id parsed from the frame header.
         if (this.crdtForwarders.size > 0) {
           this.broadcastToTabs({ type: "binary", bytes });
         }
