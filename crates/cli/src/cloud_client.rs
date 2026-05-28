@@ -138,8 +138,8 @@ pub fn save_state(state: &CliState) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(state)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json =
+        serde_json::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&tmp, json)?;
     #[cfg(unix)]
     {

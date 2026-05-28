@@ -195,8 +195,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     // Path-shaped argument → fall through to manifest inspect for
     // backward compatibility with the old behavior.
-    let looks_like_path =
-        arg.contains('/') || arg.starts_with('.') || arg.ends_with(".json");
+    let looks_like_path = arg.contains('/') || arg.starts_with('.') || arg.ends_with(".json");
     if looks_like_path {
         return inspect_manifest(arg, json_mode);
     }

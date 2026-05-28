@@ -62,7 +62,9 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 .map(|a| a.trim_start_matches("--token=").to_string())
         });
     let token_stdin = args.iter().any(|a| a == "--token-stdin");
-    let env_token = std::env::var("PYLON_CLI_TOKEN").ok().filter(|s| !s.is_empty());
+    let env_token = std::env::var("PYLON_CLI_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     if let Some(token) = token_flag.or(env_token) {
         return run_with_token(&cloud, &token, json_mode);

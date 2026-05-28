@@ -195,7 +195,9 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
                     println!("✓ Project context set to {slug}");
                     println!("  Local:  {}", path.display());
                     println!("  Global: ~/.config/pylon/state.json");
-                    println!("  Subsequent `pylon` commands anywhere will target it without --project.");
+                    println!(
+                        "  Subsequent `pylon` commands anywhere will target it without --project."
+                    );
                 }
                 ExitCode::Ok
             }

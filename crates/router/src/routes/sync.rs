@@ -169,13 +169,14 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         };
         let mut entity_after = initial_after;
         loop {
-            let raw = match ctx
-                .store
-                .list_after(&entity.name, entity_after.as_deref(), RAW_FETCH_CHUNK)
-            {
-                Ok(r) => r,
-                Err(_) => break,
-            };
+            let raw =
+                match ctx
+                    .store
+                    .list_after(&entity.name, entity_after.as_deref(), RAW_FETCH_CHUNK)
+                {
+                    Ok(r) => r,
+                    Err(_) => break,
+                };
             if raw.is_empty() {
                 break;
             }
@@ -343,11 +344,7 @@ fn project_change_for_caller(ctx: &RouterContext, ev: ChangeEvent) -> Option<Cha
 // GDPR endpoints
 // ---------------------------------------------------------------------------
 
-fn handle_gdpr(
-    ctx: &RouterContext,
-    method: HttpMethod,
-    url: &str,
-) -> Option<(u16, String)> {
+fn handle_gdpr(ctx: &RouterContext, method: HttpMethod, url: &str) -> Option<(u16, String)> {
     let tail = url.strip_prefix("/api/admin/users/")?;
     let tail = tail.split('?').next().unwrap_or(tail);
     let (user_id, action) = tail.split_once('/')?;
@@ -461,30 +458,29 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
         let kind_label = change_kind_label(&change.kind);
         let outcome = run_push_op(&mctx, change);
 
-        let result_envelope =
-            |status: &str,
-             row_id: Option<&str>,
-             seq: Option<u64>,
-             error: Option<(String, String)>|
-             -> serde_json::Value {
-                let mut e = serde_json::json!({
-                    "op_id": op_id_opt,
-                    "entity": change.entity,
-                    "row_id": row_id.unwrap_or(&change.row_id),
-                    "kind": kind_label,
-                    "status": status,
+        let result_envelope = |status: &str,
+                               row_id: Option<&str>,
+                               seq: Option<u64>,
+                               error: Option<(String, String)>|
+         -> serde_json::Value {
+            let mut e = serde_json::json!({
+                "op_id": op_id_opt,
+                "entity": change.entity,
+                "row_id": row_id.unwrap_or(&change.row_id),
+                "kind": kind_label,
+                "status": status,
+            });
+            if let Some(s) = seq {
+                e["seq"] = serde_json::Value::from(s);
+            }
+            if let Some((code, message)) = error {
+                e["error"] = serde_json::json!({
+                    "code": code,
+                    "message": message,
                 });
-                if let Some(s) = seq {
-                    e["seq"] = serde_json::Value::from(s);
-                }
-                if let Some((code, message)) = error {
-                    e["error"] = serde_json::json!({
-                        "code": code,
-                        "message": message,
-                    });
-                }
-                e
-            };
+            }
+            e
+        };
 
         match outcome {
             Ok(out) => {

@@ -69,9 +69,8 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // --limit N, etc.). Previously the positional filter only
     // skipped dash-prefixed tokens, so `--project yapless` left
     // `yapless` floating and got mistaken for a subcommand.
-    let flag_takes_value = |s: &str| {
-        matches!(s, "--project" | "--limit" | "--token") && !s.contains('=')
-    };
+    let flag_takes_value =
+        |s: &str| matches!(s, "--project" | "--limit" | "--token") && !s.contains('=');
     let mut positional: Vec<&str> = Vec::new();
     let mut iter = args.iter().enumerate();
     while let Some((_, a)) = iter.next() {
