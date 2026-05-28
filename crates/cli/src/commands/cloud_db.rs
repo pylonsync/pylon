@@ -54,7 +54,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     match positional.first().copied() {
         Some("backup") => run_backup(&creds, &project_id, json_mode),
         Some("list") | Some("backups") | None => run_list(&creds, &project_id, json_mode),
-        Some("restore") => run_restore(&creds, &project_id, positional.get(1).copied(), json_mode),
+        Some("restore") => run_restore(
+            &creds,
+            &project_id,
+            positional.get(1).copied(),
+            args,
+            json_mode,
+        ),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
             eprintln!("Usage: pylon db [list | backup | restore <id>]");
@@ -141,13 +147,44 @@ fn run_restore(
     creds: &Credentials,
     project_id: &str,
     backup_id: Option<&str>,
+    args: &[String],
     json_mode: bool,
 ) -> ExitCode {
     let Some(id) = backup_id else {
-        output::print_error("Usage: pylon db restore <backup-id>");
+        output::print_error("Usage: pylon db restore <backup-id> [--yes]");
         eprintln!("  Find ids with: pylon db list");
         return ExitCode::Usage;
     };
+    // Restore is destructive — overwrites the project's primary
+    // volume from the snapshot. Guard rails:
+    //   - TTY humans get a y/N prompt by default.
+    //   - Non-TTY / --json callers MUST pass --yes or -y. Otherwise
+    //     an agent that types the wrong id silently wipes prod.
+    let assume_yes = args.iter().any(|a| a == "--yes" || a == "-y");
+    if !assume_yes {
+        use std::io::{BufRead, IsTerminal, Write};
+        if json_mode || !std::io::stdin().is_terminal() {
+            output::print_error(
+                "Refusing destructive restore without --yes. Re-run with --yes to confirm.",
+            );
+            return ExitCode::Usage;
+        }
+        eprintln!(
+            "About to restore the project's volume from backup {id}. \
+             This OVERWRITES current data and cannot be undone."
+        );
+        eprint!("Type 'restore' to continue: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_err() {
+            output::print_error("Failed to read confirmation.");
+            return ExitCode::Usage;
+        }
+        if line.trim() != "restore" {
+            output::print_error("Aborted.");
+            return ExitCode::Usage;
+        }
+    }
     #[derive(serde::Serialize)]
     struct Args<'a> {
         #[serde(rename = "projectId")]
