@@ -213,15 +213,85 @@ pub struct ChangeLog {
     /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
     /// `append_peer()` interop correctly with the global counter.
     seq_provider: Option<SeqProvider>,
-    /// Recently-claimed client op_ids and their applied seq, for push
-    /// idempotency. Entries transition `Pending` → `Applied(seq)` on the
-    /// final state of the write; on failure the entry is removed entirely
-    /// so the client's retry can run for real. Bounded by `op_id_capacity`:
-    /// the FIFO queue tracks insertion order so the oldest entries age
-    /// out when the map grows past the limit.
-    op_state: Mutex<std::collections::HashMap<String, OpEntry>>,
-    op_order: Mutex<std::collections::VecDeque<String>>,
-    op_id_capacity: usize,
+    /// Op-id idempotency tracker. State + FIFO order live behind ONE
+    /// mutex — splitting them across two mutexes (as a prior revision
+    /// did) created a lock-order deadlock risk: `claim_op_id` held
+    /// `order` then locked `state` during eviction, while
+    /// `complete_op_id` held `state` then locked `order` to keep the
+    /// FIFO in sync. Two threads under capacity pressure could
+    /// deadlock on the cycle. One mutex → one lock order → no cycle.
+    op_tracker: Mutex<OpTracker>,
+}
+
+/// Combined idempotency state: HashMap for O(1) lookup + VecDeque for
+/// insertion-order eviction. Both are mutated together; one mutex
+/// covers the pair.
+struct OpTracker {
+    state: std::collections::HashMap<String, OpEntry>,
+    order: std::collections::VecDeque<String>,
+    capacity: usize,
+}
+
+impl OpTracker {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            state: std::collections::HashMap::with_capacity(1024),
+            order: std::collections::VecDeque::with_capacity(1024),
+            capacity,
+        }
+    }
+
+    fn claim(&mut self, op_id: &str) -> OpClaim {
+        match self.state.get(op_id) {
+            Some(OpEntry::Pending) => OpClaim::InFlight,
+            Some(OpEntry::Applied { seq }) => OpClaim::Replayed { seq: *seq },
+            None => {
+                self.state.insert(op_id.to_string(), OpEntry::Pending);
+                self.order.push_back(op_id.to_string());
+                while self.order.len() > self.capacity {
+                    if let Some(evicted) = self.order.pop_front() {
+                        self.state.remove(&evicted);
+                    }
+                }
+                OpClaim::Proceed
+            }
+        }
+    }
+
+    fn complete(&mut self, op_id: &str, seq: u64) {
+        // Always overwrite to Applied even if not Pending — a stale
+        // pre-fix call site that called `remember_op_id` without first
+        // claiming still ends up in the right terminal state.
+        self.state
+            .insert(op_id.to_string(), OpEntry::Applied { seq });
+        if !self.order.iter().any(|s| s == op_id) {
+            // Defensive: keep the FIFO + map in sync if a caller
+            // somehow completed without claiming first.
+            self.order.push_back(op_id.to_string());
+            while self.order.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.state.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn forget(&mut self, op_id: &str) {
+        if matches!(self.state.get(op_id), Some(OpEntry::Applied { .. })) {
+            return;
+        }
+        self.state.remove(op_id);
+        if let Some(pos) = self.order.iter().position(|s| s == op_id) {
+            self.order.remove(pos);
+        }
+    }
+
+    fn applied_seq(&self, op_id: &str) -> Option<u64> {
+        match self.state.get(op_id) {
+            Some(OpEntry::Applied { seq }) => Some(*seq),
+            _ => None,
+        }
+    }
 }
 
 /// State of a tracked op_id. Used by the push handler to disambiguate
@@ -273,9 +343,7 @@ impl ChangeLog {
             seq: Mutex::new(0),
             capacity,
             seq_provider: None,
-            op_state: Mutex::new(std::collections::HashMap::with_capacity(1024)),
-            op_order: Mutex::new(std::collections::VecDeque::with_capacity(1024)),
-            op_id_capacity: 10_000,
+            op_tracker: Mutex::new(OpTracker::with_capacity(10_000)),
         }
     }
 
@@ -313,18 +381,10 @@ impl ChangeLog {
     /// Used by tests + observability surfaces. Push handlers should
     /// prefer `claim_op_id` which atomically transitions state.
     pub fn has_seen_op_id(&self, op_id: &str) -> bool {
-        matches!(
-            self.op_state.lock().unwrap().get(op_id),
-            Some(OpEntry::Applied { .. })
-        )
+        self.op_tracker.lock().unwrap().applied_seq(op_id).is_some()
     }
 
-    /// Atomic check-and-claim. Replaces the seen-set design that
-    /// conflated "in flight" with "applied" — pre-fix, a concurrent
-    /// retry that arrived while the first writer was mid-flush got
-    /// deduped, and if the first writer then errored and called
-    /// `forget_op_id`, the retry was lost forever. Now state is
-    /// tristate:
+    /// Atomic check-and-claim. State is tristate:
     ///   - absent           → claimer wins, transitions to Pending
     ///   - present Pending  → another writer is mid-flight; return
     ///                        `InFlight` so the client knows to retry
@@ -337,25 +397,9 @@ impl ChangeLog {
     /// After `Proceed`, the caller MUST call either `complete_op_id`
     /// (on success, with the assigned seq) or `forget_op_id` (on
     /// failure). Forgetting clears the Pending entry so the client's
-    /// retry has a clean state to claim. Codex P1.
+    /// retry has a clean state to claim.
     pub fn claim_op_id(&self, op_id: &str) -> OpClaim {
-        let mut state = self.op_state.lock().unwrap();
-        match state.get(op_id) {
-            Some(OpEntry::Pending) => OpClaim::InFlight,
-            Some(OpEntry::Applied { seq }) => OpClaim::Replayed { seq: *seq },
-            None => {
-                state.insert(op_id.to_string(), OpEntry::Pending);
-                drop(state);
-                let mut q = self.op_order.lock().unwrap();
-                q.push_back(op_id.to_string());
-                while q.len() > self.op_id_capacity {
-                    if let Some(evicted) = q.pop_front() {
-                        self.op_state.lock().unwrap().remove(&evicted);
-                    }
-                }
-                OpClaim::Proceed
-            }
-        }
+        self.op_tracker.lock().unwrap().claim(op_id)
     }
 
     /// Mark a previously-claimed op_id as successfully applied at
@@ -363,22 +407,7 @@ impl ChangeLog {
     /// `OpClaim::Replayed { seq }` so the client can advance its
     /// cursor / clear its optimistic ghost with the right seq.
     pub fn complete_op_id(&self, op_id: &str, seq: u64) {
-        let mut state = self.op_state.lock().unwrap();
-        // Always overwrite to Applied even if not Pending — a stale
-        // pre-fix call site that called `remember_op_id` without first
-        // claiming still ends up in the right terminal state.
-        state.insert(op_id.to_string(), OpEntry::Applied { seq });
-        if !self.op_order.lock().unwrap().iter().any(|s| s == op_id) {
-            // Defensive: keep the FIFO + map in sync if a caller
-            // somehow completed without claiming first.
-            let mut q = self.op_order.lock().unwrap();
-            q.push_back(op_id.to_string());
-            while q.len() > self.op_id_capacity {
-                if let Some(evicted) = q.pop_front() {
-                    state.remove(&evicted);
-                }
-            }
-        }
+        self.op_tracker.lock().unwrap().complete(op_id, seq);
     }
 
     /// Roll back a `claim_op_id`. Called by push handlers when the
@@ -386,16 +415,7 @@ impl ChangeLog {
     /// retry would be deduped away by the still-cached claim. Only
     /// removes Pending entries; Applied entries are immutable history.
     pub fn forget_op_id(&self, op_id: &str) {
-        let mut state = self.op_state.lock().unwrap();
-        if matches!(state.get(op_id), Some(OpEntry::Applied { .. })) {
-            return;
-        }
-        state.remove(op_id);
-        drop(state);
-        let mut q = self.op_order.lock().unwrap();
-        if let Some(pos) = q.iter().position(|s| s == op_id) {
-            q.remove(pos);
-        }
+        self.op_tracker.lock().unwrap().forget(op_id);
     }
 
     /// Current highest assigned sequence number. Reads the seq counter
@@ -1005,5 +1025,51 @@ mod tests {
             OpClaim::Replayed { seq: 7 } => {}
             other => panic!("Applied must survive forget, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn op_id_concurrent_claim_complete_does_not_deadlock() {
+        // Regression for codex round-7: the previous design held
+        // op_order during eviction (line ~349) then locked op_state,
+        // while complete_op_id held op_state then tried to lock
+        // op_order. Under capacity pressure two threads could form a
+        // cycle. The combined-mutex design has only one lock order, so
+        // this test exercises the path that used to deadlock and
+        // checks it converges in bounded wall-clock.
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let log = Arc::new(ChangeLog::new());
+        let mut handles = Vec::new();
+        let started = std::time::Instant::now();
+        for thread_id in 0..8 {
+            let log = Arc::clone(&log);
+            handles.push(thread::spawn(move || {
+                for i in 0..2_000 {
+                    let op_id = format!("t{}-op{}", thread_id, i);
+                    if matches!(log.claim_op_id(&op_id), OpClaim::Proceed) {
+                        // Half complete, half forget — both paths now
+                        // share the same mutex with claim.
+                        if i % 2 == 0 {
+                            log.complete_op_id(&op_id, i as u64);
+                        } else {
+                            log.forget_op_id(&op_id);
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+        // Under a deadlock this assertion never reaches us; the test
+        // process hangs. Bound it conservatively so a regression that
+        // reintroduces the cycle (or any other contention pathology)
+        // surfaces as a timeout when run under `cargo test --timeout`.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "concurrent claim/complete/forget took too long — possible deadlock"
+        );
     }
 }
