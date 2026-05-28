@@ -549,40 +549,20 @@ export class SyncEngine {
    */
   private enqueueApply(
     changes: ChangeEvent[],
-    options:
-      | SyncCursor
-      | { targetCursor?: SyncCursor; skipSeqGuard?: boolean; advanceCursor?: boolean } = {},
+    targetCursor?: SyncCursor,
   ): Promise<void> {
-    // Back-compat: callers that pass a SyncCursor positional arg get
-    // the same semantics as before. New callers can pass an options
-    // object — `skipSeqGuard` lets reconcile bypass the seq filter
-    // (its synthetic events fabricate seqs that don't fit the natural
-    // monotonic order), and `advanceCursor: false` keeps the cursor
-    // pinned where it was so reconcile doesn't fake-advance past the
-    // server's real position.
-    const opts: { targetCursor?: SyncCursor; skipSeqGuard?: boolean; advanceCursor?: boolean } =
-      options && typeof options === "object" && "last_seq" in options
-        ? { targetCursor: options as SyncCursor }
-        : (options as {
-            targetCursor?: SyncCursor;
-            skipSeqGuard?: boolean;
-            advanceCursor?: boolean;
-          });
-    const skipSeqGuard = opts.skipSeqGuard ?? false;
-    const advanceCursor = opts.advanceCursor ?? true;
-    const targetCursor = opts.targetCursor;
-
     const prev = this.applyQueue;
     const next = prev.then(async () => {
-      const filtered = skipSeqGuard
-        ? changes
-        : changes.filter(
-            (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
-          );
+      // Per-event monotonic filter: re-applies of an already-seen seq
+      // are skipped before touching the store. Without that, a
+      // retransmit (WS + pull window overlap) would have us run
+      // applyChange twice against the local store.
+      const filtered = changes.filter(
+        (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
+      );
       if (filtered.length > 0) {
         await this.store.applyChangesAsync(filtered);
       }
-      if (!advanceCursor) return;
       // Pick the cursor target. Explicit `targetCursor` (from pull) wins
       // — pull's response carries the server's authoritative current_seq
       // even when no changes landed in this window. Otherwise derive
@@ -601,6 +581,33 @@ export class SyncEngine {
     });
     // Errors stay scoped to this batch — don't poison the chain for
     // future applies.
+    this.applyQueue = next.catch(() => {});
+    return next;
+  }
+
+  /**
+   * Reconcile path. Routes through the same applyQueue as WS/pull so
+   * a reconcile batch can't interleave with a fresher change event
+   * mid-apply — but reconcile carries no real seqs, so the seq filter
+   * and cursor advance from `enqueueApply` are deliberately absent.
+   * Pending mutations are protected upstream (in applyEntityReconcile)
+   * before the batch is ever built.
+   */
+  private enqueueReconcile(
+    entity: string,
+    upserts: Row[],
+    removalIds: string[],
+    tombstoneSeq: number,
+  ): Promise<void> {
+    const prev = this.applyQueue;
+    const next = prev.then(async () => {
+      await this.store.applyReconcileBatch(
+        entity,
+        upserts,
+        removalIds,
+        tombstoneSeq,
+      );
+    });
     this.applyQueue = next.catch(() => {});
     return next;
   }
@@ -1357,92 +1364,40 @@ export class SyncEngine {
     tombstoneSeq: number,
   ): Promise<void> {
     // Invariant: rows with in-flight or failed mutations are
-    // off-limits to reconcile. Neither the "server row missing from
-    // local snapshot" apply branch nor the "local row missing from
-    // server snapshot" tombstone branch may touch them. A hydrated
-    // offline mutation that hasn't been pushed yet would otherwise
-    // look like a phantom local-only row and get tombstoned before
-    // push has a chance to ship it.
+    // off-limits to reconcile. Neither the upsert branch nor the
+    // tombstone branch may touch them. A hydrated offline mutation
+    // that hasn't been pushed yet would otherwise look like a phantom
+    // local-only row and get tombstoned before push has a chance to
+    // ship it.
     // Test: `hydrated_offline_mutations_survive_startup_reconcile`.
     const pendingKeys = this.mutations.pendingRowKeys();
     const serverIds = new Set<string>();
-    const changes: ChangeEvent[] = [];
+    const upserts: Row[] = [];
     for (const row of serverRows) {
       const id = (row as { id?: unknown }).id;
       if (typeof id !== "string" || id.length === 0) continue;
       serverIds.add(id);
-      // Skip any row whose canonical state is still being decided
-      // by an in-flight mutation — applying the server snapshot
-      // would clobber the user's pending edit.
       if (pendingKeys.has(`${entity}/${id}`)) continue;
       const local = this.store.get(entity, id);
-      if (!local) {
-        changes.push({
-          seq: tombstoneSeq + 1,
-          entity,
-          row_id: id,
-          kind: "insert",
-          data: row,
-          timestamp: "",
-        });
-      } else if (rowsDiffer(local, row)) {
-        changes.push({
-          seq: tombstoneSeq + 1,
-          entity,
-          row_id: id,
-          kind: "update",
-          data: row,
-          timestamp: "",
-        });
+      if (!local || rowsDiffer(local, row)) {
+        upserts.push(row);
       }
-    }
-    if (changes.length > 0) {
-      // Reconcile applies route through the same serialized queue as
-      // WS/pull so a stale reconcile response can't interleave with a
-      // newer WS/pull update mid-batch. The synthetic seqs reconcile
-      // fabricates (tombstoneSeq + 1) collide with WS-issued seqs so
-      // we skip the monotonic guard and don't advance the cursor —
-      // the cursor still reflects the server's last_seq, not our
-      // fabricated reconcile seqs.
-      await this.enqueueApply(changes, {
-        skipSeqGuard: true,
-        advanceCursor: false,
-      });
     }
     // Removals: every local row whose id isn't in the server set is
-    // stale. Tombstone with the current cursor so future legitimate
-    // re-creations still flow through. Synthesize Delete events for
-    // each removal and route through the apply queue so the order
-    // relative to WS/pull updates is preserved — a removal here is
-    // really "server says this row is gone as of tombstoneSeq", which
-    // matters if a later WS update reinstates it on the same row id.
-    const locals = this.store.list(entity);
-    const removalChanges: ChangeEvent[] = [];
-    for (const local of locals) {
+    // stale. The reconcile primitive tombstones at `tombstoneSeq` so
+    // future legitimate re-creations (with strictly greater seqs)
+    // still flow through.
+    const removalIds: string[] = [];
+    for (const local of this.store.list(entity)) {
       const id = (local as { id?: unknown }).id;
       if (typeof id !== "string") continue;
-      // Pending mutations protect the row from the removal pass too
-      // — a queued insert that hasn't been pushed yet would otherwise
-      // look like a phantom local-only row and get tombstoned, only
-      // for push() to later resurrect it.
       if (pendingKeys.has(`${entity}/${id}`)) continue;
-      if (!serverIds.has(id)) {
-        removalChanges.push({
-          seq: tombstoneSeq,
-          entity,
-          row_id: id,
-          kind: "delete",
-          data: undefined,
-          timestamp: "",
-        });
-      }
+      if (!serverIds.has(id)) removalIds.push(id);
     }
-    if (removalChanges.length > 0) {
-      await this.enqueueApply(removalChanges, {
-        skipSeqGuard: true,
-        advanceCursor: false,
-      });
-    }
+    if (upserts.length === 0 && removalIds.length === 0) return;
+    // Route through the apply queue so a reconcile batch can't
+    // interleave with a fresher WS/pull change event mid-apply.
+    await this.enqueueReconcile(entity, upserts, removalIds, tombstoneSeq);
   }
 
   private async dropEntity(

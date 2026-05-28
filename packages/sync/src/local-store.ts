@@ -319,6 +319,80 @@ export class LocalStore {
   }
 
   /**
+   * Apply a reconcile result against the local replica. Reconcile is
+   * "the server says these are the canonical rows right now" — it does
+   * NOT carry per-event seqs. Distinct from `applyChange` (which
+   * threads server-issued change events through a monotonic seq
+   * guard + cursor advance).
+   *
+   * `tombstoneSeq` is the cursor at the start of the reconcile fetch.
+   * - Upserts skip rows whose tombstone is fresher (would be stale
+   *   resurrections of a later delete).
+   * - Removals tombstone at `tombstoneSeq` so a later legitimate
+   *   re-create (with a strictly greater seq) flows through.
+   *
+   * Cursor is NOT advanced — reconcile fabricates no real seqs, so
+   * the engine's cursor stays pinned to the change-log position the
+   * reconcile started from.
+   */
+  async applyReconcileBatch(
+    entity: string,
+    upserts: Row[],
+    removalIds: string[],
+    tombstoneSeq: number,
+  ): Promise<void> {
+    if (!this.tables.has(entity)) this.tables.set(entity, new Map());
+    const table = this.tables.get(entity)!;
+    const applied: Array<{ id: string; row: Row }> = [];
+    for (const row of upserts) {
+      const id = (row as { id?: unknown }).id;
+      if (typeof id !== "string" || id.length === 0) continue;
+      // Treat the upsert as effective at `tombstoneSeq + 1`. Anything
+      // tombstoned at a HIGHER seq is fresher and wins; the upsert is
+      // a stale view that pre-dated the delete.
+      if (this.isTombstoned(entity, id, tombstoneSeq + 1)) continue;
+      const merged = { ...row, id };
+      table.set(id, merged);
+      applied.push({ id, row: merged });
+    }
+    const removed: string[] = [];
+    for (const id of removalIds) {
+      if (this.reconcileRemove(entity, id, tombstoneSeq)) {
+        removed.push(id);
+      }
+    }
+    if (applied.length > 0 || removed.length > 0) this.notify();
+    // Persist sequentially so disk order matches memory order — same
+    // discipline as applyChangesAsync.
+    if (this._persistFn) {
+      for (const { id, row } of applied) {
+        const ev: ChangeEvent = {
+          seq: tombstoneSeq + 1,
+          entity,
+          row_id: id,
+          kind: "insert",
+          data: row,
+          timestamp: "",
+        };
+        const result = this._persistFn(ev);
+        if (result instanceof Promise) await result;
+      }
+      for (const id of removed) {
+        const ev: ChangeEvent = {
+          seq: tombstoneSeq,
+          entity,
+          row_id: id,
+          kind: "delete",
+          data: undefined as unknown as Row,
+          timestamp: "",
+        };
+        const result = this._persistFn(ev);
+        if (result instanceof Promise) await result;
+      }
+    }
+  }
+
+  /**
    * Drop every table + tombstone in-place, then notify. Used by the
    * sync engine's `resetReplica()` on identity flip (token or tenant
    * changed — the old replica reflects a different visible set).
