@@ -34,10 +34,16 @@ function makeEngine(): SyncEngine {
   // run on the Bun runtime which has no `indexedDB` global. Reconcile
   // itself only touches `this.persistence` defensively, so disabling
   // the layer is harmless here.
+  //
+  // `multiTab: false` opts out of the broker entirely so the engine
+  // acts as the sole leader from construction. Without this the tests
+  // would skip the leader-gated reconcile path because start() (which
+  // is what flips the leader bit in normal use) is never called here.
   return new SyncEngine({
     baseUrl: "http://stub.invalid",
     persist: false,
     reconcileMinIntervalMs: 0,
+    multiTab: false,
   });
 }
 
@@ -224,6 +230,7 @@ describe("SyncEngine.reconcile", () => {
       baseUrl: "http://stub.invalid",
       persist: false,
       reconcileMinIntervalMs: 5_000,
+      multiTab: false,
     });
     seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
 

@@ -236,8 +236,16 @@ export class SyncEngine {
    */
   private multiTab: MultiTabBroker | null = null;
   /** True after the broker has decided this tab is the leader. Used
-   *  to gate WS / pull / push / poll. Followers stay passive. */
-  private isMultiTabLeader = true;
+   *  to gate WS / pull / push / poll. Followers stay passive.
+   *
+   *  Defaults to false so a tab joining an existing election stays a
+   *  passive follower until onPromote explicitly fires. A `true`
+   *  default would let a late joiner whose broker never fires onPromote
+   *  (because it was never leader) silently run as a leader and open
+   *  its own WS, defeating coordination. The non-broker paths
+   *  (`multiTab: false`, BroadcastChannel unavailable) flip it true
+   *  explicitly inside `initMultiTab`. */
+  private isMultiTabLeader = false;
 
   /**
    * Timer for the "stable connection" check. On `onopen` we start a 5s
@@ -423,6 +431,14 @@ export class SyncEngine {
     // sendWs helper short-circuits otherwise) so registering before
     // start() is safe — the spec gets replayed on `ws.onopen`.
     this.serverSubs = new ServerSubscriptions((msg) => this.sendWs(msg));
+    // When multi-tab coordination is explicitly disabled, this engine
+    // is always its own sole leader — even before start(). Tests that
+    // construct an engine and call reconcile()/pull() directly without
+    // start() rely on this. The dynamic election paths (broker-driven
+    // promote/demote) only matter when multiTab is enabled.
+    if (this.config.multiTab === false) {
+      this.isMultiTabLeader = true;
+    }
   }
 
   /**
@@ -550,6 +566,15 @@ export class SyncEngine {
       return;
     }
 
+    // Leader path. If any subscribeCrdt / subscribeReactive call came
+    // in before start() (or before initMultiTab settled), it took the
+    // default-follower branch and tried to broadcast to a not-yet-
+    // running broker. Now that we know we ARE the leader, populate
+    // serverSubs from local interest so the WS subscribe frames go
+    // out on the next connect. Idempotent w.r.t. subscribe calls that
+    // happen later through the normal leader branch.
+    this.seedServerSubsFromLocalInterest();
+
     // Seed the server-resolved session before the first pull so
     // `useSession` subscribers see the right tenant from frame one,
     // and the resolver's lastSeenTenant is populated before any
@@ -644,6 +669,7 @@ export class SyncEngine {
         },
         onAppMessage: (payload, from) =>
           this.handleMultiTabMessage(payload, from.tabId),
+        onLeave: (tabId) => this.onMultiTabPeerLeft(tabId),
       });
       // Bound the settle wait — if no other tab claims leader within
       // the election window, this tab takes the role.
@@ -663,6 +689,41 @@ export class SyncEngine {
     void promotedDuringStart;
   }
 
+  /** Seed serverSubs with every subscription this tab currently wants.
+   *  Called from both the initial-leader path (when start() lands here
+   *  as leader and there might be subscribes that happened before
+   *  start() — those took the follower branch which broadcasts to a
+   *  not-yet-running broker, so the registers were lost) and the
+   *  late-promotion path (where the previous leader owned the subs
+   *  and we need to claim them). Idempotent: serverSubs.register
+   *  dedupes by payload equality. */
+  private seedServerSubsFromLocalInterest(): void {
+    for (const [sub_id, spec] of this.wantedReactiveSpecs) {
+      this.serverSubs.register(sub_id, {
+        type: "reactive-subscribe",
+        sub_id,
+        fn_name: spec.fn_name,
+        args: spec.args,
+      });
+      let owners = this.reactiveSubOwners.get(sub_id);
+      if (!owners) {
+        owners = new Set();
+        this.reactiveSubOwners.set(sub_id, owners);
+      }
+      owners.add(SyncEngine.OWN_TAB);
+    }
+    for (const key of this.crdtSubscribers.keys()) {
+      const [entity, rowId] = key.split("\x00");
+      if (entity && rowId !== undefined) {
+        this.serverSubs.register(key, {
+          type: "crdt-subscribe",
+          entity,
+          rowId,
+        });
+      }
+    }
+  }
+
   /** Late promotion: the previous leader dropped while we were
    *  running as a follower. Take over network ops now AND drain any
    *  pending mutations through push() — a mutation we'd forwarded to
@@ -676,24 +737,7 @@ export class SyncEngine {
       // Re-register every locally-wanted server subscription with our
       // own serverSubs. Previous leader had these; now we own the WS,
       // so we need to send the subscribe frames on the next connect.
-      for (const [sub_id, spec] of this.wantedReactiveSpecs) {
-        this.serverSubs.register(sub_id, {
-          type: "reactive-subscribe",
-          sub_id,
-          fn_name: spec.fn_name,
-          args: spec.args,
-        });
-      }
-      for (const key of this.crdtSubscribers.keys()) {
-        const [entity, rowId] = key.split("\x00");
-        if (entity && rowId !== undefined) {
-          this.serverSubs.register(key, {
-            type: "crdt-subscribe",
-            entity,
-            rowId,
-          });
-        }
-      }
+      this.seedServerSubsFromLocalInterest();
       // Ask the rest of the tabs to re-forward their subs so we can
       // serve them from our new WS. They'll respond via `sub-register`.
       this.broadcastToTabs({ type: "request-sub-replay" });
@@ -713,6 +757,50 @@ export class SyncEngine {
       else if (transport === "poll") this.startPolling();
     } catch {
       /* best-effort — next reconnect cycle catches up */
+    }
+  }
+
+  /** A peer tab left the coordination group gracefully. Only meaningful
+   *  on the leader side — we own the forwarded-sub state. Scrub every
+   *  forwarder/owner entry for the departed tab; when a key drops to
+   *  zero remaining owners (no local consumer, no forwarder) we
+   *  unregister the server subscription so the WS stops fanning data
+   *  at a tab that no longer exists. */
+  private onMultiTabPeerLeft(tabId: string): void {
+    if (!this.isMultiTabLeader) return;
+    // CRDT forwarders: each key holds a Set<tabId>. Remove the departed
+    // tab; if the set is now empty AND there's no local consumer for
+    // the same row, unregister.
+    for (const [key, fwd] of this.crdtForwarders) {
+      if (!fwd.delete(tabId)) continue;
+      if (fwd.size === 0) {
+        this.crdtForwarders.delete(key);
+        const localCount = this.crdtSubscribers.get(key) ?? 0;
+        if (localCount === 0 && this.serverSubs.has(key)) {
+          const [entity, rowId] = key.split("\x00");
+          if (entity && rowId !== undefined) {
+            this.serverSubs.unregister(key, {
+              type: "crdt-unsubscribe",
+              entity,
+              rowId,
+            });
+          }
+        }
+      }
+    }
+    // Reactive owners: each sub_id holds a Set<tabId>. Same pattern —
+    // a self-owned sub keeps the entry alive via the OWN_TAB sentinel.
+    for (const [sub_id, owners] of this.reactiveSubOwners) {
+      if (!owners.delete(tabId)) continue;
+      if (owners.size === 0) {
+        this.reactiveSubOwners.delete(sub_id);
+        if (this.serverSubs.has(sub_id)) {
+          this.serverSubs.unregister(sub_id, {
+            type: "reactive-unsubscribe",
+            sub_id,
+          });
+        }
+      }
     }
   }
 
@@ -848,6 +936,21 @@ export class SyncEngine {
         if (Array.isArray(opIds)) {
           for (const id of opIds) this.mutations.markApplied(id);
           this.mutations.clear();
+        }
+        break;
+      }
+      case "mutations-failed": {
+        // Leader → followers: these op_ids hit a validation/auth error
+        // server-side. Mark each one failed on the originating follower
+        // so the UI can surface it. The follower keeps the entry in the
+        // queue (markFailed doesn't prune) for retry / user-ack.
+        const ops = msg.ops as
+          | { opId: string; error: string }[]
+          | undefined;
+        if (Array.isArray(ops)) {
+          for (const op of ops) {
+            this.mutations.markFailed(op.opId, op.error);
+          }
         }
         break;
       }
@@ -2332,13 +2435,29 @@ export class SyncEngine {
         }
       }
 
-      // Broadcast acks BEFORE clearing locally so followers can match
-      // op_ids against their pending queues.
-      const ackedOpIds = pending
-        .map((m) => m.change.op_id)
-        .filter((id): id is string => typeof id === "string");
+      // Broadcast per-op outcomes BEFORE clearing locally so followers
+      // can update their queue status. Filter strictly by current
+      // status — pending[i] is the LIVE PendingMutation that markApplied
+      // / markFailed just mutated, so `m.status` tells us exactly what
+      // happened. Ops that stayed "pending" (server-side in-flight
+      // dedupe) get neither — the leader will retry, and a later push
+      // will broadcast a real ack.
+      const ackedOpIds: string[] = [];
+      const failedOps: { opId: string; error: string }[] = [];
+      for (const m of pending) {
+        const opId = m.change.op_id;
+        if (typeof opId !== "string") continue;
+        if (m.status === "applied") {
+          ackedOpIds.push(opId);
+        } else if (m.status === "failed") {
+          failedOps.push({ opId, error: m.error ?? "unknown" });
+        }
+      }
       if (ackedOpIds.length > 0) {
         this.broadcastToTabs({ type: "mutations-acked", opIds: ackedOpIds });
+      }
+      if (failedOps.length > 0) {
+        this.broadcastToTabs({ type: "mutations-failed", ops: failedOps });
       }
 
       this.mutations.clear();

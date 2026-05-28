@@ -75,6 +75,13 @@ export interface MultiTabHandlers {
   onDemote: () => void;
   /** Fired for every application-level message from another tab. */
   onAppMessage: (payload: unknown, from: TabIdentity) => void;
+  /** Fired when another tab leaves the coordination group gracefully
+   *  (its `bye` was observed). The leader uses this to scrub forwarded
+   *  subscription state for the departed tab so it stops fanning WS
+   *  traffic at a dead peer. Does NOT fire for crashed tabs — those
+   *  have no `bye` and currently leak in the roster until either a
+   *  new election runs or this tab itself goes away. */
+  onLeave?: (tabId: string) => void;
 }
 
 export class MultiTabBroker {
@@ -261,7 +268,13 @@ export class MultiTabBroker {
         break;
       }
       case "bye": {
-        this.roster.delete(msg.tabId);
+        // Only fire onLeave if the tab was actually in the roster.
+        // A `bye` for a tab we never heard of (race on hello/bye) is
+        // a no-op and shouldn't trigger spurious cleanup callbacks.
+        const wasKnown = this.roster.delete(msg.tabId);
+        if (wasKnown && msg.tabId !== this.self.tabId) {
+          this.handlers.onLeave?.(msg.tabId);
+        }
         if (this.leaderTabId === msg.tabId) {
           this.leaderTabId = null;
           this.scheduleElection();

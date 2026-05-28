@@ -33,6 +33,9 @@ function makeTab(channelName: string): Promise<Tab> {
       onAppMessage: (payload, from) => {
         events.push({ type: "app", data: { payload, from } });
       },
+      onLeave: (tabId) => {
+        events.push({ type: "leave", data: tabId });
+      },
     });
     // Give the election a beat to settle.
     setTimeout(() => resolve({ broker, events }), 350);
@@ -137,6 +140,33 @@ describe("MultiTabBroker", () => {
     // A remains leader because its lead validation rejects B's claim
     // (B is not the smallest startTime in A's roster).
     expect(a.broker.isLeader()).toBe(true);
+  });
+
+  test("a follower's bye fires onLeave on every other tab", async () => {
+    // Regression for codex round-6 P2: when a follower closes, the
+    // leader (and any other tab) needs to know which tabId left so it
+    // can scrub forwarded-sub state for that peer. Pre-fix the broker
+    // dropped the bye-sender from its roster silently and the engine
+    // kept fanning WS traffic at a dead tab forever.
+    const ch = channel("bye-fires-onleave");
+    const a = await makeTab(ch);
+    tabs.push(a);
+    await new Promise((r) => setTimeout(r, 20));
+    const b = await makeTab(ch);
+    tabs.push(b);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const bId = b.broker.self.tabId;
+
+    // b stops gracefully — broadcasts `bye`.
+    b.broker.stop();
+    // Remove b from tabs so afterEach doesn't double-stop it.
+    tabs.splice(tabs.indexOf(b), 1);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const leaveEvents = a.events.filter((e) => e.type === "leave");
+    expect(leaveEvents.length).toBe(1);
+    expect(leaveEvents[0].data).toBe(bId);
   });
 
   test("when the leader stops, a follower is promoted", async () => {
