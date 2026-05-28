@@ -270,6 +270,17 @@ export class SyncEngine {
   private opQueue: OpQueue = new OpQueue();
 
   /**
+   * Serialized chain for session-transition application. Multiple
+   * concurrent triggers (`refreshResolvedSession` from app code +
+   * a `session-changed` envelope landing over WS + a multi-tab
+   * `session` broadcast) all enqueue here. Without it, two
+   * inspect-then-commit pairs interleave on the microtask queue
+   * and the older session can commit AFTER the newer, leaving the
+   * engine pinned to a stale tenant.
+   */
+  private sessionChain: Promise<void> = Promise.resolve();
+
+  /**
    * Registered consumers for binary WebSocket frames. SyncEngine itself
    * doesn't decode binary — it just owns the WS connection and routes
    * frames to whoever signed up via [`onBinaryFrame`]. The first
@@ -299,6 +310,12 @@ export class SyncEngine {
    *  refcount lives here so the engine knows when the LAST consumer
    *  is gone and the WS unsubscribe should fire. */
   private crdtSubscribers: Map<string, number> = new Map();
+
+  /** Per-sub_id refcount for reactive subscriptions, used by the
+   *  leader to track how many consumers (its own + forwarded from
+   *  followers) want a given sub_id alive. Without this, a single
+   *  unsubscribe in either tab would dark the peer. */
+  private reactiveSubscribers: Map<string, number> = new Map();
 
   /** Inbound message routing for reactive subscriptions — server pushes
    *  `reactive-result` / `reactive-error` envelopes keyed by sub_id,
@@ -768,20 +785,14 @@ export class SyncEngine {
         break;
       }
       case "session": {
-        // Leader → followers: /api/auth/me result. Inspect first,
-        // act on the verdict (reset if needed), THEN commit so
-        // useSession doesn't briefly report the new tenant while
-        // the replica is still being wiped.
+        // Leader → followers: /api/auth/me result. Funnel through
+        // the shared session chain so concurrent broadcasts (or a
+        // broadcast racing with a local notifySessionChanged) commit
+        // in arrival order — without that, the older tenant could
+        // win and pin the engine to a stale session.
         const resolved = msg.resolved as ResolvedSession | undefined;
         if (resolved) {
-          const verdict = this.session.inspectSession(resolved);
-          void (async () => {
-            if (verdict.replicaInvalidated) {
-              await this.resetReplicaInner();
-            }
-            this.session.commitObservation(resolved);
-            if (verdict.identityChanged) this.store.notify();
-          })();
+          void this.applySessionTransition(resolved, /* broadcast */ false);
         }
         break;
       }
@@ -837,6 +848,8 @@ export class SyncEngine {
           const sub_id = msg.sub_id as string;
           const fn_name = msg.fn_name as string;
           const args = msg.args;
+          const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
+          this.reactiveSubscribers.set(sub_id, prev + 1);
           this.serverSubs.register(sub_id, {
             type: "reactive-subscribe",
             sub_id,
@@ -867,11 +880,17 @@ export class SyncEngine {
           }
         } else if (kind === "reactive") {
           const sub_id = msg.sub_id as string;
-          if (this.serverSubs.has(sub_id)) {
-            this.serverSubs.unregister(sub_id, {
-              type: "reactive-unsubscribe",
-              sub_id,
-            });
+          const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
+          if (prev <= 1) {
+            this.reactiveSubscribers.delete(sub_id);
+            if (this.serverSubs.has(sub_id)) {
+              this.serverSubs.unregister(sub_id, {
+                type: "reactive-unsubscribe",
+                sub_id,
+              });
+            }
+          } else {
+            this.reactiveSubscribers.set(sub_id, prev - 1);
           }
         }
         break;
@@ -1894,6 +1913,7 @@ export class SyncEngine {
     // broadcasts the result, which `handleMultiTabMessage` routes
     // into the resolver.
     if (!this.isMultiTabLeader) return;
+    let next: ResolvedSession;
     try {
       const res = await this.rawFetch("/api/auth/me");
       if (!res.ok) return;
@@ -1903,12 +1923,35 @@ export class SyncEngine {
         is_admin?: boolean;
         roles?: string[];
       };
-      const next: ResolvedSession = {
+      next = {
         userId: raw.user_id ?? null,
         tenantId: raw.tenant_id ?? null,
         isAdmin: raw.is_admin ?? false,
         roles: raw.roles ?? [],
       };
+    } catch {
+      // Swallow — /api/auth/me errors are transient and the next pull
+      // will retry. Don't take down the sync loop for this.
+      return;
+    }
+    await this.applySessionTransition(next, /* broadcast */ true);
+  }
+
+  /**
+   * Apply a freshly-observed session through the resolver and act on
+   * the verdict. Serialized via `sessionChain` so concurrent triggers
+   * (refreshResolvedSession from app code + multi-tab `session`
+   * broadcast + WS `session-changed` envelope) run in arrival order
+   * and the latest tenant wins — without this, two interleaved
+   * inspect-then-commit pairs could commit an older session AFTER
+   * the newer one.
+   */
+  private applySessionTransition(
+    next: ResolvedSession,
+    broadcast: boolean,
+  ): Promise<void> {
+    const prev = this.sessionChain;
+    const next$ = prev.then(async () => {
       // Defer the null→X / X→Y / first-resolution distinction to the
       // resolver, but DON'T commit the new resolved session until
       // after the engine has finished acting on the verdict — that
@@ -1917,23 +1960,28 @@ export class SyncEngine {
       const verdict = this.session.inspectSession(next);
       if (verdict.tenantChanged) {
         if (verdict.replicaInvalidated) {
-          await this.resetReplica();
+          // Reset directly when this tab is the leader (we already
+          // serialize via sessionChain — re-queuing through opQueue
+          // is unnecessary). Follower path uses the inner variant
+          // too since followers don't hold any opQueue slot here.
+          await this.resetReplicaInner();
         }
-        await this.pull();
+        if (this.isMultiTabLeader) {
+          // Only the leader pulls — followers receive subsequent
+          // applied broadcasts that close the catch-up window.
+          await this.pull();
+        }
       }
       this.session.commitObservation(next);
       if (verdict.identityChanged) {
-        // Piggy-back on the store notifier so `useSession` re-renders
-        // via useSyncExternalStore without a second pub/sub channel.
         this.store.notify();
       }
-      // Broadcast the canonical session to followers so they observe
-      // the same verdict and stay in sync without their own fetch.
-      this.broadcastToTabs({ type: "session", resolved: next });
-    } catch {
-      // Swallow — /api/auth/me errors are transient and the next pull
-      // will retry. Don't take down the sync loop for this.
-    }
+      if (broadcast && this.isMultiTabLeader) {
+        this.broadcastToTabs({ type: "session", resolved: next });
+      }
+    });
+    this.sessionChain = next$.catch(() => {});
+    return next$;
   }
 
   private async rawFetch(path: string): Promise<Response> {
@@ -2531,6 +2579,11 @@ export class SyncEngine {
       });
       return;
     }
+    // Leader path: refcount + register. If a follower has already
+    // forwarded this sub_id, our own subscribe just bumps the count;
+    // the WS frame was already sent and is still live.
+    const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
+    this.reactiveSubscribers.set(sub_id, prev + 1);
     this.serverSubs.register(sub_id, {
       type: "reactive-subscribe",
       sub_id,
@@ -2555,11 +2608,18 @@ export class SyncEngine {
       });
       return;
     }
-    if (this.serverSubs.has(sub_id)) {
-      this.serverSubs.unregister(sub_id, {
-        type: "reactive-unsubscribe",
-        sub_id,
-      });
+    // Leader path: decrement refcount, only unsubscribe at zero.
+    const prev = this.reactiveSubscribers.get(sub_id) ?? 0;
+    if (prev <= 1) {
+      this.reactiveSubscribers.delete(sub_id);
+      if (this.serverSubs.has(sub_id)) {
+        this.serverSubs.unregister(sub_id, {
+          type: "reactive-unsubscribe",
+          sub_id,
+        });
+      }
+    } else {
+      this.reactiveSubscribers.set(sub_id, prev - 1);
     }
   }
 

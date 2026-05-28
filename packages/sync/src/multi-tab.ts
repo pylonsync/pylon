@@ -224,25 +224,35 @@ export class MultiTabBroker {
           if (!this.roster.has(t.tabId)) this.roster.set(t.tabId, t);
         }
         this.roster.set(msg.tab.tabId, msg.tab);
-        if (msg.leaderTabId) this.leaderTabId = msg.leaderTabId;
+        // Don't accept `here.leaderTabId` blindly — a clock-skewed
+        // tab can claim leadership via its own `here` reply, and the
+        // late joiner would treat it as canonical. Validate against
+        // our (now larger) roster: only honor the claim if the
+        // sender is the current computed winner.
+        if (msg.leaderTabId) {
+          const winner = this.computeWinner();
+          if (winner && winner.tabId === msg.leaderTabId) {
+            this.leaderTabId = msg.leaderTabId;
+          }
+        }
         break;
       }
       case "lead": {
         this.roster.set(msg.tab.tabId, msg.tab);
-        this.lastLeaderHeartbeat = Date.now();
         // Don't trust a `lead` claim blindly. If the sender isn't the
         // minimum (startTime, tabId) in OUR known roster, ignore it —
         // a tab whose clock jumped backwards (macOS sleep/wake on a
         // VM) could otherwise convince its peers it's leader and
         // produce a ping-pong demote/promote loop. The next election
-        // will reconcile.
+        // will reconcile. Crucially, do NOT update lastLeaderHeartbeat
+        // for an ignored claim: otherwise the misbehaving tab would
+        // suppress our liveness check and stay "leader" indefinitely.
         const winner = this.computeWinner();
         if (winner && winner.tabId !== msg.tab.tabId) {
-          // Schedule an election so the misbehaving tab eventually
-          // sees the correct winner via its own `here`/`lead` flow.
           this.scheduleElection();
           break;
         }
+        this.lastLeaderHeartbeat = Date.now();
         const wasLeader = this.isLeader();
         this.leaderTabId = msg.tab.tabId;
         if (wasLeader && !this.isLeader()) {
