@@ -56,6 +56,29 @@ fn run() -> ExitCode {
         .map(|s| s.as_str())
         .collect();
 
+    // Universal `--help` / `-h` short-circuit. Without this, subcommands
+    // like `pylon db backup --help` would dispatch through to the
+    // command handler, which then sees `--help` as a no-op flag and
+    // happily executes the command — `db backup` actually fired the
+    // cloud API and got `INVALID_ARGS` back. Help must NEVER cause a
+    // side effect.
+    //
+    // Per-command help printers (logs, etc.) handle their own --help
+    // before reaching this point — those are still reachable when the
+    // command intercepts the flag itself with richer copy. This is
+    // the safety net for everything else.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        // Commands that own a richer help printer get to handle it
+        // themselves. Everyone else falls back to the top-level usage.
+        match positional.first().copied() {
+            Some("logs") => return commands::cloud_logs::run(&args, json_mode),
+            _ => {
+                print_usage();
+                return ExitCode::Ok;
+            }
+        }
+    }
+
     match positional.first().copied() {
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
