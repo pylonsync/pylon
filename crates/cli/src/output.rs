@@ -1,6 +1,39 @@
 use pylon_kernel::{Diagnostic, Severity};
 use serde::Serialize;
 
+/// Guard a destructive operation behind --yes / interactive
+/// confirmation. Used by every CLI surface that can lose customer
+/// data (db restore, secrets rm, domains rm). Returns `true` when
+/// the caller may proceed.
+///
+/// Behavior:
+///   - `--yes` or `-y` in argv         → proceed silently
+///   - TTY humans, no --yes            → prompt y/N
+///   - Non-TTY (pipe / CI / --json)    → refuse with --yes pointer
+///
+/// On refusal the helper prints the right error; the caller should
+/// just return `ExitCode::Usage`.
+pub fn confirm_destructive(args: &[String], verb: &str, json_mode: bool) -> bool {
+    if args.iter().any(|a| a == "--yes" || a == "-y") {
+        return true;
+    }
+    use std::io::{BufRead, IsTerminal, Write};
+    if json_mode || !std::io::stdin().is_terminal() {
+        print_error(&format!(
+            "Refusing to {verb} without --yes. Re-run with --yes to confirm."
+        ));
+        return false;
+    }
+    eprint!("About to {verb}. Proceed? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).is_err() {
+        print_error("Failed to read confirmation.");
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 // ---------------------------------------------------------------------------
 // ANSI color support
 // ---------------------------------------------------------------------------

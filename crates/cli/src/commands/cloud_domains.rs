@@ -54,9 +54,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         Some("list") | None => run_list(&creds, &project_id, json_mode),
         Some("add") => run_add(&creds, &project_id, positional.get(1).copied(), json_mode),
         Some("verify") => run_verify(&creds, &project_id, positional.get(1).copied(), json_mode),
-        Some("rm") | Some("delete") => {
-            run_rm(&creds, &project_slug, positional.get(1).copied(), json_mode)
-        }
+        Some("rm") | Some("delete") => run_rm(
+            &creds,
+            &project_slug,
+            positional.get(1).copied(),
+            args,
+            json_mode,
+        ),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
             eprintln!("Usage: pylon domains [list | add <host> | verify <host> | rm <host>]");
@@ -232,12 +236,16 @@ fn run_rm(
     creds: &Credentials,
     project_slug: &str,
     host_arg: Option<&str>,
+    args: &[String],
     json_mode: bool,
 ) -> ExitCode {
     let Some(hostname) = host_arg else {
-        output::print_error("Usage: pylon domains rm <hostname>");
+        output::print_error("Usage: pylon domains rm <hostname> [--yes]");
         return ExitCode::Usage;
     };
+    if !output::confirm_destructive(args, &format!("remove domain {hostname}"), json_mode) {
+        return ExitCode::Usage;
+    }
     #[derive(serde::Serialize)]
     struct Args<'a> {
         #[serde(rename = "projectSlug")]

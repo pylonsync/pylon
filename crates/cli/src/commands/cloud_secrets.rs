@@ -77,9 +77,13 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             positional.get(1).copied(),
             json_mode,
         ),
-        Some("rm") | Some("delete") | Some("unset") => {
-            run_rm(&creds, &project_slug, positional.get(1).copied(), json_mode)
-        }
+        Some("rm") | Some("delete") | Some("unset") => run_rm(
+            &creds,
+            &project_slug,
+            positional.get(1).copied(),
+            args,
+            json_mode,
+        ),
         Some("import") => run_import(
             args,
             &creds,
@@ -283,12 +287,16 @@ fn run_rm(
     creds: &Credentials,
     project_slug: &str,
     key_arg: Option<&str>,
+    args: &[String],
     json_mode: bool,
 ) -> ExitCode {
     let Some(key) = key_arg else {
-        output::print_error("Usage: pylon secrets rm KEY");
+        output::print_error("Usage: pylon secrets rm KEY [--yes]");
         return ExitCode::Usage;
     };
+    if !output::confirm_destructive(args, &format!("delete secret \"{key}\""), json_mode) {
+        return ExitCode::Usage;
+    }
     #[derive(serde::Serialize)]
     struct Args<'a> {
         #[serde(rename = "projectSlug")]
