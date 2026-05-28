@@ -300,26 +300,7 @@ describe("SyncEngine.reconcile session guard", () => {
   test("skips apply when tenant flips during entity fetch", async () => {
     let restore: (() => void) | null = null;
     try {
-      restore = installFetch(async (url) => {
-        if (url.includes("/api/entities/Recording/cursor")) {
-          // Server filtered under stale tenant — returns empty. Without
-          // the guard, applyEntityReconcile would tombstone r1.
-          return {
-            status: 200,
-            body: { data: [], next_cursor: null, has_more: false },
-          };
-        }
-        return { status: 404, body: {} };
-      });
-
       const engine = makeEngine();
-      seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
-      expect(engine.store.list("Recording").length).toBe(1);
-
-      // Simulate the app calling select-org WHILE reconcile is mid-flight.
-      // The implementation reads `_resolvedSession` directly; we override
-      // via the engine's internal store mutation surface to match how the
-      // session-changed handler would update it during a real flip.
       const engineWithSession = engine as unknown as {
         _resolvedSession: {
           userId: string | null;
@@ -334,19 +315,36 @@ describe("SyncEngine.reconcile session guard", () => {
         isAdmin: false,
         roles: [],
       };
-      const reconcilePromise = engine.reconcile(["Recording"]);
-      // Flip the tenant before the fetch resolves. The microtask queue
-      // already has the in-flight fetch; this just changes the field
-      // they'll compare against.
-      engineWithSession._resolvedSession = {
-        userId: "u1",
-        tenantId: "org-42",
-        isAdmin: false,
-        roles: [],
-      };
-      await reconcilePromise;
 
-      // Row must survive — the stale fetch result was discarded.
+      restore = installFetch(async (url) => {
+        if (url.includes("/api/entities/Recording/cursor")) {
+          // Flip the session signature WHILE the fetch is "in flight"
+          // — i.e., between the engine's `sessionBeforeFetch` capture
+          // and the apply pass. The engine's reconcile op runs through
+          // the op queue, so the snapshot is taken inside the queued
+          // body. Mutating here exactly models the WS session-changed
+          // envelope landing while we're awaiting the response.
+          engineWithSession._resolvedSession = {
+            userId: "u1",
+            tenantId: "org-42",
+            isAdmin: false,
+            roles: [],
+          };
+          return {
+            status: 200,
+            body: { data: [], next_cursor: null, has_more: false },
+          };
+        }
+        return { status: 404, body: {} };
+      });
+
+      seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
+      expect(engine.store.list("Recording").length).toBe(1);
+
+      await engine.reconcile(["Recording"]);
+
+      // Row must survive — the stale fetch result was discarded by
+      // the session-signature guard.
       expect(engine.store.list("Recording").length).toBe(1);
       expect(engine.store.get("Recording", "r1")).not.toBeNull();
     } finally {

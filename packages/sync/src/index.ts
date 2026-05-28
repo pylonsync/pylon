@@ -15,6 +15,7 @@ import {
 } from "./transport";
 import { LocalStore } from "./local-store";
 import { MutationQueue } from "./mutation-queue";
+import { OpQueue } from "./op-queue";
 import { generateClientId, generateId } from "./ids";
 export { IndexedDBPersistence, persistChange } from "./persistence";
 export {
@@ -246,6 +247,16 @@ export class SyncEngine {
    * the cursor advance so `last_seq` only moves forward.
    */
   private applyQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Serialized channel for outbound network ops (pull, push, reconcile,
+   * refresh, resetReplica). Replaces the per-op `inFlightX` mutexes +
+   * the fire-and-forget `void refreshResolvedSession()` calls that used
+   * to race against in-flight pulls and reconciles. Apply stays
+   * separate (see `applyQueue` above) so WS events don't block on a
+   * pull's HTTP round-trip.
+   */
+  private opQueue: OpQueue = new OpQueue();
 
   /**
    * Registered consumers for binary WebSocket frames. SyncEngine itself
@@ -988,6 +999,13 @@ export class SyncEngine {
    * in-memory state could fix.
    */
   async resetReplica(): Promise<void> {
+    // Public callers go through the queue so a reset can't race with
+    // an in-flight pull / push / reconcile. Internal callers that
+    // already hold the queue slot use `resetReplicaInner` directly.
+    return this.opQueue.enqueue("reset", () => this.resetReplicaInner());
+  }
+
+  private async resetReplicaInner(): Promise<void> {
     this.cursor = { last_seq: 0 };
     this.store.clearAll();
     if (this.persistence) {
@@ -1081,8 +1099,17 @@ export class SyncEngine {
     );
   }
 
-  /** Pull changes from the server. */
+  /** Pull changes from the server. Coalesces concurrent callers via
+   *  the op queue and serializes against push / reconcile / reset, so
+   *  the cursor can't be read mid-reset and the change-log delta can't
+   *  interleave with a sweeping reconcile. The 410 RESYNC retry path
+   *  recurses into `pullInner` directly to avoid self-deadlock on the
+   *  queue. */
   async pull(): Promise<void> {
+    return this.opQueue.enqueue("pull", () => this.pullInner());
+  }
+
+  private async pullInner(): Promise<void> {
     // Identity change detection. If the token flipped since the last pull
     // (anonymous → signed in, user A → user B, signed in → signed out),
     // the server's visible set changed under us and the cursor we saved
@@ -1093,7 +1120,9 @@ export class SyncEngine {
       this.lastSeenToken !== undefined &&
       this.lastSeenToken !== tokenNow
     ) {
-      await this.resetReplica();
+      // We're holding the "pull" slot in the op queue — bypass the
+      // queue's reset path to avoid self-deadlock.
+      await this.resetReplicaInner();
       // Token flipped → the cached tenant is for the previous user. Pull
       // the fresh session in parallel with the cursor catch-up below.
       void this.refreshResolvedSession();
@@ -1158,8 +1187,11 @@ export class SyncEngine {
         const attempt = this.consecutive_410s;
         this.consecutive_410s += 1;
         if (attempt === 0) {
-          await this.resetReplica();
-          await this.pull();
+          // Bypass the queue here — we ARE the pull op holding the
+          // queue slot. Calling the public pull() would re-enqueue and
+          // share our own promise back to us (deadlock).
+          await this.resetReplicaInner();
+          await this.pullInner();
         } else {
           // Already retried once and still 410. Stop. Schedule a
           // back-off retry tied to the WS reconnect path so we don't
@@ -1189,11 +1221,6 @@ export class SyncEngine {
    *  a quick tab-flick after a normal reconnect shouldn't refetch every
    *  entity twice within seconds. Configurable via `reconcileMinIntervalMs`. */
   private lastReconcileAt = 0;
-
-  /** In-flight reconcile promise — coalesces concurrent callers so a
-   *  visibility-change firing during an in-progress reconcile doesn't
-   *  double the work. */
-  private inFlightReconcile: Promise<void> | null = null;
 
   /**
    * Reconcile the local replica against server truth.
@@ -1231,18 +1258,22 @@ export class SyncEngine {
    * no arg, every entity with local rows is checked.
    */
   async reconcile(entities?: string[]): Promise<void> {
-    if (this.inFlightReconcile) return this.inFlightReconcile;
     const minIntervalMs = this.config.reconcileMinIntervalMs ?? 2_000;
     const now = Date.now();
     if (entities === undefined && now - this.lastReconcileAt < minIntervalMs) {
       return;
     }
-    const work = this.reconcileInner(entities).finally(() => {
-      this.inFlightReconcile = null;
-      this.lastReconcileAt = Date.now();
+    // Coalesce concurrent reconciles to a single op via the queue's
+    // keyed dedupe — multiple callers in the same tick share one fetch.
+    // Reconcile waits behind any in-flight pull / refresh / push so it
+    // can't apply rows captured under a stale session.
+    return this.opQueue.enqueue("reconcile", async () => {
+      try {
+        await this.reconcileInner(entities);
+      } finally {
+        this.lastReconcileAt = Date.now();
+      }
     });
-    this.inFlightReconcile = work;
-    return work;
   }
 
   private async reconcileInner(entities?: string[]): Promise<void> {
@@ -1716,28 +1747,15 @@ export class SyncEngine {
     return parsed;
   }
 
-  /**
-   * In-flight push promise. Used as a mutex so a slow push can't be restarted
-   * by the poll timer or a user mutation, which would resend the same batch
-   * and cause duplicate writes on the server. The mutation `op_id` keeps
-   * that safe at the protocol level (the server deduplicates), but shipping
-   * the same batch twice is still wasted bandwidth — hold them instead.
-   *
-   * Callers always get the SAME promise while a push is running; chain a
-   * `.then(() => next push)` if you need a follow-up push after this one.
-   */
-  private inFlightPush: Promise<void> | null = null;
-
-  /** Push pending mutations to the server. Coalesces concurrent callers. */
+  /** Push pending mutations to the server. Coalesces concurrent callers
+   *  via the op queue's keyed dedupe — a slow push can't be restarted
+   *  by the poll timer or a user mutation, which would resend the same
+   *  batch (the mutation `op_id` keeps that safe at the protocol level,
+   *  but shipping the same batch twice is still wasted bandwidth). Also
+   *  serializes against pull / reconcile / resetReplica so a push can't
+   *  observe a half-reset cursor or a mid-reconcile replica. */
   async push(): Promise<void> {
-    if (this.inFlightPush) {
-      return this.inFlightPush;
-    }
-    const work = this.pushInner().finally(() => {
-      this.inFlightPush = null;
-    });
-    this.inFlightPush = work;
-    return work;
+    return this.opQueue.enqueue("push", () => this.pushInner());
   }
 
   private async pushInner(): Promise<void> {
