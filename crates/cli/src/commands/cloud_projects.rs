@@ -16,7 +16,7 @@
 use pylon_kernel::ExitCode;
 use serde::Deserialize;
 
-use crate::cloud_client::{post_json, require_credentials};
+use crate::cloud_client::{post_json, require_credentials, set_default_project};
 use crate::output;
 use crate::project_context::{clear_context_file, write_context_file};
 
@@ -176,6 +176,11 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
             eprintln!("  List available projects: pylon projects list");
             return ExitCode::Usage;
         }
+        // Persist the global default too so subsequent invocations
+        // from any cwd remember the selection. Per-dir context still
+        // wins when present; this is purely the fallback for callers
+        // running outside the .pylon/ tree.
+        set_default_project(slug);
         match write_context_file(slug) {
             Ok(path) => {
                 if json_mode {
@@ -183,12 +188,14 @@ fn run_use(slug_arg: Option<&str>, json_mode: bool) -> ExitCode {
                         "ok": true,
                         "slug": slug,
                         "path": path.to_string_lossy(),
+                        "default_project_persisted": true,
                     });
                     println!("{}", serde_json::to_string(&out).unwrap_or_default());
                 } else {
                     println!("✓ Project context set to {slug}");
-                    println!("  Written to: {}", path.display());
-                    println!("  Subsequent `pylon` commands in this tree will target it without --project.");
+                    println!("  Local:  {}", path.display());
+                    println!("  Global: ~/.config/pylon/state.json");
+                    println!("  Subsequent `pylon` commands anywhere will target it without --project.");
                 }
                 ExitCode::Ok
             }

@@ -65,13 +65,25 @@ pub fn resolve_project_slug(
     if let Some(slug) = read_context_file() {
         return Ok(slug);
     }
-    // 5. Interactive picker — TTY only. CI / --json gets an error
+    // 5. Global default from ~/.config/pylon/state.json. Set by
+    //    `pylon projects use <slug>` (and by the interactive picker
+    //    below). Lets agents `projects use yapless` once and have
+    //    every subsequent invocation know about it regardless of cwd.
+    //    Per-dir context above still wins so monorepos can override.
+    if let Ok(state) = crate::cloud_client::load_state() {
+        if let Some(slug) = state.default_project {
+            if !slug.is_empty() {
+                return Ok(slug);
+            }
+        }
+    }
+    // 6. Interactive picker — TTY only. CI / --json gets an error
     //    pointing at the flag so a misconfigured pipeline doesn't
     //    silently target a previously-set context.
     use std::io::{BufRead, IsTerminal, Write};
     if json_mode || !std::io::stdin().is_terminal() {
         return Err(
-			"No project specified. Pass --project <slug>, set PYLON_PROJECT, or run `pylon projects use <slug>` from this directory."
+			"No project specified. Pass --project <slug>, set PYLON_PROJECT, or run `pylon projects use <slug>`."
 				.into(),
 		);
     }

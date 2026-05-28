@@ -93,6 +93,74 @@ pub fn save_credentials(creds: &Credentials) -> io::Result<()> {
     Ok(())
 }
 
+/// Path to the persistent CLI state file (separate from credentials so
+/// rotating the auth token doesn't blow away cached selections like
+/// the default project). Honors XDG_CONFIG_HOME the same way.
+pub fn state_path() -> io::Result<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        let home = std::env::var("HOME")
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
+        PathBuf::from(home).join(".config")
+    };
+    Ok(base.join("pylon").join("state.json"))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CliState {
+    /// Slug of the last project the user selected via
+    /// `pylon projects use <slug>` (or interactive picker). Acts as
+    /// the global fallback when no per-dir `.pylon/project` is found,
+    /// so agents don't need to keep passing `--project` from every
+    /// cwd. Per-dir context still wins when present — single project
+    /// repos benefit from the global fallback, monorepos can pin a
+    /// different project per subtree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_project: Option<String>,
+}
+
+pub fn load_state() -> io::Result<CliState> {
+    let path = state_path()?;
+    if !path.exists() {
+        return Ok(CliState::default());
+    }
+    let raw = fs::read_to_string(&path)?;
+    // Malformed state isn't fatal — fall back to empty and overwrite
+    // on the next save. Worse to brick every CLI invocation than to
+    // quietly forget the last-used project.
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+pub fn save_state(state: &CliState) -> io::Result<()> {
+    let path = state_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&tmp, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    }
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Update the global default project in state.json. Best-effort —
+/// failures (read-only $HOME, disk full) don't fail the calling
+/// command; the per-dir context still works and the worst case is
+/// the next `pylon` invocation re-prompts for a project.
+pub fn set_default_project(slug: &str) {
+    if let Ok(mut state) = load_state() {
+        state.default_project = Some(slug.to_string());
+        let _ = save_state(&state);
+    }
+}
+
 /// Delete stored credentials. Idempotent — returns Ok(false) if the
 /// file didn't exist.
 pub fn delete_credentials() -> io::Result<bool> {
