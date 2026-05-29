@@ -84,10 +84,13 @@ impl DispatchLimiter {
     ) -> Option<(GlobalSlot, crate::ip_limit::IpConnGuard)> {
         // Optimistic increment then check — race vs check-then-increment
         // would let `cap+1` requests in before any of them sees the cap.
-        let prev = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let prev = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if prev >= self.global_cap {
             // Roll back; the slot belongs to nobody.
-            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             return None;
         }
         let global = GlobalSlot {
@@ -166,9 +169,12 @@ impl StreamLimiter {
         self: &Arc<Self>,
         ip: std::net::IpAddr,
     ) -> Option<(StreamGlobalSlot, crate::ip_limit::IpConnGuard)> {
-        let prev = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let prev = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if prev >= self.global_cap {
-            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             return None;
         }
         let global = StreamGlobalSlot {

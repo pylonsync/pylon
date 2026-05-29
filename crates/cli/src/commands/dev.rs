@@ -800,13 +800,9 @@ fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
     // Match the init template's layout (apps/web) plus the examples'
     // older layout (plain web/). First match wins; an app can put
     // a frontend in either location and it just works.
-    let candidates = [
-        watch_dir.join("web"),
-        watch_dir.join("apps").join("web"),
-    ];
+    let candidates = [watch_dir.join("web"), watch_dir.join("apps").join("web")];
     let Some(web_dir) = candidates.into_iter().find(|p| {
-        p.join("package.json").is_file()
-            && package_json_has_dev_script(&p.join("package.json"))
+        p.join("package.json").is_file() && package_json_has_dev_script(&p.join("package.json"))
     }) else {
         return;
     };
