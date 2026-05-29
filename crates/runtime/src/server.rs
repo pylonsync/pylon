@@ -1069,6 +1069,15 @@ fn start_server(
         if SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
+        // Per-request handler closure. Mechanical conversion of the
+        // dispatch-loop body: each `continue;` in the body becomes
+        // `return;` (returning from the closure runs the next loop
+        // iteration). Phase 1 of the per-request threading refactor —
+        // this commit keeps the call site `()()`, so behavior is
+        // identical to the pre-refactor loop. The next commit moves
+        // to `move ||` + `thread::spawn` so a slow request can't
+        // block the dispatch thread or any other request.
+        (|| {
 
         let rt = Arc::clone(&runtime);
         let ss = Arc::clone(&session_store);
@@ -1231,7 +1240,7 @@ fn start_server(
                     })
                     .ok();
                 mt.record_request("GET", 101);
-                continue;
+                return;
             }
             // Missing Upgrade headers — fall through to a plain 400.
             let response = with_security_headers(
@@ -1244,7 +1253,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 400);
-            continue;
+            return;
         }
 
         // --- Deep health: shallow /health + a 500ms responsive-
@@ -1292,7 +1301,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", status);
-            continue;
+            return;
         }
 
         // --- Health check: fast path before auth or body parsing ---
@@ -1318,7 +1327,7 @@ fn start_server(
                     ),
             );
             let _ = request.respond(response);
-            continue;
+            return;
         }
 
         // --- Metrics endpoint: fast path before rate-limit / body parsing.
@@ -1357,7 +1366,7 @@ fn start_server(
                         ),
                 );
                 let _ = request.respond(response);
-                continue;
+                return;
             }
             let prefers_prometheus = request.headers().iter().any(|h| {
                 (h.field.as_str() == "Accept" || h.field.as_str() == "accept")
@@ -1444,7 +1453,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- /admin/logs/tail: live request-log tail backed by the
@@ -1480,7 +1489,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             // Parse `since=<iso-8601>` from the query string. Anything
             // else in the query string is ignored — `since` is the
@@ -1529,7 +1538,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- /admin/entities: list every entity declared in the
@@ -1560,7 +1569,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             let entities: Vec<serde_json::Value> = runtime
                 .manifest()
@@ -1592,7 +1601,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- /admin/entities/<E>: paginated row browse for the
@@ -1636,7 +1645,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("GET", 401);
-                    continue;
+                    return;
                 }
                 let qs = url.split_once('?').map(|(_, q)| q).unwrap_or("");
                 let limit: usize = qs
@@ -1695,7 +1704,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 200);
-                continue;
+                return;
             }
         }
 
@@ -1737,7 +1746,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             let limit: usize = url
                 .split_once('?')
@@ -1776,7 +1785,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- /admin/jobs[/...]: read-only job-queue surface for the
@@ -1812,7 +1821,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             let path = url.split('?').next().unwrap_or(url.as_str());
             let body: String = if path == "/admin/jobs/stats" {
@@ -1852,7 +1861,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 404);
-                            continue;
+                            return;
                         }
                     }
                 }
@@ -1873,7 +1882,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- /admin/workflows[/...]: read-only workflow surface.
@@ -1904,7 +1913,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             let path = url.split('?').next().unwrap_or(url.as_str());
             let body: String = if path == "/admin/workflows/definitions" {
@@ -1945,7 +1954,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 404);
-                            continue;
+                            return;
                         }
                     }
                 }
@@ -1966,7 +1975,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
 
         // --- Rate limiting: check per-IP request count ---
@@ -2025,7 +2034,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request(method.as_str(), 429);
-                continue;
+                return;
             }
         } // end: if !is_preflight
 
@@ -2081,7 +2090,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request(method_str, err.status);
-                    continue;
+                    return;
                 }
             }
         }
@@ -2174,8 +2183,25 @@ fn start_server(
                         "[auth] PYLON_JWT_SECRET set but PYLON_JWT_ISSUER missing — \
                          refusing JWT verify (set both to enable JWT sessions)"
                     );
-                    Err("JWT_MISCONFIGURED")?;
-                    unreachable!();
+                    // Pre-refactor used `Err("JWT_MISCONFIGURED")?` which
+                    // propagated to start()'s Result and crashed the server.
+                    // Now we're inside a per-request closure returning () —
+                    // reject just this request and let the operator see the
+                    // misconfig in the warn log + their failed requests.
+                    let body = json_error(
+                        "JWT_MISCONFIGURED",
+                        "JWT auth requires both PYLON_JWT_SECRET and PYLON_JWT_ISSUER",
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(&body)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request(method.as_str(), 503);
+                    return;
                 };
                 let secret = jwt_secret().expect("checked above");
                 match pylon_auth::jwt::verify(t, secret.as_bytes(), Some(issuer)) {
@@ -2209,7 +2235,7 @@ fn start_server(
                             .unwrap(),
                     );
                 let _ = request.respond(resp);
-                continue;
+                return;
             }
         };
 
@@ -2417,7 +2443,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 403);
-                continue;
+                return;
             }
             let (status, body) = match rt.reset_for_tests() {
                 Ok(()) => (200u16, "{\"reset\":true}".to_string()),
@@ -2437,7 +2463,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
-            continue;
+            return;
         }
 
         // --- File upload: 3-step flow (init → client PUT → confirm) ---
@@ -2480,7 +2506,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             use std::io::Read;
             let mut body_bytes = Vec::new();
@@ -2509,7 +2535,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
             let filename = v["filename"].as_str().unwrap_or("upload");
@@ -2546,7 +2572,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 413);
-                continue;
+                return;
             }
 
             let storage = pylon_storage::files::select_from_env();
@@ -2571,7 +2597,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
-            continue;
+            return;
         }
 
         // POST /api/files/confirm — step 3. Owner gets recorded here.
@@ -2597,7 +2623,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             use std::io::Read;
             let mut body_bytes = Vec::new();
@@ -2626,7 +2652,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
             let asset_id = match v["assetId"].as_str() {
@@ -2649,7 +2675,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
 
@@ -2697,7 +2723,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
-            continue;
+            return;
         }
 
         // PUT /api/files/local-put/<id> — local backend's byte
@@ -2728,7 +2754,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("PUT", 401);
-                    continue;
+                    return;
                 }
                 let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
                     .ok()
@@ -2758,7 +2784,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("PUT", 413);
-                        continue;
+                        return;
                     }
                 }
                 use std::io::Read;
@@ -2786,7 +2812,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("PUT", 413);
-                    continue;
+                    return;
                 }
                 let local = pylon_storage::files::local_from_env();
                 let (status, body) = match local.write_bytes(asset_id, &bytes) {
@@ -2809,7 +2835,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("PUT", status);
-                continue;
+                return;
             }
         }
 
@@ -2839,7 +2865,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("DELETE", 401);
-                    continue;
+                    return;
                 }
                 let storage = pylon_storage::files::select_from_env();
                 let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
@@ -2870,7 +2896,7 @@ fn start_server(
                                 );
                                 let _ = request.respond(response);
                                 mt.record_request("DELETE", 404);
-                                continue;
+                                return;
                             }
                         }
                         Ok(None) => {
@@ -2896,7 +2922,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("DELETE", 404);
-                            continue;
+                            return;
                         }
                         Err(_) => {}
                     }
@@ -2922,7 +2948,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("DELETE", status);
-                continue;
+                return;
             }
         }
 
@@ -2962,7 +2988,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("GET", 401);
-                        continue;
+                        return;
                     }
                     let storage = pylon_storage::files::select_from_env();
                     let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
@@ -2988,7 +3014,7 @@ fn start_server(
                                 );
                                 let _ = request.respond(response);
                                 mt.record_request("GET", 404);
-                                continue;
+                                return;
                             }
                         }
                     }
@@ -3015,7 +3041,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 302);
-                            continue;
+                            return;
                         }
                         Ok(None) => {}
                         Err(e) => {
@@ -3037,7 +3063,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 500);
-                            continue;
+                            return;
                         }
                     }
                     // No direct URL — local backend. Stream the bytes.
@@ -3068,7 +3094,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("GET", status);
-                    continue;
+                    return;
                 }
             }
         }
@@ -3098,7 +3124,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", 410);
-            continue;
+            return;
         }
 
         // Read body before routing (request is consumed by respond).
@@ -3131,7 +3157,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request(method.as_str(), 413);
-                continue;
+                return;
             }
         }
 
@@ -3171,7 +3197,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request(method.as_str(), 413);
-            continue;
+            return;
         }
 
         // (auth_token + auth_ctx were resolved above, before the fast paths.)
@@ -3206,7 +3232,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("GET", 401);
-                        continue;
+                        return;
                     }
                     let shards = match &shards_ref {
                         Some(s) => Arc::clone(s),
@@ -3232,7 +3258,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 503);
-                            continue;
+                            return;
                         }
                     };
                     let shard = match shards.get(shard_id) {
@@ -3259,7 +3285,7 @@ fn start_server(
                             );
                             let _ = request.respond(response);
                             mt.record_request("GET", 404);
-                            continue;
+                            return;
                         }
                     };
 
@@ -3322,7 +3348,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("GET", status);
-                        continue;
+                        return;
                     }
 
                     // Auto-unsubscribe when the client disconnects: we watch
@@ -3365,7 +3391,7 @@ fn start_server(
                     ));
                     let _ = request.respond(response);
                     mt.record_request("GET", 200);
-                    continue;
+                    return;
                 }
             }
         }
@@ -3413,7 +3439,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 404);
-                    continue;
+                    return;
                 }
                 // 1b. `internal: true` functions reachable only from
                 // admin contexts. The non-streaming router path (in
@@ -3451,7 +3477,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 404);
-                        continue;
+                        return;
                     }
                 }
                 // 2. Per-function rate limit. Match router identity:
@@ -3491,7 +3517,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 429);
-                    continue;
+                    return;
                 }
 
                 let args: serde_json::Value =
@@ -3560,7 +3586,7 @@ fn start_server(
                 ));
                 let _ = request.respond(response);
                 mt.record_request("POST", 200);
-                continue;
+                return;
             }
         }
 
@@ -3594,7 +3620,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             let name = url
                 .trim_start_matches("/api/connections/")
@@ -3629,7 +3655,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 503);
-                    continue;
+                    return;
                 }
             };
             let result = mgr.build_auth_url(
@@ -3664,7 +3690,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
-            continue;
+            return;
         }
 
         // --- GET /api/connections/<name>/callback?code=...&state=... ---
@@ -3712,7 +3738,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("GET", 503);
-                    continue;
+                    return;
                 }
             };
             let (code, state) = match (code, state) {
@@ -3731,7 +3757,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("GET", 400);
-                    continue;
+                    return;
                 }
             };
             let runtime_for_store = Arc::clone(&runtime);
@@ -3794,7 +3820,7 @@ fn start_server(
             let response = with_security_headers(resp);
             let _ = request.respond(response);
             mt.record_request("GET", status);
-            continue;
+            return;
         }
 
         // --- POST /api/llm/complete — non-streaming LLM completion ---
@@ -3826,7 +3852,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             let ai_identity = auth_ctx.user_id.as_deref().unwrap_or(&peer_ip);
             if !auth_ctx.is_admin {
@@ -3850,7 +3876,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 429);
-                    continue;
+                    return;
                 }
             }
             let client = match llm_client_route.clone() {
@@ -3876,7 +3902,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 503);
-                    continue;
+                    return;
                 }
             };
             let parsed: serde_json::Value = match serde_json::from_str(&body) {
@@ -3899,7 +3925,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
             // Model-allowlist gate — env + manifest merged (codex P1-1).
@@ -3935,7 +3961,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 403);
-                        continue;
+                        return;
                     }
                     if !allowed_set.contains(req_model) {
                         let err = json_error(
@@ -3958,7 +3984,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 403);
-                        continue;
+                        return;
                     }
                 }
             }
@@ -3985,7 +4011,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
             let (status, body) = match client.complete(req_obj) {
@@ -4031,7 +4057,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", status);
-            continue;
+            return;
         }
 
         // --- POST /api/ai/stream — SSE streaming AI completion ---
@@ -4059,7 +4085,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             // Per-user rate limit. Default 30/hour caps a runaway client
             // (or compromised session) at ~$5/day on typical pricing.
@@ -4086,7 +4112,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 429);
-                    continue;
+                    return;
                 }
             }
             let ai_provider = std::env::var("PYLON_AI_PROVIDER").unwrap_or_default();
@@ -4115,7 +4141,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 503);
-                continue;
+                return;
             }
 
             let parsed: serde_json::Value = match serde_json::from_str(&body) {
@@ -4138,7 +4164,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
 
@@ -4169,7 +4195,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("POST", 400);
-                    continue;
+                    return;
                 }
             };
 
@@ -4209,7 +4235,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 403);
-                        continue;
+                        return;
                     }
                     let allowed_set: std::collections::HashSet<&str> = allowed
                         .split(',')
@@ -4237,7 +4263,7 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 403);
-                        continue;
+                        return;
                     }
                     req
                 }
@@ -4313,7 +4339,7 @@ fn start_server(
             ));
             let _ = request.respond(response);
             mt.record_request("POST", 200);
-            continue;
+            return;
         }
 
         // Studio route (returns HTML, not JSON).
@@ -4342,7 +4368,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 200);
-            continue;
+            return;
         }
         if url == "/studio/login" && method == Method::Post {
             let mut body_bytes = Vec::new();
@@ -4375,7 +4401,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 503);
-                continue;
+                return;
             }
             if !pylon_auth::constant_time_eq(submitted.as_bytes(), admin.as_bytes()) {
                 let html = studio_login_html(Some("Invalid admin token."));
@@ -4388,7 +4414,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("POST", 401);
-                continue;
+                return;
             }
             // Token verified. Set the admin cookie + redirect.
             let admin_cookie = format!(
@@ -4403,7 +4429,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("POST", 303);
-            continue;
+            return;
         }
         if url == "/studio/logout" && (method == Method::Get || method == Method::Post) {
             let cleared = format!(
@@ -4430,7 +4456,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("GET", 303);
-            continue;
+            return;
         }
 
         // HEAD /studio: respond 200 with empty body. Health checks
@@ -4449,7 +4475,7 @@ fn start_server(
             );
             let _ = request.respond(response);
             mt.record_request("HEAD", 200);
-            continue;
+            return;
         }
 
         let (status, response_body, content_type, is_studio, extra_headers) = if (url == "/studio"
@@ -4497,7 +4523,7 @@ fn start_server(
                     );
                     let _ = request.respond(response);
                     mt.record_request("GET", 403);
-                    continue;
+                    return;
                 }
                 let target = studio_cfg
                     .login_url
@@ -4521,7 +4547,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 303);
-                continue;
+                return;
             }
 
             // Derive the public base URL from the request's headers.
@@ -4592,7 +4618,7 @@ fn start_server(
                 );
                 let _ = request.respond(response);
                 mt.record_request("GET", 401);
-                continue;
+                return;
             }
             match rt.studio_entry_bytes() {
                 Some(bytes) => {
@@ -4819,6 +4845,7 @@ fn start_server(
 
         let _ = request.respond(response);
         mt.record_request(method.as_str(), status);
+        })();
     }
 
     tracing::warn!("Shutting down gracefully...");
