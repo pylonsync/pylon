@@ -1109,25 +1109,50 @@ function CreateChannelModal({
               placeholder="team-chat"
             />
           </div>
-          <label
-            className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-accent/30 px-3 py-2.5 hover:bg-accent/40"
-          >
-            <Checkbox
-              checked={isPrivate}
-              onCheckedChange={(v) => setIsPrivate(!!v)}
-              className="mt-0.5"
-            />
-            <div>
-              <div className="text-sm font-medium">
-                {isPrivate ? "🔒 Private channel" : "# Public channel"}
-              </div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                {isPrivate
-                  ? "Only invited members can see or join."
-                  : "Anyone in the workspace can see and join."}
-              </div>
+          <div className="grid gap-2">
+            <Label>Visibility</Label>
+            <div
+              role="radiogroup"
+              aria-label="Channel visibility"
+              className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-muted/40 p-1"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!isPrivate}
+                onClick={() => setIsPrivate(false)}
+                className={cn(
+                  "flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  !isPrivate
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Hash className="size-4" />
+                Public
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={isPrivate}
+                onClick={() => setIsPrivate(true)}
+                className={cn(
+                  "flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  isPrivate
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Lock className="size-4" />
+                Private
+              </button>
             </div>
-          </label>
+            <div className="text-xs text-muted-foreground">
+              {isPrivate
+                ? "Only invited members can see or join."
+                : "Anyone in the workspace can see and join."}
+            </div>
+          </div>
           {err && (
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
               {err}
