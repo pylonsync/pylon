@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Pylon chat demo.
  *
@@ -7,16 +5,13 @@
  * presence), reactions via toggleReaction, optimistic sends via
  * useMutation, threads, DMs. Two browser windows side-by-side give you
  * the full multiplayer experience.
+ *
+ * The Pylon engine + client are initialized by `PylonProvider` in
+ * `main.tsx` — this component just consumes the hooks.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  init,
-  db,
-  useRoom,
-  configureClient,
-  storageKey,
-} from "@pylonsync/react";
+import { configureClient, db, storageKey, useRoom } from "@pylonsync/react";
 import {
   Loader2,
   Hash,
@@ -50,25 +45,17 @@ import { Checkbox } from "@pylonsync/example-ui/checkbox";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { cn } from "@pylonsync/example-ui/utils";
 
-// Pylon backend URL. Read from Vite at build time so production
-// bundles ship with the deployed Pylon hostname baked in. Set
-// NEXT_PUBLIC_PYLON_URL on Vercel (or your host) to e.g.
-// https://pylon-chat-api.fly.dev. Falls back to localhost so
-// `bun dev` works without any env config — the framework's
-// init() warns loudly when it detects a production HTTPS host
-// pointing at a localhost API, so a missing env var on Vercel
-// surfaces as a console banner instead of silent failure.
-const BASE_URL =
-  process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
-// WS hub URL. With framework v0.3.44+ Pylon multiplexes WS on the
-// main HTTP port via /api/sync/ws; @pylonsync/sync's deriveWsUrl
-// picks that up automatically when wsUrl isn't set. Override here
-// only if you are behind a proxy that does not pass Upgrade headers.
-const WS_URL = process.env.NEXT_PUBLIC_PYLON_WS_URL || undefined;
-// Give this app its own namespace so chat's auth + replica don't clobber
-// any other Pylon app served from the same browser origin.
-init({ baseUrl: BASE_URL, appName: "chat", wsUrl: WS_URL });
-configureClient({ baseUrl: BASE_URL, appName: "chat" });
+// Engine + client configuration moved to `PylonProvider` in main.tsx
+// so the same component works under any host. Auth-related fetches
+// below still need a base URL — derive it the same way main.tsx
+// does so dev (Vite proxies `/api/*` to Pylon) and prod (Pylon serves
+// the SPA from its own origin) both work without env config.
+const BASE_URL = (() => {
+  if (typeof window === "undefined") return "http://localhost:4321";
+  const env = (import.meta as unknown as { env?: { VITE_PYLON_URL?: string } })
+    .env;
+  return env?.VITE_PYLON_URL ?? window.location.origin;
+})();
 
 // ---------------------------------------------------------------------------
 // Types

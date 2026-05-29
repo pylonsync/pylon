@@ -2,10 +2,7 @@
 @import "tw-animate-css";
 @import "@pylonsync/example-ui/tokens.css";
 
-@source "./app";
-@source "./components";
-@source "./lib";
-@source "../../client";
+@source "./";
 @source "../../../_shared/src";
 
 @theme {

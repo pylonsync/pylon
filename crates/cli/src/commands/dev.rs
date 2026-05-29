@@ -372,6 +372,18 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 std::process::exit(1);
             }
         });
+
+        // Frontend dev server — single-command DX for full-stack apps.
+        // If the project has a `web/` directory with a package.json that
+        // defines a `dev` script, spawn `bun run dev` in it as a child
+        // process. This is Phase 1 of unified full-stack serving: the
+        // frontend gets its own port (typically 5173 or 3000 depending
+        // on the framework's default) and the user goes there for the
+        // UI. Phase 2 will reverse-proxy from Pylon's :4321 so there's
+        // truly only one port. The frontend's existing dev-proxy config
+        // (vite.config / next.config) already forwards `/api/*` to
+        // :4321, so /api requests work either way.
+        spawn_frontend_dev_server(watch_dir, json_mode);
     }
 
     // Poll loop. We track file mtimes under the watch dir and react
@@ -764,6 +776,94 @@ fn exec_restart(_json_mode: bool) {
         let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
         std::process::exit(0);
     }
+}
+
+/// Spawn the frontend dev server if the project has one.
+///
+/// Detection: look for `<watch_dir>/web/package.json` with a `dev`
+/// script. The `web/` directory convention matches the init template
+/// (`apps/web/` in newer projects, plain `web/` in the chat/todo
+/// examples). When found, spawn `bun run dev` in that directory and
+/// inherit stdout/stderr so dev-server logs interleave with Pylon's.
+///
+/// Lifecycle: the child inherits stdin from the parent. When the
+/// user Ctrl-Cs `pylon dev`, both processes are in the foreground
+/// process group on Unix, so SIGINT is delivered to the child too
+/// and Next/Vite shut down cleanly. (On Windows we rely on the
+/// child observing stdin closure.)
+///
+/// Phase 1 of unified full-stack: the child still listens on its
+/// own port (5173 / 3000 / etc.) — the user goes there for the UI.
+/// Phase 2 will reverse-proxy from Pylon's :4321 so the user sees
+/// a single port.
+fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
+    // Match the init template's layout (apps/web) plus the examples'
+    // older layout (plain web/). First match wins; an app can put
+    // a frontend in either location and it just works.
+    let candidates = [
+        watch_dir.join("web"),
+        watch_dir.join("apps").join("web"),
+    ];
+    let Some(web_dir) = candidates.into_iter().find(|p| {
+        p.join("package.json").is_file()
+            && package_json_has_dev_script(&p.join("package.json"))
+    }) else {
+        return;
+    };
+
+    // bun runs the package.json's `dev` script. We don't try to
+    // detect Next vs Vite — both projects expose `dev` as the
+    // canonical entrypoint, so it's a one-command spawn.
+    let mut cmd = std::process::Command::new("bun");
+    cmd.args(["run", "dev"]).current_dir(&web_dir);
+    // Stdio inherits so the user sees Vite/Next's "ready on …" log
+    // immediately alongside Pylon's "Listening on :4321."
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    match cmd.spawn() {
+        Ok(child) => {
+            if !json_mode {
+                eprintln!(
+                    "[dev] Frontend dev server started from {} (pid {})",
+                    web_dir.display(),
+                    child.id()
+                );
+            }
+            // Intentionally leak the Child handle: when `pylon dev`
+            // exits, the OS reaps the child via SIGHUP from the
+            // tty / process-group teardown. Holding the handle
+            // would mean we'd need to call .wait() somewhere; we
+            // don't because the parent stays in the poll loop
+            // indefinitely.
+            std::mem::forget(child);
+        }
+        Err(e) => {
+            if !json_mode {
+                eprintln!(
+                    "[dev] Could not spawn frontend dev server in {}: {e}",
+                    web_dir.display()
+                );
+                eprintln!("[dev] Skipping — run `bun run dev` in that directory yourself.");
+            }
+        }
+    }
+}
+
+fn package_json_has_dev_script(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value
+        .get("scripts")
+        .and_then(|s| s.get("dev"))
+        .and_then(|d| d.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
 }
 
 /// Collect mtime of `.ts` and `.tsx` files in a directory, excluding

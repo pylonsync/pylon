@@ -4,27 +4,29 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev --port 5173",
-    "build": "next build --webpack",
-    "start": "next start --port 5173",
-    "lint": "next lint",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@pylonsync/client": "workspace:*",
     "@pylonsync/example-ui": "workspace:*",
+    "@pylonsync/loro": "workspace:*",
     "@pylonsync/react": "workspace:*",
-    "@pylonsync/sync": "workspace:*","@pylonsync/loro": "workspace:*",
-    "next": "^16.0.0",
+    "@pylonsync/sync": "workspace:*",
+    "lucide-react": "^0.469.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.0",
-    "@types/node": "^22.10.0",
+    "@tailwindcss/vite": "^4.1.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^4.7.0",
     "tailwindcss": "^4.1.0",
     "tw-animate-css": "^1.2.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^7.0.0"
   }
 }

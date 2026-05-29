@@ -26,25 +26,19 @@ Demonstrates:
 
 ## Run it
 
-Two terminals:
-
-**Terminal 1 — pylon backend (port 4321):**
+One terminal:
 
 ```sh
 cd examples/chat
-pylon dev app.ts
+bun dev
 ```
 
-**Terminal 2 — Vite dev server for the React UI (port 5173):**
+That starts Pylon on :4321 AND auto-spawns the Vite dev server in
+`web/` on :5173. Open two browser windows at `http://localhost:5173`,
+sign in as different emails in each, and watch messages land live.
 
-```sh
-cd examples/chat/web
-bun install     # first time only
-bun run dev
-```
-
-Open two browser windows at `http://localhost:5173`. Sign in as different
-emails in each; send messages and watch them land live.
+`/api/*` requests from the React app are proxied to Pylon by Vite
+(see `web/vite.config.ts`).
 
 Studio at `http://localhost:4321/studio` lets you inspect rows directly
 (requires admin token in non-dev mode).
@@ -56,7 +50,7 @@ Studio at `http://localhost:4321/studio` lets you inspect rows directly
 | `pylon.manifest.json` | Data model — 7 entities, 4 policies |
 | `functions/sendMessage.ts` | The critical write path — transactional |
 | `functions/toggleReaction.ts` | Race-safe toggle with unique-index fallback |
-| `client/ChatApp.tsx` | React UI — `useQuery`, `useRoom`, `useMutation` |
+| `web/src/ChatApp.tsx` | React UI — `useQuery`, `useRoom`, `useMutation` |
 
 ## What this example does NOT do
 
