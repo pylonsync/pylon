@@ -28,14 +28,16 @@ impl SqliteSessionBackend {
     /// Open or create a SQLite file and ensure the session table exists.
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
-        crate::tune_runtime_connection(&conn, false);
+        crate::tune_runtime_connection(&conn, false)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         Self::from_connection(conn)
     }
 
     /// Use an in-memory database (for tests).
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("open: {e}"))?;
-        crate::tune_runtime_connection(&conn, true);
+        crate::tune_runtime_connection(&conn, true)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         Self::from_connection(conn)
     }
 

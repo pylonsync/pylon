@@ -28,12 +28,14 @@ pub struct SqliteSamlBackend {
 impl SqliteSamlBackend {
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
-        crate::tune_runtime_connection(&conn, false);
+        crate::tune_runtime_connection(&conn, false)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         Self::from_connection(conn)
     }
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("open: {e}"))?;
-        crate::tune_runtime_connection(&conn, true);
+        crate::tune_runtime_connection(&conn, true)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         Self::from_connection(conn)
     }
     fn from_connection(conn: Connection) -> Result<Self, String> {

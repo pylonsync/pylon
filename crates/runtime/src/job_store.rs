@@ -19,7 +19,8 @@ impl JobStore {
     /// Open or create the job store database at `path`.
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("Failed to open job store: {e}"))?;
-        crate::tune_runtime_connection(&conn, false);
+        crate::tune_runtime_connection(&conn, false)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -31,7 +32,8 @@ impl JobStore {
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory()
             .map_err(|e| format!("Failed to open in-memory store: {e}"))?;
-        crate::tune_runtime_connection(&conn, true);
+        crate::tune_runtime_connection(&conn, true)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };

@@ -31,7 +31,8 @@ impl WorkflowStore {
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory()
             .map_err(|e| format!("Failed to open in-memory store: {e}"))?;
-        crate::tune_runtime_connection(&conn, true);
+        crate::tune_runtime_connection(&conn, true)
+            .map_err(|e| format!("pragma init failed: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };

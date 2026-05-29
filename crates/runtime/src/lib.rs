@@ -288,7 +288,18 @@ fn validate_column_name(name: &str, entity: &ManifestEntity) -> Result<(), Runti
 ///
 /// See `crates/storage/src/sqlite.rs` for the rationale on each
 /// pragma. Skipping it on writes drops throughput by 5–10×.
-pub(crate) fn tune_runtime_connection(conn: &Connection, in_memory: bool) {
+///
+/// Returns the first pragma that failed so the caller can decide
+/// fatal-vs-lenient. Boot paths (every backend's `new()`, the main
+/// runtime's open) MUST surface this error so a silent pragma miss
+/// can't ever produce a half-tuned DB that hangs on the first
+/// busy_timeout-less lock wait. Run-time / hot-path callers (read-
+/// pool clones, etc.) can swallow with `let _ = ...` when the
+/// failure mode is "log and proceed."
+pub(crate) fn tune_runtime_connection(
+    conn: &Connection,
+    in_memory: bool,
+) -> Result<(), rusqlite::Error> {
     let pragmas: &[(&str, &str)] = if in_memory {
         &[
             ("temp_store", "MEMORY"),
@@ -308,8 +319,9 @@ pub(crate) fn tune_runtime_connection(conn: &Connection, in_memory: bool) {
         ]
     };
     for (key, value) in pragmas {
-        let _ = conn.pragma_update(None, key, value);
+        conn.pragma_update(None, key, value)?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -667,8 +679,13 @@ impl Runtime {
         mut manifest: AppManifest,
         is_in_memory: bool,
     ) -> Result<Self, RuntimeError> {
-        // Apply the production pragma set on the write connection.
-        tune_runtime_connection(&conn, is_in_memory);
+        // Apply the production pragma set on the write connection. Fatal
+        // on boot — a silent pragma miss here means subsequent ops have
+        // no busy_timeout and would hang on any lock contention.
+        tune_runtime_connection(&conn, is_in_memory).map_err(|e| RuntimeError {
+            code: "PRAGMA_INIT_FAILED".into(),
+            message: format!("pragma init on write connection: {e}"),
+        })?;
 
         ensure_connection_entity(&mut manifest);
         validate_encrypted_fields(&manifest)?;
@@ -833,7 +850,15 @@ impl Runtime {
                     code: "POOL_OPEN_FAILED".into(),
                     message: format!("Failed to open read connection: {e}"),
                 })?;
-                tune_runtime_connection(&read_conn, false);
+                // Read-pool connection: fatal on tune failure too. If
+                // the write conn tuned cleanly but a read-pool conn
+                // doesn't, we'd ship a partially-tuned pool where some
+                // queries hang on busy and others don't — clearer to
+                // fail boot than to debug at 3 AM.
+                tune_runtime_connection(&read_conn, false).map_err(|e| RuntimeError {
+                    code: "PRAGMA_INIT_FAILED".into(),
+                    message: format!("pragma init on read pool connection: {e}"),
+                })?;
                 pool.push(Mutex::new(read_conn));
             }
             pool
