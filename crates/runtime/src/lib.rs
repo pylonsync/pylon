@@ -2904,6 +2904,38 @@ impl Runtime {
         }
     }
 
+    /// Force-flush + truncate the WAL on the main write connection. Called
+    /// from the server's shutdown drain so the next boot doesn't have to
+    /// recover a stale WAL. Postgres-backed runtimes are a no-op (the
+    /// only auxiliary SQLite dbs Pylon owns are session/jobs/etc. — those
+    /// have their own shutdown via SessionStore/JobQueue or just rely on
+    /// auto-checkpoint).
+    ///
+    /// Errors are logged by the caller but not fatal — checkpointing is
+    /// hygiene, not correctness; a missed checkpoint just means the next
+    /// boot does the recovery itself (which now has busy_timeout=5s so
+    /// it can't hang).
+    pub fn checkpoint_wal(&self) -> Result<(), RuntimeError> {
+        let sb = match self.sqlite_backend() {
+            Ok(sb) => sb,
+            Err(_) => return Ok(()), // Postgres or not-sqlite — nothing to do
+        };
+        let conn = sb.write_conn.lock().map_err(|e| RuntimeError {
+            code: "LOCK_FAILED".into(),
+            message: format!("Failed to acquire write conn for checkpoint: {e}"),
+        })?;
+        // wal_checkpoint(TRUNCATE) blocks until the WAL is fully merged
+        // into the main DB AND truncated to zero bytes. Safe under
+        // concurrent readers (they'll just retry); we drain HTTP
+        // workers first so the only contender is the scheduler/job
+        // worker tail which should also have stopped by this point.
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .map_err(|e| RuntimeError {
+                code: "WAL_CHECKPOINT_FAILED".into(),
+                message: format!("wal_checkpoint(TRUNCATE) failed: {e}"),
+            })
+    }
+
     /// Borrow the SQLite backend, or fail with `NOT_SQLITE_BACKEND` if
     /// this runtime is Postgres-backed. Used by every SQLite-specific
     /// helper as a single point of dispatch.

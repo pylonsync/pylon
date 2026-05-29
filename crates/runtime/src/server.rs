@@ -5249,21 +5249,54 @@ fn start_server(
     // Let the scheduler finish its current cycle.
     let _ = &scheduler; // drop Arc at end of scope
 
-    // Wait for outstanding workers to idle, up to drain_timeout.
+    // Wait for in-flight HTTP workers AND background jobs to drain. The
+    // HTTP workers are the new piece: pre-refactor the dispatch loop
+    // was single-threaded so shutdown blocked recv() implicitly; now
+    // each request runs on its own worker thread and we need to wait
+    // for the active set to clear before we close the runtime. Stream
+    // workers are intentionally not waited on — they're long-lived by
+    // design and would always hit the drain_timeout. If they outlive
+    // the cap, they get killed alongside the process; that's
+    // acceptable for a graceful-shutdown signal vs. SIGKILL.
     while start.elapsed() < drain_timeout {
         let pending_jobs = job_queue.stats().pending;
-        if pending_jobs == 0 {
+        let in_flight_http = dispatch_limiter.in_flight();
+        if pending_jobs == 0 && in_flight_http == 0 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     let elapsed = start.elapsed();
+    let final_in_flight = dispatch_limiter.in_flight();
+    let final_pending = job_queue.stats().pending;
+    let final_streams = stream_limiter
+        .in_flight
+        .load(std::sync::atomic::Ordering::Acquire);
     tracing::warn!(
-        "Drain complete in {:.1}s (timeout {}s)",
+        "Drain complete in {:.1}s (timeout {}s, in-flight http={}, pending jobs={}, streams={})",
         elapsed.as_secs_f32(),
-        drain_timeout.as_secs()
+        drain_timeout.as_secs(),
+        final_in_flight,
+        final_pending,
+        final_streams,
     );
+
+    // Force-checkpoint the WAL so the next boot doesn't have to recover
+    // any uncommitted journal pages. The wedge we hit on dev.db.jobs.db
+    // came from skipping this step on abrupt termination — for graceful
+    // shutdown we leave the DB in a clean state. Logged-not-fatal: if
+    // checkpoint fails (e.g., another conn still holds a lock) we want
+    // to exit anyway. busy_timeout=5000 means the operator-visible cap
+    // is bounded.
+    match runtime.checkpoint_wal() {
+        Ok(()) => tracing::info!("WAL checkpoint (TRUNCATE) complete"),
+        Err(e) => tracing::warn!(
+            "WAL checkpoint failed (next boot will recover): {} {}",
+            e.code,
+            e.message
+        ),
+    }
     Ok(())
 }
 
