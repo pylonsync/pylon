@@ -256,6 +256,12 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
     bun_install_in_dir(&pkg_dir)
 }
 
+/// Public wrapper kept for back-compat — root install path doesn't
+/// know about a "source" web dir, so just delegates.
+fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
+    bun_install_in_dir_with_source(pkg_dir, None)
+}
+
 /// Workhorse used by both the root install ([`ensure_npm_deps_installed`])
 /// and the frontend install ([`ensure_frontend_built`]). Runs `bun install`
 /// in `pkg_dir` with these guarantees:
@@ -263,16 +269,25 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
 /// - Fast-skip via mtime marker at `<pkg_dir>/node_modules/.pylon-install-marker`.
 /// - Workspace:* dep handling for monorepo-authored apps deployed standalone
 ///   (Pylon Cloud / chat dogfood): if every workspace dep is already satisfied
-///   in `node_modules` (typically symlinks), strip them from package.json
-///   before install, restore after. Otherwise let bun fail loudly so the
-///   operator knows which dep is missing.
+///   in `node_modules` OR resolvable via the walk-up candidates from
+///   `find_workspace_package_dir`, strip them from package.json before
+///   install and restore after. Otherwise let bun fail loudly so the operator
+///   knows which dep is missing.
 /// - Uses `--frozen-lockfile` when a lockfile is present AND we're not on
 ///   the strip-workspace-deps path (that path always drifts the committed
 ///   lockfile).
 ///
+/// `source_web_dir` is the original (possibly read-only) source web dir
+/// when `pkg_dir` is a build fallback — `find_workspace_package_dir` can
+/// then also satisfy workspace deps via the source's monorepo node_modules.
+/// Pass `None` for the root install (no fallback monorepo concept there).
+///
 /// Returns `BUN_INSTALL_FAILED` on non-zero exit; `BUN_EXEC_FAILED` when
 /// bun itself can't spawn; `PKG_JSON_*` on the rare backup/write hiccup.
-fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
+fn bun_install_in_dir_with_source(
+    pkg_dir: &Path,
+    source_web_dir: Option<&Path>,
+) -> Result<(), Diagnostic> {
     let pkg_json = pkg_dir.join("package.json");
     let node_modules = pkg_dir.join("node_modules");
     let lockfile_text = pkg_dir.join("bun.lock");
@@ -305,39 +320,28 @@ fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
     })?;
     let workspace_deps = scan_workspace_deps(&pkg_json_text);
     // A workspace:* dep is "satisfied" when bun's import resolution can
-    // find a real package for it — either in the local node_modules
-    // (the legacy symlink-stage path) OR in any of the standard walk-up
-    // candidates that Node's resolution would also try.
+    // find a real package for it. Check, in order:
     //
-    // The walk-up candidates on Pylon Cloud / Fly:
-    //   /app/node_modules/@pylonsync/<bare>  ← pre-seeded by the Dockerfile
-    //   /pylon/packages/<bare>               ← canonical source-of-truth
+    //   1. <pkg_dir>/node_modules/<dep>/package.json  ← local install
+    //   2. /pylon/packages/<bare>/package.json        ← Pylon Cloud image
+    //   3. /app/node_modules/<dep>/package.json       ← Dockerfile-seeded
+    //   4. <source_web_dir>/node_modules/<dep>/...    ← local monorepo
     //
-    // Without checking these, we'd false-negative on the "all satisfied"
-    // gate and fall through to the normal `bun install --frozen-lockfile`
-    // path with workspace:* deps intact, which dies with "Workspace
-    // dependency not found." This was the chat-api failure mode through
-    // v0.3.206. Checking walk-up candidates means the strip-deps path
-    // fires unconditionally when the framework packages are present —
-    // even if no per-web symlink staging happened (perms, fs quirks).
+    // Without these walk-ups we'd false-negative on the "all satisfied"
+    // gate and fall through to a normal `bun install --frozen-lockfile`
+    // with workspace:* deps intact, which dies with "Workspace dependency
+    // not found." This was the chat-api failure mode through v0.3.207.
     let satisfied_workspace_deps: Vec<&String> = workspace_deps
         .iter()
         .filter(|name| {
-            // Local node_modules: previous behavior.
             if node_modules.join(name).join("package.json").is_file() {
                 return true;
             }
-            // Walk-up candidates Node's resolver would also try.
-            let bare = name.strip_prefix("@pylonsync/").unwrap_or(name);
-            for candidate in [
-                Path::new("/app/node_modules").join(name),
-                Path::new("/pylon/packages").join(bare),
-            ] {
-                if candidate.join("package.json").is_file() {
-                    return true;
-                }
-            }
-            false
+            // find_workspace_package_dir handles all the other candidate
+            // locations uniformly. Pass `pkg_dir` itself as the source
+            // hint when the caller had no separate source dir.
+            let source_hint = source_web_dir.unwrap_or(pkg_dir);
+            find_workspace_package_dir(name, source_hint).is_some()
         })
         .collect();
     let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
@@ -469,41 +473,89 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
         })
         .unwrap_or(Path::new("."));
     let candidates = [entry_dir.join("web"), entry_dir.join("apps/web")];
-    let Some(web_dir) = candidates
+    let Some(source_web_dir) = candidates
         .into_iter()
         .find(|p| p.join("package.json").is_file())
     else {
         return Ok(());
     };
 
-    if !package_json_has_build_script(&web_dir.join("package.json")) {
+    if !package_json_has_build_script(&source_web_dir.join("package.json")) {
         return Ok(());
     }
 
-    let dist = web_dir.join("dist");
+    // Resolve where to actually do the install + build. In a stock
+    // dev or self-host monorepo, this is source_web_dir directly
+    // (in-place, fast). On Pylon Cloud / Fly the source ships via
+    // files-mount with root ownership of /app/web/, so pylon-uid
+    // can read but can't create node_modules/, dist/, or even
+    // rename package.json (rename needs write on parent dir).
+    // Detect that and fall back to a writable location.
+    //
+    // Discovery order tried by `resolve_build_dir`:
+    //   1. source_web_dir (in-place, when writable)
+    //   2. /data/.pylon-frontend-build/web (persistent volume — survives reboots so the mtime-marker fast-skip still works)
+    //   3. /tmp/.pylon-frontend-build/web (ephemeral, last resort)
+    let (build_dir, mirror_needed) =
+        resolve_build_dir(&source_web_dir).map_err(|e| Diagnostic {
+            severity: Severity::Error,
+            code: "BUILD_DIR_RESOLVE_FAILED".into(),
+            message: format!(
+                "Failed to find a writable build dir for the frontend (tried {}, /data/.pylon-frontend-build, /tmp/.pylon-frontend-build): {e}",
+                source_web_dir.display(),
+            ),
+            span: None,
+            hint: Some(
+                "Ensure either web/ is writable, or /data/ or /tmp/ is mountable + writable by the pylon user."
+                    .into(),
+            ),
+        })?;
+
+    // Mirror source into the build dir if we're not building in place.
+    // Smart mirror: only copy files whose source mtime is newer than
+    // the corresponding dest mtime, so subsequent boots only re-copy
+    // edits instead of re-shipping the whole tree. Excludes
+    // node_modules (bun re-builds) and dist (output dir).
+    if mirror_needed {
+        smart_mirror(&source_web_dir, &build_dir, &["node_modules", "dist"]).map_err(|e| {
+            Diagnostic {
+                severity: Severity::Error,
+                code: "BUILD_DIR_COPY_FAILED".into(),
+                message: format!(
+                    "Failed to mirror frontend source from {} to {}: {e}",
+                    source_web_dir.display(),
+                    build_dir.display()
+                ),
+                span: None,
+                hint: None,
+            }
+        })?;
+    }
+
+    let dist = build_dir.join("dist");
     let marker = dist.join(".pylon-build-marker");
     let index = dist.join("index.html");
 
     // Fast-skip when nothing's changed since the last successful build.
-    // Compare the marker mtime against every relevant input. If the
-    // input set drifts (new build config in some future framework),
-    // worst case is we under-rebuild — operator can rm -rf dist/ to
-    // force. Better than over-rebuilding every reboot.
+    // Inputs are read from source_web_dir (the canonical source), NOT
+    // build_dir (where they might've been freshly copied with new
+    // mtimes by the mirror step). Marker lives in build_dir/dist
+    // because that's where the artifact actually is.
     if index.is_file() && marker.is_file() {
         if let Ok(marker_mtime) = std::fs::metadata(&marker).and_then(|m| m.modified()) {
             let mut newest_input = std::time::SystemTime::UNIX_EPOCH;
             let mut walked = false;
             for input in [
-                web_dir.join("package.json"),
-                web_dir.join("bun.lock"),
-                web_dir.join("bun.lockb"),
-                web_dir.join("vite.config.ts"),
-                web_dir.join("vite.config.js"),
-                web_dir.join("next.config.ts"),
-                web_dir.join("next.config.js"),
-                web_dir.join("tsconfig.json"),
-                web_dir.join("astro.config.ts"),
-                web_dir.join("astro.config.mjs"),
+                source_web_dir.join("package.json"),
+                source_web_dir.join("bun.lock"),
+                source_web_dir.join("bun.lockb"),
+                source_web_dir.join("vite.config.ts"),
+                source_web_dir.join("vite.config.js"),
+                source_web_dir.join("next.config.ts"),
+                source_web_dir.join("next.config.js"),
+                source_web_dir.join("tsconfig.json"),
+                source_web_dir.join("astro.config.ts"),
+                source_web_dir.join("astro.config.mjs"),
             ] {
                 if let Ok(t) = std::fs::metadata(&input).and_then(|m| m.modified()) {
                     walked = true;
@@ -512,7 +564,7 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
                     }
                 }
             }
-            if let Ok(src_newest) = newest_mtime_in(&web_dir.join("src")) {
+            if let Ok(src_newest) = newest_mtime_in(&source_web_dir.join("src")) {
                 walked = true;
                 if src_newest > newest_input {
                     newest_input = src_newest;
@@ -524,33 +576,29 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
         }
     }
 
-    // Workspace:* support for the frontend dir. On Pylon Cloud the
-    // base image populates /app/node_modules/@pylonsync/* via the
-    // Dockerfile but NOT /app/web/node_modules — so a chat-style app
-    // with `"@pylonsync/client": "workspace:*"` in web/package.json
-    // would die in bun install with "Workspace dependency not found".
-    // Stage symlinks into web/node_modules pointing at the framework's
-    // /pylon/packages/ tree so bun_install_in_dir's strip-deps path
-    // sees them as satisfied. No-op when /pylon/packages/ doesn't
-    // exist (self-host monorepo dev — `bun install` resolves the
-    // workspace deps the normal way).
-    stage_workspace_symlinks(&web_dir);
+    // Workspace:* support. Stage symlinks in build_dir/node_modules
+    // pointing at the resolved package locations (tried in order:
+    // /pylon/packages, /app/node_modules, source_web_dir/node_modules).
+    // Vite resolves @pylonsync/* imports through these at bundle time.
+    // Pair with `bun_install_in_dir`'s walk-up satisfaction check so
+    // the strip-deps gate fires reliably.
+    stage_workspace_symlinks(&build_dir, &source_web_dir);
 
-    bun_install_in_dir(&web_dir)?;
+    bun_install_in_dir_with_source(&build_dir, Some(&source_web_dir))?;
 
     // Run the build script. Use the explicit `bun run build` form so
     // the call works against any framework whose package.json defines
     // `"build": "..."` — vite, next, astro, parcel, etc.
     let output = std::process::Command::new("bun")
         .args(["run", "build"])
-        .current_dir(&web_dir)
+        .current_dir(&build_dir)
         .output()
         .map_err(|e| Diagnostic {
             severity: Severity::Error,
             code: "BUN_EXEC_FAILED".into(),
             message: format!(
                 "Failed to execute `bun run build` for frontend in {}: {e}",
-                web_dir.display()
+                build_dir.display()
             ),
             span: None,
             hint: None,
@@ -568,7 +616,7 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
             code: "FRONTEND_BUILD_FAILED".into(),
             message: format!(
                 "`bun run build` failed in {}:\n\n{detail}",
-                web_dir.display()
+                build_dir.display()
             ),
             span: None,
             hint: Some(
@@ -581,46 +629,41 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-/// Pre-stage `@pylonsync/*` workspace symlinks inside `web_dir/node_modules/`
-/// so the bun-install path can satisfy `workspace:*` deps without a real
-/// workspace root.
+/// Pre-stage `@pylonsync/*` workspace symlinks inside
+/// `build_dir/node_modules/`, looking up package locations in
+/// `find_workspace_package_dir`. Combines with
+/// `bun_install_in_dir`'s walk-up satisfaction check so the
+/// strip-workspace-deps path fires reliably across:
 ///
-/// Source of truth: `/pylon/packages/<name>` (Pylon Cloud's base image
-/// layout). When that path doesn't exist (self-hosted monorepo dev where
-/// bun finds the real workspace) we skip the symlink and let bun's normal
-/// resolution take over.
+/// - Pylon Cloud / Fly: `/pylon/packages/<bare>` (image-seeded)
+/// - Self-hosted monorepo dev: `source_web_dir/node_modules/@pylonsync/<dep>`
+///   (real bun-workspace symlink)
+/// - CLI-upload deploys with read-only source: build runs in /tmp or
+///   /data fallback, source's pre-existing node_modules may not be
+///   present, so `/pylon/packages` is the only fallback.
 ///
-/// Idempotent + best-effort: failures (symlink already exists with a
-/// different target, FS doesn't support symlinks, etc.) don't propagate
-/// because the install step downstream will surface any real "dep not
-/// found" failure with a clearer error than we could produce here.
-fn stage_workspace_symlinks(web_dir: &Path) {
-    let Ok(pkg_text) = std::fs::read_to_string(web_dir.join("package.json")) else {
+/// Idempotent + best-effort: a write failure for any single dep
+/// doesn't propagate; the strip-deps path downstream surfaces the
+/// real "dep not found" error with a better explanation than this
+/// helper could produce.
+fn stage_workspace_symlinks(build_dir: &Path, source_web_dir: &Path) {
+    let Ok(pkg_text) = std::fs::read_to_string(build_dir.join("package.json")) else {
         return;
     };
     let workspace_deps = scan_workspace_deps(&pkg_text);
     if workspace_deps.is_empty() {
         return;
     }
-    let pylon_packages = Path::new("/pylon/packages");
-    if !pylon_packages.is_dir() {
-        return;
-    }
-    let node_modules = web_dir.join("node_modules");
+    let node_modules = build_dir.join("node_modules");
     let _ = std::fs::create_dir_all(node_modules.join("@pylonsync"));
     for dep in &workspace_deps {
-        // Convert "@pylonsync/client" → src "/pylon/packages/client",
-        // dest "<web>/node_modules/@pylonsync/client". Drop the namespace
-        // prefix for the source side (packages/ uses unqualified names).
-        let bare = dep.strip_prefix("@pylonsync/").unwrap_or(dep);
-        let src = pylon_packages.join(bare);
         let dest = node_modules.join(dep);
-        if !src.is_dir() {
-            continue; // bun install will fail loudly if this matters
+        if dest.exists() || dest.is_symlink() {
+            continue; // already linked or installed
         }
-        if dest.exists() {
-            continue; // already symlinked / installed
-        }
+        let Some(src) = find_workspace_package_dir(dep, source_web_dir) else {
+            continue; // bun install + strip path will surface the gap
+        };
         #[cfg(unix)]
         {
             let _ = std::os::unix::fs::symlink(&src, &dest);
@@ -630,6 +673,39 @@ fn stage_workspace_symlinks(web_dir: &Path) {
             let _ = std::os::windows::fs::symlink_dir(&src, &dest);
         }
     }
+}
+
+/// Find the directory of a workspace dep package by trying the
+/// known candidate locations. First hit wins. Returns the dir that
+/// CONTAINS `package.json` for the dep — the symlink target.
+///
+/// Candidates, in order:
+/// 1. `/pylon/packages/<bare>` — Pylon Cloud's base image layout.
+/// 2. `/app/node_modules/<dep>` — Pylon Cloud's pre-seeded symlink set.
+/// 3. `<source_web_dir>/node_modules/<dep>` — local monorepo bun-workspace
+///    install (the symlink bun creates in a monorepo).
+///
+/// Each is verified by checking for a `package.json` inside, so a stale
+/// directory or empty placeholder doesn't false-positive.
+fn find_workspace_package_dir(dep: &str, source_web_dir: &Path) -> Option<PathBuf> {
+    let bare = dep.strip_prefix("@pylonsync/").unwrap_or(dep);
+    let candidates = [
+        PathBuf::from("/pylon/packages").join(bare),
+        PathBuf::from("/app/node_modules").join(dep),
+        source_web_dir.join("node_modules").join(dep),
+    ];
+    // canonicalize() resolves any leading `.` / `..` AND follows the
+    // symlink so the returned PathBuf points at the package's real
+    // location on disk. Critical because stage_workspace_symlinks
+    // uses this output as a symlink TARGET — a relative path
+    // (e.g. `./web/node_modules/@pylonsync/example-ui`) resolves
+    // against the SYMLINK's dir, not the cwd, and creates a
+    // self-loop when the symlink lives in a different tree
+    // (the `/tmp/.pylon-frontend-build/web/...` fallback case).
+    candidates
+        .into_iter()
+        .find(|p| p.join("package.json").is_file())
+        .and_then(|p| p.canonicalize().ok())
 }
 
 /// Does `path` (a package.json) declare a `build` script?
@@ -646,6 +722,111 @@ fn package_json_has_build_script(path: &Path) -> bool {
         .and_then(|d| d.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false)
+}
+
+/// Quick writability probe: try create + remove a tiny file. Used by
+/// `resolve_build_dir` to decide between in-place builds (the natural
+/// path) and fallback-dir builds (when the source dir is read-only,
+/// e.g. /app/web/ comes from Fly's files-mount with root ownership).
+fn is_dir_writable(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    let probe = dir.join(".pylon-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Resolve the directory where bun install + bun run build will run.
+/// Returns `(build_dir, mirror_needed)` — when `mirror_needed` is true,
+/// the caller must copy source files from web_dir into build_dir
+/// before invoking bun.
+///
+/// Preference order:
+///   1. `web_dir` (in-place build, fastest)
+///   2. `/data/.pylon-frontend-build/web` (persistent Fly volume —
+///      survives across machine restarts so the mtime-marker fast-skip
+///      still works)
+///   3. `/tmp/.pylon-frontend-build/web` (ephemeral last-resort —
+///      rebuilds on every cold start but always works)
+///
+/// On Pylon Cloud / Fly the source dir comes from files-mount with
+/// root ownership. The pylon-uid (10001) container user can read but
+/// not write — including renaming package.json (which the
+/// strip-workspace-deps path needs). The fallback paths give us a
+/// writable build location without sacrificing the warm-boot
+/// fast-skip.
+fn resolve_build_dir(web_dir: &Path) -> std::io::Result<(PathBuf, bool)> {
+    if is_dir_writable(web_dir) {
+        return Ok((web_dir.to_path_buf(), false));
+    }
+
+    // Persistent: lives on the Fly volume so reboots reuse the build.
+    let persistent = PathBuf::from("/data/.pylon-frontend-build/web");
+    if persistent
+        .parent()
+        .map(|p| p.is_dir() || std::fs::create_dir_all(p).is_ok())
+        .unwrap_or(false)
+    {
+        if persistent.is_dir() || std::fs::create_dir_all(&persistent).is_ok() {
+            if is_dir_writable(&persistent) {
+                return Ok((persistent, true));
+            }
+        }
+    }
+
+    // Ephemeral last resort. /tmp is always writable on Unix.
+    let tmp = PathBuf::from("/tmp/.pylon-frontend-build/web");
+    std::fs::create_dir_all(&tmp)?;
+    Ok((tmp, true))
+}
+
+/// Smart copy of a source dir tree into a destination, skipping files
+/// whose dest mtime is already ≥ source mtime. Excludes given
+/// top-level directory names (typically `node_modules` and `dist`).
+///
+/// Used to seed build_dir from web_dir when the build runs in a
+/// different location. Subsequent boots only re-copy edited files —
+/// not the entire tree — keeping warm-boot cost low.
+///
+/// Symlinks in the source are SKIPPED (rare in handwritten source
+/// trees; would otherwise dereference through to copied files). The
+/// `exclude` list always wins, so a symlinked `node_modules` is
+/// dropped before any decision about how to copy it.
+fn smart_mirror(src: &Path, dest: &Path, exclude: &[&str]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if exclude.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dest_path = dest.join(&name);
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            smart_mirror(&src_path, &dest_path, exclude)?;
+        } else if ft.is_file() {
+            let src_mtime = entry.metadata()?.modified()?;
+            let should_copy = match std::fs::metadata(&dest_path).and_then(|m| m.modified()) {
+                Ok(dest_mtime) => src_mtime > dest_mtime,
+                Err(_) => true, // dest missing
+            };
+            if should_copy {
+                std::fs::copy(&src_path, &dest_path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Recursively find the newest mtime under `dir`. Used by

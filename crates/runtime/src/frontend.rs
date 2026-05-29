@@ -128,7 +128,18 @@ impl FrontendConfig {
             // Default discovery: <app>/web/dist or <app>/apps/web/dist.
             // First hit wins; matches the layout the `pylon init`
             // template + the examples use.
-            let candidates = [app_dir.join("web/dist"), app_dir.join("apps/web/dist")];
+            //
+            // Fallback candidates: /data/.pylon-frontend-build/web/dist
+            // and /tmp/.pylon-frontend-build/web/dist — these are where
+            // the CLI's `ensure_frontend_built` writes when /app/web/
+            // is read-only (Pylon Cloud / Fly files-mount with root
+            // ownership of source dir).
+            let candidates = [
+                app_dir.join("web/dist"),
+                app_dir.join("apps/web/dist"),
+                PathBuf::from("/data/.pylon-frontend-build/web/dist"),
+                PathBuf::from("/tmp/.pylon-frontend-build/web/dist"),
+            ];
             candidates
                 .into_iter()
                 .find(|p| p.join("index.html").is_file())
@@ -306,7 +317,15 @@ pub fn try_handle(
 /// finishes so the next request picks up the freshly-built dist
 /// without a process restart.
 fn discover_dist_dir(app_dir: &Path) -> Option<PathBuf> {
-    let candidates = [app_dir.join("web/dist"), app_dir.join("apps/web/dist")];
+    let candidates = [
+        app_dir.join("web/dist"),
+        app_dir.join("apps/web/dist"),
+        // CLI's ensure_frontend_built falls back to these locations
+        // when /app/web/ is read-only (Pylon Cloud / Fly): keep the
+        // discovery list in sync with bun.rs's resolve_build_dir.
+        PathBuf::from("/data/.pylon-frontend-build/web/dist"),
+        PathBuf::from("/tmp/.pylon-frontend-build/web/dist"),
+    ];
     candidates
         .into_iter()
         .find(|p| p.join("index.html").is_file())
