@@ -304,9 +304,41 @@ fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
         hint: None,
     })?;
     let workspace_deps = scan_workspace_deps(&pkg_json_text);
+    // A workspace:* dep is "satisfied" when bun's import resolution can
+    // find a real package for it — either in the local node_modules
+    // (the legacy symlink-stage path) OR in any of the standard walk-up
+    // candidates that Node's resolution would also try.
+    //
+    // The walk-up candidates on Pylon Cloud / Fly:
+    //   /app/node_modules/@pylonsync/<bare>  ← pre-seeded by the Dockerfile
+    //   /pylon/packages/<bare>               ← canonical source-of-truth
+    //
+    // Without checking these, we'd false-negative on the "all satisfied"
+    // gate and fall through to the normal `bun install --frozen-lockfile`
+    // path with workspace:* deps intact, which dies with "Workspace
+    // dependency not found." This was the chat-api failure mode through
+    // v0.3.206. Checking walk-up candidates means the strip-deps path
+    // fires unconditionally when the framework packages are present —
+    // even if no per-web symlink staging happened (perms, fs quirks).
     let satisfied_workspace_deps: Vec<&String> = workspace_deps
         .iter()
-        .filter(|name| node_modules.join(name).join("package.json").is_file())
+        .filter(|name| {
+            // Local node_modules: previous behavior.
+            if node_modules.join(name).join("package.json").is_file() {
+                return true;
+            }
+            // Walk-up candidates Node's resolver would also try.
+            let bare = name.strip_prefix("@pylonsync/").unwrap_or(name);
+            for candidate in [
+                Path::new("/app/node_modules").join(name),
+                Path::new("/pylon/packages").join(bare),
+            ] {
+                if candidate.join("package.json").is_file() {
+                    return true;
+                }
+            }
+            false
+        })
         .collect();
     let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
     let restore_after =

@@ -135,7 +135,8 @@ RUN mkdir -p /app/node_modules/@pylonsync \
     && ln -sfn /pylon/packages/loro        /app/node_modules/@pylonsync/loro \
     && ln -sfn /pylon/packages/next        /app/node_modules/@pylonsync/next \
     && ln -sfn /pylon/packages/plugins     /app/node_modules/@pylonsync/plugins \
-    && ln -sfn /pylon/packages/workflows   /app/node_modules/@pylonsync/workflows
+    && ln -sfn /pylon/packages/workflows   /app/node_modules/@pylonsync/workflows \
+    && ln -sfn /pylon/packages/example-ui  /app/node_modules/@pylonsync/example-ui
 
 RUN groupadd --system --gid 10001 pylon \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin pylon \

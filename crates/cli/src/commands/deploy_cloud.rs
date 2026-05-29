@@ -52,6 +52,13 @@ const EXCLUDE_DIRS: &[&str] = &[
     "target",
     ".pylon",
     ".next",
+    // `dist` excluded: shipping the pre-built bundle hits Fly's
+    // machine-config body cap (every byte gets base64'd into the
+    // updateMachine payload; the chat example's loro_wasm alone is
+    // 3MB → 4MB encoded, blows the cap before the rest of the bundle
+    // is even considered). The runtime rebuilds in /app/web/ on boot,
+    // which is both cheaper to ship AND gets a deterministic install
+    // against the locked deps.
     "dist",
     "build",
     ".turbo",
