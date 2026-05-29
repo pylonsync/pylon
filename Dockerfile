@@ -129,6 +129,31 @@ COPY --from=rust-builder /build/examples/_shared /pylon/packages/example-ui
 # customer-machine boot.
 RUN cd /pylon/packages/example-ui && bun install --production
 
+# Pre-install the non-workspace runtime deps of the @pylonsync/* packages
+# (clsx for client, loro-crdt for loro) into /pylon/node_modules/ so a
+# customer's web build can resolve them through Node's walk-up from
+# /pylon/packages/<name>/src/. Without this, vite/rollup dies with
+# "Rollup failed to resolve import 'loro-crdt' from
+# /pylon/packages/loro/src/registry.ts" — the package is imported but
+# /pylon/node_modules/ only has the @pylonsync/* symlinks; no real npm
+# deps. Keep this dependency list in sync with the `dependencies` blocks
+# across packages/*/package.json; new non-workspace transitive deps go
+# here.
+RUN <<'EOF'
+cat > /pylon/package.json <<'JSON'
+{
+  "name": "pylon-framework-image-deps",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "clsx": "*",
+    "loro-crdt": "*"
+  }
+}
+JSON
+cd /pylon && bun install --production
+EOF
+
 # Pre-create /app with the workspace deps wired in so customer code
 # dropped at /app/app.ts can `import {entity, ...} from "@pylonsync/sdk"`
 # without shipping its own node_modules. The SDK + functions + react +
