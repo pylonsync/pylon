@@ -103,6 +103,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
 COPY --from=rust-builder /build/packages /pylon/packages
+# The monorepo's root tsconfig.base.json — each @pylonsync/* package
+# (react, client, sync, loro, sdk, next, workflows) has a tsconfig.json
+# whose "extends" points at "../../tsconfig.base.json". From a customer's
+# web/ vite build that walk-up-resolves an @pylonsync/* tsconfig at
+# /pylon/packages/<name>/tsconfig.json, "../../" lands at /pylon/. Ship
+# the base config there so vite's esbuild plugin can resolve it instead
+# of dying with [vite:esbuild] failed to resolve "extends":"../../tsconfig.base.json".
+COPY --from=rust-builder /build/tsconfig.base.json /pylon/tsconfig.base.json
 # Shared example UI components used across examples/ dogfood apps.
 # Lives at examples/_shared in the repo; aliased into /pylon/packages so
 # stage_workspace_symlinks (crates/cli/src/bun.rs) discovers it the same
