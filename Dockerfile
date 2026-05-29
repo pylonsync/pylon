@@ -110,6 +110,17 @@ COPY --from=rust-builder /build/packages /pylon/packages
 # `"@pylonsync/example-ui": "workspace:*"` dep.
 COPY --from=rust-builder /build/examples/_shared /pylon/packages/example-ui
 
+# Install example-ui's transitive deps (@radix-ui/*, clsx, lucide-react,
+# etc.) so a customer's web/ build can resolve them through Node's
+# module-resolution walk. .dockerignore excludes **/node_modules from
+# the build context, so the COPY above ships only source — without
+# this RUN, the chat dogfood (and any other example using
+# `@pylonsync/example-ui`) crashes at vite-build time with
+# "Cannot find module @radix-ui/react-slot". Producing the install at
+# image-build time is much cheaper than re-doing it on every
+# customer-machine boot.
+RUN cd /pylon/packages/example-ui && bun install --production
+
 # Pre-create /app with the workspace deps wired in so customer code
 # dropped at /app/app.ts can `import {entity, ...} from "@pylonsync/sdk"`
 # without shipping its own node_modules. The SDK + functions + react +

@@ -27,7 +27,69 @@
 //! fall through to SPA fallback or 404.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Request, Response};
+
+/// Build progress / outcome surfaced to the SPA handler so non-API
+/// GETs can render a useful holding page while `bun install + bun
+/// run build` finishes on first boot.
+#[derive(Clone, Debug)]
+pub enum BuildState {
+    /// No build was kicked off (no `web/` dir or no build script).
+    /// Default state — SPA serving falls through to API routing.
+    Idle,
+    /// Build thread is running. Non-API GETs see the building page.
+    InProgress,
+    /// Build finished successfully. SPA serves from disk.
+    Ready,
+    /// Build failed. Non-API GETs see an error page with the diagnostic.
+    Failed(String),
+}
+
+/// Shared handle the CLI uses to publish build progress and the
+/// runtime reads to decide what to serve. Cheap to `Clone` (Arc) so
+/// the spawn closure can own one and the FrontendConfig can hold
+/// another.
+pub type SharedBuildState = Arc<RwLock<BuildState>>;
+
+/// Process-wide singleton so the CLI's `pylon start` can publish
+/// build progress and the runtime's start_server can read it without
+/// threading a handle through every API boundary.
+///
+/// Static — one per process. The build only fires once per pylon
+/// start (mtime-marker fast-path on warm boots means the worker
+/// flips straight to Ready), so a single global state matches
+/// reality and avoids leaking an Arc through every CLI → runtime
+/// call site.
+pub fn shared_build_state() -> SharedBuildState {
+    use std::sync::OnceLock;
+    static STATE: OnceLock<SharedBuildState> = OnceLock::new();
+    STATE
+        .get_or_init(|| Arc::new(RwLock::new(BuildState::Idle)))
+        .clone()
+}
+
+pub fn mark_build_in_progress(state: &SharedBuildState) {
+    if let Ok(mut s) = state.write() {
+        *s = BuildState::InProgress;
+    }
+}
+
+pub fn mark_build_ready(state: &SharedBuildState) {
+    if let Ok(mut s) = state.write() {
+        *s = BuildState::Ready;
+    }
+}
+
+pub fn mark_build_failed(state: &SharedBuildState, msg: String) {
+    if let Ok(mut s) = state.write() {
+        *s = BuildState::Failed(msg);
+    }
+}
+
+fn read_build_state(state: &SharedBuildState) -> BuildState {
+    state.read().map(|s| s.clone()).unwrap_or(BuildState::Idle)
+}
 
 /// Resolved frontend config. Built once at startup and shared (cheap to
 /// `Clone`).
@@ -75,10 +137,21 @@ impl FrontendConfig {
         Self { dir, dev_proxy }
     }
 
-    /// Is anything wired up? If both are None, the runtime stays
-    /// API-only.
+    /// Is anything wired up?
+    ///
+    /// True when we have a built dist on disk, a dev proxy URL, OR
+    /// the async builder was at least started. The build-state check
+    /// is what lets the runtime serve a "building" page during first
+    /// boot even though FrontendConfig::from_env at startup saw no
+    /// dist; the Ready branch keeps it active so the discover-after-
+    /// build path in `try_handle` can pick up the freshly-written
+    /// dist/. Only `Idle` (no build kicked off at all) returns false,
+    /// preserving the API-only behavior for projects without a `web/`.
     pub fn is_active(&self) -> bool {
-        self.dir.is_some() || self.dev_proxy.is_some()
+        if self.dir.is_some() || self.dev_proxy.is_some() {
+            return true;
+        }
+        !matches!(read_build_state(&shared_build_state()), BuildState::Idle)
     }
 }
 
@@ -196,10 +269,156 @@ pub fn try_handle(
         return serve_via_proxy(proxy_base, request, cors_origin);
     }
 
-    let Some(dir) = cfg.dir.as_deref() else {
+    // Resolve the serve directory, accounting for a build that
+    // finished AFTER startup (FrontendConfig::from_env captured a
+    // snapshot at boot, but the async builder writes to disk after
+    // that). The lookup is cheap (a couple of stat calls) and only
+    // runs when the boot-captured dir was None — once we get a hit
+    // we'd ideally cache, but the cost is small enough vs the
+    // refactor needed to mutate config from here that we re-check
+    // per request. Operators who set PYLON_FRONTEND_DIR get the
+    // configured path with zero ambiguity.
+    let resolved_dir: Option<PathBuf> = cfg
+        .dir
+        .clone()
+        .or_else(|| discover_dist_dir(&std::env::current_dir().ok().unwrap_or_default()));
+
+    if resolved_dir.is_none() {
+        match read_build_state(&shared_build_state()) {
+            BuildState::InProgress => return serve_build_in_progress(request, cors_origin),
+            BuildState::Failed(msg) => return serve_build_failed(request, &msg, cors_origin),
+            BuildState::Idle | BuildState::Ready => {
+                // Nothing to serve from disk and no build kicked off
+                // (Idle) — defer to the API NOT_FOUND handler.
+                // Ready w/o a discovered dir means the build claimed
+                // success but didn't produce index.html — let the
+                // API 404 surface that to the operator.
+            }
+        }
         return Err(request);
-    };
-    serve_from_disk(dir, request, &url, cors_origin)
+    }
+    let dir = resolved_dir.unwrap();
+    serve_from_disk(&dir, request, &url, cors_origin)
+}
+
+/// Re-run the default frontend-dir discovery (matches
+/// `FrontendConfig::from_env`'s lookup). Used after the async build
+/// finishes so the next request picks up the freshly-built dist
+/// without a process restart.
+fn discover_dist_dir(app_dir: &Path) -> Option<PathBuf> {
+    let candidates = [app_dir.join("web/dist"), app_dir.join("apps/web/dist")];
+    candidates
+        .into_iter()
+        .find(|p| p.join("index.html").is_file())
+}
+
+/// Status page shown while `bun install + bun run build` runs in the
+/// background. Auto-refreshes every 3 seconds so the user lands on
+/// the real SPA as soon as the build completes (next request will
+/// either still 503 if dist isn't there yet, or hit the cfg.dir
+/// branch if it was discovered on the next FrontendConfig::from_env).
+fn serve_build_in_progress(request: Request, cors_origin: &str) -> Result<(), Request> {
+    // 503 with auto-refresh so the page becomes a live status panel.
+    // The 3-second interval is fast enough that the user perceives a
+    // "loading" feel but slow enough not to hammer the server on a
+    // long npm install. Plain-text fallback if HTML rendering is off
+    // (e.g. curl).
+    let body = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="3">
+  <title>Building…</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; background: #0a0a0a; color: #fafafa; }
+    .wrap { height: 100%; display: grid; place-items: center; }
+    .card { text-align: center; }
+    .spinner { width: 24px; height: 24px; margin: 0 auto 16px; border: 2px solid #333; border-top-color: #fafafa; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h1 { font-size: 16px; font-weight: 500; margin: 0 0 8px; }
+    p { font-size: 14px; color: #999; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="spinner"></div>
+      <h1>Building your app…</h1>
+      <p>First boot — installing dependencies and bundling the frontend.</p>
+    </div>
+  </div>
+</body>
+</html>"#;
+    let response = Response::from_data(body.as_bytes().to_vec())
+        .with_status_code(503u16)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        .with_header(
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        )
+        // Retry-After tells well-behaved clients (and Fly's healthcheck) to
+        // back off. 5s aligns with the auto-refresh and signals "transient,
+        // not a permanent error."
+        .with_header(Header::from_bytes("Retry-After", "5").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
+    let _ = request.respond(response);
+    Ok(())
+}
+
+/// Status page shown when the frontend build failed at startup.
+/// Includes the diagnostic message so the operator can see what
+/// broke without grepping logs. Returns 500 (not 503) because this
+/// is a permanent error until the deploy is fixed.
+fn serve_build_failed(request: Request, msg: &str, cors_origin: &str) -> Result<(), Request> {
+    let body = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Frontend build failed</title>
+  <style>
+    html, body {{ margin: 0; padding: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; background: #0a0a0a; color: #fafafa; }}
+    .wrap {{ max-width: 720px; margin: 0 auto; padding: 64px 24px; }}
+    h1 {{ font-size: 18px; margin: 0 0 16px; color: #ef4444; }}
+    pre {{ background: #18181b; color: #fafafa; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.5; }}
+    p {{ font-size: 14px; color: #999; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Frontend build failed</h1>
+    <p>The runtime started but the SPA couldn't be built. Check the deploy logs and fix the underlying issue, then redeploy.</p>
+    <pre>{}</pre>
+  </div>
+</body>
+</html>"#,
+        html_escape(msg)
+    );
+    let response = Response::from_data(body.into_bytes())
+        .with_status_code(500u16)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        .with_header(
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        )
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
+    let _ = request.respond(response);
+    Ok(())
+}
+
+/// Minimal HTML escape so a build error containing `<` / `>` doesn't
+/// break the status page layout (or worse, get treated as markup).
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Serve a path off disk with SPA fallback to `index.html`.

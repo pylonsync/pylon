@@ -82,16 +82,44 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    // Build the frontend SPA if the project ships one (web/ with a
-    // build script). On Pylon Cloud / Fly this is what materializes
-    // web/dist/ on the machine — the deploy ships source but never
-    // dist. Skipped (~5ms) on warm boots via a mtime marker. Fatal
-    // on failure: a deploy that can't build the UI shouldn't silently
-    // come up API-only.
-    if let Err(diag) = crate::bun::ensure_frontend_built(&entry_file) {
-        print_diagnostics(&[diag], json_mode);
-        return ExitCode::Error;
-    }
+    // Build the frontend SPA in the BACKGROUND if the project ships
+    // one (web/ with a build script). On Pylon Cloud / Fly this is
+    // what materializes web/dist/ on the machine — the deploy ships
+    // source but never dist.
+    //
+    // Why background: cold-boot `bun install + bun run build` for a
+    // React/Vite project takes 20-60s. Fly's healthcheck (Dockerfile
+    // start_period=15s + 3*30s retries = 105s total) is generous but
+    // not guaranteed to cover us, and even when it does the autostop
+    // model relies on hitting /health within seconds of a wakeup.
+    // Blocking startup on the build means /health 503s, the load
+    // balancer marks the machine unhealthy, and the deploy crashloops.
+    //
+    // Async pattern: the runtime's frontend module exposes a build-
+    // state handle. We start the build now, the HTTP server starts
+    // immediately, /health responds in ms. Non-API GETs serve a
+    // "building" shell until dist/index.html appears, then flip over
+    // to the real SPA. The fast path (warm boot with dist/.pylon-build-
+    // marker present) returns Ok within ~5ms anyway and the user
+    // sees the SPA from the first request.
+    let entry_file_clone = entry_file.clone();
+    let build_state = pylon_runtime::frontend::shared_build_state();
+    pylon_runtime::frontend::mark_build_in_progress(&build_state);
+    std::thread::Builder::new()
+        .name("pylon-frontend-build".into())
+        .spawn({
+            let build_state = build_state.clone();
+            move || match crate::bun::ensure_frontend_built(&entry_file_clone) {
+                Ok(()) => {
+                    pylon_runtime::frontend::mark_build_ready(&build_state);
+                }
+                Err(diag) => {
+                    eprintln!("[frontend] build failed ({}): {}", diag.code, diag.message);
+                    pylon_runtime::frontend::mark_build_failed(&build_state, diag.message);
+                }
+            }
+        })
+        .expect("spawn frontend build thread");
 
     let manifest = match parse_manifest(&manifest_json, &entry_file) {
         Ok(m) => m,

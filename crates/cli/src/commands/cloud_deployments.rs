@@ -133,8 +133,13 @@ fn run_rollback(
     struct Args<'a> {
         #[serde(rename = "projectId")]
         project_id: &'a str,
-        #[serde(rename = "targetDeploymentId")]
-        target_deployment_id: &'a str,
+        // Field name must match the cloud function exactly. The
+        // server-side `rollbackDeployment` takes `deploymentId`
+        // (v.id("Deployment")); sending `targetDeploymentId` instead
+        // returns "Missing required field deploymentId" and the
+        // rollback never queues.
+        #[serde(rename = "deploymentId")]
+        deployment_id: &'a str,
     }
     #[derive(Deserialize)]
     #[allow(dead_code)]
@@ -147,7 +152,7 @@ fn run_rollback(
         "/api/fn/rollbackDeployment",
         &Args {
             project_id,
-            target_deployment_id: id,
+            deployment_id: id,
         },
     ) {
         Ok(o) => o,
