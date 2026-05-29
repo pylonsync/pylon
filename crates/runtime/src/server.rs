@@ -1272,6 +1272,25 @@ fn start_server(
             .unwrap_or_else(|| "16".to_string()),
     );
 
+    // Resolve the unified full-stack server's frontend config. When the
+    // project has a built `web/dist/` (or `PYLON_FRONTEND_DEV_PROXY` is
+    // set for dev), non-API GETs serve the SPA on the same port. When
+    // neither is configured the runtime stays API-only — backwards
+    // compatible with deployments that haven't added a frontend yet.
+    let frontend_config = {
+        let app_dir = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Arc::new(crate::frontend::FrontendConfig::from_env(&app_dir))
+    };
+    if frontend_config.is_active() {
+        if let Some(dir) = frontend_config.dir.as_deref() {
+            tracing::info!("  Frontend: serving from {}", dir.display());
+        }
+        if let Some(proxy) = frontend_config.dev_proxy.as_deref() {
+            tracing::info!("  Frontend: proxying to {proxy}");
+        }
+    }
+
     // Use recv() in a loop instead of incoming_requests() so we can share
     // the Arc<Server> with the shutdown path (incoming_requests borrows &self
     // which prevents moving the Arc into another thread).
@@ -1377,6 +1396,7 @@ fn start_server(
         let ai_rate_limiter = Arc::clone(&ai_rate_limiter);
         let llm_client_route = llm_client_route.clone();
         let stream_limiter = Arc::clone(&stream_limiter);
+        let frontend_config = Arc::clone(&frontend_config);
 
         // Per-request handler thread. Each request runs on its own worker;
         // a slow fn call here can't block /health or other requests.
@@ -1389,6 +1409,10 @@ fn start_server(
             .spawn(move || {
                 // Hold the slots for the worker's lifetime.
                 let _limiter_guards = limiter_guards;
+                // Re-bind `request` as mut so the SPA hand-back path
+                // (`request = returned;`) compiles — `move` capture
+                // doesn't carry the outer `let mut`.
+                let mut request = request;
 
         let rt = Arc::clone(&runtime);
         let ss = Arc::clone(&session_store);
@@ -2348,6 +2372,37 @@ fn start_server(
                 return;
             }
         } // end: if !is_preflight
+
+        // --- SPA serving (unified full-stack) ---
+        //
+        // After rate-limiting, before auth + CSRF: if the project ships
+        // a built frontend (web/dist/) or PYLON_FRONTEND_DEV_PROXY is set,
+        // route non-API GET/HEAD requests through it. The handler is
+        // self-contained — it consumes `request` on success or hands it
+        // back (`Err(request)`) when the URL is API-bound so existing
+        // routing continues unchanged.
+        //
+        // CSRF + auth are intentionally below this point: SPA assets are
+        // public-by-design (anyone hitting the URL can fetch them — the
+        // SPA's own code is what proves identity once the bundle runs)
+        // and only-GET, so the CSRF check wouldn't fire on them anyway.
+        if frontend_config.is_active() {
+            let method_str_for_metric = method.as_str().to_string();
+            match crate::frontend::try_handle(&frontend_config, request, &cors_origin) {
+                Ok(()) => {
+                    // Status is logged inside the module; we record a
+                    // 200 here as a conservative aggregate (precise per-
+                    // asset status codes flow through `tracing::info!`
+                    // in dev). The frontend module never panics — a
+                    // 502 from the proxy still flows through Ok(()).
+                    metrics.record_request(&method_str_for_metric, 200);
+                    return;
+                }
+                Err(returned) => {
+                    request = returned;
+                }
+            }
+        }
 
         // --- CSRF check on state-changing requests ---
         //

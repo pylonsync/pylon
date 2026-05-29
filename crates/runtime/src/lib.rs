@@ -8,6 +8,7 @@ pub mod connections;
 pub mod cron;
 pub mod datastore;
 pub mod encryption;
+pub mod frontend;
 pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
