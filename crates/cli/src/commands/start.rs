@@ -82,6 +82,17 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
+    // Build the frontend SPA if the project ships one (web/ with a
+    // build script). On Pylon Cloud / Fly this is what materializes
+    // web/dist/ on the machine — the deploy ships source but never
+    // dist. Skipped (~5ms) on warm boots via a mtime marker. Fatal
+    // on failure: a deploy that can't build the UI shouldn't silently
+    // come up API-only.
+    if let Err(diag) = crate::bun::ensure_frontend_built(&entry_file) {
+        print_diagnostics(&[diag], json_mode);
+        return ExitCode::Error;
+    }
+
     let manifest = match parse_manifest(&manifest_json, &entry_file) {
         Ok(m) => m,
         Err(diags) => {

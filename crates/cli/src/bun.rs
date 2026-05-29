@@ -433,6 +433,243 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+/// Build the frontend SPA if the project ships one — the runtime
+/// counterpart to [`ensure_npm_deps_installed`] for the `web/dist/`
+/// half of a unified full-stack app.
+///
+/// Detection: looks for `<entry-dir>/web/package.json` then
+/// `<entry-dir>/apps/web/package.json`. First hit wins. The
+/// `package.json` must declare a `build` script.
+///
+/// Skipping: if `dist/index.html` exists AND every input under
+/// `src/`, plus `package.json` + `vite.config.*` + `tsconfig.json`,
+/// is older than the marker, we skip both install and build. The
+/// marker file lives at `dist/.pylon-build-marker` and is touched
+/// after a successful build. This keeps warm-boot cost at ~5ms
+/// instead of ~15s.
+///
+/// Behaviour on Pylon Cloud / Fly: the deploy machinery ships
+/// `web/` source via files-mount but never `dist/` (excluded). On
+/// first boot this runs `bun install + bun run build`, taking the
+/// hit once. Subsequent reboots of the same machine reuse the
+/// existing `dist/`.
+///
+/// `BUN_INSTALL_FAILED` / `FRONTEND_BUILD_FAILED` diagnostics give
+/// the operator a clear distinction between dep-install issues vs
+/// build-script failures.
+pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
+    let entry_dir = Path::new(entry_file)
+        .parent()
+        .and_then(|p| if p.as_os_str().is_empty() { None } else { Some(p) })
+        .unwrap_or(Path::new("."));
+    let candidates = [entry_dir.join("web"), entry_dir.join("apps/web")];
+    let Some(web_dir) = candidates
+        .into_iter()
+        .find(|p| p.join("package.json").is_file())
+    else {
+        return Ok(());
+    };
+
+    if !package_json_has_build_script(&web_dir.join("package.json")) {
+        return Ok(());
+    }
+
+    let dist = web_dir.join("dist");
+    let marker = dist.join(".pylon-build-marker");
+    let index = dist.join("index.html");
+
+    // Fast-skip when nothing's changed since the last successful build.
+    // Compare the marker mtime against every relevant input. If the
+    // input set drifts (new build config in some future framework),
+    // worst case is we under-rebuild — operator can rm -rf dist/ to
+    // force. Better than over-rebuilding every reboot.
+    if index.is_file() && marker.is_file() {
+        if let Ok(marker_mtime) = std::fs::metadata(&marker).and_then(|m| m.modified()) {
+            let mut newest_input = std::time::SystemTime::UNIX_EPOCH;
+            let mut walked = false;
+            for input in [
+                web_dir.join("package.json"),
+                web_dir.join("bun.lock"),
+                web_dir.join("bun.lockb"),
+                web_dir.join("vite.config.ts"),
+                web_dir.join("vite.config.js"),
+                web_dir.join("next.config.ts"),
+                web_dir.join("next.config.js"),
+                web_dir.join("tsconfig.json"),
+                web_dir.join("astro.config.ts"),
+                web_dir.join("astro.config.mjs"),
+            ] {
+                if let Ok(t) = std::fs::metadata(&input).and_then(|m| m.modified()) {
+                    walked = true;
+                    if t > newest_input {
+                        newest_input = t;
+                    }
+                }
+            }
+            if let Ok(src_newest) = newest_mtime_in(&web_dir.join("src")) {
+                walked = true;
+                if src_newest > newest_input {
+                    newest_input = src_newest;
+                }
+            }
+            if walked && newest_input <= marker_mtime {
+                return Ok(());
+            }
+        }
+    }
+
+    // Install deps for the frontend. Mirrors ensure_npm_deps_installed's
+    // marker-fast-skip but keyed off node_modules/.pylon-install-marker
+    // INSIDE the web dir.
+    let node_modules = web_dir.join("node_modules");
+    let install_marker = node_modules.join(".pylon-install-marker");
+    let pkg_json = web_dir.join("package.json");
+    let lockfile_text = web_dir.join("bun.lock");
+    let lockfile_bin = web_dir.join("bun.lockb");
+    let install_fresh = node_modules.is_dir()
+        && install_marker.is_file()
+        && std::fs::metadata(&install_marker)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|marker_t| {
+                [&pkg_json, &lockfile_text, &lockfile_bin].iter().all(|p| {
+                    std::fs::metadata(p)
+                        .and_then(|m| m.modified())
+                        .map(|t| t <= marker_t)
+                        .unwrap_or(true)
+                })
+            })
+            .unwrap_or(false);
+
+    if !install_fresh {
+        let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
+        let mut cmd = std::process::Command::new("bun");
+        cmd.arg("install").current_dir(&web_dir);
+        if has_lockfile {
+            cmd.arg("--frozen-lockfile");
+        }
+        let output = cmd.output().map_err(|e| Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_EXEC_FAILED".into(),
+            message: format!(
+                "Failed to execute `bun install` for frontend in {}: {e}",
+                web_dir.display()
+            ),
+            span: None,
+            hint: Some("Ensure bun is installed and available on PATH".into()),
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.is_empty() {
+                stderr.trim()
+            } else {
+                stdout.trim()
+            };
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                code: "BUN_INSTALL_FAILED".into(),
+                message: format!(
+                    "Installing frontend npm dependencies failed in {}:\n\n{detail}",
+                    web_dir.display()
+                ),
+                span: None,
+                hint: Some(
+                    "Commit bun.lock so the deploy can run in --frozen-lockfile mode.".into(),
+                ),
+            });
+        }
+        let _ = std::fs::File::create(&install_marker);
+    }
+
+    // Run the build script. Use the explicit `bun run build` form so
+    // the call works against any framework whose package.json defines
+    // `"build": "..."` — vite, next, astro, parcel, etc.
+    let output = std::process::Command::new("bun")
+        .args(["run", "build"])
+        .current_dir(&web_dir)
+        .output()
+        .map_err(|e| Diagnostic {
+            severity: Severity::Error,
+            code: "BUN_EXEC_FAILED".into(),
+            message: format!(
+                "Failed to execute `bun run build` for frontend in {}: {e}",
+                web_dir.display()
+            ),
+            span: None,
+            hint: None,
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            code: "FRONTEND_BUILD_FAILED".into(),
+            message: format!(
+                "`bun run build` failed in {}:\n\n{detail}",
+                web_dir.display()
+            ),
+            span: None,
+            hint: Some(
+                "Test the build locally with `cd web && bun run build` to reproduce.".into(),
+            ),
+        });
+    }
+
+    let _ = std::fs::File::create(&marker);
+    Ok(())
+}
+
+/// Does `path` (a package.json) declare a `build` script?
+fn package_json_has_build_script(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value
+        .get("scripts")
+        .and_then(|s| s.get("build"))
+        .and_then(|d| d.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
+/// Recursively find the newest mtime under `dir`. Used by
+/// [`ensure_frontend_built`] to detect source edits across an
+/// arbitrary `src/` tree.
+fn newest_mtime_in(dir: &Path) -> std::io::Result<std::time::SystemTime> {
+    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    stack.push(path);
+                } else if let Ok(m) = entry.metadata() {
+                    if let Ok(t) = m.modified() {
+                        if t > newest {
+                            newest = t;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(newest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
