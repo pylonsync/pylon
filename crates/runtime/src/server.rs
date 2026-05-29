@@ -1278,8 +1278,7 @@ fn start_server(
     // neither is configured the runtime stays API-only — backwards
     // compatible with deployments that haven't added a frontend yet.
     let frontend_config = {
-        let app_dir = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let app_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         Arc::new(crate::frontend::FrontendConfig::from_env(&app_dir))
     };
     if frontend_config.is_active() {

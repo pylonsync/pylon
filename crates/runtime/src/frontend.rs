@@ -67,7 +67,9 @@ impl FrontendConfig {
             // First hit wins; matches the layout the `pylon init`
             // template + the examples use.
             let candidates = [app_dir.join("web/dist"), app_dir.join("apps/web/dist")];
-            candidates.into_iter().find(|p| p.join("index.html").is_file())
+            candidates
+                .into_iter()
+                .find(|p| p.join("index.html").is_file())
         };
 
         Self { dir, dev_proxy }
@@ -146,7 +148,10 @@ fn resolve_safe(root: &Path, request_path: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.split('/').any(|seg| seg == ".." || seg == "." || seg.is_empty()) {
+    if trimmed
+        .split('/')
+        .any(|seg| seg == ".." || seg == "." || seg.is_empty())
+    {
         return None;
     }
 
@@ -218,8 +223,11 @@ fn serve_from_disk(
             .with_status_code(200)
             .with_header(Header::from_bytes("Content-Type", ct).unwrap())
             .with_header(
-                Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
-                    .unwrap(),
+                Header::from_bytes(
+                    "Access-Control-Allow-Origin",
+                    cors_origin.as_bytes().to_vec(),
+                )
+                .unwrap(),
             )
             .with_header(
                 // Hashed assets (Vite emits ?v= and chunk-hash filenames)
@@ -251,8 +259,11 @@ fn serve_from_disk(
         .with_status_code(200)
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
         .with_header(
-            Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
-                .unwrap(),
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
         )
         .with_header(
             // index.html must NEVER be long-cached or a deploy bump

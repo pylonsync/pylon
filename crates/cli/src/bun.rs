@@ -253,17 +253,32 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
     let Some(pkg_dir) = find_nearest_package_json(entry_file) else {
         return Ok(());
     };
+    bun_install_in_dir(&pkg_dir)
+}
 
+/// Workhorse used by both the root install ([`ensure_npm_deps_installed`])
+/// and the frontend install ([`ensure_frontend_built`]). Runs `bun install`
+/// in `pkg_dir` with these guarantees:
+///
+/// - Fast-skip via mtime marker at `<pkg_dir>/node_modules/.pylon-install-marker`.
+/// - Workspace:* dep handling for monorepo-authored apps deployed standalone
+///   (Pylon Cloud / chat dogfood): if every workspace dep is already satisfied
+///   in `node_modules` (typically symlinks), strip them from package.json
+///   before install, restore after. Otherwise let bun fail loudly so the
+///   operator knows which dep is missing.
+/// - Uses `--frozen-lockfile` when a lockfile is present AND we're not on
+///   the strip-workspace-deps path (that path always drifts the committed
+///   lockfile).
+///
+/// Returns `BUN_INSTALL_FAILED` on non-zero exit; `BUN_EXEC_FAILED` when
+/// bun itself can't spawn; `PKG_JSON_*` on the rare backup/write hiccup.
+fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
     let pkg_json = pkg_dir.join("package.json");
     let node_modules = pkg_dir.join("node_modules");
     let lockfile_text = pkg_dir.join("bun.lock");
     let lockfile_bin = pkg_dir.join("bun.lockb");
     let marker = node_modules.join(".pylon-install-marker");
 
-    // Fast-skip when nothing's changed since the last successful
-    // install. Compares marker mtime against every input file's
-    // mtime; if any is newer (or the marker is missing), we
-    // (re)install. Cheap stat calls, no hashing.
     if node_modules.is_dir() && marker.is_file() {
         if let Ok(marker_mtime) = std::fs::metadata(&marker).and_then(|m| m.modified()) {
             let mut inputs_newer = false;
@@ -281,23 +296,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         }
     }
 
-    // workspace:* dep handling. Apps authored inside a monorepo
-    // (the pylon-chat example, anyone else using bun workspaces)
-    // pin their @pylonsync/* deps as `workspace:*` so local dev
-    // gets the live source. In Pylon Cloud, the base image has
-    // already symlinked those packages into node_modules — bun
-    // install in the deployed container has no workspace root to
-    // resolve `workspace:*` against, so it dies with "Workspace
-    // dependency X not found" and the machine enters a restart
-    // loop. Symptom on 2026-05-17: chat-api spent ~hours bouncing.
-    //
-    // Detect this and write a temp package.json with workspace:*
-    // entries stripped (only those whose target is already in
-    // node_modules — anything missing should still error so the
-    // operator notices). Run install against the temp, restore
-    // the original on success/failure. Self-host monorepo dev
-    // never hits this branch because bun install resolves the
-    // workspace deps normally.
     let pkg_json_text = std::fs::read_to_string(&pkg_json).map_err(|e| Diagnostic {
         severity: Severity::Error,
         code: "PKG_JSON_READ_FAILED".into(),
@@ -310,12 +308,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         .iter()
         .filter(|name| node_modules.join(name).join("package.json").is_file())
         .collect();
-    // Stripping only kicks in when we DID find workspace:* entries
-    // AND every one of them is satisfied by an existing
-    // node_modules entry (typically a symlink the base image
-    // pre-populated). Mixed states fall through to the normal
-    // install path, which will fail loudly so the operator sees
-    // exactly which dep is missing.
     let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
     let restore_after =
         if !workspace_deps.is_empty() && satisfied_workspace_deps.len() == workspace_deps.len() {
@@ -332,8 +324,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
                 });
             }
             if let Err(e) = std::fs::write(&pkg_json, stripped) {
-                // Restore before bailing so the next attempt sees the
-                // original file, not a half-state.
                 let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
                 return Err(Diagnostic {
                     severity: Severity::Error,
@@ -350,20 +340,8 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
 
     let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
     let mut cmd = std::process::Command::new("bun");
-    cmd.arg("install").current_dir(&pkg_dir);
+    cmd.arg("install").current_dir(pkg_dir);
     if has_lockfile && !restore_after {
-        // `--frozen-lockfile` makes the install deterministic and
-        // fails if the lockfile is out of sync with package.json.
-        // That's the right default for Pylon Cloud (we want every
-        // deploy to install the same tree the user committed) and
-        // for self-host (the user is the source of truth for what
-        // ships). The error message bun emits in this case is
-        // specific enough that we don't need to rewrite it.
-        //
-        // Skipped on the strip-workspace-deps path because the
-        // committed lockfile WILL be out of sync with the
-        // temporarily-stripped package.json — frozen-lockfile would
-        // false-positive there and abort an otherwise valid deploy.
         cmd.arg("--frozen-lockfile");
     }
 
@@ -383,10 +361,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         }
     })?;
 
-    // Always restore the original package.json before returning so
-    // callers see the file as the user authored it (matters for
-    // subsequent `pylon dev` watcher restarts, `pylon codegen` runs,
-    // and any operator inspecting the running container).
     if restore_after {
         let _ = std::fs::rename(&pkg_json_backup_path, &pkg_json);
     }
@@ -400,9 +374,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
             stdout.trim()
         };
         let exit_code = output.status.code().unwrap_or(-1);
-        // Cleaner hint for the common case (committed package.json but
-        // no lockfile committed, or lockfile drifted from package.json).
-        // The deploy operator should know which side to fix.
         let hint = if has_lockfile {
             format!(
                 "`bun install --frozen-lockfile` failed in {}. Most often this means package.json was edited without re-committing bun.lock. Run `bun install` locally and commit the lockfile.",
@@ -426,9 +397,6 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
         });
     }
 
-    // Mark the install as fresh so the next invocation can fast-skip.
-    // Failure to write the marker isn't fatal — worst case we
-    // re-install next time, which is wasteful but correct.
     let _ = std::fs::File::create(&marker);
     Ok(())
 }
@@ -460,7 +428,13 @@ pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
 pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
     let entry_dir = Path::new(entry_file)
         .parent()
-        .and_then(|p| if p.as_os_str().is_empty() { None } else { Some(p) })
+        .and_then(|p| {
+            if p.as_os_str().is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        })
         .unwrap_or(Path::new("."));
     let candidates = [entry_dir.join("web"), entry_dir.join("apps/web")];
     let Some(web_dir) = candidates
@@ -518,69 +492,19 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
         }
     }
 
-    // Install deps for the frontend. Mirrors ensure_npm_deps_installed's
-    // marker-fast-skip but keyed off node_modules/.pylon-install-marker
-    // INSIDE the web dir.
-    let node_modules = web_dir.join("node_modules");
-    let install_marker = node_modules.join(".pylon-install-marker");
-    let pkg_json = web_dir.join("package.json");
-    let lockfile_text = web_dir.join("bun.lock");
-    let lockfile_bin = web_dir.join("bun.lockb");
-    let install_fresh = node_modules.is_dir()
-        && install_marker.is_file()
-        && std::fs::metadata(&install_marker)
-            .and_then(|m| m.modified())
-            .ok()
-            .map(|marker_t| {
-                [&pkg_json, &lockfile_text, &lockfile_bin].iter().all(|p| {
-                    std::fs::metadata(p)
-                        .and_then(|m| m.modified())
-                        .map(|t| t <= marker_t)
-                        .unwrap_or(true)
-                })
-            })
-            .unwrap_or(false);
+    // Workspace:* support for the frontend dir. On Pylon Cloud the
+    // base image populates /app/node_modules/@pylonsync/* via the
+    // Dockerfile but NOT /app/web/node_modules — so a chat-style app
+    // with `"@pylonsync/client": "workspace:*"` in web/package.json
+    // would die in bun install with "Workspace dependency not found".
+    // Stage symlinks into web/node_modules pointing at the framework's
+    // /pylon/packages/ tree so bun_install_in_dir's strip-deps path
+    // sees them as satisfied. No-op when /pylon/packages/ doesn't
+    // exist (self-host monorepo dev — `bun install` resolves the
+    // workspace deps the normal way).
+    stage_workspace_symlinks(&web_dir);
 
-    if !install_fresh {
-        let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
-        let mut cmd = std::process::Command::new("bun");
-        cmd.arg("install").current_dir(&web_dir);
-        if has_lockfile {
-            cmd.arg("--frozen-lockfile");
-        }
-        let output = cmd.output().map_err(|e| Diagnostic {
-            severity: Severity::Error,
-            code: "BUN_EXEC_FAILED".into(),
-            message: format!(
-                "Failed to execute `bun install` for frontend in {}: {e}",
-                web_dir.display()
-            ),
-            span: None,
-            hint: Some("Ensure bun is installed and available on PATH".into()),
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = if !stderr.is_empty() {
-                stderr.trim()
-            } else {
-                stdout.trim()
-            };
-            return Err(Diagnostic {
-                severity: Severity::Error,
-                code: "BUN_INSTALL_FAILED".into(),
-                message: format!(
-                    "Installing frontend npm dependencies failed in {}:\n\n{detail}",
-                    web_dir.display()
-                ),
-                span: None,
-                hint: Some(
-                    "Commit bun.lock so the deploy can run in --frozen-lockfile mode.".into(),
-                ),
-            });
-        }
-        let _ = std::fs::File::create(&install_marker);
-    }
+    bun_install_in_dir(&web_dir)?;
 
     // Run the build script. Use the explicit `bun run build` form so
     // the call works against any framework whose package.json defines
@@ -623,6 +547,57 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
 
     let _ = std::fs::File::create(&marker);
     Ok(())
+}
+
+/// Pre-stage `@pylonsync/*` workspace symlinks inside `web_dir/node_modules/`
+/// so the bun-install path can satisfy `workspace:*` deps without a real
+/// workspace root.
+///
+/// Source of truth: `/pylon/packages/<name>` (Pylon Cloud's base image
+/// layout). When that path doesn't exist (self-hosted monorepo dev where
+/// bun finds the real workspace) we skip the symlink and let bun's normal
+/// resolution take over.
+///
+/// Idempotent + best-effort: failures (symlink already exists with a
+/// different target, FS doesn't support symlinks, etc.) don't propagate
+/// because the install step downstream will surface any real "dep not
+/// found" failure with a clearer error than we could produce here.
+fn stage_workspace_symlinks(web_dir: &Path) {
+    let Ok(pkg_text) = std::fs::read_to_string(web_dir.join("package.json")) else {
+        return;
+    };
+    let workspace_deps = scan_workspace_deps(&pkg_text);
+    if workspace_deps.is_empty() {
+        return;
+    }
+    let pylon_packages = Path::new("/pylon/packages");
+    if !pylon_packages.is_dir() {
+        return;
+    }
+    let node_modules = web_dir.join("node_modules");
+    let _ = std::fs::create_dir_all(node_modules.join("@pylonsync"));
+    for dep in &workspace_deps {
+        // Convert "@pylonsync/client" → src "/pylon/packages/client",
+        // dest "<web>/node_modules/@pylonsync/client". Drop the namespace
+        // prefix for the source side (packages/ uses unqualified names).
+        let bare = dep.strip_prefix("@pylonsync/").unwrap_or(dep);
+        let src = pylon_packages.join(bare);
+        let dest = node_modules.join(dep);
+        if !src.is_dir() {
+            continue; // bun install will fail loudly if this matters
+        }
+        if dest.exists() {
+            continue; // already symlinked / installed
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&src, &dest);
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::os::windows::fs::symlink_dir(&src, &dest);
+        }
+    }
 }
 
 /// Does `path` (a package.json) declare a `build` script?

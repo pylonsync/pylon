@@ -103,6 +103,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
 COPY --from=rust-builder /build/packages /pylon/packages
+# Shared example UI components used across examples/ dogfood apps.
+# Lives at examples/_shared in the repo; aliased into /pylon/packages so
+# stage_workspace_symlinks (crates/cli/src/bun.rs) discovers it the same
+# way as framework packages when an example app deploys with a
+# `"@pylonsync/example-ui": "workspace:*"` dep.
+COPY --from=rust-builder /build/examples/_shared /pylon/packages/example-ui
 
 # Pre-create /app with the workspace deps wired in so customer code
 # dropped at /app/app.ts can `import {entity, ...} from "@pylonsync/sdk"`
@@ -110,10 +116,15 @@ COPY --from=rust-builder /build/packages /pylon/packages
 # sync packages are versioned with this image — they line up with
 # whatever pylon binary is bundled.
 RUN mkdir -p /app/node_modules/@pylonsync \
-    && ln -sfn /pylon/packages/sdk       /app/node_modules/@pylonsync/sdk \
-    && ln -sfn /pylon/packages/functions /app/node_modules/@pylonsync/functions \
-    && ln -sfn /pylon/packages/react     /app/node_modules/@pylonsync/react \
-    && ln -sfn /pylon/packages/sync      /app/node_modules/@pylonsync/sync
+    && ln -sfn /pylon/packages/sdk         /app/node_modules/@pylonsync/sdk \
+    && ln -sfn /pylon/packages/functions   /app/node_modules/@pylonsync/functions \
+    && ln -sfn /pylon/packages/react       /app/node_modules/@pylonsync/react \
+    && ln -sfn /pylon/packages/sync        /app/node_modules/@pylonsync/sync \
+    && ln -sfn /pylon/packages/client      /app/node_modules/@pylonsync/client \
+    && ln -sfn /pylon/packages/loro        /app/node_modules/@pylonsync/loro \
+    && ln -sfn /pylon/packages/next        /app/node_modules/@pylonsync/next \
+    && ln -sfn /pylon/packages/plugins     /app/node_modules/@pylonsync/plugins \
+    && ln -sfn /pylon/packages/workflows   /app/node_modules/@pylonsync/workflows
 
 RUN groupadd --system --gid 10001 pylon \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin pylon \
