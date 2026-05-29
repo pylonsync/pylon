@@ -124,6 +124,108 @@ impl Drop for GlobalSlot {
 }
 
 // ---------------------------------------------------------------------------
+// StreamLimiter — separate cap for long-lived streaming responses.
+//
+// Streaming endpoints (SSE for pubsub shards, /api/llm streaming, /admin/logs/
+// tail) block their worker for the stream lifetime because tiny_http drains
+// the response body inline. Sharing the DispatchLimiter pool with normal
+// requests would let a flood of streams starve short-lived traffic — 256
+// concurrent streams = full dispatch pool, /health gets 503.
+//
+// This limiter has its own counters: global = 4× DispatchLimiter, per-IP =
+// 16 (a single client typically opens 1–3 streams per tab). The helper
+// `spawn_streaming_response` below moves request + response onto a fresh
+// thread holding the stream slot, then the worker returns and frees its
+// dispatch slot for the next short request.
+// ---------------------------------------------------------------------------
+
+struct StreamLimiter {
+    in_flight: std::sync::atomic::AtomicUsize,
+    global_cap: usize,
+    per_ip: Arc<crate::ip_limit::IpConnCounter>,
+}
+
+impl StreamLimiter {
+    fn new(dispatch_global_cap: usize) -> Arc<Self> {
+        let global_cap = std::env::var("PYLON_STREAM_INFLIGHT_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(dispatch_global_cap * 4);
+        let per_ip_cap = std::env::var("PYLON_STREAM_PER_IP_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16u32);
+        Arc::new(Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            global_cap,
+            per_ip: Arc::new(crate::ip_limit::IpConnCounter::new(per_ip_cap)),
+        })
+    }
+
+    fn acquire(
+        self: &Arc<Self>,
+        ip: std::net::IpAddr,
+    ) -> Option<(StreamGlobalSlot, crate::ip_limit::IpConnGuard)> {
+        let prev = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if prev >= self.global_cap {
+            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return None;
+        }
+        let global = StreamGlobalSlot {
+            counter: Arc::clone(self),
+        };
+        let ip_guard = self.per_ip.acquire(ip)?;
+        Some((global, ip_guard))
+    }
+}
+
+struct StreamGlobalSlot {
+    counter: Arc<StreamLimiter>,
+}
+
+impl Drop for StreamGlobalSlot {
+    fn drop(&mut self) {
+        self.counter
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Move a streaming response onto a dedicated thread holding a StreamLimiter
+/// slot. Returns `true` on successful spawn (caller should EXIT the worker
+/// closure immediately so the dispatch slot frees), `false` on cap hit
+/// (caller should respond 503 inline using the existing dispatch slot).
+///
+/// Caller responsibility:
+///   - The Response body MUST be a streaming one (StreamingBody) — passing a
+///     fixed-size body works too but defeats the point.
+///   - Caller MUST NOT touch `request` or call `respond` after this returns
+///     true; both have been moved into the stream thread.
+fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
+    request: tiny_http::Request,
+    response: tiny_http::Response<R>,
+    stream_limiter: &Arc<StreamLimiter>,
+    peer_ip: std::net::IpAddr,
+    metrics: Arc<Metrics>,
+    method: String,
+    status: u16,
+) -> Result<(), tiny_http::Request> {
+    let slot = match stream_limiter.acquire(peer_ip) {
+        Some(g) => g,
+        None => return Err(request),
+    };
+    let _ = std::thread::Builder::new()
+        .name("pylon-stream".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let _slot = slot;
+            let _ = request.respond(response);
+            metrics.record_request(&method, status);
+        });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Streaming body — bridges mpsc::Receiver to std::io::Read for SSE responses
 // ---------------------------------------------------------------------------
 
@@ -1151,12 +1253,17 @@ fn start_server(
     // The limiter caps total in-flight + per-IP so a flood of slow
     // requests can't OOM the box.
     let dispatch_limiter = DispatchLimiter::new();
+    let stream_limiter = StreamLimiter::new(dispatch_limiter.global_cap);
     tracing::info!(
-        "  HTTP cap: global={} per_ip={}",
+        "  HTTP cap: dispatch={} per_ip={}, stream={} per_ip={}",
         dispatch_limiter.global_cap,
         std::env::var("PYLON_HTTP_PER_IP_MAX")
             .ok()
-            .unwrap_or_else(|| "64".to_string())
+            .unwrap_or_else(|| "64".to_string()),
+        stream_limiter.global_cap,
+        std::env::var("PYLON_STREAM_PER_IP_MAX")
+            .ok()
+            .unwrap_or_else(|| "16".to_string()),
     );
 
     // Use recv() in a loop instead of incoming_requests() so we can share
@@ -1183,11 +1290,17 @@ fn start_server(
         // cap or per-IP cap is hit, respond 503 with Retry-After: 1
         // immediately on the dispatch thread — spawning would have
         // produced the same response after thread setup overhead.
-        let peer_ip_str = resolve_client_ip(&request, trust_proxy_hops);
-        let peer_ip: std::net::IpAddr = peer_ip_str
+        // Pre-acquisition: read client IP once so it can flow into BOTH the
+        // dispatch-limiter (here) and the stream-limiter (later, inside the
+        // closure). Bound name `dispatch_peer_ip` avoids conflict with the
+        // body's per-request `peer_ip` String AND the access-log
+        // `request_peer_ip` String — both pre-existing — we just need the
+        // parsed IpAddr for the limiters.
+        let dispatch_peer_ip_str = resolve_client_ip(&request, trust_proxy_hops);
+        let dispatch_peer_ip: std::net::IpAddr = dispatch_peer_ip_str
             .parse()
             .unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
-        let limiter_guards = match dispatch_limiter.acquire(peer_ip) {
+        let limiter_guards = match dispatch_limiter.acquire(dispatch_peer_ip) {
             Some(g) => g,
             None => {
                 let body = json_error(
@@ -1257,6 +1370,7 @@ fn start_server(
         let csrf = Arc::clone(&csrf);
         let ai_rate_limiter = Arc::clone(&ai_rate_limiter);
         let llm_client_route = llm_client_route.clone();
+        let stream_limiter = Arc::clone(&stream_limiter);
 
         // Per-request handler thread. Each request runs on its own worker;
         // a slow fn call here can't block /health or other requests.
@@ -3580,8 +3694,36 @@ fn start_server(
                         None,
                         None,
                     ));
-                    let _ = request.respond(response);
-                    mt.record_request("GET", 200);
+                    // Hand the request + stream over to a dedicated stream
+                    // thread holding a StreamLimiter slot — the worker
+                    // returns immediately so its dispatch slot frees for
+                    // the next short request. Streams have their own cap
+                    // (PYLON_STREAM_INFLIGHT_MAX + PYLON_STREAM_PER_IP_MAX)
+                    // so a flood of streams can't starve normal traffic.
+                    if let Err(request) = spawn_streaming_response(
+                        request,
+                        response,
+                        &stream_limiter,
+                        dispatch_peer_ip,
+                        Arc::clone(&mt),
+                        "GET".to_string(),
+                        200,
+                    ) {
+                        let body = json_error(
+                            "STREAM_OVERLOADED",
+                            "Server is at its streaming concurrency cap. Retry shortly.",
+                        );
+                        let resp = with_security_headers(
+                            Response::from_string(&body)
+                                .with_status_code(503u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                        );
+                        let _ = request.respond(resp);
+                        mt.record_request("GET", 503);
+                    }
                     return;
                 }
             }
@@ -3775,8 +3917,30 @@ fn start_server(
                     None,
                     None,
                 ));
-                let _ = request.respond(response);
-                mt.record_request("POST", 200);
+                if let Err(request) = spawn_streaming_response(
+                    request,
+                    response,
+                    &stream_limiter,
+                    dispatch_peer_ip,
+                    Arc::clone(&mt),
+                    "POST".to_string(),
+                    200,
+                ) {
+                    let body = json_error(
+                        "STREAM_OVERLOADED",
+                        "Server is at its streaming concurrency cap. Retry shortly.",
+                    );
+                    let resp = with_security_headers(
+                        Response::from_string(&body)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                    );
+                    let _ = request.respond(resp);
+                    mt.record_request("POST", 503);
+                }
                 return;
             }
         }
@@ -4528,8 +4692,30 @@ fn start_server(
                 None, // unknown content length = chunked transfer
                 None,
             ));
-            let _ = request.respond(response);
-            mt.record_request("POST", 200);
+            if let Err(request) = spawn_streaming_response(
+                request,
+                response,
+                &stream_limiter,
+                dispatch_peer_ip,
+                Arc::clone(&mt),
+                "POST".to_string(),
+                200,
+            ) {
+                let body = json_error(
+                    "STREAM_OVERLOADED",
+                    "Server is at its streaming concurrency cap. Retry shortly.",
+                );
+                let resp = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(503u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                );
+                let _ = request.respond(resp);
+                mt.record_request("POST", 503);
+            }
             return;
         }
 
