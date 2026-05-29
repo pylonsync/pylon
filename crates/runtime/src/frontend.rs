@@ -280,6 +280,39 @@ pub fn try_handle(
         return serve_via_proxy(proxy_base, request, cors_origin);
     }
 
+    // Build state takes precedence over a stale dist on disk. If the
+    // current boot's build failed (mark_build_failed), surface the
+    // operator-visible Failed page instead of silently serving the
+    // PREVIOUS deploy's SPA shell. Without this gate, a broken deploy
+    // that landed after a working one would render the old UI and
+    // the operator would never see the build-error page — they'd
+    // only notice when the new feature didn't appear.
+    //
+    // InProgress similarly takes precedence so the user sees the
+    // Building... shell instead of momentarily-stale SPA flashes
+    // during a re-build triggered by a config edit.
+    match read_build_state(&shared_build_state()) {
+        BuildState::Failed(msg) => return serve_build_failed(request, &msg, cors_origin),
+        BuildState::InProgress => {
+            // Only intercept with the building page when there's no
+            // disk-served SPA yet — once the FIRST build of this
+            // machine succeeded, subsequent restarts serve from disk
+            // immediately (the marker-fast-skip path keeps state
+            // Ready in practice; InProgress on a warm-marker boot
+            // would be a re-build kicked off by source changes).
+            //
+            // Without this guard, a brief InProgress window during
+            // a config edit would 503 every existing SPA request
+            // even though dist/ on disk is fully serviceable.
+            if cfg.dir.is_none()
+                && discover_dist_dir(&std::env::current_dir().ok().unwrap_or_default()).is_none()
+            {
+                return serve_build_in_progress(request, cors_origin);
+            }
+        }
+        BuildState::Idle | BuildState::Ready => {}
+    }
+
     // Resolve the serve directory, accounting for a build that
     // finished AFTER startup (FrontendConfig::from_env captured a
     // snapshot at boot, but the async builder writes to disk after
@@ -295,17 +328,10 @@ pub fn try_handle(
         .or_else(|| discover_dist_dir(&std::env::current_dir().ok().unwrap_or_default()));
 
     if resolved_dir.is_none() {
-        match read_build_state(&shared_build_state()) {
-            BuildState::InProgress => return serve_build_in_progress(request, cors_origin),
-            BuildState::Failed(msg) => return serve_build_failed(request, &msg, cors_origin),
-            BuildState::Idle | BuildState::Ready => {
-                // Nothing to serve from disk and no build kicked off
-                // (Idle) — defer to the API NOT_FOUND handler.
-                // Ready w/o a discovered dir means the build claimed
-                // success but didn't produce index.html — let the
-                // API 404 surface that to the operator.
-            }
-        }
+        // Nothing to serve from disk. If we got here, BuildState is
+        // Idle or Ready-with-no-dist (build claimed success but
+        // produced no index.html — operator should see the API 404
+        // for that misconfiguration).
         return Err(request);
     }
     let dir = resolved_dir.unwrap();

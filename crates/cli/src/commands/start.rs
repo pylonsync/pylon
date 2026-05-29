@@ -109,13 +109,40 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .name("pylon-frontend-build".into())
         .spawn({
             let build_state = build_state.clone();
-            move || match crate::bun::ensure_frontend_built(&entry_file_clone) {
-                Ok(()) => {
-                    pylon_runtime::frontend::mark_build_ready(&build_state);
-                }
-                Err(diag) => {
-                    eprintln!("[frontend] build failed ({}): {}", diag.code, diag.message);
-                    pylon_runtime::frontend::mark_build_failed(&build_state, diag.message);
+            move || {
+                // Wrap the entire build in catch_unwind so a panic
+                // anywhere in ensure_frontend_built (FS quirk on
+                // /data, bun.lock metadata race, std::fs::* unwrap,
+                // etc.) flips the BuildState to Failed instead of
+                // leaving InProgress forever. Without this guard,
+                // a thread panic terminates the worker silently and
+                // the operator sees an infinite "Building..." page
+                // with no way to know what went wrong.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::bun::ensure_frontend_built(&entry_file_clone)
+                }));
+                match result {
+                    Ok(Ok(())) => {
+                        pylon_runtime::frontend::mark_build_ready(&build_state);
+                    }
+                    Ok(Err(diag)) => {
+                        eprintln!("[frontend] build failed ({}): {}", diag.code, diag.message);
+                        pylon_runtime::frontend::mark_build_failed(&build_state, diag.message);
+                    }
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else {
+                            "build thread panicked with non-string payload".to_string()
+                        };
+                        eprintln!("[frontend] build panicked: {msg}");
+                        pylon_runtime::frontend::mark_build_failed(
+                            &build_state,
+                            format!("build thread panicked: {msg}"),
+                        );
+                    }
                 }
             }
         })

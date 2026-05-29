@@ -293,6 +293,38 @@ fn bun_install_in_dir_with_source(
     let lockfile_text = pkg_dir.join("bun.lock");
     let lockfile_bin = pkg_dir.join("bun.lockb");
     let marker = node_modules.join(".pylon-install-marker");
+    let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
+
+    // Crash-recovery: a previous run that died between the first
+    // rename(pkg_json → backup) and the final rename(backup → pkg_json)
+    // leaves package.json holding a stripped version and the backup
+    // holding the original. Without recovery, this run reads the
+    // stripped package.json, scan_workspace_deps returns empty, the
+    // strip path doesn't fire, and `bun install --frozen-lockfile`
+    // rejects the install (lockfile still references the workspace
+    // deps that package.json no longer declares).
+    //
+    // The backup is the source of truth — rename overwrites the
+    // current (possibly partial) package.json. Idempotent: a normal
+    // boot has no backup file and skips this block.
+    if pkg_json_backup_path.is_file() {
+        if let Err(e) = std::fs::rename(&pkg_json_backup_path, &pkg_json) {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                code: "PKG_JSON_RECOVERY_FAILED".into(),
+                message: format!(
+                    "Found stranded {} from a previous crashed install — failed to restore: {e}",
+                    pkg_json_backup_path.display(),
+                ),
+                span: None,
+                hint: Some(format!(
+                    "Manually `mv {} {}` and retry.",
+                    pkg_json_backup_path.display(),
+                    pkg_json.display(),
+                )),
+            });
+        }
+    }
 
     if node_modules.is_dir() && marker.is_file() {
         if let Ok(marker_mtime) = std::fs::metadata(&marker).and_then(|m| m.modified()) {
@@ -344,7 +376,8 @@ fn bun_install_in_dir_with_source(
             find_workspace_package_dir(name, source_hint).is_some()
         })
         .collect();
-    let pkg_json_backup_path = pkg_dir.join("package.json.pylon-bak");
+    // pkg_json_backup_path declared at the top for the crash-recovery
+    // block; the strip path below reuses the same binding.
     let restore_after =
         if !workspace_deps.is_empty() && satisfied_workspace_deps.len() == workspace_deps.len() {
             let stripped = strip_workspace_deps_from_pkg_json(&pkg_json_text, &workspace_deps);
