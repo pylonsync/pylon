@@ -146,6 +146,27 @@ RUN mkdir -p /app/node_modules/@pylonsync \
     && ln -sfn /pylon/packages/workflows   /app/node_modules/@pylonsync/workflows \
     && ln -sfn /pylon/packages/example-ui  /app/node_modules/@pylonsync/example-ui
 
+# Same symlink set under /pylon/node_modules/@pylonsync/ so vite + Node
+# module resolution can walk UP from any file inside /pylon/packages/<name>/
+# and still find sibling @pylonsync/* deps. Concretely: when a customer's
+# web build bundles /pylon/packages/react/src/index.ts, rollup walks
+# /pylon/packages/react/src → /pylon/packages/react → /pylon/packages →
+# /pylon/node_modules/@pylonsync/sdk. Without these symlinks, rollup
+# died with "Rollup failed to resolve import @pylonsync/sdk from
+# /pylon/packages/react/src/index.ts". Mirror the /app/ set verbatim so
+# any cross-package import (react → sdk, client → react, etc.) resolves.
+RUN mkdir -p /pylon/node_modules/@pylonsync \
+    && ln -sfn /pylon/packages/sdk         /pylon/node_modules/@pylonsync/sdk \
+    && ln -sfn /pylon/packages/functions   /pylon/node_modules/@pylonsync/functions \
+    && ln -sfn /pylon/packages/react       /pylon/node_modules/@pylonsync/react \
+    && ln -sfn /pylon/packages/sync        /pylon/node_modules/@pylonsync/sync \
+    && ln -sfn /pylon/packages/client      /pylon/node_modules/@pylonsync/client \
+    && ln -sfn /pylon/packages/loro        /pylon/node_modules/@pylonsync/loro \
+    && ln -sfn /pylon/packages/next        /pylon/node_modules/@pylonsync/next \
+    && ln -sfn /pylon/packages/plugins     /pylon/node_modules/@pylonsync/plugins \
+    && ln -sfn /pylon/packages/workflows   /pylon/node_modules/@pylonsync/workflows \
+    && ln -sfn /pylon/packages/example-ui  /pylon/node_modules/@pylonsync/example-ui
+
 RUN groupadd --system --gid 10001 pylon \
     && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin pylon \
     && mkdir -p /data \
