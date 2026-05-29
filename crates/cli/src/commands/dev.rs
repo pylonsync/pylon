@@ -360,6 +360,17 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             runtime.set_studio_entry_path(Some(studio_ext_path));
         }
 
+        // Frontend dev server — single-command DX for full-stack apps.
+        // If the project has a `web/` directory with a package.json that
+        // defines a `dev` script, spawn `bun run dev` in it as a child
+        // process AND tell pylon-runtime to reverse-proxy non-API GETs
+        // to it. From the user's perspective, only :4321 exists — the
+        // Vite child runs on :5173 but they never type that URL.
+        //
+        // Must run BEFORE pylon-runtime starts so PYLON_FRONTEND_DEV_PROXY
+        // is set when the runtime reads the env at boot.
+        spawn_frontend_dev_server(watch_dir, json_mode);
+
         let rt_clone = Arc::clone(&runtime);
         std::thread::spawn(move || {
             // Previously this dropped the error with `let _ = ...` which made
@@ -372,18 +383,6 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 std::process::exit(1);
             }
         });
-
-        // Frontend dev server — single-command DX for full-stack apps.
-        // If the project has a `web/` directory with a package.json that
-        // defines a `dev` script, spawn `bun run dev` in it as a child
-        // process. This is Phase 1 of unified full-stack serving: the
-        // frontend gets its own port (typically 5173 or 3000 depending
-        // on the framework's default) and the user goes there for the
-        // UI. Phase 2 will reverse-proxy from Pylon's :4321 so there's
-        // truly only one port. The frontend's existing dev-proxy config
-        // (vite.config / next.config) already forwards `/api/*` to
-        // :4321, so /api requests work either way.
-        spawn_frontend_dev_server(watch_dir, json_mode);
     }
 
     // Poll loop. We track file mtimes under the watch dir and react
@@ -792,14 +791,18 @@ fn exec_restart(_json_mode: bool) {
 /// and Next/Vite shut down cleanly. (On Windows we rely on the
 /// child observing stdin closure.)
 ///
-/// Phase 1 of unified full-stack: the child still listens on its
-/// own port (5173 / 3000 / etc.) — the user goes there for the UI.
-/// Phase 2 will reverse-proxy from Pylon's :4321 so the user sees
-/// a single port.
+/// Unified full-stack dev: spawn Vite + tell pylon-runtime to proxy
+/// non-API GETs to it. After this, the user only ever types :4321 —
+/// the Vite child on :5173 is an implementation detail.
+///
+/// Port selection: Vite's default is 5173. We pass `--port 5173` so
+/// it stays deterministic even if a user has a stray VITE_PORT env
+/// somewhere, then export `PYLON_FRONTEND_DEV_PROXY=http://localhost:5173`
+/// so pylon-runtime's frontend module knows where to send traffic.
+/// Users with a custom port can set `PYLON_FRONTEND_DEV_PROXY`
+/// themselves and we honor it (env-var overrides take precedence
+/// over our default — see frontend::FrontendConfig::from_env).
 fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
-    // Match the init template's layout (apps/web) plus the examples'
-    // older layout (plain web/). First match wins; an app can put
-    // a frontend in either location and it just works.
     let candidates = [watch_dir.join("web"), watch_dir.join("apps").join("web")];
     let Some(web_dir) = candidates.into_iter().find(|p| {
         p.join("package.json").is_file() && package_json_has_dev_script(&p.join("package.json"))
@@ -807,13 +810,25 @@ fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
         return;
     };
 
-    // bun runs the package.json's `dev` script. We don't try to
-    // detect Next vs Vite — both projects expose `dev` as the
-    // canonical entrypoint, so it's a one-command spawn.
+    // The proxy URL pylon-runtime will use. If the user already set
+    // PYLON_FRONTEND_DEV_PROXY explicitly (custom port or remote dev
+    // server), respect that and don't pin --port.
+    let user_override = std::env::var("PYLON_FRONTEND_DEV_PROXY").ok().is_some();
+    let vite_port: u16 = 5173;
+
+    // `bun run dev -- --port 5173`. The `--` separator forwards the
+    // port flag to vite without bun trying to interpret it.
     let mut cmd = std::process::Command::new("bun");
     cmd.args(["run", "dev"]).current_dir(&web_dir);
-    // Stdio inherits so the user sees Vite/Next's "ready on …" log
-    // immediately alongside Pylon's "Listening on :4321."
+    if !user_override {
+        cmd.args(["--", "--port", "5173"]);
+        // Set env BEFORE spawning the child so pylon-runtime (started
+        // moments later in the same process) reads it.
+        std::env::set_var(
+            "PYLON_FRONTEND_DEV_PROXY",
+            format!("http://localhost:{vite_port}"),
+        );
+    }
     cmd.stdin(std::process::Stdio::inherit());
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
@@ -821,18 +836,15 @@ fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
     match cmd.spawn() {
         Ok(child) => {
             if !json_mode {
+                let proxy = std::env::var("PYLON_FRONTEND_DEV_PROXY")
+                    .unwrap_or_else(|_| "(none — set PYLON_FRONTEND_DEV_PROXY)".into());
                 eprintln!(
-                    "[dev] Frontend dev server started from {} (pid {})",
+                    "[dev] Frontend dev server started from {} (pid {}), proxied via Pylon at {}",
                     web_dir.display(),
-                    child.id()
+                    child.id(),
+                    proxy,
                 );
             }
-            // Intentionally leak the Child handle: when `pylon dev`
-            // exits, the OS reaps the child via SIGHUP from the
-            // tty / process-group teardown. Holding the handle
-            // would mean we'd need to call .wait() somewhere; we
-            // don't because the parent stays in the poll loop
-            // indefinitely.
             std::mem::forget(child);
         }
         Err(e) => {
@@ -842,6 +854,11 @@ fn spawn_frontend_dev_server(watch_dir: &Path, json_mode: bool) {
                     web_dir.display()
                 );
                 eprintln!("[dev] Skipping — run `bun run dev` in that directory yourself.");
+            }
+            // Clear the env var so pylon-runtime doesn't try to proxy
+            // to a non-existent server and 502 every request.
+            if !user_override {
+                std::env::remove_var("PYLON_FRONTEND_DEV_PROXY");
             }
         }
     }
