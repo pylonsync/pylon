@@ -29,6 +29,101 @@ use pylon_plugin::builtin::ai_proxy::{AiMessage, AiProxyPlugin};
 use pylon_plugin::builtin::cache::CachePlugin;
 
 // ---------------------------------------------------------------------------
+// DispatchLimiter — bounds concurrent HTTP request handlers.
+//
+// Pre-commit, every request ran inline in the single dispatch thread. A slow
+// fn call (30s DEFAULT_CALL_TIMEOUT) would back the kernel accept queue up
+// and starve `/health`, /metrics, every other request. Now each request
+// runs on its own worker thread — but unbounded `thread::spawn` is a DoS
+// surface (a flood of slow requests = thousands of threads = OOM). This
+// limiter caps total in-flight workers + per-IP fairness. Over the cap →
+// respond 503 with `Retry-After: 1` and DON'T spawn.
+//
+// Defaults: global cap = max(32, min(256, available_parallelism * 16))
+//           per-IP cap = 64 (matches IpConnCounter's streaming default)
+// Both env-overridable for ops.
+// ---------------------------------------------------------------------------
+
+struct DispatchLimiter {
+    /// Total in-flight worker threads across all clients.
+    in_flight: std::sync::atomic::AtomicUsize,
+    /// Hard cap on `in_flight`.
+    global_cap: usize,
+    /// Per-IP cap reuses the streaming limiter's pattern.
+    per_ip: Arc<crate::ip_limit::IpConnCounter>,
+}
+
+impl DispatchLimiter {
+    fn new() -> Arc<Self> {
+        let global_cap = std::env::var("PYLON_HTTP_INFLIGHT_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                let par = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
+                (par * 16).clamp(32, 256)
+            });
+        let per_ip_cap = std::env::var("PYLON_HTTP_PER_IP_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64u32);
+        Arc::new(Self {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            global_cap,
+            per_ip: Arc::new(crate::ip_limit::IpConnCounter::new(per_ip_cap)),
+        })
+    }
+
+    /// Try to acquire one global slot + one per-IP slot. Returns a guard
+    /// pair on success (both drop on worker thread completion → both slots
+    /// release). Returns None if either cap is hit — caller responds 503.
+    fn acquire(
+        self: &Arc<Self>,
+        ip: std::net::IpAddr,
+    ) -> Option<(GlobalSlot, crate::ip_limit::IpConnGuard)> {
+        // Optimistic increment then check — race vs check-then-increment
+        // would let `cap+1` requests in before any of them sees the cap.
+        let prev = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if prev >= self.global_cap {
+            // Roll back; the slot belongs to nobody.
+            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return None;
+        }
+        let global = GlobalSlot {
+            counter: Arc::clone(self),
+        };
+        let ip_guard = match self.per_ip.acquire(ip) {
+            Some(g) => g,
+            None => {
+                // global drops naturally
+                return None;
+            }
+        };
+        Some((global, ip_guard))
+    }
+
+    /// Current in-flight count — used in /health/deep + tests.
+    #[allow(dead_code)]
+    fn in_flight(&self) -> usize {
+        self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// RAII guard for the global in-flight slot. Decrements on drop.
+struct GlobalSlot {
+    counter: Arc<DispatchLimiter>,
+}
+
+impl Drop for GlobalSlot {
+    fn drop(&mut self) {
+        self.counter
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Streaming body — bridges mpsc::Receiver to std::io::Read for SSE responses
 // ---------------------------------------------------------------------------
 
@@ -1050,6 +1145,20 @@ fn start_server(
     tracing::info!("  API:    http://localhost:{port}/api/entities/<entity>");
     tracing::info!("  Auth:   http://localhost:{port}/api/auth/session");
 
+    // Per-request bounded concurrency. Each request now runs on its own
+    // worker thread (commit follow-up of refactor 326064ff) so a slow fn
+    // call can't starve /health, /metrics, or other in-flight requests.
+    // The limiter caps total in-flight + per-IP so a flood of slow
+    // requests can't OOM the box.
+    let dispatch_limiter = DispatchLimiter::new();
+    tracing::info!(
+        "  HTTP cap: global={} per_ip={}",
+        dispatch_limiter.global_cap,
+        std::env::var("PYLON_HTTP_PER_IP_MAX")
+            .ok()
+            .unwrap_or_else(|| "64".to_string())
+    );
+
     // Use recv() in a loop instead of incoming_requests() so we can share
     // the Arc<Server> with the shutdown path (incoming_requests borrows &self
     // which prevents moving the Arc into another thread).
@@ -1069,15 +1178,97 @@ fn start_server(
         if SHUTDOWN.load(Ordering::Relaxed) {
             break;
         }
-        // Per-request handler closure. Mechanical conversion of the
-        // dispatch-loop body: each `continue;` in the body becomes
-        // `return;` (returning from the closure runs the next loop
-        // iteration). Phase 1 of the per-request threading refactor —
-        // this commit keeps the call site `()()`, so behavior is
-        // identical to the pre-refactor loop. The next commit moves
-        // to `move ||` + `thread::spawn` so a slow request can't
-        // block the dispatch thread or any other request.
-        (|| {
+
+        // Acquire a dispatch slot BEFORE spawning the worker. If the global
+        // cap or per-IP cap is hit, respond 503 with Retry-After: 1
+        // immediately on the dispatch thread — spawning would have
+        // produced the same response after thread setup overhead.
+        let peer_ip_str = resolve_client_ip(&request, trust_proxy_hops);
+        let peer_ip: std::net::IpAddr = peer_ip_str
+            .parse()
+            .unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
+        let limiter_guards = match dispatch_limiter.acquire(peer_ip) {
+            Some(g) => g,
+            None => {
+                let body = json_error(
+                    "OVERLOADED",
+                    "Server is at its per-IP or global concurrency cap. Retry shortly.",
+                );
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(503u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                );
+                let method_str = request.method().as_str().to_string();
+                let _ = request.respond(response);
+                metrics.record_request(&method_str, 503);
+                continue;
+            }
+        };
+
+        // Shadow-rebind every outer Arc<T>/Vec/etc. used by the request
+        // handler so the `move ||` closure below captures the local
+        // shadows (one fresh Arc::clone per iteration) rather than the
+        // outer originals (which the next loop iteration still needs).
+        // The existing per-iteration aliases (rt, ss, pe …) stay so the
+        // body's existing references compile unchanged.
+        let runtime = Arc::clone(&runtime);
+        let session_store = Arc::clone(&session_store);
+        let policy_engine = Arc::clone(&policy_engine);
+        let change_log = Arc::clone(&change_log);
+        let ws_hub = Arc::clone(&ws_hub);
+        let sse_hub = Arc::clone(&sse_hub);
+        let cluster_bus = Arc::clone(&cluster_bus);
+        let reactive_registry = Arc::clone(&reactive_registry);
+        let shared_manifest = Arc::clone(&shared_manifest);
+        let magic_codes = Arc::clone(&magic_codes);
+        let plugin_reg = Arc::clone(&plugin_reg);
+        let room_mgr = Arc::clone(&room_mgr);
+        let metrics = Arc::clone(&metrics);
+        let oauth_state = Arc::clone(&oauth_state);
+        let account_store = Arc::clone(&account_store);
+        let api_keys = Arc::clone(&api_keys);
+        let orgs = Arc::clone(&orgs);
+        let siwe = Arc::clone(&siwe);
+        let phone_codes = Arc::clone(&phone_codes);
+        let passkeys = Arc::clone(&passkeys);
+        let verification = Arc::clone(&verification);
+        let audit = Arc::clone(&audit);
+        let trusted_devices = Arc::clone(&trusted_devices);
+        let org_sso = Arc::clone(&org_sso);
+        let saml = Arc::clone(&saml);
+        let trusted_origins = Arc::clone(&trusted_origins);
+        let cache = Arc::clone(&cache);
+        let pubsub_broker = Arc::clone(&pubsub_broker);
+        let job_queue = Arc::clone(&job_queue);
+        let scheduler = Arc::clone(&scheduler);
+        let workflow_engine = Arc::clone(&workflow_engine);
+        let fn_ops_maybe = fn_ops_maybe.clone();
+        let shard_registry = shard_registry.clone();
+        let cors_allowlist = cors_allowlist.clone();
+        let cookie_config = Arc::clone(&cookie_config);
+        let ws_auth = Arc::clone(&ws_auth);
+        let snapshot_fetcher = snapshot_fetcher.clone();
+        let admin_token = admin_token.clone();
+        let rate_limiter = Arc::clone(&rate_limiter);
+        let csrf = Arc::clone(&csrf);
+        let ai_rate_limiter = Arc::clone(&ai_rate_limiter);
+        let llm_client_route = llm_client_route.clone();
+
+        // Per-request handler thread. Each request runs on its own worker;
+        // a slow fn call here can't block /health or other requests.
+        // `limiter_guards` is moved into the worker so the global +
+        // per-IP slots stay reserved for the request's lifetime and
+        // release when the worker thread exits.
+        let _ = std::thread::Builder::new()
+            .name("pylon-http-worker".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                // Hold the slots for the worker's lifetime.
+                let _limiter_guards = limiter_guards;
 
         let rt = Arc::clone(&runtime);
         let ss = Arc::clone(&session_store);
@@ -4845,7 +5036,7 @@ fn start_server(
 
         let _ = request.respond(response);
         mt.record_request(method.as_str(), status);
-        })();
+            }); // end of thread::spawn closure
     }
 
     tracing::warn!("Shutting down gracefully...");
