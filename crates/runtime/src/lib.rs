@@ -288,7 +288,7 @@ fn validate_column_name(name: &str, entity: &ManifestEntity) -> Result<(), Runti
 ///
 /// See `crates/storage/src/sqlite.rs` for the rationale on each
 /// pragma. Skipping it on writes drops throughput by 5–10×.
-fn tune_runtime_connection(conn: &Connection, in_memory: bool) {
+pub(crate) fn tune_runtime_connection(conn: &Connection, in_memory: bool) {
     let pragmas: &[(&str, &str)] = if in_memory {
         &[
             ("temp_store", "MEMORY"),

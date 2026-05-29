@@ -44,11 +44,13 @@ pub struct SqliteAccountBackend {
 impl SqliteAccountBackend {
     pub fn open(path: &str) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+        crate::tune_runtime_connection(&conn, false);
         Self::from_connection(conn)
     }
 
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("open: {e}"))?;
+        crate::tune_runtime_connection(&conn, true);
         Self::from_connection(conn)
     }
 
