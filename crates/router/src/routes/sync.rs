@@ -175,7 +175,15 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                     .list_after(&entity.name, entity_after.as_deref(), RAW_FETCH_CHUNK)
                 {
                     Ok(r) => r,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::error!(
+                            entity = %entity.name,
+                            after = ?entity_after,
+                            error = ?e,
+                            "snapshot pagination list_after failed; truncating entity"
+                        );
+                        break;
+                    }
                 };
             if raw.is_empty() {
                 break;

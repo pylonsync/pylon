@@ -470,7 +470,15 @@ impl DataStore for Runtime {
             return self.pg_transact_with_crdt(pg, ops);
         }
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        let _ = conn.execute("BEGIN", []);
+        // BEGIN failure is non-recoverable for this request: if we
+        // ignore the error and continue, every subsequent op runs in
+        // undefined transaction state (autocommit-or-not depending on
+        // why BEGIN failed). The next caller would inherit the same
+        // unknown state. Surface immediately.
+        conn.execute("BEGIN", []).map_err(|e| DataError {
+            code: "SQLITE_BEGIN_FAILED".into(),
+            message: format!("BEGIN failed: {e}"),
+        })?;
         let mut results: Vec<serde_json::Value> = Vec::new();
         let mut rollback = false;
 
@@ -525,10 +533,42 @@ impl DataStore for Runtime {
             }
         }
 
+        // Surface COMMIT/ROLLBACK errors. A swallowed COMMIT failure is
+        // the worst possible outcome: the caller sees Ok((true, ...))
+        // but the data isn't durable. A swallowed ROLLBACK leaves the
+        // connection's transaction open, so the next caller on this
+        // same connection inherits an in-progress tx. Mirrors the
+        // `FnCallError` handling around line 3717 of this file
+        // (SQLite mutation tx) — same error class, same response.
         if rollback {
-            let _ = conn.execute("ROLLBACK", []);
-        } else {
-            let _ = conn.execute("COMMIT", []);
+            if let Err(e) = conn.execute("ROLLBACK", []) {
+                return Err(DataError {
+                    code: "SQLITE_ROLLBACK_FAILED".into(),
+                    message: format!(
+                        "ROLLBACK failed: {e}; connection may be in inconsistent state. Operator may need to restart the runtime."
+                    ),
+                });
+            }
+        } else if let Err(commit_err) = conn.execute("COMMIT", []) {
+            // Best-effort cleanup: try to ROLLBACK so the failed tx
+            // doesn't bleed into the next request on this connection.
+            // If ROLLBACK also fails the connection is hosed —
+            // surface a louder error so the operator sees it.
+            if let Err(rollback_err) = conn.execute("ROLLBACK", []) {
+                tracing::warn!(
+                    "[transact] ROLLBACK after COMMIT failure also failed: {rollback_err}"
+                );
+                return Err(DataError {
+                    code: "SQLITE_ROLLBACK_FAILED".into(),
+                    message: format!(
+                        "COMMIT failed: {commit_err}; ROLLBACK also failed: {rollback_err}; connection may be in inconsistent state. Operator may need to restart the runtime."
+                    ),
+                });
+            }
+            return Err(DataError {
+                code: "SQLITE_COMMIT_FAILED".into(),
+                message: format!("COMMIT failed: {commit_err}"),
+            });
         }
 
         Ok((!rollback, results))
@@ -1514,6 +1554,10 @@ impl pylon_router::RoomOps for RoomManager {
             .into_iter()
             .map(|p| to_json(p))
             .collect()
+    }
+
+    fn is_in_room(&self, room: &str, user_id: &str) -> bool {
+        RoomManager::is_in_room(self, room, user_id)
     }
 }
 
@@ -6260,5 +6304,215 @@ mod user_projection_broadcast_tests {
         // If we ever change the User entity name in the manifest,
         // the guard must follow.
         assert_eq!(notifier.auth_user.entity, "User");
+    }
+}
+
+#[cfg(test)]
+mod sqlite_transact_tx_safety_tests {
+    //! Regression tests for the SQLite-path `<Runtime as DataStore>::transact`
+    //! BEGIN/COMMIT/ROLLBACK error handling.
+    //!
+    //! Pre-fix, `let _ = conn.execute("BEGIN" | "COMMIT" | "ROLLBACK", [])`
+    //! silently dropped errors. That meant:
+    //!   - COMMIT failure → caller saw `Ok((true, results))` and treated
+    //!     the write as durable when it wasn't.
+    //!   - BEGIN failure → subsequent ops ran in undefined tx state.
+    //!   - ROLLBACK failure → the connection carried an open tx into the
+    //!     next request, where the next BEGIN would error with
+    //!     "cannot start a transaction within a transaction".
+    //!
+    //! These tests pin the typed-error contract plus the
+    //! "connection not poisoned after a successful rollback" invariant.
+    //! Forcing an actual COMMIT failure from a single connection is
+    //! impractical without contrived schema rigging (deferred FK +
+    //! `defer_foreign_keys=ON`, or BUSY retries against a second writer
+    //! we control) so that path is exercised via the structural review
+    //! rather than runtime forcing.
+    use super::*;
+    use pylon_http::DataStore;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestIndex};
+
+    fn manifest_with_unique_email() -> AppManifest {
+        AppManifest {
+            manifest_version: 1,
+            name: "TxSafety".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "User".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "email".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: true,
+                        crdt: None,
+                        server_only: false,
+                        readonly: false,
+                        default: None,
+                        enum_values: None,
+                        encrypted: false,
+                    },
+                    ManifestField {
+                        name: "displayName".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                        server_only: false,
+                        readonly: false,
+                        default: None,
+                        enum_values: None,
+                        encrypted: false,
+                    },
+                ],
+                indexes: vec![ManifestIndex {
+                    name: "user_email".into(),
+                    fields: vec!["email".into()],
+                    unique: true,
+                    where_clause: None,
+                }],
+                relations: vec![],
+                search: None,
+                crdt: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Happy path: a single-insert transact commits and the row is
+    /// readable on the same runtime after the call returns. The fix
+    /// must not regress the success path — the `Ok((true, ...))`
+    /// return shape is part of the wire contract for `/api/transact`.
+    #[test]
+    fn transact_happy_path_commits() {
+        let rt = Runtime::in_memory(manifest_with_unique_email()).unwrap();
+        let ops = vec![serde_json::json!({
+            "op": "insert",
+            "entity": "User",
+            "data": {"email": "a@b.com", "displayName": "A"},
+        })];
+        let (committed, results) =
+            <Runtime as DataStore>::transact(&rt, &ops).expect("transact ok");
+        assert!(committed, "single-insert transact must commit");
+        assert_eq!(results.len(), 1);
+        // Round-trip the row to prove COMMIT actually landed.
+        let rows = rt.list("User").unwrap();
+        assert_eq!(rows.len(), 1, "row must be visible after commit");
+    }
+
+    /// Op-level failure path: an op error triggers in-memory rollback,
+    /// the caller sees `Ok((false, results))`, AND — the meat of this
+    /// regression — a follow-up query on the SAME runtime works. If
+    /// the ROLLBACK SQL had been silently dropped (the pre-fix code)
+    /// and somehow failed, this query would error with
+    /// "cannot start a transaction within a transaction" or its
+    /// equivalent. Even though ROLLBACK on a fresh in-memory DB
+    /// always succeeds, this test pins the contract: the runtime
+    /// must not leave the connection in a half-open state across
+    /// the transact boundary.
+    #[test]
+    fn transact_op_failure_rolls_back_without_poisoning_connection() {
+        let rt = Runtime::in_memory(manifest_with_unique_email()).unwrap();
+        // Seed a row so the second insert collides on UNIQUE(email).
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "dup@example.com", "displayName": "First"}),
+        )
+        .unwrap();
+
+        let ops = vec![
+            serde_json::json!({
+                "op": "insert",
+                "entity": "User",
+                "data": {"email": "ok@example.com", "displayName": "OK"},
+            }),
+            // This second insert violates UNIQUE(email) → triggers
+            // rollback inside transact.
+            serde_json::json!({
+                "op": "insert",
+                "entity": "User",
+                "data": {"email": "dup@example.com", "displayName": "Dup"},
+            }),
+        ];
+        let (committed, _results) =
+            <Runtime as DataStore>::transact(&rt, &ops).expect("rollback must not surface Err");
+        assert!(!committed, "tx with op failure must report committed=false");
+
+        // The first insert above (the seeded one) is still the only
+        // User row — the transact's first op was rolled back along
+        // with the failing second op.
+        let rows = rt.list("User").unwrap();
+        assert_eq!(rows.len(), 1, "rollback must drop the in-tx writes");
+        assert_eq!(rows[0]["email"], "dup@example.com");
+
+        // CRITICAL: the next transact on the same runtime must
+        // succeed. If ROLLBACK had silently failed and left an open
+        // tx behind on the connection, the next BEGIN would error
+        // and we'd surface SQLITE_BEGIN_FAILED here.
+        let next_ops = vec![serde_json::json!({
+            "op": "insert",
+            "entity": "User",
+            "data": {"email": "next@example.com", "displayName": "Next"},
+        })];
+        let (next_committed, _) =
+            <Runtime as DataStore>::transact(&rt, &next_ops).expect("next transact must succeed");
+        assert!(next_committed, "no leaked tx state from prior rollback");
+
+        // And a plain `insert` (non-transact path) must also work
+        // — same connection, same lock. This confirms the
+        // post-rollback connection is fully usable.
+        rt.insert(
+            "User",
+            &serde_json::json!({"email": "after@example.com", "displayName": "After"}),
+        )
+        .expect("plain insert after rollback must work");
+        let rows = rt.list("User").unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    /// If BEGIN failed silently and we kept running, this would
+    /// blow up in confusing ways later. The fix surfaces a
+    /// SQLITE_BEGIN_FAILED before any ops run. Forcing a real BEGIN
+    /// failure from outside the runtime is hard (it requires the
+    /// connection to already hold a tx, which only happens via a
+    /// poisoned-tx escape — exactly the bug we just fixed). Instead
+    /// this test does a structural check: drive transact into a
+    /// state where BEGIN would fail, by issuing a manual BEGIN
+    /// directly on the connection, then calling transact. The
+    /// inner BEGIN errors and we expect SQLITE_BEGIN_FAILED.
+    #[test]
+    fn transact_surfaces_begin_failure_typed_error() {
+        let rt = Runtime::in_memory(manifest_with_unique_email()).unwrap();
+        // Manually open a tx on the shared connection so the next
+        // BEGIN errors with "cannot start a transaction within a
+        // transaction".
+        {
+            let conn = rt.lock_conn_pub().expect("lock conn");
+            conn.execute("BEGIN", []).expect("manual BEGIN");
+            // drop the guard — the tx stays open on the connection
+            // because SQLite tracks tx state on the connection, not
+            // the guard. (This is exactly the leak we're guarding
+            // against in the production fix.)
+        }
+
+        let ops = vec![serde_json::json!({
+            "op": "insert",
+            "entity": "User",
+            "data": {"email": "a@b.com", "displayName": "A"},
+        })];
+        let err = <Runtime as DataStore>::transact(&rt, &ops)
+            .expect_err("BEGIN-in-tx must surface as typed Err");
+        assert_eq!(err.code, "SQLITE_BEGIN_FAILED");
+        assert!(
+            err.message.contains("BEGIN failed"),
+            "message must include 'BEGIN failed': {}",
+            err.message
+        );
+
+        // Clean up: roll back the manually-opened tx so the test
+        // doesn't leak a transaction across test boundaries (each
+        // test gets its own in-memory DB, but be tidy).
+        let conn = rt.lock_conn_pub().expect("lock conn");
+        let _ = conn.execute("ROLLBACK", []);
     }
 }

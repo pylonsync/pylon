@@ -37,7 +37,7 @@ use crate::pubsub::PubSubBroker;
 /// It runs independently of the main pylon server -- no auth, no entities,
 /// no sync. Just the cache and pub/sub.
 pub fn start_cache_server(port: u16, max_keys: usize, max_history: usize) -> Result<(), String> {
-    start_cache_server_with_options(port, max_keys, max_history, None, false)
+    start_cache_server_with_options(port, max_keys, max_history, None, false, None, None)
 }
 
 /// Start a standalone cache server with optional RESP protocol support.
@@ -47,21 +47,43 @@ pub fn start_cache_server(port: u16, max_keys: usize, max_history: usize) -> Res
 /// to connect directly.
 ///
 /// When `resp_only` is `true`, only the RESP server is started (no HTTP).
+///
+/// `resp_bind` is the address the RESP server binds to. `None` means
+/// loopback only (`127.0.0.1`). Pass `"0.0.0.0"` for dual-stack v6+v4,
+/// or any specific interface address. Loopback is the only safe default;
+/// see `resp_server::start_resp_server` for the rationale.
+///
+/// `resp_requirepass` enables RESP authentication (`AUTH <password>`).
+/// `None` means no auth — only safe when paired with loopback bind.
 pub fn start_cache_server_with_options(
     port: u16,
     max_keys: usize,
     max_history: usize,
     resp_port: Option<u16>,
     resp_only: bool,
+    resp_bind: Option<String>,
+    resp_requirepass: Option<String>,
 ) -> Result<(), String> {
+    // HTTP Bearer-token gate. Set `PYLON_CACHE_REQUIRE_TOKEN=<token>` to
+    // require `Authorization: Bearer <token>` on every endpoint. Without
+    // the env var, the existing behavior (open access) is preserved —
+    // backwards compatible for anyone running the cache server on a
+    // private network where the network itself is the boundary.
+    let http_bearer_token: Option<Arc<String>> = std::env::var("PYLON_CACHE_REQUIRE_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(Arc::new);
+
     let cache = Arc::new(CachePlugin::new(max_keys));
     let pubsub = Arc::new(PubSubBroker::new(max_history));
 
     // Start the RESP server on a background thread if requested.
     if let Some(rp) = resp_port {
         let cache_for_resp = Arc::clone(&cache);
+        let bind = resp_bind.clone();
+        let requirepass = resp_requirepass.clone();
         std::thread::spawn(move || {
-            crate::resp_server::start_resp_server(cache_for_resp, rp);
+            crate::resp_server::start_resp_server(cache_for_resp, rp, bind, requirepass);
         });
     }
 
@@ -73,7 +95,7 @@ pub fn start_cache_server_with_options(
         // If it was None (user said --resp-only without --resp-port), start
         // it on the default port on this thread.
         if resp_port.is_none() {
-            crate::resp_server::start_resp_server(cache, rp);
+            crate::resp_server::start_resp_server(cache, rp, resp_bind, resp_requirepass);
         } else {
             // Block forever so the process doesn't exit. The RESP server
             // thread is doing the real work.
@@ -100,6 +122,9 @@ pub fn start_cache_server_with_options(
     tracing::warn!("  Cache:  POST http://localhost:{port}/cache");
     tracing::warn!("  PubSub: POST http://localhost:{port}/pubsub/publish");
     tracing::warn!("  Health: GET  http://localhost:{port}/health");
+    if http_bearer_token.is_some() {
+        tracing::warn!("  Auth:   Bearer token required (PYLON_CACHE_REQUIRE_TOKEN)");
+    }
 
     for mut request in server.incoming_requests() {
         let cache = Arc::clone(&cache);
@@ -111,7 +136,34 @@ pub fn start_cache_server_with_options(
         let method = request.method().clone();
         let url = request.url().to_string();
 
-        let (status, response_body) = route_request(&cache, &pubsub, &method, &url, &body);
+        // Bearer-token gate. CORS preflight (OPTIONS) and /health are
+        // intentionally exempt — health probes from load balancers
+        // shouldn't have to carry the secret, and OPTIONS can't.
+        let bearer_ok = match http_bearer_token.as_ref() {
+            None => true,
+            Some(expected) => {
+                if method.as_str() == "OPTIONS" || url == "/health" {
+                    true
+                } else {
+                    check_bearer(&request, expected.as_str())
+                }
+            }
+        };
+
+        let (status, response_body) = if !bearer_ok {
+            (
+                401,
+                serde_json::json!({
+                    "error": {
+                        "code": "UNAUTHORIZED",
+                        "message": "Missing or invalid bearer token"
+                    }
+                })
+                .to_string(),
+            )
+        } else {
+            route_request(&cache, &pubsub, &method, &url, &body)
+        };
 
         let response = Response::from_string(&response_body)
             .with_status_code(status)
@@ -122,6 +174,27 @@ pub fn start_cache_server_with_options(
     }
 
     Ok(())
+}
+
+/// Constant-time compare of the `Authorization: Bearer <token>` header
+/// against the configured token. Returns false if the header is missing,
+/// malformed, or the token doesn't match.
+fn check_bearer(request: &tiny_http::Request, expected: &str) -> bool {
+    let auth_header = match request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+    {
+        Some(h) => h.value.as_str(),
+        None => return false,
+    };
+
+    let presented = match auth_header.strip_prefix("Bearer ") {
+        Some(t) => t.trim(),
+        None => return false,
+    };
+
+    pylon_auth::constant_time_eq(presented.as_bytes(), expected.as_bytes())
 }
 
 /// Route a request to the appropriate handler.

@@ -242,7 +242,16 @@ impl RoomManager {
     }
 
     /// Broadcast an arbitrary event to a room.
-    /// Returns the broadcast event, or None if the room doesn't exist.
+    /// Returns the broadcast event, or None if the room doesn't exist OR
+    /// `sender` is provided but is not a current member of the room.
+    ///
+    /// The membership gate mirrors `set_presence`: a caller can only emit
+    /// into rooms they have joined. This is defense-in-depth — the router
+    /// layer (`/api/rooms/broadcast`) gates on the same invariant for
+    /// non-admin callers, but the runtime enforces it too so any callsite
+    /// (current or future) inherits the check by default. Anonymous /
+    /// system broadcasts (`sender = None`) remain allowed for any existing
+    /// room — those come from trusted server paths.
     pub fn broadcast(
         &self,
         room: &str,
@@ -251,8 +260,11 @@ impl RoomManager {
         data: serde_json::Value,
     ) -> Option<RoomEvent> {
         let rooms = self.rooms.lock().unwrap();
-        if !rooms.contains_key(room) {
-            return None;
+        let room_state = rooms.get(room)?;
+        if let Some(s) = sender {
+            if !room_state.members.contains_key(s) {
+                return None;
+            }
         }
 
         Some(RoomEvent::Broadcast {
@@ -497,6 +509,64 @@ mod tests {
         assert!(mgr
             .broadcast("ghost", None, "ping", serde_json::json!({}))
             .is_none());
+    }
+
+    /// Defense-in-depth: a caller (even an admin at the router layer)
+    /// that spoofs a `sender` who is NOT a member of the room must be
+    /// rejected at the runtime layer. Mirrors `set_presence`'s
+    /// "must be in the room" gate so the broadcast topic stream can
+    /// never carry a `sender` that lies about membership.
+    #[test]
+    fn broadcast_rejects_non_member_sender() {
+        let mgr = RoomManager::new(60);
+        mgr.join("lobby", "alice", None).unwrap();
+
+        // mallory never joined "lobby" — the broadcast must short-circuit.
+        let event = mgr.broadcast(
+            "lobby",
+            Some("mallory"),
+            "spam",
+            serde_json::json!({"x": 1}),
+        );
+        assert!(
+            event.is_none(),
+            "non-member sender must be rejected by the runtime layer"
+        );
+    }
+
+    /// Counterpart to `broadcast_rejects_non_member_sender`: a real
+    /// member can still broadcast (so the runtime gate doesn't
+    /// over-block). Covers the "admin spoofing a real member" path —
+    /// the runtime can't distinguish admin-spoofed from
+    /// self-broadcast, and it doesn't need to: membership is the
+    /// invariant.
+    #[test]
+    fn broadcast_allows_member_sender() {
+        let mgr = RoomManager::new(60);
+        mgr.join("lobby", "alice", None).unwrap();
+        mgr.join("lobby", "bob", None).unwrap();
+
+        // bob is a member; sender=Some("bob") must succeed even if
+        // some upstream layer (admin) spoofed his identity.
+        let event = mgr.broadcast("lobby", Some("bob"), "ping", serde_json::json!({}));
+        assert!(matches!(
+            event,
+            Some(RoomEvent::Broadcast { ref sender, .. }) if sender.as_deref() == Some("bob")
+        ));
+    }
+
+    /// Server-internal broadcasts (sender = None) bypass the
+    /// membership gate. The router layer never produces these for
+    /// untrusted callers — it always resolves `sender` from the auth
+    /// context — so passing through `None` here is safe and useful
+    /// for system announcements.
+    #[test]
+    fn broadcast_allows_anonymous_sender() {
+        let mgr = RoomManager::new(60);
+        mgr.join("lobby", "alice", None).unwrap();
+
+        let event = mgr.broadcast("lobby", None, "system", serde_json::json!({"msg": "hi"}));
+        assert!(event.is_some());
     }
 
     #[test]

@@ -291,6 +291,10 @@ pub trait RoomOps: Send + Sync {
     fn list_rooms(&self) -> Vec<String>;
     fn room_size(&self, name: &str) -> usize;
     fn members(&self, name: &str) -> Vec<serde_json::Value>;
+    /// Membership probe used by the broadcast endpoint to gate non-admin
+    /// senders. Returning `false` for unknown rooms is fine — the
+    /// downstream `broadcast` call will short-circuit too.
+    fn is_in_room(&self, room: &str, user_id: &str) -> bool;
 }
 
 /// Job queue operations used by the router.
@@ -2710,6 +2714,9 @@ mod auth_gate_tests {
         fn members(&self, _name: &str) -> Vec<serde_json::Value> {
             vec![]
         }
+        fn is_in_room(&self, _room: &str, _user_id: &str) -> bool {
+            false
+        }
     }
     impl CacheOps for StubCache {
         fn handle_command(&self, _body: &str) -> (u16, String) {
@@ -2939,7 +2946,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
-            siwe: &siwe,
+            siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
             verification: &verification,
@@ -3546,7 +3553,7 @@ mod auth_gate_tests {
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
-            siwe: &siwe,
+            siwe: &*siwe,
             phone_codes: &phone_codes,
             passkeys: &passkeys,
             verification: &verification,
@@ -4088,7 +4095,7 @@ mod auth_gate_tests {
                 account_store: &account_store,
                 api_keys: &api_keys,
                 orgs: &orgs,
-                siwe: &siwe,
+                siwe: &*siwe,
                 phone_codes: &phone_codes,
                 passkeys: &passkeys,
                 verification: &verification,

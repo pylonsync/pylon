@@ -271,25 +271,28 @@ fn handle_org_sso_callback(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16
     let display_name = name.unwrap_or_else(|| email.clone());
     // Look up or create the User row by email — same pattern as the
     // magic-code verify path.
-    let now = format!(
-        "{}Z",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
+    let now = pylon_kernel::util::now_iso();
     let user_entity = ctx.store.manifest().auth.user.entity.clone();
     let user_id = match ctx.store.lookup(&user_entity, "email", &email) {
         Ok(Some(row)) => {
             let id = row["id"].as_str().unwrap_or("").to_string();
             // The IdP just vouched for the email; stamp emailVerified
-            // if it wasn't already.
+            // if it wasn't already. Surface failures so a misconfigured
+            // schema (missing emailVerified column) doesn't silently
+            // leave the user forever-unverified — the prior `let _ =`
+            // swallow was exactly that bug.
             if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                let _ = ctx.store.update(
+                if let Err(e) = ctx.store.update(
                     &user_entity,
                     &id,
                     &serde_json::json!({ "emailVerified": now }),
-                );
+                ) {
+                    tracing::warn!(
+                        "[auth] oauth: failed to persist emailVerified for user {}: {}",
+                        id,
+                        e
+                    );
+                }
             }
             id
         }
@@ -561,13 +564,7 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
             );
         }
     };
-    let now = format!(
-        "{}Z",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
+    let now = pylon_kernel::util::now_iso();
     // Canonicalize the SAML-supplied email so lookups intersect with
     // the user's password-signup / OAuth row. See
     // pylon_auth::normalize_email for the rationale.
@@ -576,12 +573,21 @@ fn handle_saml_acs(ctx: &RouterContext, org_id: &str, body: &str) -> (u16, Strin
     let user_id = match ctx.store.lookup(&user_entity, "email", &canonical_email) {
         Ok(Some(row)) => {
             let id = row["id"].as_str().unwrap_or("").to_string();
+            // SAML assertion vouched for the email; stamp emailVerified
+            // if not already set. Surface failures so a missing-column
+            // schema doesn't silently keep users unverified.
             if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                let _ = ctx.store.update(
+                if let Err(e) = ctx.store.update(
                     &user_entity,
                     &id,
                     &serde_json::json!({ "emailVerified": now }),
-                );
+                ) {
+                    tracing::warn!(
+                        "[auth] saml: failed to persist emailVerified for user {}: {}",
+                        id,
+                        e
+                    );
+                }
             }
             id
         }
@@ -1123,46 +1129,49 @@ pub(crate) fn handle(
         };
         match ctx.magic_codes.try_verify(email, code) {
             Ok(()) => {
-                let now = format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
-                let user_id =
-                    match ctx
-                        .store
-                        .lookup(&ctx.store.manifest().auth.user.entity, "email", email)
-                    {
-                        Ok(Some(row)) => {
-                            let id = row["id"].as_str().unwrap_or("").to_string();
-                            // Magic-link login implicitly verifies the
-                            // email — the caller proved control by typing
-                            // the code we sent there. Stamp emailVerified
-                            // if not already set.
-                            if row.get("emailVerified").map_or(true, |v| v.is_null()) {
-                                let _ = ctx.store.update(
-                                    &ctx.store.manifest().auth.user.entity,
-                                    &id,
-                                    &serde_json::json!({ "emailVerified": now }),
-                                );
-                            }
-                            id
-                        }
-                        _ => ctx
-                            .store
-                            .insert(
+                let now = pylon_kernel::util::now_iso();
+                let user_id = match ctx.store.lookup(
+                    &ctx.store.manifest().auth.user.entity,
+                    "email",
+                    email,
+                ) {
+                    Ok(Some(row)) => {
+                        let id = row["id"].as_str().unwrap_or("").to_string();
+                        // Magic-link login implicitly verifies the
+                        // email — the caller proved control by typing
+                        // the code we sent there. Stamp emailVerified
+                        // if not already set. Surface failures so a
+                        // missing-column schema doesn't silently keep
+                        // users unverified — the prior `let _ =`
+                        // swallow was exactly that class of bug.
+                        if row.get("emailVerified").map_or(true, |v| v.is_null()) {
+                            if let Err(e) = ctx.store.update(
                                 &ctx.store.manifest().auth.user.entity,
-                                &serde_json::json!({
-                                    "email": email,
-                                    "displayName": email,
-                                    "emailVerified": now,
-                                    "createdAt": now,
-                                }),
-                            )
-                            .unwrap_or_else(|_| email.to_string()),
-                    };
+                                &id,
+                                &serde_json::json!({ "emailVerified": now }),
+                            ) {
+                                tracing::warn!(
+                                        "[auth] magic-code login: failed to persist emailVerified for user {}: {}",
+                                        id,
+                                        e
+                                    );
+                            }
+                        }
+                        id
+                    }
+                    _ => ctx
+                        .store
+                        .insert(
+                            &ctx.store.manifest().auth.user.entity,
+                            &serde_json::json!({
+                                "email": email,
+                                "displayName": email,
+                                "emailVerified": now,
+                                "createdAt": now,
+                            }),
+                        )
+                        .unwrap_or_else(|_| email.to_string()),
+                };
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
                 // Wave-7 D: anonymous → authenticated merge. If the request
@@ -1476,13 +1485,7 @@ pub(crate) fn handle(
         }
 
         let hash = pylon_auth::password::hash_password(password);
-        let now = format!(
-            "{}Z",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
+        let now = pylon_kernel::util::now_iso();
 
         let palette = [
             "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#10b981", "#84cc16", "#eab308", "#f97316",
@@ -4313,13 +4316,7 @@ pub(crate) fn handle(
                 .unwrap_or_default()
                 .to_string(),
             _ => {
-                let now = format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                let now = pylon_kernel::util::now_iso();
                 let dn = display_name.unwrap_or_else(|| normalized.clone());
                 match ctx.store.insert(
                     entity,
@@ -4349,6 +4346,29 @@ pub(crate) fn handle(
     // ─── SIWE — Sign-In With Ethereum ─────────────────────────────────
     if let Some(rest) = url.strip_prefix("/api/auth/siwe/nonce") {
         if method == HttpMethod::Get {
+            // Rate limit BEFORE allocating a NonceStore slot — the
+            // store keeps expired entries past TTL by design
+            // (nonce-bombing protection: an attacker who knows a
+            // victim's pending nonce must NOT be able to invalidate
+            // it by re-posting an expired copy). The background
+            // sweeper only evicts after a grace window, so without
+            // a cap an attacker could grow the map unbounded by
+            // issuing nonces for fresh random addresses.
+            let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+            if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+                pylon_auth::rate_limit::AuthBucket::NonceIssue,
+                ctx.peer_ip,
+                None,
+            ) {
+                return Some((
+                    429,
+                    json_error_with_hint(
+                        "RATE_LIMITED",
+                        "Too many nonce requests",
+                        &format!("Try again in {retry_after_secs}s"),
+                    ),
+                ));
+            }
             let q = rest.trim_start_matches('?');
             let params = parse_query(q);
             let addr = params.get("address").map(|s| s.as_str()).unwrap_or("");
@@ -4401,13 +4421,7 @@ pub(crate) fn handle(
                 .unwrap_or_default()
                 .to_string(),
             _ => {
-                let now = format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                let now = pylon_kernel::util::now_iso();
                 let dn = display_name.unwrap_or_else(|| {
                     format!("{}…{}", &recovered[..6], &recovered[recovered.len() - 4..])
                 });
@@ -4851,13 +4865,7 @@ pub(crate) fn handle(
                         ))
                     }
                 };
-                let now = format!(
-                    "{}Z",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                );
+                let now = pylon_kernel::util::now_iso();
                 let row = serde_json::json!({
                     "email": scim_user.primary_email(),
                     "displayName": scim_user.pretty_display_name(),
@@ -6037,13 +6045,7 @@ pub(crate) fn handle(
                     .unwrap_or_default()
                     .to_string(),
                 _ => {
-                    let now = format!(
-                        "{}Z",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    );
+                    let now = pylon_kernel::util::now_iso();
                     match ctx.store.insert(
                         entity,
                         &serde_json::json!({
@@ -6195,13 +6197,7 @@ pub(crate) fn handle(
             ));
         }
         let entity = &ctx.store.manifest().auth.user.entity;
-        let now = format!(
-            "{}Z",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
+        let now = pylon_kernel::util::now_iso();
         if let Err(e) = ctx.store.update(
             entity,
             &user_id,

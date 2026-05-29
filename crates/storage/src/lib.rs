@@ -417,8 +417,23 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                 // fail; the one-way gap this closes is going from
                 // "no search" → "search" on a table that already has
                 // rows.
-                if let Some(cfg) = &entity.search {
-                    if !cfg.is_empty() {
+                //
+                // Inverse case: the manifest used to declare `search:`
+                // but no longer does (or the block was cleared). The
+                // `_fts_<entity>` shadow table is still present from
+                // the previous push — emit RemoveSearchIndex so the
+                // apply path drops it. Without this, orphaned FTS
+                // tables linger forever, waste disk, and surface
+                // stale data on later queries (the maintenance loop
+                // keeps writing to them if the entity is ever marked
+                // searchable again).
+                let search_active = entity
+                    .search
+                    .as_ref()
+                    .map(|cfg| !cfg.is_empty())
+                    .unwrap_or(false);
+                if search_active {
+                    if let Some(cfg) = &entity.search {
                         let fts_table = format!("_fts_{}", entity.name);
                         let facet_table = "_facet_bitmap";
                         let fts_exists = existing_tables.contains_key(fts_table.as_str());
@@ -429,6 +444,13 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                                 config: cfg.clone(),
                             });
                         }
+                    }
+                } else {
+                    let fts_table = format!("_fts_{}", entity.name);
+                    if existing_tables.contains_key(fts_table.as_str()) {
+                        operations.push(SchemaOperation::RemoveSearchIndex {
+                            entity: entity.name.clone(),
+                        });
                     }
                 }
             }
@@ -607,9 +629,26 @@ impl StorageAdapter for DiffAdapter {
             .map(|e| (e.name.as_str(), e))
             .collect();
 
-        // Removed entities
-        for name in old_entities.keys() {
+        // Removed entities. RemoveSearchIndex MUST precede
+        // RemoveEntity in the op list: on Postgres the FTS shadow
+        // table is created with a foreign-key-style reference back
+        // to the parent (CASCADE on drop saves us in some paths,
+        // but the deterministic order here means the apply step
+        // never relies on cascade order, and on SQLite the FTS5
+        // virtual table can hold a sync trigger referencing the
+        // parent which must be cleared first).
+        for (name, old_entity) in &old_entities {
             if !new_entities.contains_key(name) {
+                let had_search = old_entity
+                    .search
+                    .as_ref()
+                    .map(|cfg| !cfg.is_empty())
+                    .unwrap_or(false);
+                if had_search {
+                    operations.push(SchemaOperation::RemoveSearchIndex {
+                        entity: name.to_string(),
+                    });
+                }
                 operations.push(SchemaOperation::RemoveEntity {
                     name: name.to_string(),
                 });
@@ -641,6 +680,17 @@ impl StorageAdapter for DiffAdapter {
                         unique: index.unique,
                         where_clause: index.where_clause.clone(),
                     });
+                }
+                // Newly added entity with a `search:` block: mirror
+                // what plan_from_snapshot does for the None-arm so
+                // the diff path doesn't quietly skip search setup.
+                if let Some(cfg) = &entity.search {
+                    if !cfg.is_empty() {
+                        operations.push(SchemaOperation::CreateSearchIndex {
+                            entity: name.to_string(),
+                            config: cfg.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -701,6 +751,45 @@ impl StorageAdapter for DiffAdapter {
                             name: index.name.clone(),
                         });
                     }
+                }
+
+                // Search-block transitions on a shared entity.
+                // - off → on: emit CreateSearchIndex so the apply
+                //   path materialises the FTS shadow tables.
+                // - on  → off: emit RemoveSearchIndex so the old
+                //   shadow tables get dropped instead of lingering
+                //   as orphans (wastes disk, returns stale data on
+                //   any later read path).
+                // - shape change (different text/facet/sortable
+                //   columns) is intentionally NOT auto-handled
+                //   here — operators have to touch the manifest
+                //   twice (clear, then re-add) until we can
+                //   diff the inner config safely.
+                let old_search = old_entity
+                    .search
+                    .as_ref()
+                    .map(|cfg| !cfg.is_empty())
+                    .unwrap_or(false);
+                let new_search = new_entity
+                    .search
+                    .as_ref()
+                    .map(|cfg| !cfg.is_empty())
+                    .unwrap_or(false);
+                match (old_search, new_search) {
+                    (false, true) => {
+                        if let Some(cfg) = &new_entity.search {
+                            operations.push(SchemaOperation::CreateSearchIndex {
+                                entity: name.to_string(),
+                                config: cfg.clone(),
+                            });
+                        }
+                    }
+                    (true, false) => {
+                        operations.push(SchemaOperation::RemoveSearchIndex {
+                            entity: name.to_string(),
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1493,5 +1582,193 @@ mod tests {
         });
         let json = serde_json::to_string(&analysis).unwrap();
         assert!(json.contains("DESTRUCTIVE_REMOVE_ENTITY"));
+    }
+
+    // -- RemoveSearchIndex emission --
+    //
+    // Regression: when an entity's `search:` block is cleared from the
+    // manifest but the live DB still has the `_fts_<entity>` shadow
+    // table, plan_from_snapshot used to leave the orphan in place
+    // forever. Now it emits RemoveSearchIndex so the apply path drops
+    // the table.
+
+    fn post_entity_no_search() -> ManifestEntity {
+        ManifestEntity {
+            name: "Post".into(),
+            fields: vec![ManifestField {
+                name: "title".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            search: None,
+            crdt: true,
+        }
+    }
+
+    fn manifest_with(entities: Vec<ManifestEntity>) -> AppManifest {
+        AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities,
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        }
+    }
+
+    #[test]
+    fn plan_emits_remove_search_index_when_search_dropped_from_manifest() {
+        // Snapshot has Post table + orphan `_fts_Post` shadow table.
+        // Manifest's Post entity has no `search:` block.
+        let snapshot = SchemaSnapshot {
+            tables: vec![
+                TableSnapshot {
+                    name: "Post".into(),
+                    columns: vec![
+                        ColumnSnapshot {
+                            name: "id".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: true,
+                        },
+                        ColumnSnapshot {
+                            name: "title".into(),
+                            column_type: "TEXT".into(),
+                            notnull: true,
+                            primary_key: false,
+                        },
+                    ],
+                    indexes: vec![],
+                },
+                TableSnapshot {
+                    name: "_fts_Post".into(),
+                    columns: vec![],
+                    indexes: vec![],
+                },
+            ],
+        };
+        let manifest = manifest_with(vec![post_entity_no_search()]);
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+        assert!(
+            plan.operations.iter().any(|op| matches!(
+                op,
+                SchemaOperation::RemoveSearchIndex { entity } if entity == "Post"
+            )),
+            "expected RemoveSearchIndex for Post, got {:?}",
+            plan.operations
+        );
+    }
+
+    #[test]
+    fn plan_does_not_emit_remove_search_index_when_no_fts_table() {
+        // Manifest has no search, and the snapshot has no FTS table —
+        // no RemoveSearchIndex should appear (nothing to clean up).
+        let snapshot = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "Post".into(),
+                columns: vec![
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: true,
+                    },
+                    ColumnSnapshot {
+                        name: "title".into(),
+                        column_type: "TEXT".into(),
+                        notnull: true,
+                        primary_key: false,
+                    },
+                ],
+                indexes: vec![],
+            }],
+        };
+        let manifest = manifest_with(vec![post_entity_no_search()]);
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op, SchemaOperation::RemoveSearchIndex { .. })),
+            "no RemoveSearchIndex expected, got {:?}",
+            plan.operations
+        );
+    }
+
+    #[test]
+    fn diff_adapter_emits_remove_search_index_before_remove_entity() {
+        // Entity Post had search, gets dropped entirely. Plan must
+        // contain RemoveSearchIndex *before* RemoveEntity so the
+        // shadow tables are torn down before the parent disappears.
+        let mut post = post_entity_no_search();
+        post.search = Some(ManifestSearchConfig {
+            text: vec!["title".into()],
+            facets: vec![],
+            sortable: vec![],
+            language: None,
+        });
+        let old = manifest_with(vec![post]);
+        let new = manifest_with(vec![]);
+        let adapter = DiffAdapter { from: old };
+        let plan = adapter.plan_schema(&new).unwrap();
+
+        let remove_search_idx = plan.operations.iter().position(|op| {
+            matches!(
+                op,
+                SchemaOperation::RemoveSearchIndex { entity } if entity == "Post"
+            )
+        });
+        let remove_entity_idx = plan.operations.iter().position(|op| {
+            matches!(
+                op,
+                SchemaOperation::RemoveEntity { name } if name == "Post"
+            )
+        });
+
+        assert!(remove_search_idx.is_some(), "expected RemoveSearchIndex");
+        assert!(remove_entity_idx.is_some(), "expected RemoveEntity");
+        assert!(
+            remove_search_idx.unwrap() < remove_entity_idx.unwrap(),
+            "RemoveSearchIndex must precede RemoveEntity, got {:?}",
+            plan.operations
+        );
+    }
+
+    #[test]
+    fn diff_adapter_emits_remove_search_index_when_search_block_cleared() {
+        // Entity exists in both, but search block disappears.
+        let mut old_post = post_entity_no_search();
+        old_post.search = Some(ManifestSearchConfig {
+            text: vec!["title".into()],
+            facets: vec![],
+            sortable: vec![],
+            language: None,
+        });
+        let old = manifest_with(vec![old_post]);
+        let new = manifest_with(vec![post_entity_no_search()]);
+        let adapter = DiffAdapter { from: old };
+        let plan = adapter.plan_schema(&new).unwrap();
+        assert!(
+            plan.operations.iter().any(|op| matches!(
+                op,
+                SchemaOperation::RemoveSearchIndex { entity } if entity == "Post"
+            )),
+            "expected RemoveSearchIndex, got {:?}",
+            plan.operations
+        );
     }
 }

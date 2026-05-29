@@ -230,6 +230,40 @@ mod tests {
         assert_eq!(s.chars().nth(10), Some('T'));
     }
 
+    /// Regression: prevents recurrence of the `format!("{}Z", unix_secs)`
+    /// bug that wrote garbage like `1748534400Z` into Postgres datetime
+    /// columns. now_iso() must emit a proper RFC 3339 string that
+    /// round-trips through the parser back to roughly the current epoch.
+    #[test]
+    fn now_iso_round_trips_through_iso_to_epoch() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let s = now_iso();
+        let parsed = iso_to_epoch(&s).expect("now_iso must be parseable RFC3339");
+        // Allow a small skew for the system clock between the two reads.
+        assert!(
+            parsed >= before.saturating_sub(2) && parsed <= before + 2,
+            "round-trip drift: before={before} parsed={parsed} s={s:?}"
+        );
+        // Guard the original bug class: the bad pattern produced strings
+        // like "1748534400Z" — no dashes, no 'T'. Assert the shape.
+        assert!(
+            s.contains('-'),
+            "now_iso must contain date separators: {s:?}"
+        );
+        assert!(
+            s.contains('T'),
+            "now_iso must contain date/time separator: {s:?}"
+        );
+        assert!(
+            s.len() >= 20,
+            "now_iso must be a full RFC3339 timestamp, got {s:?}"
+        );
+    }
+
     #[test]
     fn epoch_to_iso_zero() {
         assert_eq!(epoch_to_iso(0), "1970-01-01T00:00:00Z");

@@ -34,6 +34,14 @@ pub enum AuthBucket {
     /// public verify endpoints with cryptographic gates. Caps the
     /// signature-fuzzing class.
     Verify,
+    /// `/api/auth/siwe/nonce` — public endpoint that allocates a
+    /// per-address slot in the in-process `NonceStore`. Without a
+    /// cap, an attacker can grow the map unbounded by issuing
+    /// nonces for fresh random addresses (each one is ~64 bytes
+    /// that survive past TTL by design for nonce-bombing
+    /// protection; the background sweeper only evicts after a
+    /// grace window).
+    NonceIssue,
 }
 
 impl AuthBucket {
@@ -46,6 +54,12 @@ impl AuthBucket {
             Self::Send => (3, 10),
             // 30/min/IP — generous because legitimate flows can retry.
             Self::Verify => (30, 100),
+            // 30/min/IP — matches Verify because a single sign-in
+            // attempt issues one nonce then one verify; a legit user
+            // who fat-fingers a wallet popup retries a handful of
+            // times. Per-account cap doesn't apply: nonce issuance
+            // has no account binding (the address is attacker-chosen).
+            Self::NonceIssue => (30, 0),
         }
     }
 }
@@ -205,6 +219,25 @@ mod tests {
         }
         let result = rl.check(bucket, "10.0.0.99", Some("victim@x.com"));
         assert!(matches!(result, RateLimitDecision::Deny { .. }));
+    }
+
+    /// `NonceIssue` is the gate in front of `/api/auth/siwe/nonce`.
+    /// Confirm it actually denies after the per-IP cap is hit so a
+    /// burst from one IP can't grow the in-process `NonceStore`
+    /// unbounded.
+    #[test]
+    fn nonce_issue_denies_per_ip_burst() {
+        let rl = AuthRateLimiter::new();
+        let bucket = AuthBucket::NonceIssue;
+        let (ip_cap, _) = bucket.caps();
+        for _ in 0..ip_cap {
+            assert_eq!(rl.check(bucket, "9.9.9.9", None), RateLimitDecision::Allow);
+        }
+        let next = rl.check(bucket, "9.9.9.9", None);
+        match next {
+            RateLimitDecision::Deny { retry_after_secs } => assert!(retry_after_secs <= 60),
+            _ => panic!("expected Deny after burst"),
+        }
     }
 
     #[test]

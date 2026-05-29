@@ -23,7 +23,8 @@
 //!      `siwe:<lowercased-address>`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 /// Ethereum-signed-message recovery + EIP-4361 message validation.
 ///
@@ -87,17 +88,35 @@ pub struct NonceStore {
     nonces: Mutex<HashMap<String, (String, u64)>>, // addr → (nonce, expires_at)
 }
 
-impl Default for NonceStore {
-    fn default() -> Self {
-        Self {
-            nonces: Mutex::new(HashMap::new()),
-        }
-    }
-}
+/// How long after a nonce's TTL we still keep it in the map. This
+/// preserves the nonce-bombing protection (an attacker who reuses an
+/// expired nonce must NOT be able to free the slot — otherwise they
+/// could repeatedly invalidate a victim's pending challenge by
+/// re-posting an expired version of it). After grace, the entry is
+/// safe to evict: any in-flight verify would also have observed it as
+/// expired, so the attacker class has timed out too.
+const CLEANUP_GRACE_SECS: u64 = 600;
+
+/// How often the background sweeper runs. Hash-map growth between
+/// sweeps is bounded by `issue_rate * 5min` which is small even under
+/// attack (the rate limiter on the issue endpoint caps incoming rate).
+const CLEANUP_INTERVAL_SECS: u64 = 300;
 
 impl NonceStore {
-    pub fn new() -> Self {
-        Self::default()
+    /// Build a new store and spawn a background sweeper that drops
+    /// expired entries past their grace window. Returns `Arc<Self>` so
+    /// the sweeper thread can hold a `Weak<Self>` — when all strong
+    /// refs drop, the sweeper observes upgrade-failure and exits.
+    pub fn new() -> Arc<Self> {
+        let store = Arc::new(NonceStore {
+            nonces: Mutex::new(HashMap::new()),
+        });
+        let weak = Arc::downgrade(&store);
+        std::thread::Builder::new()
+            .name("siwe-nonce-gc".into())
+            .spawn(move || sweeper_loop(weak))
+            .expect("spawn siwe-nonce-gc");
+        store
     }
 
     /// Mint + stash a nonce for `address`. Overwrites any existing
@@ -147,6 +166,31 @@ impl NonceStore {
             return None;
         }
         Some(nonce)
+    }
+
+    /// Drop entries whose expiry + grace window is in the past.
+    ///
+    /// The grace window matters: `take`/`peek` already treat an entry
+    /// as expired the moment `now > exp`, but we deliberately keep
+    /// the slot around so an attacker can't free it by posting an
+    /// already-expired nonce (see `expired_take_does_not_remove_slot`).
+    /// After `exp + CLEANUP_GRACE_SECS` no honest client could still
+    /// be racing on that slot, so it's safe to evict.
+    pub fn cleanup_expired(&self) {
+        let now = now_secs();
+        if let Ok(mut nonces) = self.nonces.lock() {
+            nonces.retain(|_, (_, exp)| *exp + CLEANUP_GRACE_SECS > now);
+        }
+    }
+}
+
+fn sweeper_loop(weak: Weak<NonceStore>) {
+    loop {
+        std::thread::sleep(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        match weak.upgrade() {
+            Some(store) => store.cleanup_expired(),
+            None => break,
+        }
     }
 }
 
@@ -642,6 +686,44 @@ mod tests {
         // user's subsequent successful verify.
         let still_there = store.peek("0x1111222233334444555566667777888899990000");
         assert_eq!(still_there.as_deref(), Some(real_nonce.as_str()));
+    }
+
+    /// Background sweeper regression: 10k stale entries (expiry +
+    /// grace already in the past) must all evict in a single
+    /// `cleanup_expired` call. Without the sweeper the map would
+    /// grow unbounded under a /siwe/nonce DoS — each call was
+    /// ~64 bytes that never shrank, because `take`/`peek` deliberately
+    /// preserve expired slots for nonce-bombing protection.
+    #[test]
+    fn cleanup_expired_drops_stale_entries() {
+        let store = NonceStore::new();
+        {
+            let mut map = store.nonces.lock().unwrap();
+            for i in 0..10_000u32 {
+                // exp + grace is already in the past → safe to evict.
+                map.insert(format!("0x{i:040x}"), (format!("n{i}"), 1));
+            }
+            assert_eq!(map.len(), 10_000);
+        }
+        store.cleanup_expired();
+        assert_eq!(store.nonces.lock().unwrap().len(), 0);
+    }
+
+    /// The sweep must NOT evict entries inside the grace window —
+    /// otherwise the nonce-bombing protection breaks. A nonce that
+    /// just expired (within `CLEANUP_GRACE_SECS`) must still occupy
+    /// its slot so an attacker can't free it by re-posting it.
+    #[test]
+    fn cleanup_expired_keeps_recently_expired_entries() {
+        let store = NonceStore::new();
+        let now = now_secs();
+        {
+            let mut map = store.nonces.lock().unwrap();
+            // Expired 60s ago — well inside the 10-min grace.
+            map.insert("0xfresh".into(), ("nonce-x".into(), now - 60));
+        }
+        store.cleanup_expired();
+        assert!(store.nonces.lock().unwrap().contains_key("0xfresh"));
     }
 
     /// Codex-flagged P0-7: nonce-bombing. Posting an EXPIRED nonce

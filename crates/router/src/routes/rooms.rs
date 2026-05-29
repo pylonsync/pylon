@@ -209,6 +209,33 @@ pub(crate) fn handle(
         };
         let broadcast_data = data.get("data").cloned().unwrap_or(serde_json::json!({}));
 
+        // Auth gate (mirrors set_presence above): require an
+        // identifiable sender, and require non-admin senders to be
+        // members of the target room. Without this, any authed user
+        // could blast topics into rooms they never joined. Admins
+        // bypass for server-to-server use cases; the runtime layer
+        // (RoomManager::broadcast) still enforces membership when an
+        // admin tries to spoof a non-member sender — defense in depth.
+        let sender_id = match sender {
+            Some(s) => s,
+            None => {
+                return Some((
+                    401,
+                    json_error("AUTH_REQUIRED", "authenticated session required"),
+                ));
+            }
+        };
+        if !ctx.auth_ctx.is_admin && !ctx.rooms.is_in_room(room, sender_id) {
+            // Mirror set_presence's response shape (`not_in_room`) so
+            // clients can branch on one consistent gating reason
+            // across presence + broadcast. Do not call into the runtime
+            // — the membership check has already failed.
+            return Some((
+                200,
+                serde_json::json!({"broadcasted": false, "reason": "not_in_room"}).to_string(),
+            ));
+        }
+
         if let Some(broadcast_event) = ctx.rooms.broadcast(room, sender, topic, broadcast_data) {
             if let Ok(json) = serde_json::to_string(&broadcast_event) {
                 ctx.notifier.notify_presence(&json);

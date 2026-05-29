@@ -437,4 +437,16 @@ impl RoomOps for WorkersRooms {
             .and_then(|v| v.as_array().cloned())
             .unwrap_or_default()
     }
+
+    fn is_in_room(&self, room: &str, user_id: &str) -> bool {
+        // Defense-in-depth membership check used by /api/rooms/broadcast
+        // — see crates/router/src/routes/rooms.rs. Issues a HEAD-style
+        // probe to the DO so we don't pay the cost of pulling the full
+        // members array client-side. Fails closed on transport error.
+        let body = serde_json::json!({ "user_id": user_id });
+        self.do_request(room, Method::Post, "/is_in_room", Some(body))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
 }

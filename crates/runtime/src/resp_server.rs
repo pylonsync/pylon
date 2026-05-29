@@ -15,7 +15,7 @@
 //! Conn:    PING, ECHO, QUIT, COMMAND, INFO
 
 use std::io::{BufReader, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
@@ -23,22 +23,79 @@ use pylon_plugin::builtin::cache::CachePlugin;
 
 use crate::resp::{parse_resp, RespValue};
 
-/// Start a RESP-compatible server (Redis protocol) on the given port.
+/// Default bind address — loopback only.
 ///
-/// This blocks the calling thread. Each client connection is handled in its
-/// own thread with a synchronous read loop.
-pub fn start_resp_server(cache: Arc<CachePlugin>, port: u16) {
-    // Dual-stack v6+v4 (see crate::bind_dual_stack_tcp).
-    let listener = match crate::bind_dual_stack_tcp(port) {
+/// Historic behavior was dual-stack `[::]:port`, which bound to every
+/// interface (LAN + the public internet on a misconfigured Fly machine)
+/// with no authentication. That let anyone with network reach run
+/// `FLUSHALL`, dump every key with `KEYS *`, etc. Loopback is the only
+/// safe default; operators who want network reach must pass
+/// `--bind 0.0.0.0`, `--bind-all`, or a specific bind address AND set
+/// `--requirepass` / `PYLON_RESP_REQUIREPASS`.
+pub const DEFAULT_RESP_BIND: &str = "127.0.0.1";
+
+/// Start a RESP-compatible server (Redis protocol).
+///
+/// This blocks the calling thread. Each client connection is handled in
+/// its own thread with a synchronous read loop.
+///
+/// # Authentication
+///
+/// When `requirepass` is `Some`, clients must issue `AUTH <password>`
+/// before any command other than `PING`, `AUTH`, or `QUIT`. The password
+/// comparison is constant-time (`pylon_auth::constant_time_eq`).
+///
+/// When `requirepass` is `None`, the server runs with no auth. A
+/// stderr warning is logged if the bind address is non-loopback.
+///
+/// # Bind address
+///
+/// `bind_addr` accepts a host (e.g. `"127.0.0.1"`, `"0.0.0.0"`, `"::"`,
+/// `"192.168.1.10"`). The special value `"0.0.0.0"` (or any non-loopback
+/// IPv4) is also re-bound as dual-stack v6+v4 via [`crate::bind_dual_stack_tcp`]
+/// when the operator passes the `--bind-all` shorthand from the CLI
+/// (which sets `bind_addr = Some("0.0.0.0")` and `dual_stack = true`).
+/// Pass `None` for the default loopback-only bind.
+pub fn start_resp_server(
+    cache: Arc<CachePlugin>,
+    port: u16,
+    bind_addr: Option<String>,
+    requirepass: Option<String>,
+) {
+    let bind = bind_addr
+        .clone()
+        .unwrap_or_else(|| DEFAULT_RESP_BIND.to_string());
+
+    let listener = match open_listener(&bind, port) {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!("[resp] Failed to bind RESP server on port {port}: {e}");
+            tracing::warn!("[resp] Failed to bind RESP server on {bind}:{port}: {e}");
             return;
         }
     };
 
-    tracing::warn!("[resp] RESP server listening on resp://localhost:{port}");
-    tracing::warn!("[resp] Compatible with redis-cli: redis-cli -p {port}");
+    let is_loopback = is_loopback_addr(&bind);
+    if !is_loopback && requirepass.is_none() {
+        // Loud stderr warning so an operator who turned on `--bind-all`
+        // (or `--bind 0.0.0.0`) without a password sees this before
+        // the next prod incident. tracing::warn! routes to stderr in
+        // the default subscriber config.
+        eprintln!(
+            "[resp] WARNING: binding non-loopback address {bind} without --requirepass; \
+             anyone with network reach can run FLUSHALL etc. \
+             Set PYLON_RESP_REQUIREPASS=<password> or limit network reach."
+        );
+        tracing::warn!(
+            "[resp] WARNING: binding non-loopback address {bind} without --requirepass; \
+             anyone with network reach can run FLUSHALL etc. \
+             Set PYLON_RESP_REQUIREPASS=<password> or limit network reach."
+        );
+    }
+
+    tracing::warn!("[resp] RESP server listening on resp://{bind}:{port}");
+    tracing::warn!("[resp] Compatible with redis-cli: redis-cli -h {bind} -p {port}");
+
+    let requirepass = requirepass.map(Arc::new);
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -47,19 +104,59 @@ pub fn start_resp_server(cache: Arc<CachePlugin>, port: u16) {
         };
 
         let cache = Arc::clone(&cache);
+        let requirepass = requirepass.clone();
         thread::spawn(move || {
-            handle_client(cache, stream);
+            handle_client(cache, stream, requirepass);
         });
     }
 }
 
-fn handle_client(cache: Arc<CachePlugin>, stream: TcpStream) {
+/// Open a TCP listener on `bind_addr:port`.
+///
+/// - `"0.0.0.0"` and `"::"` go through `bind_dual_stack_tcp` so v6
+///   clients still reach us on Linux + macOS.
+/// - Every other host is bound directly (loopback or an explicit
+///   interface).
+fn open_listener(bind_addr: &str, port: u16) -> std::io::Result<TcpListener> {
+    if bind_addr == "0.0.0.0" || bind_addr == "::" {
+        crate::bind_dual_stack_tcp(port)
+    } else {
+        TcpListener::bind((bind_addr, port))
+    }
+}
+
+/// Is `addr` a loopback address (no network reach beyond the local host)?
+///
+/// Accepts string forms — `"127.0.0.1"`, `"::1"`, `"localhost"` — and
+/// any other 127.0.0.0/8 IPv4 address that parses cleanly.
+fn is_loopback_addr(addr: &str) -> bool {
+    if addr.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = addr.parse::<Ipv4Addr>() {
+        return ip.is_loopback();
+    }
+    if let Ok(ip) = addr.parse::<Ipv6Addr>() {
+        return ip.is_loopback();
+    }
+    if let Ok(sock) = addr.parse::<SocketAddr>() {
+        return sock.ip().is_loopback();
+    }
+    false
+}
+
+fn handle_client(cache: Arc<CachePlugin>, stream: TcpStream, requirepass: Option<Arc<String>>) {
     let write_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
     };
     let mut reader = BufReader::new(stream);
     let mut writer = write_stream;
+
+    // If no password is required, the connection is pre-authed. Otherwise,
+    // every command except PING / AUTH / QUIT is rejected with NOAUTH
+    // until a successful AUTH.
+    let mut authed = requirepass.is_none();
 
     loop {
         let value = match parse_resp(&mut reader) {
@@ -90,14 +187,71 @@ fn handle_client(cache: Arc<CachePlugin>, stream: TcpStream) {
             continue;
         }
 
+        let upper = cmd_parts[0].to_uppercase();
+
+        // AUTH handling — happens before the authed gate so it works
+        // pre-auth (the whole point) and also post-auth (Redis lets you
+        // re-AUTH; we accept it idempotently).
+        if upper == "AUTH" {
+            let response = handle_auth(requirepass.as_deref(), &cmd_parts, &mut authed);
+            let _ = writer.write_all(&response.serialize());
+            let _ = writer.flush();
+            continue;
+        }
+
+        // Gate: pre-auth connections can only PING / QUIT.
+        if !authed && upper != "PING" && upper != "QUIT" {
+            let _ = writer
+                .write_all(&RespValue::Error("NOAUTH Authentication required.".into()).serialize());
+            let _ = writer.flush();
+            continue;
+        }
+
         let response = execute_command(&cache, &cmd_parts);
         let _ = writer.write_all(&response.serialize());
         let _ = writer.flush();
 
         // QUIT: send OK then close.
-        if cmd_parts[0].eq_ignore_ascii_case("QUIT") {
+        if upper == "QUIT" {
             break;
         }
+    }
+}
+
+/// Handle the `AUTH` command.
+///
+/// Uses constant-time compare so an attacker can't time the byte
+/// match. Wrong passwords keep `authed = false` and return a generic
+/// error (no information leak about whether AUTH is even required).
+fn handle_auth(requirepass: Option<&String>, args: &[String], authed: &mut bool) -> RespValue {
+    let expected = match requirepass {
+        Some(pw) => pw,
+        None => {
+            // Redis returns this exact error when AUTH is sent but the
+            // server has no requirepass configured.
+            return RespValue::Error(
+                "ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?".into(),
+            );
+        }
+    };
+
+    // Redis accepts `AUTH <password>` (RESP2) and `AUTH <username> <password>`
+    // (Redis 6+ ACLs). We only support the password form — we don't model
+    // users — and we accept either by taking the LAST arg as the password.
+    let presented = match args.len() {
+        2 => &args[1],
+        3 => &args[2],
+        _ => {
+            return RespValue::err("wrong number of arguments for 'auth' command");
+        }
+    };
+
+    if pylon_auth::constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+        *authed = true;
+        RespValue::ok()
+    } else {
+        // Don't flip `authed` — wrong password keeps the connection gated.
+        RespValue::Error("WRONGPASS invalid username-password pair or user is disabled.".into())
     }
 }
 
@@ -673,8 +827,20 @@ mod tests {
     ///
     /// Uses an in-memory buffer pair instead of real TCP sockets.
     fn run_session(cache: &CachePlugin, commands: &[u8]) -> Vec<u8> {
+        run_session_with_auth(cache, commands, None)
+    }
+
+    /// Same as `run_session` but with an optional `requirepass`. Mirrors the
+    /// production `handle_client` flow (NOAUTH gate + AUTH bookkeeping).
+    fn run_session_with_auth(
+        cache: &CachePlugin,
+        commands: &[u8],
+        requirepass: Option<&str>,
+    ) -> Vec<u8> {
         let mut input = BufReader::new(Cursor::new(commands.to_vec()));
         let mut output = Vec::new();
+        let mut authed = requirepass.is_none();
+        let requirepass_owned = requirepass.map(|s| s.to_string());
 
         loop {
             let value = match crate::resp::parse_resp(&mut input) {
@@ -704,10 +870,25 @@ mod tests {
                 continue;
             }
 
+            let upper = cmd_parts[0].to_uppercase();
+
+            if upper == "AUTH" {
+                let response = handle_auth(requirepass_owned.as_ref(), &cmd_parts, &mut authed);
+                output.extend_from_slice(&response.serialize());
+                continue;
+            }
+
+            if !authed && upper != "PING" && upper != "QUIT" {
+                output.extend_from_slice(
+                    &RespValue::Error("NOAUTH Authentication required.".into()).serialize(),
+                );
+                continue;
+            }
+
             let response = execute_command(cache, &cmd_parts);
             output.extend_from_slice(&response.serialize());
 
-            if cmd_parts[0].eq_ignore_ascii_case("QUIT") {
+            if upper == "QUIT" {
                 break;
             }
         }
@@ -1111,6 +1292,151 @@ mod tests {
     }
 
     // -- Multi-command session --
+
+    // -- Security: bind defaults + AUTH gate --
+
+    #[test]
+    fn default_bind_is_loopback() {
+        // The exported default must be a loopback address; an operator
+        // who calls `start_resp_server(..., None, None)` must not get a
+        // 0.0.0.0 bind.
+        assert!(
+            is_loopback_addr(DEFAULT_RESP_BIND),
+            "DEFAULT_RESP_BIND ({DEFAULT_RESP_BIND}) is not loopback"
+        );
+        assert!(is_loopback_addr("127.0.0.1"));
+        assert!(is_loopback_addr("::1"));
+        assert!(is_loopback_addr("localhost"));
+        assert!(!is_loopback_addr("0.0.0.0"));
+        assert!(!is_loopback_addr("::"));
+        assert!(!is_loopback_addr("192.168.1.10"));
+    }
+
+    #[test]
+    fn flushall_without_auth_returns_noauth() {
+        let cache = CachePlugin::new(100);
+        cache.set("a", "1", None);
+
+        let output = run_session_with_auth(&cache, &build_command(&["FLUSHALL"]), Some("hunter2"));
+        match parse_response(&output) {
+            RespValue::Error(msg) => assert!(
+                msg.starts_with("NOAUTH"),
+                "expected NOAUTH error, got: {msg}"
+            ),
+            other => panic!("Expected NOAUTH error, got {other:?}"),
+        }
+
+        // Critically: FLUSHALL must NOT have actually run.
+        assert_eq!(cache.dbsize(), 1, "FLUSHALL ran despite NOAUTH gate");
+    }
+
+    #[test]
+    fn ping_allowed_pre_auth() {
+        // PING must still work pre-auth so health probes / connection
+        // tests don't need to AUTH first.
+        let cache = CachePlugin::new(100);
+        let output = run_session_with_auth(&cache, &build_command(&["PING"]), Some("hunter2"));
+        assert_eq!(
+            parse_response(&output),
+            RespValue::SimpleString("PONG".into())
+        );
+    }
+
+    #[test]
+    fn auth_correct_password_permits_subsequent_commands() {
+        let cache = CachePlugin::new(100);
+        let mut cmds = build_command(&["AUTH", "hunter2"]);
+        cmds.extend_from_slice(&build_command(&["SET", "k", "v"]));
+        cmds.extend_from_slice(&build_command(&["GET", "k"]));
+
+        let responses = parse_all_responses(&run_session_with_auth(&cache, &cmds, Some("hunter2")));
+        assert_eq!(responses[0], RespValue::ok()); // AUTH ok
+        assert_eq!(responses[1], RespValue::ok()); // SET ok
+        assert_eq!(responses[2], RespValue::bulk("v")); // GET v
+    }
+
+    #[test]
+    fn auth_wrong_password_keeps_gate_closed() {
+        let cache = CachePlugin::new(100);
+        cache.set("a", "1", None);
+
+        let mut cmds = build_command(&["AUTH", "wrong-password"]);
+        cmds.extend_from_slice(&build_command(&["FLUSHALL"]));
+
+        let responses = parse_all_responses(&run_session_with_auth(&cache, &cmds, Some("hunter2")));
+
+        // AUTH returns WRONGPASS error.
+        match &responses[0] {
+            RespValue::Error(msg) => assert!(
+                msg.starts_with("WRONGPASS"),
+                "expected WRONGPASS, got: {msg}"
+            ),
+            other => panic!("Expected WRONGPASS error, got {other:?}"),
+        }
+
+        // FLUSHALL still gated.
+        match &responses[1] {
+            RespValue::Error(msg) => assert!(
+                msg.starts_with("NOAUTH"),
+                "expected NOAUTH after wrong AUTH, got: {msg}"
+            ),
+            other => panic!("Expected NOAUTH error, got {other:?}"),
+        }
+
+        // Cache untouched.
+        assert_eq!(cache.dbsize(), 1, "FLUSHALL ran despite WRONGPASS + NOAUTH");
+    }
+
+    #[test]
+    fn auth_uses_constant_time_compare() {
+        // We can't measure timing in a unit test, but we can verify the
+        // call routes through `pylon_auth::constant_time_eq` by checking
+        // that same-length and different-length wrong passwords both
+        // return WRONGPASS (and not some byte-length short-circuit).
+        let cache = CachePlugin::new(100);
+
+        // Same length as expected ("hunter2" is 7 bytes).
+        let same_len = run_session_with_auth(
+            &cache,
+            &build_command(&["AUTH", "hunter1"]),
+            Some("hunter2"),
+        );
+        // Different length.
+        let diff_len =
+            run_session_with_auth(&cache, &build_command(&["AUTH", "x"]), Some("hunter2"));
+
+        for output in [&same_len, &diff_len] {
+            match parse_response(output) {
+                RespValue::Error(msg) => assert!(
+                    msg.starts_with("WRONGPASS"),
+                    "expected WRONGPASS, got: {msg}"
+                ),
+                other => panic!("Expected WRONGPASS, got {other:?}"),
+            }
+        }
+
+        // And same password authenticates.
+        let mut authed = false;
+        let args = vec!["AUTH".to_string(), "hunter2".to_string()];
+        let response = handle_auth(Some(&"hunter2".to_string()), &args, &mut authed);
+        assert_eq!(response, RespValue::ok());
+        assert!(authed);
+    }
+
+    #[test]
+    fn auth_with_no_requirepass_returns_err() {
+        // Sending AUTH against a server with no password configured
+        // returns the standard Redis error.
+        let cache = CachePlugin::new(100);
+        let output = run_session_with_auth(&cache, &build_command(&["AUTH", "anything"]), None);
+        match parse_response(&output) {
+            RespValue::Error(msg) => assert!(
+                msg.starts_with("ERR Client sent AUTH"),
+                "expected 'no password is set' error, got: {msg}"
+            ),
+            other => panic!("Expected error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn full_session() {

@@ -103,6 +103,16 @@ impl RoomOps for NoopAll {
     fn members(&self, _name: &str) -> Vec<serde_json::Value> {
         vec![]
     }
+
+    fn is_in_room(&self, _room: &str, _user_id: &str) -> bool {
+        // Pre-DO-binding Workers target has no room state at all, so
+        // membership is always false. Routes/rooms.rs uses this as the
+        // defense-in-depth check before broadcast; returning false
+        // matches the broader DO_BINDING_REQUIRED posture (rooms
+        // unreachable on Workers until the Durable Object binding
+        // lands).
+        false
+    }
 }
 
 impl CacheOps for NoopAll {

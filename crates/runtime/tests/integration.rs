@@ -794,6 +794,101 @@ fn rooms_via_http() {
     assert_eq!(status, 200, "leave: {body}");
 }
 
+/// Regression: a non-admin authed user attempting to broadcast to a
+/// room they have NOT joined must be rejected at the router layer
+/// with `{"broadcasted": false, "reason": "not_in_room"}`, mirroring
+/// `set_presence`'s membership gate. Before this fix any authed user
+/// could fan out arbitrary topics into rooms they never joined,
+/// hitting every real member of the room.
+#[test]
+fn broadcast_requires_room_membership() {
+    let base = start_test_server();
+
+    // Mint a guest session: a non-admin authenticated identity.
+    let (status, body) = http_request("POST", &format!("{base}/api/auth/guest"), None);
+    assert!(
+        status == 200 || status == 201,
+        "guest mint: status={status} body={body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let guest_token = resp["token"]
+        .as_str()
+        .expect("guest token missing")
+        .to_string();
+    assert_eq!(resp["guest"].as_bool().unwrap_or(false), true);
+
+    // An admin seeds the room with a real member so the room exists
+    // and has a victim of the would-be broadcast.
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/join"),
+        Some(r#"{"room": "doc:1", "user_id": "alice"}"#),
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "admin join seed: {body}");
+
+    // Guest tries to broadcast into "doc:1" without ever joining.
+    // The router must return 200 with `broadcasted: false,
+    // reason: "not_in_room"` and must NOT call into the runtime
+    // (no event reaches alice).
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/broadcast"),
+        Some(r#"{"room": "doc:1", "topic": "spam", "data": {"x": 1}}"#),
+        Some(&guest_token),
+    );
+    assert_eq!(status, 200, "broadcast (non-member): {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        resp["broadcasted"].as_bool(),
+        Some(false),
+        "expected broadcasted=false, got {body}"
+    );
+    assert_eq!(
+        resp["reason"].as_str(),
+        Some("not_in_room"),
+        "expected reason=not_in_room, got {body}"
+    );
+
+    // Sanity: an admin can still broadcast (server-to-server path)
+    // when the admin itself is a member — this is the
+    // "admin spoofing a real member" path. Admin already joined as
+    // "alice" above, so spoofing user_id=alice must succeed.
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/broadcast"),
+        Some(
+            r#"{"room": "doc:1", "topic": "announce", "user_id": "alice", "data": {"msg": "ok"}}"#,
+        ),
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "admin broadcast as member: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        resp["broadcasted"].as_bool(),
+        Some(true),
+        "admin-as-member broadcast should succeed: {body}"
+    );
+
+    // And: an admin spoofing a NON-member sender is rejected at the
+    // runtime layer (defense in depth). The router doesn't gate
+    // admins, so the only thing between the admin and a fake-sender
+    // broadcast is RoomManager::broadcast.
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/broadcast"),
+        Some(r#"{"room": "doc:1", "topic": "spoof", "user_id": "ghost", "data": {}}"#),
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "admin spoof non-member: {body}");
+    let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        resp["broadcasted"].as_bool(),
+        Some(false),
+        "admin spoof of non-member must be rejected by runtime: {body}"
+    );
+}
+
 #[test]
 fn openapi_spec() {
     let base = start_test_server();
