@@ -622,6 +622,82 @@ impl Runtime {
             .ok()
     }
 
+    /// SQLite analog of `bootstrap_global_change_seq`. Creates a
+    /// `_pylon_change_seq` row whose single `value` column carries the
+    /// highest seq the server has ever minted. Without this, every
+    /// process restart resets the in-memory seq counter to 0 + seeds it
+    /// to ~N (the current entity count). Any client whose cursor is
+    /// ahead of the new seed range gets a permanent 410 RESYNC_REQUIRED
+    /// from `crates/sync/src/lib.rs:568` because `cursor.last_seq >
+    /// current_seq`. The 410 forces the client through reset → re-pull,
+    /// which is visible UI churn on every deploy. Persisting the seq
+    /// across restarts eliminates the case.
+    pub fn bootstrap_sqlite_change_seq(&self) -> Result<(), RuntimeError> {
+        let sb = self.sqlite_backend()?;
+        let conn = sb.write_conn.lock().map_err(|e| RuntimeError {
+            code: "SQLITE_LOCK_FAILED".into(),
+            message: format!("write_conn lock poisoned: {e}"),
+        })?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _pylon_change_seq (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL)",
+            [],
+        )
+        .map_err(|e| RuntimeError {
+            code: "SQLITE_SEQUENCE_BOOTSTRAP_FAILED".into(),
+            message: format!("CREATE TABLE _pylon_change_seq: {e}"),
+        })?;
+        conn.execute(
+            "INSERT OR IGNORE INTO _pylon_change_seq (id, value) VALUES (1, 0)",
+            [],
+        )
+        .map_err(|e| RuntimeError {
+            code: "SQLITE_SEQUENCE_BOOTSTRAP_FAILED".into(),
+            message: format!("seed _pylon_change_seq: {e}"),
+        })?;
+        Ok(())
+    }
+
+    /// Snapshot the persisted seq value without minting a new one. Used
+    /// at boot to align the in-memory ChangeLog counter so seed events
+    /// resume from the last persisted seq instead of restarting at 0.
+    pub fn current_sqlite_change_seq(&self) -> Option<u64> {
+        let sb = self.sqlite_backend().ok()?;
+        let conn = sb.write_conn.lock().ok()?;
+        let v: i64 = conn
+            .query_row(
+                "SELECT value FROM _pylon_change_seq WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        Some(v as u64)
+    }
+
+    /// Atomically increment + return the persisted seq. SQLite serializes
+    /// this through the write_conn mutex, so concurrent appenders
+    /// produce strictly-monotonic seqs without a separate lock. Returns
+    /// `None` on any storage error; caller falls back to the local
+    /// in-memory atomic, which keeps writes flowing under disk pressure
+    /// (correctness restored on the next successful call via the
+    /// `max(prev, current)` guard inside `ChangeLog::append`).
+    pub fn next_sqlite_change_seq(&self) -> Option<u64> {
+        let sb = self.sqlite_backend().ok()?;
+        let conn = sb.write_conn.lock().ok()?;
+        conn.execute(
+            "UPDATE _pylon_change_seq SET value = value + 1 WHERE id = 1",
+            [],
+        )
+        .ok()?;
+        let v: i64 = conn
+            .query_row(
+                "SELECT value FROM _pylon_change_seq WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        Some(v as u64)
+    }
+
     /// Filesystem path to the SQLite database, if this runtime is file-backed.
     /// Returns `None` for in-memory runtimes AND Postgres runtimes (no local
     /// file). Used by the server bootstrap to derive companion paths
@@ -3314,6 +3390,45 @@ mod tests {
         let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
         let err = rt.reset_for_tests().unwrap_err();
         assert_eq!(err.code, "RESET_REFUSED");
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Regression: a SQLite-backed runtime must hand back strictly
+    /// monotonic seqs across process restarts. Without the persisted
+    /// `_pylon_change_seq` row, every restart starts the in-memory
+    /// counter at 0 and seed events fill 1..N; any client cursor from
+    /// the prior incarnation that's >= N permanently 410s — observed
+    /// in production as "cursor last_seq=49 is older than the oldest
+    /// retained seq=49" after a deploy roll.
+    #[test]
+    fn sqlite_change_seq_persists_across_restart() {
+        let dir = std::env::temp_dir().join("pylon-seq-persist");
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("db.sqlite");
+        let _ = std::fs::remove_file(&db_path);
+
+        {
+            let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
+            rt.bootstrap_sqlite_change_seq().unwrap();
+            assert_eq!(rt.current_sqlite_change_seq().unwrap(), 0);
+            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 1);
+            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 2);
+            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 3);
+            assert_eq!(rt.current_sqlite_change_seq().unwrap(), 3);
+        }
+        {
+            // Reopen the same file — simulating a process restart. The
+            // counter must resume from 3, not 0.
+            let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
+            rt.bootstrap_sqlite_change_seq().unwrap();
+            assert_eq!(
+                rt.current_sqlite_change_seq().unwrap(),
+                3,
+                "restart must resume from persisted seq, not reset to 0"
+            );
+            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 4);
+        }
+
         let _ = std::fs::remove_file(&db_path);
     }
 

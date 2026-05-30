@@ -557,8 +557,16 @@ fn start_server(
     // monotonically-increasing seq space. Without this, instance A and
     // instance B can independently mint seq=N for different events;
     // a client connected to one and pulling from the other drops
-    // events as "duplicate seq" (codex P1). SQLite / single-instance
-    // deployments stay on the in-memory atomic counter.
+    // events as "duplicate seq" (codex P1).
+    //
+    // SQLite backends: wire a _pylon_change_seq-row-backed provider so
+    // seqs persist across process restarts. Without this, every deploy
+    // resets the in-memory seq counter to 0 + seeds to ~entity_count;
+    // any cached client cursor ahead of the new seed range fires a
+    // permanent 410 RESYNC_REQUIRED → reset → re-pull (visible churn
+    // on every deploy). Persisted seqs are strictly monotonic across
+    // boots so the 410 path only ever fires under genuine retention
+    // eviction.
     let mut change_log_builder = ChangeLog::new();
     if runtime.is_postgres() {
         if let Err(e) = runtime.bootstrap_global_change_seq() {
@@ -586,6 +594,33 @@ fn start_server(
                 .with_initial_seq(initial);
             tracing::info!(
                 "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
+            );
+        }
+    } else if !runtime.is_in_memory() {
+        // File-backed SQLite. Persist the seq through a single-row table
+        // so process restarts resume from the last minted seq instead of
+        // resetting to 0. In-memory SQLite skips this — its rows
+        // disappear on restart too, so there's no stale-cursor case.
+        if let Err(e) = runtime.bootstrap_sqlite_change_seq() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap SQLite _pylon_change_seq; falling back to per-instance seq: {}",
+                e.message
+            );
+        } else {
+            let rt_for_provider = Arc::clone(&runtime);
+            let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
+            let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
+            let local_for_provider = std::sync::Arc::clone(&local_fallback);
+            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
+                rt_for_provider.next_sqlite_change_seq().unwrap_or_else(|| {
+                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+                })
+            });
+            change_log_builder = change_log_builder
+                .with_seq(provider)
+                .with_initial_seq(initial);
+            tracing::info!(
+                "[change_log] using SQLite _pylon_change_seq (initial seq = {initial})"
             );
         }
     }
