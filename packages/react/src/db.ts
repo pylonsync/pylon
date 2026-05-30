@@ -75,7 +75,11 @@ export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) 
   });
 }
 
-function getSync(): SyncEngine {
+/** Module-internal accessor for the global sync engine. Exported so
+ *  hooks living outside this file (e.g. `useRoom`) can share the same
+ *  engine instance and benefit from the same lazy-start / lazy-init
+ *  semantics — without re-implementing the resolution rules. */
+export function getSync(): SyncEngine {
   if (!_sync) {
     // Lazy fallback for callers that never invoked init(). Same
     // resolution rules as init: browser → window.location.origin,

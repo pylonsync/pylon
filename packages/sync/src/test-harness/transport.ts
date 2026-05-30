@@ -19,6 +19,10 @@ export interface TransportHandle {
   fetchCount: () => number;
   /** Number of WS connections opened so far. */
   wsConnectCount: () => number;
+  /** Close the most-recently-opened mock WS so the engine sees a
+   *  disconnect and schedules reconnect via its backoff. Returns
+   *  true if a socket was actually closed, false otherwise. */
+  closeLatestWs: () => boolean;
   /** Tear down the global stubs. */
   restore: () => void;
 }
@@ -33,6 +37,12 @@ export function installTransport(server: TestServer): TransportHandle {
   let token: string | undefined;
   let fetchCount = 0;
   let wsConnectCount = 0;
+  // Track open mock sockets so a test that needs to simulate a
+  // server-side disconnect (cluster bounce, autostop) can grab the
+  // latest connection and close it. The engine's reconnect loop
+  // builds a fresh MockWebSocket on the next attempt; each shows up
+  // here in order so the list maps 1:1 to actual connect attempts.
+  const openSockets: MockWebSocket[] = [];
 
   const originalFetch = globalThis.fetch;
   const originalWS = (globalThis as { WebSocket?: unknown }).WebSocket;
@@ -87,6 +97,7 @@ export function installTransport(server: TestServer): TransportHandle {
       super();
       this.url = url;
       wsConnectCount += 1;
+      openSockets.push(this);
       // The engine encodes the token as `bearer.<percent-encoded>` in
       // the WS subprotocol when one is set. Decode it so the harness
       // can route this connection to the right subscriber bucket
@@ -144,6 +155,18 @@ export function installTransport(server: TestServer): TransportHandle {
     },
     fetchCount: () => fetchCount,
     wsConnectCount: () => wsConnectCount,
+    closeLatestWs: () => {
+      // Walk back from the most recent socket to find one that's
+      // still open. Older closed sockets get skipped silently.
+      for (let i = openSockets.length - 1; i >= 0; i--) {
+        const s = openSockets[i];
+        if (s.readyState !== 3) {
+          s.close();
+          return true;
+        }
+      }
+      return false;
+    },
     restore: () => {
       globalThis.fetch = originalFetch;
       if (originalWS) {

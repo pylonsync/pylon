@@ -17,6 +17,12 @@ import { LocalStore } from "./local-store";
 import { MutationQueue, type PendingMutation } from "./mutation-queue";
 import { MultiTabOrchestrator } from "./multi-tab-orchestrator";
 import { OpQueue } from "./op-queue";
+import {
+  RoomSubscriptions,
+  type RoomError,
+  type RoomMember,
+  type RoomSubscriber,
+} from "./room-subscriptions";
 import { ServerSubscriptions } from "./server-subscriptions";
 import { SessionResolver } from "./session-resolver";
 import { SubscriptionCoordinator } from "./subscription-coordinator";
@@ -27,6 +33,13 @@ import {
   type TransportKind,
 } from "./transports";
 import { generateClientId, generateId } from "./ids";
+export {
+  RoomSubscriptions,
+  type RoomError,
+  type RoomErrorCode,
+  type RoomMember,
+  type RoomSubscriber,
+} from "./room-subscriptions";
 export { IndexedDBPersistence, persistChange } from "./persistence";
 export {
   buildRequest,
@@ -335,6 +348,27 @@ export class SyncEngine {
    *  serverSubs isn't built until then. */
   private subscriptions!: SubscriptionCoordinator;
 
+  /** Room presence subscriptions. Replaces the per-component
+   *  setInterval(GET /api/rooms/<room>, 5s) polling loop the `useRoom`
+   *  hook used to run for every channel. New server protocol
+   *  (v0.3.214+): the client sends `room-subscribe` / `room-unsubscribe`
+   *  over the existing WS, and the server pushes `room-snapshot` /
+   *  `room-update` whenever membership changes.
+   *
+   *  This engine field is leader-only (followers forward register /
+   *  unregister calls over the multi-tab channel — the leader's
+   *  registry is the single source of truth on the wire). Constructed
+   *  lazily in start() so SSR-only callers don't pay for it. */
+  private rooms!: RoomSubscriptions;
+
+  /** Per-room set of follower tabIds that have forwarded a
+   *  `room-sub-register`. Leader-only. Mirrors `crdtForwarders` in the
+   *  SubscriptionCoordinator — the WS room sub stays alive until both
+   *  the local refcount AND this set are empty. A separate map on the
+   *  engine (instead of inside RoomSubscriptions) because the registry
+   *  is leader-local and forwarder bookkeeping is multi-tab specific. */
+  private roomForwarders: Map<string, Set<string>> = new Map();
+
   /**
    * Listeners notified when the server signals a per-subscriber row
    * revocation (`row-revoked` envelope). Used by `@pylonsync/loro`
@@ -403,6 +437,16 @@ export class SyncEngine {
     this.subscriptions = new SubscriptionCoordinator(this.serverSubs, {
       isLeader: () => this.isMultiTabLeader,
       broadcastToTabs: (payload) => this.broadcastToTabs(payload),
+    });
+    this.rooms = new RoomSubscriptions((msg) => {
+      // Leader: send over the WS. Followers don't open a transport;
+      // the leader-side WS is the only path to the server.
+      if (!this.isMultiTabLeader) return false;
+      if (this.transport?.isOpen()) {
+        this.transport.send(msg);
+        return true;
+      }
+      return false;
     });
     // When multi-tab coordination is explicitly disabled, this engine
     // is always its own sole leader — even before start(). Tests that
@@ -746,13 +790,107 @@ export class SyncEngine {
           }
         }
       },
-      onPeerLeft: (_tabId: string) => {
-        // Orchestrator already scrubbed subscription state for the
-        // departed tab. The engine has no additional cleanup, but the
-        // hook exists for future needs (e.g., per-peer presence).
+      onPeerLeft: (tabId: string) => {
+        // Orchestrator already scrubbed CRDT / reactive sub state for
+        // the departed tab. Engine cleans up room forwarder sets —
+        // a follower that crashed without sending `room-sub-unregister`
+        // would otherwise keep the leader's hold (and therefore the WS
+        // sub) alive for a room nobody actually wants.
+        if (!this.isMultiTabLeader) return;
+        for (const [room, set] of [...this.roomForwarders]) {
+          if (!set.delete(tabId)) continue;
+          if (set.size === 0) {
+            this.roomForwarders.delete(room);
+            const release = this.leaderForwarderHolds.get(room);
+            if (release) {
+              this.leaderForwarderHolds.delete(room);
+              release();
+            }
+          }
+        }
+      },
+      onRoomSubRegister: (roomId: string, fromTabId: string) => {
+        let set = this.roomForwarders.get(roomId);
+        if (!set) {
+          set = new Set();
+          this.roomForwarders.set(roomId, set);
+        }
+        const wasFirst = set.size === 0;
+        set.add(fromTabId);
+        // First forwarder for this room: acquire a leader-internal
+        // hold on the registry so the WS sub stays alive as long as
+        // any tab (leader or follower) still cares. The hold is a
+        // refcount increment with a noop callback — it doesn't fire
+        // on snapshots / updates (the leader's own subscribers, if
+        // any, get the pulse; the forwarded tab gets the snapshot via
+        // the `room-fanout-*` channel). Without this hold, a leader
+        // with no local subscribers would never enter the registry
+        // and inbound `room-snapshot` for forwarded rooms would drop
+        // on the floor.
+        if (wasFirst) {
+          const noop: RoomSubscriber = () => {};
+          const release = this.rooms.register(roomId, noop);
+          this.leaderForwarderHolds.set(roomId, release);
+        }
+      },
+      onRoomSubUnregister: (roomId: string, fromTabId: string) => {
+        const set = this.roomForwarders.get(roomId);
+        if (!set) return;
+        set.delete(fromTabId);
+        if (set.size > 0) return;
+        this.roomForwarders.delete(roomId);
+        // Release the leader-internal hold IF no local subscriber on
+        // this tab cares either. The registry's refcount will then
+        // drop to zero and `room-unsubscribe` ships.
+        const release = this.leaderForwarderHolds.get(roomId);
+        if (release) {
+          this.leaderForwarderHolds.delete(roomId);
+          release();
+        }
+      },
+      onRoomFanoutSnapshot: (roomId: string, members: unknown) => {
+        if (Array.isArray(members)) {
+          this.rooms.applySnapshot(roomId, members as RoomMember[]);
+        }
+      },
+      onRoomFanoutUpdate: (
+        roomId: string,
+        action: "join" | "leave" | "presence" | "broadcast",
+        member: unknown,
+        data: unknown,
+      ) => {
+        this.rooms.applyUpdate(
+          roomId,
+          action,
+          (member ?? undefined) as RoomMember | undefined,
+          data,
+        );
+      },
+      onRoomFanoutError: (roomId: string, error: unknown) => {
+        const err = (error ?? { code: "UNKNOWN" }) as RoomError;
+        this.rooms.applyError(roomId, err);
+      },
+      onReplayRoomSubs: () => {
+        // Follower path: re-broadcast `room-sub-register` for every
+        // room we still care about. New leader rebuilds its forwarder
+        // set and resends `room-subscribe` on its WS.
+        if (this.isMultiTabLeader) return;
+        for (const roomId of this.rooms.roomIds()) {
+          this.broadcastToTabs({
+            type: "room-sub-register",
+            room: roomId,
+          });
+        }
       },
     };
   }
+
+  /** Leader-side hold tokens for room subs forwarded by followers. The
+   *  leader subscribes via its own registry with a no-op callback so
+   *  the registry's first-add gate ships `room-subscribe` exactly
+   *  once; the release tokens here let us undo that hold when the
+   *  last follower stops caring. */
+  private leaderForwarderHolds: Map<string, () => void> = new Map();
 
   /** Seed serverSubs with every subscription this tab currently wants.
    *  Called from both the initial-leader path (subscribes that
@@ -2158,6 +2296,126 @@ export class SyncEngine {
     this.transport?.send(msg);
   }
 
+  // -----------------------------------------------------------------------
+  // Room presence subscriptions
+  //
+  // Replaces the SDK's per-component `setInterval(GET /api/rooms/<room>,
+  // 5s)` polling loop. Wire shape (server v0.3.214+):
+  //
+  //   client → server:
+  //     { type: "room-subscribe",   room: "channel:foo" }
+  //     { type: "room-unsubscribe", room: "channel:foo" }
+  //   server → client:
+  //     { type: "room-snapshot", room, members: [...] }
+  //     { type: "room-update",   room, action: "join"|"leave"|"presence"|"broadcast",
+  //                                          member?, data? }
+  //     { type: "error", code: "NOT_IN_ROOM", room }   // server gate
+  //
+  // The actual `POST /api/rooms/join` still happens over HTTP (it carries
+  // initial presence + identity, returns the snapshot). This API only
+  // moves the "stay subscribed to membership deltas" loop off polling
+  // and onto the WS push channel. setPresence + broadcast also stay on
+  // HTTP for now — the WS-RPC envelope for those lands in v0.3.217.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Subscribe to a room's membership over WebSocket. The callback fires
+   * whenever the room's `members` list OR `error` state changes — read
+   * the current snapshot via `getRoomMembers(roomId)` and the latest
+   * error via `getRoomError(roomId)` inside the callback.
+   *
+   * Refcounted: multiple subscribers for the same `roomId` share one
+   * `room-subscribe` on the wire. Returns an unsubscribe function;
+   * the last unsubscribe ships `room-unsubscribe`.
+   *
+   * Follower tabs forward the register / unregister over the multi-tab
+   * channel so the leader's WS carries one subscribe per room across
+   * the whole origin. Inbound snapshot / update / error envelopes land
+   * on the leader's WS and the leader fans them out cross-tab so each
+   * follower's local registry routes to its own subscribers.
+   *
+   * Idempotent w.r.t. wire frames: a re-subscribe with no intervening
+   * full unsubscribe doesn't re-send `room-subscribe`. ServerSubscriptions-
+   * style replay on reconnect is built in — the registry resends
+   * `room-subscribe` for every active room on WS reopen.
+   */
+  subscribeRoom(roomId: string, callback: RoomSubscriber): () => void {
+    if (this.isMultiTabLeader) {
+      // Leader path: register against the local registry which owns
+      // the wire. If a follower had already forwarded this room, the
+      // WS sub is already alive — `register()` short-circuits the
+      // re-send via the registry's first-add gate.
+      return this.rooms.register(roomId, callback);
+    }
+    // Follower path: register locally for callback routing, then ask
+    // the leader to subscribe on our behalf (only on first local
+    // subscriber for the room — multiple mounts in the same follower
+    // tab share one `room-sub-register`, mirroring the leader-side
+    // ServerSubscriptions first-add gate). The leader echoes snapshots
+    // / updates / errors back over the broadcast channel and our local
+    // registry's notify() fires our callback.
+    const hadRoomBefore = this.rooms.has(roomId);
+    const unsubscribe = this.rooms.register(roomId, callback);
+    if (!hadRoomBefore) {
+      this.broadcastToTabs({
+        type: "room-sub-register",
+        room: roomId,
+      });
+    }
+    return () => {
+      unsubscribe();
+      // If this was the LAST subscriber on this tab for the room,
+      // tell the leader so it can drop us from the forwarder set.
+      if (!this.rooms.has(roomId)) {
+        this.broadcastToTabs({
+          type: "room-sub-unregister",
+          room: roomId,
+        });
+      }
+    };
+  }
+
+  /** Force-unsubscribe every local subscriber of a room and ship a
+   *  `room-unsubscribe`. Used by the `useRoom` hook's manual `leave()`
+   *  action so a deliberate exit propagates to the server immediately. */
+  unsubscribeRoom(roomId: string): void {
+    this.rooms.unregisterRoom(roomId);
+    if (!this.isMultiTabLeader) {
+      this.broadcastToTabs({
+        type: "room-sub-unregister",
+        room: roomId,
+      });
+    }
+  }
+
+  /** Read the current cached members snapshot for `roomId`. Returns
+   *  `null` when no snapshot has landed yet (distinct from `[]` for
+   *  an empty room). */
+  getRoomMembers(roomId: string): RoomMember[] | null {
+    return this.rooms?.members(roomId) ?? null;
+  }
+
+  /** Read the latest error for `roomId` (e.g. NOT_IN_ROOM). null when
+   *  none. */
+  getRoomError(roomId: string): RoomError | null {
+    return this.rooms?.error(roomId) ?? null;
+  }
+
+  /** Active transport kind. Used by the `useRoom` hook to decide
+   *  between WS push and HTTP polling fallback — only the WS transport
+   *  supports the room-subscribe push protocol; SSE and polling fall
+   *  back to the legacy 5s GET /api/rooms/<room>. */
+  getActiveTransportType(): TransportType {
+    return this.transportKind();
+  }
+
+  /** True when the active transport is a WebSocket AND the socket is
+   *  currently open. The `useRoom` hook gates its WS-push path on this
+   *  — when false, fall back to polling. */
+  isWebSocketConnected(): boolean {
+    return this.transportKind() === "websocket" && this.connected;
+  }
+
   /** Resolved transport kind, with the websocket default applied. */
   private transportKind(): TransportKind {
     return this.config.transport ?? "websocket";
@@ -2188,6 +2446,12 @@ export class SyncEngine {
         // so without this resync the subscriber's first event would
         // never arrive.
         this.serverSubs.replay();
+        // Room subscriptions live in their own registry (not under
+        // serverSubs) because they carry per-room state (members
+        // snapshot, error). Replay them on the same beat so the
+        // server starts pushing room-snapshot/room-update again for
+        // every room the user is still subscribed to.
+        this.rooms.replay();
         // Pull-on-open catches every event broadcast in the gap
         // between the prior pull() returning and the socket actually
         // opening. Reconcile fires after the pull since pull is the
@@ -2283,6 +2547,77 @@ export class SyncEngine {
     // previous tenant disappear.
     if (msg.type === "session-changed") {
       void this.refreshResolvedSession();
+      return;
+    }
+
+    // Room push: snapshot / update / error envelopes from the WS.
+    // Leader receives them on its socket and routes through the local
+    // registry; if any follower forwarded a sub for the room, fan the
+    // envelope out cross-tab so follower-local registries pick up the
+    // same state. The followers receive `room-fanout-*` envelopes
+    // through the orchestrator and apply them to their own registries.
+    if (msg.type === "room-snapshot" && typeof msg.room === "string") {
+      const room = msg.room;
+      const members = Array.isArray(msg.members)
+        ? (msg.members as RoomMember[])
+        : [];
+      this.rooms.applySnapshot(room, members);
+      if ((this.roomForwarders.get(room)?.size ?? 0) > 0) {
+        this.broadcastToTabs({
+          type: "room-fanout-snapshot",
+          room,
+          members,
+        });
+      }
+      return;
+    }
+    if (msg.type === "room-update" && typeof msg.room === "string") {
+      const room = msg.room;
+      const action = msg.action as
+        | "join"
+        | "leave"
+        | "presence"
+        | "broadcast"
+        | undefined;
+      if (!action) return;
+      const member = (msg.member as RoomMember | undefined) ?? undefined;
+      const data = msg.data;
+      this.rooms.applyUpdate(room, action, member, data);
+      if ((this.roomForwarders.get(room)?.size ?? 0) > 0) {
+        this.broadcastToTabs({
+          type: "room-fanout-update",
+          room,
+          action,
+          member,
+          data,
+        });
+      }
+      return;
+    }
+    if (
+      msg.type === "error" &&
+      typeof msg.room === "string" &&
+      typeof msg.code === "string"
+    ) {
+      // Server-side gate failure on a room subscribe. Surface to the
+      // hook via the registry so the React side can render an error
+      // state. Server only emits this in the `room-subscribe` reject
+      // path right now, but the dispatch is keyed by `code` so future
+      // error codes (rate-limited, room-full, etc.) route here too.
+      const room = msg.room;
+      const code = msg.code === "NOT_IN_ROOM" ? "NOT_IN_ROOM" : "UNKNOWN";
+      const error: RoomError = {
+        code,
+        message: typeof msg.message === "string" ? msg.message : undefined,
+      };
+      this.rooms.applyError(room, error);
+      if ((this.roomForwarders.get(room)?.size ?? 0) > 0) {
+        this.broadcastToTabs({
+          type: "room-fanout-error",
+          room,
+          error,
+        });
+      }
       return;
     }
 

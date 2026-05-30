@@ -87,6 +87,31 @@ export interface MultiTabOrchestratorHooks {
   /** A peer tab disappeared (broker observed `bye`). Engine and
    *  SubscriptionCoordinator both clean up state for the departed tab. */
   onPeerLeft(tabId: string): void;
+
+  /** Follower → leader: a follower wants to subscribe to a room.
+   *  Leader-only. Engine increments the per-room forwarder set and
+   *  sends `room-subscribe` to the server if no one else owned it. */
+  onRoomSubRegister?(roomId: string, fromTabId: string): void;
+  /** Follower → leader: a follower's last room subscriber unmounted.
+   *  Leader-only. Engine decrements the forwarder set and sends
+   *  `room-unsubscribe` when both the local refcount and the forwarder
+   *  set are empty. */
+  onRoomSubUnregister?(roomId: string, fromTabId: string): void;
+  /** Leader → followers: a room-snapshot landed on the WS. Followers
+   *  apply it to their local room registry so their subscribers fire. */
+  onRoomFanoutSnapshot?(roomId: string, members: unknown): void;
+  /** Leader → followers: a room-update landed. */
+  onRoomFanoutUpdate?(
+    roomId: string,
+    action: "join" | "leave" | "presence" | "broadcast",
+    member: unknown,
+    data: unknown,
+  ): void;
+  /** Leader → followers: the server rejected a room-subscribe. */
+  onRoomFanoutError?(roomId: string, error: unknown): void;
+  /** New leader → followers: re-forward your locally-wanted room subs.
+   *  Triggered alongside CRDT/reactive replay after a leader change. */
+  onReplayRoomSubs?(): void;
 }
 
 export interface MultiTabOrchestratorConfig {
@@ -359,6 +384,61 @@ export class MultiTabOrchestrator {
         // already has the bundle.
         if (this._isLeader) return;
         this.subscriptions.replayForwardedSubs();
+        // Followers also re-forward their active room subscriptions
+        // so the new leader can rebuild its forwarder sets and resend
+        // `room-subscribe` on the WS.
+        this.hooks.onReplayRoomSubs?.();
+        break;
+      }
+      case "room-sub-register": {
+        // Follower → leader. Leaders only — a follower receiving this
+        // (own broadcast echo, or stale leader transition) ignores.
+        if (!this._isLeader) return;
+        const room = msg.room as string | undefined;
+        if (typeof room === "string") {
+          this.hooks.onRoomSubRegister?.(room, fromTabId);
+        }
+        break;
+      }
+      case "room-sub-unregister": {
+        if (!this._isLeader) return;
+        const room = msg.room as string | undefined;
+        if (typeof room === "string") {
+          this.hooks.onRoomSubUnregister?.(room, fromTabId);
+        }
+        break;
+      }
+      case "room-fanout-snapshot": {
+        // Leader → follower. Leader ignores its own echo.
+        if (this._isLeader) return;
+        const room = msg.room as string | undefined;
+        const members = msg.members;
+        if (typeof room === "string") {
+          this.hooks.onRoomFanoutSnapshot?.(room, members);
+        }
+        break;
+      }
+      case "room-fanout-update": {
+        if (this._isLeader) return;
+        const room = msg.room as string | undefined;
+        const action = msg.action as
+          | "join"
+          | "leave"
+          | "presence"
+          | "broadcast"
+          | undefined;
+        if (typeof room === "string" && action) {
+          this.hooks.onRoomFanoutUpdate?.(room, action, msg.member, msg.data);
+        }
+        break;
+      }
+      case "room-fanout-error": {
+        if (this._isLeader) return;
+        const room = msg.room as string | undefined;
+        const error = msg.error;
+        if (typeof room === "string") {
+          this.hooks.onRoomFanoutError?.(room, error);
+        }
         break;
       }
     }
