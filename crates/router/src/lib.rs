@@ -500,6 +500,36 @@ pub trait FnOps: Send + Sync {
         pylon_functions::runner::FnCallError,
     >;
 
+    /// Render an SSR route. Bridges an incoming HTTP GET to the Bun-
+    /// side `@pylonsync/ssr` adapter, which dynamically imports
+    /// `component`, calls `renderToReadableStream`, and streams base64-
+    /// encoded body chunks back. The host writes decoded bytes to
+    /// `on_chunk` as they arrive; `on_response_start` fires once with
+    /// the HTTP status + headers before the first chunk.
+    ///
+    /// Default impl returns NOT_IMPLEMENTED so backends that don't
+    /// expose SSR (test stubs, alternate runtimes) compile without a
+    /// no-op stub.
+    #[allow(clippy::too_many_arguments)]
+    fn render_route(
+        &self,
+        _component: &str,
+        _route_path: &str,
+        _url: &str,
+        _params: serde_json::Value,
+        _search_params: serde_json::Value,
+        _headers: std::collections::HashMap<String, String>,
+        _cookies: std::collections::HashMap<String, String>,
+        _auth: pylon_functions::protocol::AuthInfo,
+        _on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
+        _on_chunk: pylon_functions::runner::ByteStreamCallback,
+    ) -> Result<(), pylon_functions::runner::FnCallError> {
+        Err(pylon_functions::runner::FnCallError {
+            code: "SSR_NOT_IMPLEMENTED".into(),
+            message: "this FnOps backend does not implement render_route".into(),
+        })
+    }
+
     /// Recent traces for observability (newest first).
     fn recent_traces(&self, limit: usize) -> Vec<pylon_functions::trace::FnTrace>;
 

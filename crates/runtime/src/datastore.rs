@@ -4046,6 +4046,38 @@ impl pylon_router::FnOps for FnOpsImpl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_route(
+        &self,
+        component: &str,
+        route_path: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: FnAuth,
+        on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
+        on_chunk: pylon_functions::runner::ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        // Same pinning rationale as `call()` — pick one runner for the
+        // entire render so dynamic-import resolution + any future
+        // ctx.runQuery from the page's loader stay on a single Bun pipe.
+        let runner = self.pool.pick();
+        runner.render_route(
+            component,
+            route_path,
+            url,
+            params,
+            search_params,
+            headers,
+            cookies,
+            auth,
+            on_response_start,
+            on_chunk,
+        )
+    }
+
     fn recent_traces(&self, limit: usize) -> Vec<FnTrace> {
         self.pool.recent_traces(limit)
     }

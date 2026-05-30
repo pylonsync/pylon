@@ -93,7 +93,7 @@ fn read_build_state(state: &SharedBuildState) -> BuildState {
 
 /// Resolved frontend config. Built once at startup and shared (cheap to
 /// `Clone`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FrontendConfig {
     /// Absolute path to the built frontend dir. `index.html` must live
     /// directly inside.
@@ -101,6 +101,26 @@ pub struct FrontendConfig {
     /// Vite-style dev server URL. If set, takes precedence over `dir` —
     /// non-API GETs are proxied here instead of served from disk.
     pub dev_proxy: Option<String>,
+    /// SSR routes (mode == "ssr") + their components, walked at every
+    /// HTTP GET to decide whether to dispatch to the Bun-side renderer
+    /// instead of the static/proxy path. Empty when the manifest has
+    /// no SSR routes; the SSR branch becomes a no-op in that case.
+    pub ssr_routes: std::sync::Arc<Vec<pylon_kernel::ManifestRoute>>,
+    /// Function-runner handle, used to invoke `render_route` for SSR
+    /// matches. None when no functions backend is wired (test stubs,
+    /// pre-functions builds) — SSR branch falls through.
+    pub fn_ops: Option<std::sync::Arc<dyn pylon_router::FnOps>>,
+}
+
+impl std::fmt::Debug for FrontendConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrontendConfig")
+            .field("dir", &self.dir)
+            .field("dev_proxy", &self.dev_proxy)
+            .field("ssr_routes_count", &self.ssr_routes.len())
+            .field("has_fn_ops", &self.fn_ops.is_some())
+            .finish()
+    }
 }
 
 impl FrontendConfig {
@@ -145,7 +165,26 @@ impl FrontendConfig {
                 .find(|p| p.join("index.html").is_file())
         };
 
-        Self { dir, dev_proxy }
+        Self {
+            dir,
+            dev_proxy,
+            ssr_routes: std::sync::Arc::new(Vec::new()),
+            fn_ops: None,
+        }
+    }
+
+    /// Populate SSR routes + fn_ops for the SSR dispatch branch. Called
+    /// once from server bootstrap after the runtime + functions are
+    /// online. Passing an empty `routes` vec is a no-op (SSR branch
+    /// stays inactive).
+    pub fn with_ssr(
+        mut self,
+        routes: std::sync::Arc<Vec<pylon_kernel::ManifestRoute>>,
+        fn_ops: Option<std::sync::Arc<dyn pylon_router::FnOps>>,
+    ) -> Self {
+        self.ssr_routes = routes;
+        self.fn_ops = fn_ops;
+        self
     }
 
     /// Is anything wired up?
@@ -274,6 +313,16 @@ pub fn try_handle(
     let url = request.url().to_string();
     if !is_spa_eligible(&url) {
         return Err(request);
+    }
+
+    // SSR branch sits ABOVE dev_proxy so file-based pages take
+    // precedence over Vite's catch-all (Vite would serve the SPA
+    // shell, masking the SSR'd output). Falls through to proxy/disk
+    // when no SSR route matches.
+    if !cfg.ssr_routes.is_empty() && cfg.fn_ops.is_some() {
+        if let Some(matched) = match_ssr_route(&url, &cfg.ssr_routes) {
+            return serve_via_ssr_rpc(cfg, matched, request, cors_origin);
+        }
     }
 
     if let Some(proxy_base) = cfg.dev_proxy.as_deref() {
@@ -630,6 +679,302 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
 // `into_reader` returns a `Box<dyn Read>`. Bring `Read` into scope so
 // `.read_to_end` resolves without a turbofish.
 use std::io::Read as _;
+
+/// An SSR route hit by an incoming GET, with dynamic-segment
+/// parameters extracted from the URL path.
+pub struct SsrMatch {
+    /// The matched route's manifest entry (route_path, component,
+    /// layout chain, auth requirement).
+    route: pylon_kernel::ManifestRoute,
+    /// `:slug` → "hello-world" mappings extracted from the URL.
+    /// Empty when the route has no dynamic segments.
+    params: std::collections::HashMap<String, String>,
+}
+
+/// Match an incoming URL path against the SSR route table.
+///
+/// Comparison strategy: split each route_path and the URL path on
+/// `/`. Lengths must match. Each segment matches literally unless
+/// it starts with `:` (e.g. `:slug`), in which case it captures
+/// any non-empty segment value. First match wins — the discoverer
+/// orders routes deterministically (literal segments before
+/// parameterized ones at the same depth) so longest-prefix winners
+/// surface first.
+///
+/// Returns `None` for non-SSR URLs (no match in the table). The
+/// caller falls through to the dev-proxy / disk branch.
+pub fn match_ssr_route(
+    url: &str,
+    routes: &[pylon_kernel::ManifestRoute],
+) -> Option<SsrMatch> {
+    let path = url.split('?').next().unwrap_or(url);
+    let url_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for r in routes {
+        if r.mode != "ssr" {
+            continue;
+        }
+        let route_segs: Vec<&str> =
+            r.path.split('/').filter(|s| !s.is_empty()).collect();
+        if route_segs.len() != url_segs.len() {
+            continue;
+        }
+        let mut params = std::collections::HashMap::new();
+        let mut matched = true;
+        for (rs, us) in route_segs.iter().zip(url_segs.iter()) {
+            if let Some(name) = rs.strip_prefix(':') {
+                if us.is_empty() {
+                    matched = false;
+                    break;
+                }
+                params.insert(name.to_string(), (*us).to_string());
+            } else if rs != us {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return Some(SsrMatch {
+                route: r.clone(),
+                params,
+            });
+        }
+    }
+    None
+}
+
+/// Dispatch a matched SSR request to the Bun-side renderer via the
+/// `render_route` RPC and serve the response.
+///
+/// Phase 1: buffered. The full rendered body accumulates into a
+/// `Vec<u8>` before the response goes back to the client. True
+/// chunked streaming follows in Phase 1.5 — the streaming pipe is
+/// already non-buffered end-to-end (`Bun stdout → Rust mpsc →
+/// tiny_http chunked`); this just wires it to a `StreamingBody`
+/// instead of a `Vec`. Buffered now keeps the diff small enough to
+/// land safely; streaming pulls in `StreamingBody` visibility +
+/// `spawn_streaming_response` from `server.rs`.
+fn serve_via_ssr_rpc(
+    cfg: &FrontendConfig,
+    matched: SsrMatch,
+    request: Request,
+    cors_origin: &str,
+) -> Result<(), Request> {
+    let fn_ops = match cfg.fn_ops.as_ref() {
+        Some(f) => f.clone(),
+        None => return Err(request),
+    };
+    let component = match matched.route.component.as_deref() {
+        Some(c) => c.to_string(),
+        None => {
+            // Misconfiguration: an SSR-mode route without a component.
+            // Should be caught by `pylon lint` before reaching here;
+            // log + fall through so the SPA branch can take over.
+            tracing::warn!(
+                route = %matched.route.path,
+                "SSR route has no component; falling through to SPA"
+            );
+            return Err(request);
+        }
+    };
+
+    let url = request.url().to_string();
+    let (path_only, query) = match url.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (url.clone(), String::new()),
+    };
+
+    // Headers + cookies forwarded to the page so layout/auth can
+    // render. Cookies are parsed out as a separate map (Set-Cookie-
+    // style, not the raw header line) — most page components want
+    // the named map.
+    let mut headers_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut cookies_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for h in request.headers() {
+        let name = h.field.as_str().as_str().to_ascii_lowercase();
+        let value = h.value.as_str().to_string();
+        if name == "cookie" {
+            for pair in value.split(';') {
+                let p = pair.trim();
+                if let Some((k, v)) = p.split_once('=') {
+                    cookies_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        headers_map.insert(name, value);
+    }
+
+    let params_json = serde_json::to_value(&matched.params)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let search_params_json = parse_query_string(&query);
+
+    // Phase 1: no auth plumbing yet (Phase 2). Anonymous AuthInfo so
+    // the page renders public-mode HTML for the smoke test. Auth-aware
+    // rendering follows the session-cookie resolution + needs the same
+    // SessionStore wiring that /api/auth/me uses.
+    let auth = pylon_functions::protocol::AuthInfo {
+        user_id: None,
+        is_admin: false,
+        tenant_id: None,
+        roles: vec![],
+    };
+
+    // Buffer the full render. Phase 1.5 streams this through tiny_http
+    // chunked transfer.
+    let body_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let status_holder = std::sync::Arc::new(std::sync::Mutex::new(200u16));
+    let headers_holder = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::HashMap::<String, String>::new(),
+    ));
+
+    let body_clone = std::sync::Arc::clone(&body_buf);
+    let status_clone = std::sync::Arc::clone(&status_holder);
+    let headers_clone = std::sync::Arc::clone(&headers_holder);
+
+    let on_chunk: pylon_functions::runner::ByteStreamCallback =
+        Box::new(move |bytes: &[u8]| {
+            if let Ok(mut buf) = body_clone.lock() {
+                buf.extend_from_slice(bytes);
+            }
+        });
+    let on_response_start: Option<pylon_functions::runner::ResponseStartCallback> =
+        Some(Box::new(move |status, hdrs| {
+            if let Ok(mut s) = status_clone.lock() {
+                *s = status;
+            }
+            if let Ok(mut h) = headers_clone.lock() {
+                *h = hdrs;
+            }
+        }));
+
+    let render_result = fn_ops.render_route(
+        &component,
+        &matched.route.path,
+        &path_only,
+        params_json,
+        search_params_json,
+        headers_map,
+        cookies_map,
+        auth,
+        on_response_start,
+        on_chunk,
+    );
+
+    if let Err(e) = render_result {
+        // Render failed BEFORE the first chunk — return 500 with the
+        // error code embedded. Phase 1.5 will distinguish "before any
+        // bytes flushed" (recoverable to 500) vs "mid-stream" (must
+        // truncate-and-drop).
+        tracing::error!(
+            code = %e.code,
+            message = %e.message,
+            "SSR render failed"
+        );
+        let body = format!(
+            "<!DOCTYPE html><html><body><h1>SSR error</h1><pre>{}: {}</pre></body></html>",
+            html_escape(&e.code),
+            html_escape(&e.message)
+        );
+        let response = Response::from_data(body.into_bytes())
+            .with_status_code(500u16)
+            .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+            .with_header(
+                Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
+                    .unwrap(),
+            );
+        let _ = request.respond(response);
+        return Ok(());
+    }
+
+    let final_status = *status_holder.lock().unwrap();
+    let final_headers = headers_holder.lock().unwrap().clone();
+    let body_vec = body_buf.lock().unwrap().clone();
+
+    let content_type = final_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
+
+    let mut response = Response::from_data(body_vec)
+        .with_status_code(final_status)
+        .with_header(Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap())
+        .with_header(
+            Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
+                .unwrap(),
+        );
+    for (k, v) in final_headers.iter() {
+        if k.eq_ignore_ascii_case("content-type")
+            || k.eq_ignore_ascii_case("content-length")
+            || k.eq_ignore_ascii_case("access-control-allow-origin")
+        {
+            continue;
+        }
+        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes().to_vec()) {
+            response.add_header(h);
+        }
+    }
+    let _ = request.respond(response);
+    Ok(())
+}
+
+fn parse_query_string(q: &str) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (percent_decode(k), percent_decode(v)),
+            None => (percent_decode(pair), String::new()),
+        };
+        map.insert(k, serde_json::Value::String(v));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Minimal %XX + `+` decoder for query-string values. Loud-fails on
+/// malformed sequences by leaving them as-is; the Phase 1 contract
+/// is "best-effort decode, never crash" — strict validation belongs
+/// at the page-component layer.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if b == b'%' && i + 2 < bytes.len() {
+            let h = bytes[i + 1];
+            let l = bytes[i + 2];
+            let hi = hex_nibble(h);
+            let lo = hex_nibble(l);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                i += 3;
+            } else {
+                out.push(b);
+                i += 1;
+            }
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

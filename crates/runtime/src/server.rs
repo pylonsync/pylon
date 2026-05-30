@@ -1320,7 +1320,24 @@ fn start_server(
     // compatible with deployments that haven't added a frontend yet.
     let frontend_config = {
         let app_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        Arc::new(crate::frontend::FrontendConfig::from_env(&app_dir))
+        // Collect SSR routes (mode == "ssr") into a shared list so the
+        // frontend dispatcher can match them on every GET. Wire fn_ops
+        // through too — the SSR branch calls render_route on it.
+        // Empty list + None fn_ops are both no-ops in try_handle, so
+        // projects without SSR routes pay nothing.
+        let ssr_routes: Vec<pylon_kernel::ManifestRoute> = shared_manifest
+            .routes
+            .iter()
+            .filter(|r| r.mode == "ssr")
+            .cloned()
+            .collect();
+        let fn_ops_arc: Option<Arc<dyn pylon_router::FnOps>> = fn_ops_maybe
+            .as_ref()
+            .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>);
+        Arc::new(
+            crate::frontend::FrontendConfig::from_env(&app_dir)
+                .with_ssr(Arc::new(ssr_routes), fn_ops_arc),
+        )
     };
     if frontend_config.is_active() {
         if let Some(dir) = frontend_config.dir.as_deref() {
