@@ -96,6 +96,7 @@ fn run() -> ExitCode {
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("fn") => commands::cloud_fn::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
+        Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
@@ -166,7 +167,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 33] = [
+const TOP_LEVEL_COMMANDS: [&str; 34] = [
     "backup",
     "build",
     "cache",
@@ -182,6 +183,7 @@ const TOP_LEVEL_COMMANDS: [&str; 33] = [
     "explain",
     "fn",
     "init",
+    "link",
     "lint",
     "login",
     "logout",
@@ -223,6 +225,7 @@ fn print_usage() {
     println!();
     println!("  login                     Authenticate against Pylon Cloud");
     println!("  logout                    Remove stored Pylon Cloud credentials");
+    println!("  link                      Connect this project to a GitHub repo for auto-deploy");
     println!("  projects [list|use|current]   List / set / show current cloud project");
     println!("  secrets  [list|set|rm|import] Manage project secrets");
     println!("  logs tail                 Tail the project's request log");

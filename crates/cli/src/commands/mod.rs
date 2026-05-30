@@ -22,6 +22,7 @@ pub mod env;
 pub mod explain;
 pub mod init;
 pub mod lint;
+pub mod link;
 pub mod login;
 pub mod migrate;
 pub mod plugins;
