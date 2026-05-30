@@ -84,3 +84,14 @@ smoke-app/
 
 # Claude Code scheduled-task lockfile (created by ScheduleWakeup tooling)
 .claude/
+
+# Per-platform CLI binaries — the actual content (Mach-O / ELF) is
+# written by .github/workflows/release.yml at release time and then
+# published to npm. Local builds (e.g. `cargo install --path
+# crates/cli`) and `./release.sh` populate these bin/ dirs with a
+# symlink to target/release/pylon for the host platform only, which
+# we don't want to commit.
+packages/cli-darwin-arm64/bin/
+packages/cli-darwin-x64/bin/
+packages/cli-linux-arm64/bin/
+packages/cli-linux-x64/bin/

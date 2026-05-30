@@ -94,6 +94,7 @@ fn run() -> ExitCode {
         Some("doctor") => commands::doctor::run(&args, json_mode),
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
+        Some("fn") => commands::cloud_fn::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
@@ -165,7 +166,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 32] = [
+const TOP_LEVEL_COMMANDS: [&str; 33] = [
     "backup",
     "build",
     "cache",
@@ -179,6 +180,7 @@ const TOP_LEVEL_COMMANDS: [&str; 32] = [
     "domains",
     "env",
     "explain",
+    "fn",
     "init",
     "lint",
     "login",
@@ -229,6 +231,7 @@ fn print_usage() {
     println!("  data     [entities|list|get] Browse entity rows from the shell");
     println!("  deployments [list|rollback]   List + roll back deploys");
     println!("  members  [list|invite]    Org members");
+    println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
     println!("  status                    One-glance project health");
     println!();
     println!("  schema check              Validate schema");

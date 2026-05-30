@@ -6,6 +6,7 @@ pub mod cloud_data;
 pub mod cloud_db;
 pub mod cloud_deployments;
 pub mod cloud_domains;
+pub mod cloud_fn;
 pub mod cloud_logs;
 pub mod cloud_members;
 pub mod cloud_projects;
