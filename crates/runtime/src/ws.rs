@@ -958,12 +958,7 @@ impl WsHub {
     /// Push a `room-snapshot` envelope to a single client. Used at
     /// subscribe time so the new subscriber has the current member list
     /// without waiting for the next mutation.
-    pub fn push_room_snapshot(
-        &self,
-        client_id: u64,
-        room: &str,
-        members: &serde_json::Value,
-    ) {
+    pub fn push_room_snapshot(&self, client_id: u64, room: &str, members: &serde_json::Value) {
         let frame = serde_json::json!({
             "type": "room-snapshot",
             "room": room,
@@ -2942,17 +2937,13 @@ mod tests {
             "type": "room-subscribe",
             "room": "channel:foo"
         });
-        handle_room_control(
-            &hub,
-            7,
-            &auth_ctx,
-            "room-subscribe",
-            &parsed,
-            Some(&bridge),
-        );
+        handle_room_control(&hub, 7, &auth_ctx, "room-subscribe", &parsed, Some(&bridge));
         // No subscription registered — non-members can't passively
         // collect future room-updates.
-        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+        assert!(hub
+            .room_subscriptions()
+            .subscribers("channel:foo")
+            .is_empty());
     }
 
     #[test]
@@ -3011,7 +3002,10 @@ mod tests {
             &parsed,
             Some(&bridge),
         );
-        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+        assert!(hub
+            .room_subscriptions()
+            .subscribers("channel:foo")
+            .is_empty());
     }
 
     #[test]
@@ -3038,7 +3032,10 @@ mod tests {
             &parsed,
             Some(&bridge),
         );
-        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+        assert!(hub
+            .room_subscriptions()
+            .subscribers("channel:foo")
+            .is_empty());
     }
 
     #[test]

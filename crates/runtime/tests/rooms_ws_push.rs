@@ -257,7 +257,9 @@ fn subscribe_and_push_on_join() {
             && v.get("room").and_then(|r| r.as_str()) == Some(room)
     });
     let snap_b = snap_b.expect("client B must receive room-snapshot on subscribe");
-    let members = snap_b["members"].as_array().expect("snapshot members array");
+    let members = snap_b["members"]
+        .as_array()
+        .expect("snapshot members array");
     assert_eq!(members.len(), 1, "snapshot has the seed member: {snap_b}");
     assert_eq!(
         members[0]["user_id"].as_str(),
@@ -365,9 +367,7 @@ fn subscribe_rejects_non_member() {
     let (status, body) = http_request_with_auth(
         "POST",
         &format!("{base}/api/rooms/join"),
-        Some(&format!(
-            r#"{{"room":"{room}","user_id":"someone_else"}}"#
-        )),
+        Some(&format!(r#"{{"room":"{room}","user_id":"someone_else"}}"#)),
         Some(TEST_ADMIN_TOKEN),
     );
     assert_eq!(status, 200, "join: {body}");
@@ -401,14 +401,8 @@ fn disconnect_fires_room_update_leave() {
         http_request_with_auth("POST", &format!("{base}/api/auth/guest"), Some("{}"), None);
     assert_eq!(status, 201, "guest auth: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let guest_token = resp["token"]
-        .as_str()
-        .expect("guest token")
-        .to_string();
-    let guest_user_id = resp["user_id"]
-        .as_str()
-        .expect("guest user_id")
-        .to_string();
+    let guest_token = resp["token"].as_str().expect("guest token").to_string();
+    let guest_user_id = resp["user_id"].as_str().expect("guest user_id").to_string();
 
     // Have the guest join the room (via HTTP — the WS push is the
     // result, not the input).

@@ -1539,7 +1539,10 @@ pub(crate) fn translate_and_push_room_event(
     };
     let (action, member, data) = match kind {
         "join" => {
-            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            let user_id = payload
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let mut m = serde_json::json!({ "user_id": user_id });
             if let Some(d) = payload.get("data") {
                 if let Some(obj) = m.as_object_mut() {
@@ -1549,7 +1552,10 @@ pub(crate) fn translate_and_push_room_event(
             ("join", Some(m), None)
         }
         "leave" => {
-            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            let user_id = payload
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             (
                 "leave",
                 Some(serde_json::json!({ "user_id": user_id })),
@@ -1557,7 +1563,10 @@ pub(crate) fn translate_and_push_room_event(
             )
         }
         "presence" => {
-            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            let user_id = payload
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let data = payload.get("data").cloned();
             (
                 "presence",
