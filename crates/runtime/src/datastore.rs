@@ -1154,11 +1154,22 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     }
 
     fn notify_presence(&self, json: &str) {
+        // Legacy WS firehose: keep broadcasting to every connected
+        // client so SDK clients on the old wire (pre-room-subscribe)
+        // still see presence/join/leave events. New clients ignore
+        // the legacy shape and rely on the room-scoped `room-update`
+        // push below.
         self.ws.broadcast_presence(json);
         self.sse.broadcast_message(json);
-        // Presence relays are cross-machine too — a typing indicator
-        // on machine A should reach clients on machine B.
+        // New room-scoped push: parse the RoomEvent shape and push a
+        // `room-update` envelope only to clients subscribed to the
+        // affected room. O(subscribers per room), NOT O(all WS
+        // clients). Replaces the 5s polling loop the SDK ran against
+        // `/api/rooms/<room>`.
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(json) {
+            translate_and_push_room_event(&self.ws, &payload);
+            // Presence relays are cross-machine too — a typing indicator
+            // on machine A should reach clients on machine B.
             self.cluster_bus.publish(&pylon_cluster::Envelope::presence(
                 self.cluster_bus.instance_id(),
                 payload,
@@ -1402,6 +1413,11 @@ pub fn install_cluster_bus_subscriber(
                 ws_handler.broadcast_presence(&json);
                 sse_handler.broadcast_message(&json);
             }
+            // Also fan to room subscribers on this machine — without
+            // this, a room-update originating on peer A would only
+            // reach peer B's legacy WS firehose listeners, not the
+            // new room-scoped subscribers.
+            translate_and_push_room_event(&ws_handler, &envelope.payload);
             return;
         }
         // CRDT binary: re-encode the wire frame and fan to local
@@ -1497,6 +1513,82 @@ fn to_json_array<T: serde::Serialize>(val: T) -> serde_json::Value {
     serde_json::to_value(val).unwrap_or(serde_json::json!([]))
 }
 
+/// Translate a `RoomEvent` JSON payload (the wire shape RoomManager
+/// serializes — `{"type":"join","room":"...","user_id":"...","data":...}`)
+/// into a `room-update` envelope and push it to subscribers of that
+/// room only.
+///
+/// Wire mapping (Server → Client):
+///   join      → action: "join",      member: {user_id, joined_at, data}
+///   leave     → action: "leave",     member: {user_id}
+///   presence  → action: "presence",  member: {user_id}, data: {…}
+///   broadcast → action: "broadcast", member: {user_id: sender}, data: {…}
+///
+/// Used by `WsSseNotifier::notify_presence` AND the cluster-bus
+/// subscriber path so a presence event originating on machine A
+/// reaches room subscribers on machine B with identical wire shape.
+pub(crate) fn translate_and_push_room_event(
+    ws: &Arc<crate::ws::WsHub>,
+    payload: &serde_json::Value,
+) {
+    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(room) = payload.get("room").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let (action, member, data) = match kind {
+        "join" => {
+            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            let mut m = serde_json::json!({ "user_id": user_id });
+            if let Some(d) = payload.get("data") {
+                if let Some(obj) = m.as_object_mut() {
+                    obj.insert("data".into(), d.clone());
+                }
+            }
+            ("join", Some(m), None)
+        }
+        "leave" => {
+            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            (
+                "leave",
+                Some(serde_json::json!({ "user_id": user_id })),
+                None,
+            )
+        }
+        "presence" => {
+            let user_id = payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+            let data = payload.get("data").cloned();
+            (
+                "presence",
+                Some(serde_json::json!({ "user_id": user_id })),
+                data,
+            )
+        }
+        "broadcast" => {
+            let sender = payload.get("sender").and_then(|v| v.as_str()).unwrap_or("");
+            let topic = payload.get("topic").and_then(|v| v.as_str()).unwrap_or("");
+            let mut data = serde_json::json!({ "topic": topic });
+            if let Some(d) = payload.get("data") {
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("payload".into(), d.clone());
+                }
+            }
+            (
+                "broadcast",
+                Some(serde_json::json!({ "user_id": sender })),
+                Some(data),
+            )
+        }
+        // Snapshot is only generated server-side at subscribe time; if
+        // it shows up here (cluster bus relay shouldn't, defensive),
+        // skip it — the subscribing client already got their snapshot
+        // from the local hub at subscribe time.
+        _ => return,
+    };
+    ws.push_room_update(room, action, member, data);
+}
+
 // ---------------------------------------------------------------------------
 // Adapter: RoomManager → RoomOps
 // ---------------------------------------------------------------------------
@@ -1558,6 +1650,38 @@ impl pylon_router::RoomOps for RoomManager {
 
     fn is_in_room(&self, room: &str, user_id: &str) -> bool {
         RoomManager::is_in_room(self, room, user_id)
+    }
+}
+
+// Bridge from the WS reader → RoomManager. Lets `room-subscribe`
+// validate membership and snapshot peers without the WS layer
+// depending on the runtime's concrete RoomManager type. Also drives
+// the auto-leave-on-WS-close path: `disconnect(user_id)` returns the
+// rooms the user was just evicted from so the caller can push
+// `room-update` action:leave to remaining subscribers.
+impl crate::ws::RoomBridge for RoomManager {
+    fn members(&self, room: &str) -> Vec<serde_json::Value> {
+        RoomManager::members(self, room)
+            .into_iter()
+            .map(|p| to_json(p))
+            .collect()
+    }
+
+    fn is_in_room(&self, room: &str, user_id: &str) -> bool {
+        RoomManager::is_in_room(self, room, user_id)
+    }
+
+    fn disconnect(&self, user_id: &str) -> Vec<String> {
+        // RoomManager::disconnect returns the list of Leave events;
+        // we only need the room names for the WS push. Extract them
+        // and drop the event objects.
+        RoomManager::disconnect(self, user_id)
+            .into_iter()
+            .filter_map(|event| match event {
+                crate::rooms::RoomEvent::Leave { room, .. } => Some(room),
+                _ => None,
+            })
+            .collect()
     }
 }
 

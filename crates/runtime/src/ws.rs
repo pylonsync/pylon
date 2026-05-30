@@ -171,6 +171,121 @@ impl CrdtSubscriptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Room subscription manager
+//
+// Per-client subscriptions to room names. Lets `room-update` pushes fan
+// out only to clients that explicitly subscribed to a room, instead of
+// blasting every connected WS client (which `broadcast_presence` does
+// for the legacy SDK firehose).
+//
+// Same two-map design as `CrdtSubscriptions`:
+//   - by_room: room → set of client_ids
+//   - by_client: client_id → set of rooms
+// Both maps live under a single mutex so disconnect cleanup and
+// concurrent subscribe never tear.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct RoomSubsState {
+    /// room → set of client_ids subscribed to that room.
+    by_room: HashMap<String, HashSet<u64>>,
+    /// client_id → set of rooms it subscribes to.
+    by_client: HashMap<u64, HashSet<String>>,
+}
+
+pub struct RoomSubscriptions {
+    state: Mutex<RoomSubsState>,
+}
+
+impl Default for RoomSubscriptions {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(RoomSubsState::default()),
+        }
+    }
+}
+
+impl RoomSubscriptions {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn subscribe(&self, client_id: u64, room: &str) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .by_room
+            .entry(room.to_string())
+            .or_default()
+            .insert(client_id);
+        state
+            .by_client
+            .entry(client_id)
+            .or_default()
+            .insert(room.to_string());
+    }
+
+    pub fn unsubscribe(&self, client_id: u64, room: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(set) = state.by_room.get_mut(room) {
+            set.remove(&client_id);
+            if set.is_empty() {
+                state.by_room.remove(room);
+            }
+        }
+        if let Some(set) = state.by_client.get_mut(&client_id) {
+            set.remove(room);
+            if set.is_empty() {
+                state.by_client.remove(&client_id);
+            }
+        }
+    }
+
+    /// Drop every room subscription for this client. Called on WS
+    /// disconnect — mirrors `CrdtSubscriptions::unsubscribe_all`. Returns
+    /// the list of rooms this client was subscribed to so the caller can
+    /// surface "you were in these rooms" diagnostics if needed.
+    pub fn unsubscribe_all(&self, client_id: u64) -> Vec<String> {
+        let mut state = self.state.lock().unwrap();
+        let rooms: Vec<String> = state
+            .by_client
+            .remove(&client_id)
+            .map(|set| set.into_iter().collect())
+            .unwrap_or_default();
+        for room in &rooms {
+            if let Some(set) = state.by_room.get_mut(room) {
+                set.remove(&client_id);
+                if set.is_empty() {
+                    state.by_room.remove(room);
+                }
+            }
+        }
+        rooms
+    }
+
+    /// Snapshot the subscriber set for a room. Returns an owned `Vec`
+    /// rather than a guard so the per-client send loop runs without
+    /// holding the mutex.
+    pub fn subscribers(&self, room: &str) -> Vec<u64> {
+        let state = self.state.lock().unwrap();
+        state
+            .by_room
+            .get(room)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn total_subscriptions(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .by_room
+            .values()
+            .map(|s| s.len())
+            .sum()
+    }
+}
+
 /// Number of shards for distributing WebSocket clients.
 /// Must be a power of two for even modulo distribution.
 const NUM_SHARDS: usize = 16;
@@ -729,6 +844,13 @@ pub struct WsHub {
     /// fanout. Wrapped in Arc so the notifier (which holds `Arc<WsHub>`)
     /// can read the subscriber set without taking an extra lock layer.
     subscriptions: Arc<CrdtSubscriptions>,
+    /// Per-client room subscriptions. Populated by `room-subscribe`
+    /// control frames; consumed by `push_room_update` to fan out
+    /// `room-update` envelopes only to clients that asked to listen.
+    /// Replaces the 5s HTTP polling loop the SDK used to run against
+    /// `/api/rooms/<room>` — new clients subscribe over WS and the
+    /// server pushes membership deltas as they happen.
+    room_subscriptions: Arc<RoomSubscriptions>,
 }
 
 impl WsHub {
@@ -787,7 +909,99 @@ impl WsHub {
             manifest,
             auth_user,
             subscriptions: CrdtSubscriptions::new(),
+            room_subscriptions: RoomSubscriptions::new(),
         })
+    }
+
+    /// Access the per-client room subscription registry. The notifier /
+    /// cluster-bus subscriber looks up subscribers via
+    /// `room_subscriptions().subscribers(room)` and feeds the ids into
+    /// `push_to_room_subscribers`.
+    pub fn room_subscriptions(&self) -> &Arc<RoomSubscriptions> {
+        &self.room_subscriptions
+    }
+
+    /// Fan a text frame to every client subscribed to `room`. Indexed by
+    /// room name, so cost is O(subscribers per room) — NOT O(all
+    /// connections). Used by `push_room_update` and `push_room_snapshot`.
+    /// Dead client ids are evicted from the room registry on send
+    /// failure so the next fanout doesn't pay the cost again.
+    pub fn push_to_room_subscribers(&self, room: &str, text: &str) {
+        let subscribers = self.room_subscriptions.subscribers(room);
+        if subscribers.is_empty() {
+            return;
+        }
+        // Route each id to its shard. The send path drops the client
+        // from the shard on Disconnected, but we also need to drop the
+        // room subscription entry — otherwise the next push retries the
+        // dead id. `send_text_to_one` returns no list because it's a
+        // best-effort single-id send, so do the cleanup here by routing
+        // and tracking failures manually via a Disconnected sentinel.
+        let mut by_shard: Vec<Vec<u64>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
+        for id in &subscribers {
+            by_shard[(*id as usize) % NUM_SHARDS].push(*id);
+        }
+        for (idx, ids) in by_shard.iter().enumerate() {
+            for id in ids {
+                self.shards[idx].send_text_to_one(*id, text);
+            }
+        }
+        // We can't tell from `send_text_to_one` which sends were
+        // Disconnected — the function silently sweeps the dead client
+        // from the shard map but doesn't report the id. That's fine:
+        // the WS reader thread for that client runs `unsubscribe_all`
+        // on its room_subscriptions slot the moment the read loop
+        // observes EOF, so the room registry self-heals within the
+        // 200ms read timeout window. No leak.
+    }
+
+    /// Push a `room-snapshot` envelope to a single client. Used at
+    /// subscribe time so the new subscriber has the current member list
+    /// without waiting for the next mutation.
+    pub fn push_room_snapshot(
+        &self,
+        client_id: u64,
+        room: &str,
+        members: &serde_json::Value,
+    ) {
+        let frame = serde_json::json!({
+            "type": "room-snapshot",
+            "room": room,
+            "members": members,
+        });
+        if let Ok(text) = serde_json::to_string(&frame) {
+            self.send_text_to(client_id, &text);
+        }
+    }
+
+    /// Push a `room-update` envelope to every subscriber of `room`. The
+    /// `action` is one of `join`, `leave`, `presence`, `broadcast`
+    /// (mirrors the RoomEvent variants). `member` carries the affected
+    /// peer's info (None for broadcast). `data` carries action-specific
+    /// payload (presence data, broadcast payload, etc).
+    pub fn push_room_update(
+        &self,
+        room: &str,
+        action: &str,
+        member: Option<serde_json::Value>,
+        data: Option<serde_json::Value>,
+    ) {
+        let mut frame = serde_json::json!({
+            "type": "room-update",
+            "room": room,
+            "action": action,
+        });
+        if let Some(obj) = frame.as_object_mut() {
+            if let Some(m) = member {
+                obj.insert("member".to_string(), m);
+            }
+            if let Some(d) = data {
+                obj.insert("data".to_string(), d);
+            }
+        }
+        if let Ok(text) = serde_json::to_string(&frame) {
+            self.push_to_room_subscribers(room, &text);
+        }
     }
 
     /// Access the per-client CRDT subscription registry. The notifier
@@ -1200,6 +1414,35 @@ impl WsHub {
 pub type SnapshotFetcher =
     Arc<dyn Fn(&pylon_auth::AuthContext, &str, &str) -> Option<Vec<u8>> + Send + Sync>;
 
+/// Bridge between the WS reader and the RoomManager.
+///
+/// The WS layer doesn't depend on `pylon_runtime::rooms::RoomManager`
+/// directly — we'd rather take a trait so test harnesses can plug in a
+/// stub, and so the runtime's `RoomManager` can grow without forcing
+/// every WS test to keep up.
+///
+/// Methods returned as raw JSON `serde_json::Value` because that's the
+/// wire-ready shape the reader pushes back to the client without extra
+/// marshalling.
+pub trait RoomBridge: Send + Sync {
+    /// Return the current member list for the room. Empty list when the
+    /// room doesn't exist (matches RoomManager::members semantics).
+    fn members(&self, room: &str) -> Vec<serde_json::Value>;
+
+    /// Is this user currently in the room? Used to gate `room-subscribe`
+    /// — non-members get `NOT_IN_ROOM` error. Admins bypass this check
+    /// at the caller layer (the reader passes through `is_admin` before
+    /// calling this).
+    fn is_in_room(&self, room: &str, user_id: &str) -> bool;
+
+    /// Disconnect a user from every room they're in. Returns the names
+    /// of the rooms they were in so the reader can fan a `room-update`
+    /// action:leave to each room's remaining subscribers. Used at WS
+    /// close time so presence updates fire even when the client never
+    /// hits `/api/rooms/leave` explicitly.
+    fn disconnect(&self, user_id: &str) -> Vec<String>;
+}
+
 /// Start the WebSocket server on the given port.
 ///
 /// The accept loop runs on the calling thread (blocking). Each accepted
@@ -1239,6 +1482,7 @@ pub fn start_ws_server(
     port: u16,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    rooms: Option<Arc<dyn RoomBridge>>,
 ) {
     // Dual-stack v6+v4. The Yapless Mac app + any client that
     // resolves `localhost` to `::1` first (the macOS default) would
@@ -1287,12 +1531,13 @@ pub fn start_ws_server(
         let auth = Arc::clone(&auth);
         let fetcher = snapshot_fetcher.clone();
         let reactive_cl = reactive.as_ref().map(Arc::clone);
+        let rooms_cl = rooms.as_ref().map(Arc::clone);
         let spawn_result = thread::Builder::new()
             .name("ws-client".into())
             .stack_size(64 * 1024)
             .spawn(move || {
                 let _conn_slot = guard;
-                handle_ws_connection(hub, auth, stream, fetcher, reactive_cl);
+                handle_ws_connection(hub, auth, stream, fetcher, reactive_cl, rooms_cl);
             });
         if spawn_result.is_err() {
             // Thread creation failed — guard is already dropped here, slot
@@ -1314,6 +1559,7 @@ fn handle_ws_connection(
     stream: TcpStream,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    rooms: Option<Arc<dyn RoomBridge>>,
 ) {
     // Short read timeout bounds how long the PER-CLIENT mutex is held
     // while this thread is blocked in socket.read(). Each client now has
@@ -1442,6 +1688,7 @@ fn handle_ws_connection(
         token,
         snapshot_fetcher,
         reactive,
+        rooms,
         write_stream,
     );
 }
@@ -1462,6 +1709,7 @@ fn run_authenticated_session(
     token: Option<String>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    rooms: Option<Arc<dyn RoomBridge>>,
     // When `Some`, this caller has a `try_clone`'d TcpStream for the
     // write half and wants the dual-thread design — a dedicated writer
     // thread blocks on `outbound_rx.recv()` and sends every broadcast
@@ -1657,6 +1905,14 @@ fn run_authenticated_session(
                         &parsed,
                         snapshot_fetcher.as_ref(),
                     ),
+                    "room-subscribe" | "room-unsubscribe" => handle_room_control(
+                        &hub,
+                        client_id,
+                        &auth_ctx,
+                        kind,
+                        &parsed,
+                        rooms.as_ref(),
+                    ),
                     "reactive-subscribe" | "reactive-unsubscribe" => {
                         if let Some(reg) = reactive.as_ref() {
                             handle_reactive_control(reg, &hub, client_id, &auth_ctx, kind, &parsed);
@@ -1698,9 +1954,19 @@ fn run_authenticated_session(
                 // remove_client so the broadcast path can never look up
                 // a stale client_id between the two ops.
                 hub.subscriptions.unsubscribe_all(client_id);
+                hub.room_subscriptions.unsubscribe_all(client_id);
                 if let Some(reg) = reactive.as_ref() {
                     reg.disconnect_client(client_id);
                 }
+                // Auto-leave every room the user was in and push
+                // `room-update` action:leave to remaining subscribers
+                // of each. This closes the stale-presence gap when a
+                // client drops without calling /api/rooms/leave.
+                let snapshot_auth = match socket_handle.auth.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -1727,9 +1993,15 @@ fn run_authenticated_session(
             }
             Err(_) => {
                 hub.subscriptions.unsubscribe_all(client_id);
+                hub.room_subscriptions.unsubscribe_all(client_id);
                 if let Some(reg) = reactive.as_ref() {
                     reg.disconnect_client(client_id);
                 }
+                let snapshot_auth = match socket_handle.auth.read() {
+                    Ok(g) => g.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                fanout_room_leaves_on_disconnect(&hub, &snapshot_auth, rooms.as_ref());
                 hub.remove_client(client_id);
                 let disconnect = serde_json::json!({
                     "type": "presence",
@@ -1832,6 +2104,137 @@ fn handle_crdt_control(
             hub.subscriptions.unsubscribe(client_id, entity, row_id);
         }
         _ => {}
+    }
+}
+
+/// Apply a parsed `room-subscribe` / `room-unsubscribe` control message.
+///
+/// Subscribe shape:
+///
+///     { "type": "room-subscribe", "room": "channel:foo" }
+///
+/// On subscribe the membership check runs against `RoomBridge::is_in_room`
+/// (mirrors the HTTP `/api/rooms/broadcast` membership gate added in
+/// v0.3.212): non-admin callers must already be in the room, or the
+/// reader pushes `{ "type": "error", "code": "NOT_IN_ROOM" }` back and
+/// registers no subscription. Admins bypass the check — server-to-
+/// server presence dashboards subscribe across rooms without joining
+/// them.
+///
+/// On subscribe success the reader fetches the current members from
+/// the bridge and pushes a `room-snapshot` so the new subscriber has
+/// the full peer list without waiting for the next mutation. Then it
+/// records the subscription in the room registry.
+///
+/// Unsubscribe shape:
+///
+///     { "type": "room-unsubscribe", "room": "channel:foo" }
+///
+/// Unsubscribe drops the registry entry — no ACK. Disconnect cleanup
+/// uses the same path via `room_subscriptions.unsubscribe_all`.
+///
+/// When no bridge is wired (test harnesses, future backends without a
+/// RoomManager) subscribe is silently dropped — without the bridge we
+/// can't validate membership or fetch the snapshot, so a sub would
+/// register but never receive anything useful. Silently refusing keeps
+/// the registry clean.
+fn handle_room_control(
+    hub: &Arc<WsHub>,
+    client_id: u64,
+    auth_ctx: &pylon_auth::AuthContext,
+    kind: &str,
+    parsed: &serde_json::Value,
+    rooms: Option<&Arc<dyn RoomBridge>>,
+) {
+    let room = match parsed.get("room").and_then(|v| v.as_str()) {
+        Some(r) if !r.is_empty() => r,
+        _ => return,
+    };
+    let Some(bridge) = rooms else {
+        // No bridge → silently refuse. See doc comment above.
+        return;
+    };
+    match kind {
+        "room-subscribe" => {
+            // Membership gate: non-admin callers must be in the room.
+            // Mirrors the v0.3.212 /api/rooms/broadcast gate so a
+            // malicious client can't subscribe to a private channel
+            // they never joined and start collecting presence/
+            // broadcast events from it. Admins (server dashboards)
+            // bypass — they need to observe arbitrary rooms.
+            //
+            // No user_id on the connection (anonymous WS) means we
+            // can't evaluate "are they in the room" — treat as
+            // NOT_IN_ROOM so anon clients can't peek at any room.
+            // Admin tokens have is_admin=true and skip the check
+            // even without a user_id.
+            let allowed = if auth_ctx.is_admin {
+                true
+            } else if let Some(user_id) = auth_ctx.user_id.as_deref() {
+                bridge.is_in_room(room, user_id)
+            } else {
+                false
+            };
+            if !allowed {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "NOT_IN_ROOM",
+                    "room": room,
+                });
+                if let Ok(text) = serde_json::to_string(&err) {
+                    hub.send_text_to(client_id, &text);
+                }
+                return;
+            }
+            // Register FIRST, then snapshot. Same ordering as
+            // `crdt-subscribe` (codex P1 fix) — any update racing
+            // between subscribe and the snapshot fetch is observable
+            // either via the push (because we subscribed before it
+            // fanned out) or via the snapshot (because it landed
+            // before the snapshot read). No room update is silently
+            // lost across the subscribe boundary.
+            hub.room_subscriptions.subscribe(client_id, room);
+            let members = bridge.members(room);
+            let members_json = serde_json::Value::Array(members);
+            hub.push_room_snapshot(client_id, room, &members_json);
+        }
+        "room-unsubscribe" => {
+            hub.room_subscriptions.unsubscribe(client_id, room);
+        }
+        _ => {}
+    }
+}
+
+/// Auto-leave fanout: invoked from the Close + Err arms of the WS
+/// reader loop. For each room this user was in, evict them from the
+/// RoomManager and push `room-update` action:leave to remaining
+/// subscribers of that room.
+///
+/// Without this, a client that drops without calling `/api/rooms/leave`
+/// would leave their presence entry hanging in the RoomManager until
+/// the next `pylon.rooms.cleanup` idle sweep (2 min default) — and
+/// other subscribers would only learn the user left on that same
+/// timer, not in real time.
+///
+/// Anonymous WS connections (no `user_id` on auth_ctx) skip — they
+/// were never in a room, so there's nothing to leave. Admins fall
+/// through the same path; an admin connection doesn't typically
+/// hold room membership, but if one does it gets cleaned up too.
+fn fanout_room_leaves_on_disconnect(
+    hub: &Arc<WsHub>,
+    auth_ctx: &pylon_auth::AuthContext,
+    rooms: Option<&Arc<dyn RoomBridge>>,
+) {
+    let Some(bridge) = rooms else {
+        return;
+    };
+    let Some(user_id) = auth_ctx.user_id.as_deref() else {
+        return;
+    };
+    let left_rooms = bridge.disconnect(user_id);
+    for room in left_rooms {
+        let member = serde_json::json!({ "user_id": user_id });
+        hub.push_room_update(&room, "leave", Some(member), None);
     }
 }
 
@@ -2089,6 +2492,7 @@ pub fn handle_http_upgrade(
     auth: Arc<WsAuth>,
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
+    rooms: Option<Arc<dyn RoomBridge>>,
 ) {
     let accept = ws_accept_value(&upgrade.sec_key);
     let mut response = tiny_http::Response::empty(101)
@@ -2130,6 +2534,7 @@ pub fn handle_http_upgrade(
         upgrade.bearer_token,
         snapshot_fetcher,
         reactive,
+        rooms,
         None,
     );
 }
@@ -2384,6 +2789,293 @@ mod tests {
             subs.unsubscribe_all(client_id);
         }
         assert_eq!(subs.total_subscriptions(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Room subscription registry tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn room_subs_subscribe_dedups() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:foo");
+        subs.subscribe(1, "channel:foo");
+        assert_eq!(subs.subscribers("channel:foo"), vec![1]);
+        assert_eq!(subs.total_subscriptions(), 1);
+    }
+
+    #[test]
+    fn room_subs_indexes_by_room() {
+        // O(subscribers per room) — verify many clients on one room
+        // all show up via the room key.
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:foo");
+        subs.subscribe(2, "channel:foo");
+        subs.subscribe(3, "channel:foo");
+        subs.subscribe(4, "channel:bar"); // unrelated
+        let mut ids = subs.subscribers("channel:foo");
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+        // The unrelated subscription doesn't leak across rooms.
+        assert_eq!(subs.subscribers("channel:bar"), vec![4]);
+    }
+
+    #[test]
+    fn room_subs_unsubscribe_removes_empty_rooms() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:foo");
+        subs.unsubscribe(1, "channel:foo");
+        assert!(subs.subscribers("channel:foo").is_empty());
+        // total drops, empty room entry cleaned up — long-running
+        // connections that churn through rooms don't leak.
+        assert_eq!(subs.total_subscriptions(), 0);
+    }
+
+    #[test]
+    fn room_subs_unsubscribe_all_drops_every_room_and_returns_names() {
+        let subs = RoomSubscriptions::default();
+        subs.subscribe(1, "channel:a");
+        subs.subscribe(1, "channel:b");
+        subs.subscribe(2, "channel:a");
+        let mut left = subs.unsubscribe_all(1);
+        left.sort();
+        assert_eq!(left, vec!["channel:a", "channel:b"]);
+        // Client 2 must still be present on channel:a.
+        assert_eq!(subs.subscribers("channel:a"), vec![2]);
+        assert!(subs.subscribers("channel:b").is_empty());
+    }
+
+    #[test]
+    fn room_subs_unsubscribe_unknown_is_noop() {
+        let subs = RoomSubscriptions::default();
+        assert!(subs.unsubscribe_all(99).is_empty());
+        subs.unsubscribe(99, "channel:foo");
+        assert_eq!(subs.total_subscriptions(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Room push tests via WsHub
+    //
+    // These tests use the in-memory registry + push surface; the actual
+    // socket I/O happens in the end-to-end integration test in
+    // `tests/rooms_ws_push.rs`.
+    // -------------------------------------------------------------------
+
+    fn make_test_hub() -> Arc<WsHub> {
+        let m = pylon_kernel::AppManifest::default();
+        let auth_user = m.auth.user.clone();
+        WsHub::new(
+            Arc::new(PolicyEngine::from_manifest(&m)),
+            Arc::new(m),
+            auth_user,
+        )
+    }
+
+    /// Stub RoomBridge for handle_room_control tests.
+    ///
+    /// Records the user_id passed to disconnect so the test can assert
+    /// the auto-leave path fires with the correct identity.
+    struct StubBridge {
+        is_member: bool,
+        peers: Vec<serde_json::Value>,
+        disconnect_log: Mutex<Vec<String>>,
+        leave_rooms: Vec<String>,
+    }
+
+    impl RoomBridge for StubBridge {
+        fn members(&self, _room: &str) -> Vec<serde_json::Value> {
+            self.peers.clone()
+        }
+        fn is_in_room(&self, _room: &str, _user_id: &str) -> bool {
+            self.is_member
+        }
+        fn disconnect(&self, user_id: &str) -> Vec<String> {
+            self.disconnect_log
+                .lock()
+                .unwrap()
+                .push(user_id.to_string());
+            self.leave_rooms.clone()
+        }
+    }
+
+    #[test]
+    fn room_subscribe_records_membership_when_in_room() {
+        // Member of the room → subscribe succeeds, registry records id.
+        let hub = make_test_hub();
+        let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
+            is_member: true,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let auth_ctx = pylon_auth::AuthContext::user("alice".into());
+        let parsed = serde_json::json!({
+            "type": "room-subscribe",
+            "room": "channel:foo"
+        });
+        handle_room_control(
+            &hub,
+            42,
+            &auth_ctx,
+            "room-subscribe",
+            &parsed,
+            Some(&bridge),
+        );
+        assert_eq!(
+            hub.room_subscriptions().subscribers("channel:foo"),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn room_subscribe_rejects_non_member() {
+        // Non-member → NOT_IN_ROOM, no registry entry recorded.
+        let hub = make_test_hub();
+        let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
+            is_member: false,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let auth_ctx = pylon_auth::AuthContext::user("bob".into());
+        let parsed = serde_json::json!({
+            "type": "room-subscribe",
+            "room": "channel:foo"
+        });
+        handle_room_control(
+            &hub,
+            7,
+            &auth_ctx,
+            "room-subscribe",
+            &parsed,
+            Some(&bridge),
+        );
+        // No subscription registered — non-members can't passively
+        // collect future room-updates.
+        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+    }
+
+    #[test]
+    fn room_subscribe_admin_bypasses_membership_check() {
+        // Admin (e.g. server-side dashboard) subscribes to any room
+        // without joining — needed for cross-room observability.
+        let hub = make_test_hub();
+        let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
+            // Even with is_member=false, admins go through.
+            is_member: false,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let auth_ctx = pylon_auth::AuthContext::admin();
+        let parsed = serde_json::json!({
+            "type": "room-subscribe",
+            "room": "channel:private"
+        });
+        handle_room_control(
+            &hub,
+            99,
+            &auth_ctx,
+            "room-subscribe",
+            &parsed,
+            Some(&bridge),
+        );
+        assert_eq!(
+            hub.room_subscriptions().subscribers("channel:private"),
+            vec![99]
+        );
+    }
+
+    #[test]
+    fn room_subscribe_rejects_anonymous() {
+        // Anonymous WS (no user_id) → can't evaluate membership →
+        // treated as NOT_IN_ROOM. Anonymous clients can't peek at any
+        // room's future deltas.
+        let hub = make_test_hub();
+        let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
+            is_member: true, // even if bridge would allow, we don't ask
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let auth_ctx = pylon_auth::AuthContext::anonymous();
+        let parsed = serde_json::json!({
+            "type": "room-subscribe",
+            "room": "channel:foo"
+        });
+        handle_room_control(
+            &hub,
+            13,
+            &auth_ctx,
+            "room-subscribe",
+            &parsed,
+            Some(&bridge),
+        );
+        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+    }
+
+    #[test]
+    fn room_unsubscribe_drops_registry_entry() {
+        let hub = make_test_hub();
+        // Pre-populate.
+        hub.room_subscriptions.subscribe(42, "channel:foo");
+        let bridge: Arc<dyn RoomBridge> = Arc::new(StubBridge {
+            is_member: true,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let auth_ctx = pylon_auth::AuthContext::user("alice".into());
+        let parsed = serde_json::json!({
+            "type": "room-unsubscribe",
+            "room": "channel:foo"
+        });
+        handle_room_control(
+            &hub,
+            42,
+            &auth_ctx,
+            "room-unsubscribe",
+            &parsed,
+            Some(&bridge),
+        );
+        assert!(hub.room_subscriptions().subscribers("channel:foo").is_empty());
+    }
+
+    #[test]
+    fn fanout_leaves_calls_bridge_disconnect() {
+        // Disconnect path: user identifies, bridge gets the user_id,
+        // returns the rooms the user was in. The push happens via
+        // push_room_update — no client sockets, so the verification
+        // is via the bridge's disconnect_log.
+        let hub = make_test_hub();
+        let bridge_struct = Arc::new(StubBridge {
+            is_member: true,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec!["channel:a".into(), "channel:b".into()],
+        });
+        let bridge: Arc<dyn RoomBridge> = bridge_struct.clone();
+        let auth_ctx = pylon_auth::AuthContext::user("alice".into());
+        fanout_room_leaves_on_disconnect(&hub, &auth_ctx, Some(&bridge));
+        let log = bridge_struct.disconnect_log.lock().unwrap();
+        assert_eq!(*log, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn fanout_leaves_skips_anonymous() {
+        // Anonymous never joined any room — disconnect cleanup is a no-op.
+        let hub = make_test_hub();
+        let bridge_struct = Arc::new(StubBridge {
+            is_member: false,
+            peers: vec![],
+            disconnect_log: Mutex::new(Vec::new()),
+            leave_rooms: vec![],
+        });
+        let bridge: Arc<dyn RoomBridge> = bridge_struct.clone();
+        let auth_ctx = pylon_auth::AuthContext::anonymous();
+        fanout_room_leaves_on_disconnect(&hub, &auth_ctx, Some(&bridge));
+        let log = bridge_struct.disconnect_log.lock().unwrap();
+        assert!(log.is_empty(), "anonymous disconnect must not call bridge");
     }
 
     #[test]

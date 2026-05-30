@@ -1186,8 +1186,16 @@ fn start_server(
         let auth = Arc::clone(&ws_auth);
         let fetcher = snapshot_fetcher.clone();
         let reactive = Arc::clone(&reactive_registry);
+        let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::clone(&room_mgr) as _;
         std::thread::spawn(move || {
-            crate::ws::start_ws_server(hub, auth, ws_port, Some(fetcher), Some(reactive));
+            crate::ws::start_ws_server(
+                hub,
+                auth,
+                ws_port,
+                Some(fetcher),
+                Some(reactive),
+                Some(rooms_bridge),
+            );
         });
     }
 
@@ -1559,6 +1567,7 @@ fn start_server(
                 let auth = Arc::clone(&ws_auth);
                 let fetcher = snapshot_fetcher.clone();
                 let reactive = Arc::clone(&reactive_registry);
+                let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::clone(&rm) as _;
                 std::thread::Builder::new()
                     .name("ws-upgrade".into())
                     .stack_size(64 * 1024)
@@ -1570,6 +1579,7 @@ fn start_server(
                             auth,
                             Some(fetcher),
                             Some(reactive),
+                            Some(rooms_bridge),
                         );
                     })
                     .ok();
