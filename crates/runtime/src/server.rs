@@ -619,9 +619,7 @@ fn start_server(
             change_log_builder = change_log_builder
                 .with_seq(provider)
                 .with_initial_seq(initial);
-            tracing::info!(
-                "[change_log] using SQLite _pylon_change_seq (initial seq = {initial})"
-            );
+            tracing::info!("[change_log] using SQLite _pylon_change_seq (initial seq = {initial})");
         }
     }
     let change_log = Arc::new(change_log_builder);

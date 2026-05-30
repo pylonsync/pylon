@@ -44,9 +44,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         Some(idx) => match positional.get(idx + 1) {
             Some(name) => *name,
             None => {
-                output::print_error(
-                    "Usage: pylon fn <function-name> [key=value ...]",
-                );
+                output::print_error("Usage: pylon fn <function-name> [key=value ...]");
                 return ExitCode::Usage;
             }
         },
@@ -76,10 +74,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             if json_mode {
                 println!("{}", serde_json::to_string(&v).unwrap_or_default());
             } else {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&v).unwrap_or_default()
-                );
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             }
             ExitCode::Ok
         }
@@ -98,9 +93,7 @@ fn build_args_json(kv_args: &[&str]) -> Result<Value, String> {
         let (key, raw) = match arg.split_once('=') {
             Some(parts) => parts,
             None => {
-                return Err(format!(
-                    "argument `{arg}` is not in key=value form"
-                ));
+                return Err(format!("argument `{arg}` is not in key=value form"));
             }
         };
         if key.is_empty() {
@@ -115,8 +108,7 @@ fn build_args_json(kv_args: &[&str]) -> Result<Value, String> {
 fn coerce_value(raw: &str) -> Result<Value, String> {
     // @path → load file as JSON.
     if let Some(path) = raw.strip_prefix('@') {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("failed to read {path}: {e}"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("failed to read {path}: {e}"))?;
         return serde_json::from_slice::<Value>(&bytes)
             .map_err(|e| format!("`{path}` is not valid JSON: {e}"));
     }
