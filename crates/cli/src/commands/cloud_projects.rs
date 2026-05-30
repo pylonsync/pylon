@@ -39,6 +39,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         Some("list") | None => run_list(json_mode),
         Some("use") => run_use(positional.get(1).copied(), json_mode),
         Some("current") => run_current(json_mode),
+        // Hidden alias so the projects subcommand tree still has a
+        // link verb for users who muscle-memory it there. Delegates
+        // to the top-level `pylon link` orchestrator (not advertised
+        // in `pylon projects` help — the canonical surface is `pylon
+        // link` and the docs point there).
+        Some("link") => crate::commands::link::run(args, json_mode),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
             eprintln!("Usage: pylon projects [list|use <slug>|current]");
