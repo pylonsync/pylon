@@ -202,6 +202,24 @@ export class SyncEngine {
     return this._hydrated;
   }
 
+  /**
+   * True when the engine drained at least one row OR a saved cursor
+   * out of IndexedDB during `start()`. Distinguishes a returning user
+   * (cached replica may contain rows the server has since deleted) from
+   * a true first-time user (cache empty, pull-from-0 IS canonical
+   * truth).
+   *
+   * Used by the WS `onConnected` fast-path: `lastPullStartedFromZero`
+   * only fires the reconcile-skip when this flag is ALSO false. A
+   * returning user whose IDB cursor somehow rolled back to 0 (rare:
+   * partial wipe, corrupt write) must still get the reconcile pass —
+   * otherwise rows deleted on the server while the tab was closed
+   * survive forever.
+   *
+   * Read-only after start() observes the IDB load.
+   */
+  private _hadCachedReplica = false;
+
   readonly store: LocalStore;
   readonly mutations: MutationQueue;
 
@@ -433,12 +451,38 @@ export class SyncEngine {
     const shouldPersist = this.config.persist !== false && typeof indexedDB !== "undefined";
     if (shouldPersist) {
       try {
-        const { IndexedDBPersistence, persistChange } = await import("./persistence");
+        const { IndexedDBPersistence } = await import("./persistence");
         this.persistence = new IndexedDBPersistence(this.config.appName);
         await this.persistence.open();
 
-        // Load cached data into the store.
-        const cached = await this.persistence.loadAllEntities();
+        // Warm-load entities + cursor in ONE readonly transaction so
+        // the hydrated rows and the cursor we'll advance from are a
+        // consistent snapshot. Separate reads could (in a multi-tab
+        // race) interleave a mid-load save and read (rows@C, cursor@C+1)
+        // — the pull would then skip seqs we never applied. The
+        // post-load timing log surfaces cold-IDB pages so a regression
+        // (50MB cache, slow disk) is observable.
+        const idbLoadStart =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        const { entities: cached, cursor: cachedCursor, hadCache } =
+          await this.persistence.loadSnapshot();
+        const idbLoadMs =
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) -
+          idbLoadStart;
+        if (idbLoadMs > 100) {
+          console.warn(
+            `[persistence] cold IDB load took ${idbLoadMs.toFixed(0)}ms (${
+              Object.keys(cached).length
+            } entities)`,
+          );
+        }
+        // Record whether IDB had a prior session's state. The cold-load
+        // fast-path in onConnected (skip post-pull reconcile when the
+        // pull was a full snapshot from cursor=0) is only safe when
+        // there was no cached replica to begin with — a returning user
+        // whose pull-from-cursor misses an offline server-side delete
+        // depends on that reconcile pass to catch the ghost row.
+        this._hadCachedReplica = hadCache;
         let hydrated = false;
         for (const [entity, rows] of Object.entries(cached)) {
           for (const row of rows) {
@@ -459,10 +503,13 @@ export class SyncEngine {
         else this.store.notify(); // notify even on empty cache so useQuery
         // sees `isHydrated()` flip and can drop its initial loading state.
 
-        // Load cursor.
-        const savedCursor = await this.persistence.loadCursor();
-        if (savedCursor) {
-          this.cursor = savedCursor;
+        // Apply the cached cursor BEFORE pull so the first pull is a
+        // delta against where we left off, not a full re-snapshot.
+        // Already part of the single loadAll() tx above — assigning
+        // here can't race a concurrent save because pull/push haven't
+        // started yet (initMultiTab is still ahead).
+        if (cachedCursor) {
+          this.cursor = cachedCursor;
         }
 
         // Auto-save changes to IndexedDB. Returns a Promise so the async
@@ -951,6 +998,14 @@ export class SyncEngine {
   private async resetReplicaInner(): Promise<void> {
     this.cursor = { last_seq: 0 };
     this.store.clearAll();
+    // The cache is now empty. The next pull will start from 0 and
+    // return a full snapshot — that's a true cold start, so the
+    // onConnected fast-path may skip the post-pull reconcile. Without
+    // this flip, a sign-out → sign-in inside the same tab would
+    // forever re-run reconcile after every pull because
+    // `_hadCachedReplica` was set to true at start() time and never
+    // cleared.
+    this._hadCachedReplica = false;
     if (this.persistence) {
       try {
         await this.persistence.clear();
@@ -2147,10 +2202,20 @@ export class SyncEngine {
         // reconnect-after-disconnect paths invoke reconcile() directly
         // (not gated by this flag) so the safety net still triggers.
         void this.pull().then(() => {
-          if (this.lastPullStartedFromZero) {
+          // Cold-load fast-path: skip reconcile only when this WAS a
+          // true cold start (no IDB cache → the pull-from-0 returned
+          // every visible row, reconcile would refetch the same set).
+          // A returning user whose pull happened to start from 0
+          // (cursor rolled back, partial cache wipe) MUST still run
+          // reconcile to catch rows deleted on the server while the
+          // tab was closed — the snapshot path only returns currently-
+          // visible rows, never tombstones, so ghost rows on the
+          // cached side persist without the reconcile pass.
+          if (this.lastPullStartedFromZero && !this._hadCachedReplica) {
             this.lastPullStartedFromZero = false;
             return;
           }
+          this.lastPullStartedFromZero = false;
           return this.reconcile();
         });
       },

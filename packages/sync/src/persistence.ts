@@ -162,6 +162,61 @@ export class IndexedDBPersistence {
     });
   }
 
+  /**
+   * Atomic warm-load: returns entities + cursor in a single IDB
+   * read transaction. Used by `SyncEngine.start()` to hydrate the
+   * in-memory replica BEFORE the network pull resolves so React
+   * hooks see real data on first render (no empty-then-populated
+   * flash on returning visits).
+   *
+   * `hadCache` is true when at least one row OR a saved cursor
+   * was found. The engine uses it to distinguish "true cold start
+   * — pull-from-0 IS a full snapshot, skip the post-snapshot
+   * reconcile" from "returning user with cached state — pull-from-
+   * cursor may miss server-side deletes that happened offline, the
+   * onConnected reconcile MUST run". Without that distinction, a
+   * returning user whose cursor somehow rolled back to 0 (rare:
+   * IDB partial corruption, cleared-by-mistake) would end up with
+   * ghost rows that survive forever.
+   *
+   * Single readonly tx is intentional — two separate reads could
+   * race a mid-load saveCursor/saveRow from another tab's apply
+   * pipeline and read an inconsistent (cursor C', rows for cursor C)
+   * pair. One tx guarantees a consistent snapshot.
+   */
+  async loadSnapshot(): Promise<{
+    entities: Record<string, Row[]>;
+    cursor: SyncCursor | null;
+    hadCache: boolean;
+  }> {
+    if (!this.db) return { entities: {}, cursor: null, hadCache: false };
+    const tx = this.db.transaction([STORE_NAME, CURSOR_STORE], "readonly");
+    const entitiesReq = tx.objectStore(STORE_NAME).getAll();
+    const cursorReq = tx.objectStore(CURSOR_STORE).get("cursor");
+    return new Promise((resolve) => {
+      tx.oncomplete = () => {
+        const entities: Record<string, Row[]> = {};
+        for (const item of (entitiesReq.result ?? []) as {
+          entity: string;
+          id: string;
+          data: Row;
+        }[]) {
+          if (!entities[item.entity]) entities[item.entity] = [];
+          entities[item.entity].push({ id: item.id, ...item.data });
+        }
+        const cursorRec = cursorReq.result as { last_seq?: number } | undefined;
+        const cursor: SyncCursor | null = cursorRec
+          ? { last_seq: cursorRec.last_seq ?? 0 }
+          : null;
+        const hadCache =
+          Object.keys(entities).length > 0 || cursor !== null;
+        resolve({ entities, cursor, hadCache });
+      };
+      tx.onerror = () => resolve({ entities: {}, cursor: null, hadCache: false });
+      tx.onabort = () => resolve({ entities: {}, cursor: null, hadCache: false });
+    });
+  }
+
   /** Save the sync cursor. */
   async saveCursor(cursor: SyncCursor): Promise<void> {
     if (!this.db) return;

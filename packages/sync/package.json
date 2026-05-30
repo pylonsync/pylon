@@ -9,5 +9,8 @@
   "types": "src/index.ts",
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }
