@@ -1,4 +1,4 @@
-import OpengraphImage from "./opengraph-image";
+import OpengraphImage from "./_opengraph-image";
 
 export const runtime = "edge";
 export const alt = "Pylon — The modern Rails for realtime apps";
