@@ -1,0 +1,14 @@
+{
+  "name": "ssr-hello",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@pylonsync/sdk": "workspace:*"
+  }
+}

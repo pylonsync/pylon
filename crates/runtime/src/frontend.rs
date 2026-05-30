@@ -321,6 +321,11 @@ pub fn try_handle(
     // when no SSR route matches.
     if !cfg.ssr_routes.is_empty() && cfg.fn_ops.is_some() {
         if let Some(matched) = match_ssr_route(&url, &cfg.ssr_routes) {
+            tracing::debug!(
+                url = %url,
+                route = %matched.route.path,
+                "SSR match"
+            );
             return serve_via_ssr_rpc(cfg, matched, request, cors_origin);
         }
     }

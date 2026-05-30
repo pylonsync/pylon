@@ -57,29 +57,52 @@ export async function handleRenderRoute(
   send: Send,
 ): Promise<void> {
   try {
-    // react + react-dom are USER deps (resolved against the user's
-    // node_modules/), not Pylon's. `@ts-ignore` on the imports so
-    // this file typechecks without bundling react into our own
-    // package.json. The imports fire lazily inside the handler so
-    // projects without SSR routes don't even attempt resolution.
+    // react + react-dom are USER deps. ssr-runtime.ts lives in
+    // packages/functions/src/, but the user's react install is under
+    // their project cwd. `import("react-dom/server")` in this file
+    // would resolve against pylon's own node_modules (which doesn't
+    // declare react), so we route through a Bun-resolveSync against
+    // the user's cwd.
+    const cwd = process.cwd();
+    const resolveFromUser = (spec: string): string =>
+      (Bun as any).resolveSync
+        ? (Bun as any).resolveSync(spec, cwd)
+        : spec;
+    // `renderToReadableStream` is only exported from
+    // `react-dom/server.browser` (WHATWG streams), not the plain
+    // `react-dom/server` (which is Node-stream-style). Try browser
+    // first, fall back to the default entry for environments that
+    // re-route it (Next runs a custom dist).
+    let reactDomServerImport: any;
+    try {
+      // @ts-ignore — user-dep, resolved at runtime
+      reactDomServerImport = await import(
+        /* @vite-ignore */ resolveFromUser("react-dom/server.browser")
+      );
+    } catch {
+      // @ts-ignore — user-dep, resolved at runtime
+      reactDomServerImport = await import(
+        /* @vite-ignore */ resolveFromUser("react-dom/server")
+      );
+    }
     // @ts-ignore — user-dep, resolved at runtime
-    const reactDomServerImport = await import("react-dom/server");
-    // @ts-ignore — user-dep, resolved at runtime
-    const reactImport = await import("react");
+    const reactImport = await import(
+      /* @vite-ignore */ resolveFromUser("react")
+    );
     const React = reactImport.default ?? reactImport;
     const renderToReadableStream =
-      (reactDomServerImport as any).renderToReadableStream ??
-      (reactDomServerImport.default as any)?.renderToReadableStream;
+      reactDomServerImport.renderToReadableStream ??
+      reactDomServerImport.default?.renderToReadableStream;
     if (typeof renderToReadableStream !== "function") {
       throw new Error(
-        "react-dom/server does not export renderToReadableStream — install react@>=18 + react-dom@>=18",
+        "react-dom/server.browser does not export renderToReadableStream — install react@>=18 + react-dom@>=18",
       );
     }
 
     // Resolve the page module. The component string is project-
     // relative without extension; try .tsx → .ts → .jsx → .js so
-    // any of the common page-file shapes work.
-    const cwd = process.cwd();
+    // any of the common page-file shapes work. cwd was captured
+    // above for the react resolver.
     const baseName = `${cwd}/${msg.component}`;
     let mod: any = null;
     let lastErr: unknown = null;

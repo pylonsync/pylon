@@ -1,0 +1,59 @@
+{
+  "manifest_version": 1,
+  "name": "ssr-hello",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Marker",
+      "fields": [
+        {
+          "name": "note",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    }
+  ],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page"
+    },
+    {
+      "path": "/hello",
+      "mode": "ssr",
+      "component": "app/hello/page"
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
+}
