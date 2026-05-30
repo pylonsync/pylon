@@ -18,7 +18,7 @@ msgpack = ["dep:rmp-serde"]
 bincode = ["dep:bincode"]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.217" }
+pylon-kernel = { path = "../core", version = "0.3.218" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
