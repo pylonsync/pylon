@@ -708,18 +708,14 @@ pub struct SsrMatch {
 ///
 /// Returns `None` for non-SSR URLs (no match in the table). The
 /// caller falls through to the dev-proxy / disk branch.
-pub fn match_ssr_route(
-    url: &str,
-    routes: &[pylon_kernel::ManifestRoute],
-) -> Option<SsrMatch> {
+pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Option<SsrMatch> {
     let path = url.split('?').next().unwrap_or(url);
     let url_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     for r in routes {
         if r.mode != "ssr" {
             continue;
         }
-        let route_segs: Vec<&str> =
-            r.path.split('/').filter(|s| !s.is_empty()).collect();
+        let route_segs: Vec<&str> = r.path.split('/').filter(|s| !s.is_empty()).collect();
         if route_segs.len() != url_segs.len() {
             continue;
         }
@@ -810,8 +806,8 @@ fn serve_via_ssr_rpc(
         headers_map.insert(name, value);
     }
 
-    let params_json = serde_json::to_value(&matched.params)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let params_json =
+        serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
     let search_params_json = parse_query_string(&query);
 
     // Phase 1: no auth plumbing yet (Phase 2). Anonymous AuthInfo so
@@ -829,20 +825,20 @@ fn serve_via_ssr_rpc(
     // chunked transfer.
     let body_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let status_holder = std::sync::Arc::new(std::sync::Mutex::new(200u16));
-    let headers_holder = std::sync::Arc::new(std::sync::Mutex::new(
-        std::collections::HashMap::<String, String>::new(),
-    ));
+    let headers_holder = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        String,
+    >::new()));
 
     let body_clone = std::sync::Arc::clone(&body_buf);
     let status_clone = std::sync::Arc::clone(&status_holder);
     let headers_clone = std::sync::Arc::clone(&headers_holder);
 
-    let on_chunk: pylon_functions::runner::ByteStreamCallback =
-        Box::new(move |bytes: &[u8]| {
-            if let Ok(mut buf) = body_clone.lock() {
-                buf.extend_from_slice(bytes);
-            }
-        });
+    let on_chunk: pylon_functions::runner::ByteStreamCallback = Box::new(move |bytes: &[u8]| {
+        if let Ok(mut buf) = body_clone.lock() {
+            buf.extend_from_slice(bytes);
+        }
+    });
     let on_response_start: Option<pylon_functions::runner::ResponseStartCallback> =
         Some(Box::new(move |status, hdrs| {
             if let Ok(mut s) = status_clone.lock() {
@@ -885,8 +881,11 @@ fn serve_via_ssr_rpc(
             .with_status_code(500u16)
             .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
             .with_header(
-                Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
-                    .unwrap(),
+                Header::from_bytes(
+                    "Access-Control-Allow-Origin",
+                    cors_origin.as_bytes().to_vec(),
+                )
+                .unwrap(),
             );
         let _ = request.respond(response);
         return Ok(());
@@ -906,8 +905,11 @@ fn serve_via_ssr_rpc(
         .with_status_code(final_status)
         .with_header(Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap())
         .with_header(
-            Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec())
-                .unwrap(),
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
         );
     for (k, v) in final_headers.iter() {
         if k.eq_ignore_ascii_case("content-type")
