@@ -118,14 +118,17 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             }
         },
     };
-    let project: ProjectForCli =
-        match post_json(&creds, "/api/fn/getProjectForCli", &SlugArgs { slug: &slug }) {
-            Ok(p) => p,
-            Err(e) => {
-                output::print_error(&format!("Could not resolve project \"{slug}\": {e}"));
-                return ExitCode::Error;
-            }
-        };
+    let project: ProjectForCli = match post_json(
+        &creds,
+        "/api/fn/getProjectForCli",
+        &SlugArgs { slug: &slug },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            output::print_error(&format!("Could not resolve project \"{slug}\": {e}"));
+            return ExitCode::Error;
+        }
+    };
 
     // Step 2: local git detection. None on each is fine — used only as
     // prompt defaults; the explicit flags + interactive picker fill the gap.
@@ -281,35 +284,21 @@ impl LinkOpts {
                 "--yes" | "-y" => opts.yes = true,
                 "--no-browser" => opts.no_browser = true,
                 "--project" | "-p" => {
-                    opts.project_slug = Some(
-                        args.get(i + 1)
-                            .cloned()
-                            .ok_or("--project needs a value")?,
-                    );
+                    opts.project_slug =
+                        Some(args.get(i + 1).cloned().ok_or("--project needs a value")?);
                     i += 1;
                 }
                 "--repo" => {
-                    opts.repo = Some(
-                        args.get(i + 1)
-                            .cloned()
-                            .ok_or("--repo needs a value")?,
-                    );
+                    opts.repo = Some(args.get(i + 1).cloned().ok_or("--repo needs a value")?);
                     i += 1;
                 }
                 "--branch" => {
-                    opts.branch = Some(
-                        args.get(i + 1)
-                            .cloned()
-                            .ok_or("--branch needs a value")?,
-                    );
+                    opts.branch = Some(args.get(i + 1).cloned().ok_or("--branch needs a value")?);
                     i += 1;
                 }
                 "--root-dir" => {
-                    opts.root_dir = Some(
-                        args.get(i + 1)
-                            .cloned()
-                            .ok_or("--root-dir needs a value")?,
-                    );
+                    opts.root_dir =
+                        Some(args.get(i + 1).cloned().ok_or("--root-dir needs a value")?);
                     i += 1;
                 }
                 s if s.starts_with("--project=") => {
@@ -459,8 +448,8 @@ fn install_github_app(
 
     // Loopback: 127.0.0.1:0 → kernel picks a free ephemeral port.
     // 127.0.0.1 (not 0.0.0.0) — never expose to LAN.
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("loopback bind failed: {e}"))?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("loopback bind failed: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("loopback addr: {e}"))?
@@ -600,7 +589,9 @@ fn resolve_repo(
         let canonical = canonical_owner_repo(want)
             .or_else(|| canonicalize_repo_url(want))
             .ok_or_else(|| format!("--repo \"{want}\" must be owner/repo or a github.com URL"))?;
-        let match_ = repos.iter().find(|r| r.full_name.eq_ignore_ascii_case(&canonical));
+        let match_ = repos
+            .iter()
+            .find(|r| r.full_name.eq_ignore_ascii_case(&canonical));
         let default = match_.map(|r| r.default_branch.clone());
         if match_.is_none() && !repos.is_empty() {
             eprintln!(
@@ -638,10 +629,11 @@ fn resolve_repo(
 
     // Interactive picker. Pre-highlight the auto-detected origin if
     // it's in the list.
-    let preselect_idx = git
-        .origin_full_name
-        .as_deref()
-        .and_then(|n| repos.iter().position(|r| r.full_name.eq_ignore_ascii_case(n)));
+    let preselect_idx = git.origin_full_name.as_deref().and_then(|n| {
+        repos
+            .iter()
+            .position(|r| r.full_name.eq_ignore_ascii_case(n))
+    });
 
     println!();
     println!("Pick a repo to deploy from:");
