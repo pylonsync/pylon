@@ -183,20 +183,17 @@ mod tests {
                 ManifestRoute {
                     path: "/".into(),
                     mode: "static".into(),
-                    query: None,
-                    auth: None,
+                    ..Default::default()
                 },
                 ManifestRoute {
                     path: "/about".into(),
                     mode: "static".into(),
-                    query: None,
-                    auth: None,
+                    ..Default::default()
                 },
                 ManifestRoute {
                     path: "/live".into(),
                     mode: "live".into(),
-                    query: None,
-                    auth: None,
+                    ..Default::default()
                 },
             ],
             queries: vec![],
@@ -225,8 +222,7 @@ mod tests {
             routes: vec![ManifestRoute {
                 path: "/posts/:slug".into(),
                 mode: "static".into(),
-                query: None,
-                auth: None,
+                ..Default::default()
             }],
             queries: vec![],
             actions: vec![],
@@ -258,7 +254,7 @@ mod tests {
                 path: "/".into(),
                 mode: "static".into(),
                 query: Some("allPosts".into()),
-                auth: None,
+                ..Default::default()
             }],
             queries: vec![],
             actions: vec![],
@@ -314,8 +310,7 @@ mod tests {
             routes: vec![ManifestRoute {
                 path: "/".into(),
                 mode: "static".into(),
-                query: None,
-                auth: None,
+                ..Default::default()
             }],
             queries: vec![],
             actions: vec![],

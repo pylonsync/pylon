@@ -648,7 +648,7 @@ pub struct ManifestIndex {
     pub where_clause: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestRoute {
     pub path: String,
     pub mode: String,
@@ -656,6 +656,21 @@ pub struct ManifestRoute {
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// Project-relative module path for SSR-rendered routes (e.g.
+    /// `app/hello/page`). Populated by the file-system discoverer
+    /// when scanning `app/**/page.tsx`. The Bun-side `@pylonsync/ssr`
+    /// adapter dynamically imports this module and renders its
+    /// default export via `renderToReadableStream`. Skipped on
+    /// serialize for non-SSR routes so older manifests stay
+    /// byte-for-byte identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// Layout chain: project-relative module paths walked from root
+    /// down to leaf, each wrapping the next as children. Discovered
+    /// from `app/.../layout.tsx` files on the route's path. Empty
+    /// when no layouts apply. Skipped on serialize when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -74,6 +74,60 @@ impl CallMessage {
     }
 }
 
+/// Render an SSR route on the TypeScript side. Sent from Rust to Bun
+/// when an incoming HTTP GET matches a file-based SSR route in the
+/// manifest. The Bun-side `@pylonsync/ssr` adapter resolves the
+/// component from the `component` path, calls
+/// `renderToReadableStream(<App />)`, and streams chunks back via
+/// `RenderChunk` messages, terminating with `RenderDone` (or
+/// `RenderError` on failure).
+///
+/// `route_path` is the canonical pattern (e.g. `/blog/:slug`),
+/// `url` is the incoming concrete path (`/blog/hello-world`).
+/// `params` is the pre-extracted dynamic-segment map. `auth` mirrors
+/// the standard call envelope so `<Page>` can render auth-aware UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderRouteMessage {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str, // always "render_route"
+    pub call_id: String,
+    pub component: String,
+    pub route_path: String,
+    pub url: String,
+    pub params: serde_json::Value,
+    pub search_params: serde_json::Value,
+    pub headers: std::collections::HashMap<String, String>,
+    pub cookies: std::collections::HashMap<String, String>,
+    pub auth: AuthInfo,
+}
+
+impl RenderRouteMessage {
+    pub fn new(
+        call_id: String,
+        component: String,
+        route_path: String,
+        url: String,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: AuthInfo,
+    ) -> Self {
+        Self {
+            msg_type: "render_route",
+            call_id,
+            component,
+            route_path,
+            url,
+            params,
+            search_params,
+            headers,
+            cookies,
+            auth,
+        }
+    }
+}
+
 /// Result of a DB operation, sent back to TypeScript.
 ///
 /// `op_id` is echoed from the incoming `DbOpMessage.op_id` when present.
@@ -212,6 +266,29 @@ pub enum TsMessage {
     /// Sent once at startup before any other message.
     #[serde(rename = "ready")]
     Ready(ReadyMessage),
+
+    /// SSR — emit the response status + headers BEFORE the body chunks
+    /// start flowing. Fire-and-forget; the host wires it into the HTTP
+    /// response head. Sent once per render, before any RenderChunk.
+    /// If the handler returns without emitting this, the host defaults
+    /// to status 200 + `Content-Type: text/html; charset=utf-8`.
+    #[serde(rename = "response_start")]
+    ResponseStart(ResponseStartMessage),
+
+    /// SSR — a chunk of the rendered HTML body. Bytes are base64-
+    /// encoded so newlines + binary safety work over the NDJSON pipe.
+    /// Fire-and-forget; the host writes the decoded bytes to the
+    /// streaming response body as they arrive (the existing pipe is
+    /// already non-buffered — Bun stdout → Rust mpsc → tiny_http
+    /// chunked transfer encoding).
+    #[serde(rename = "render_chunk")]
+    RenderChunk(RenderChunkMessage),
+
+    /// SSR — the renderer finished cleanly. No more body chunks
+    /// coming. The host closes the response body. Carries no payload
+    /// beyond `call_id` (status + headers came in ResponseStart).
+    #[serde(rename = "render_done")]
+    RenderDone(RenderDoneMessage),
 }
 
 /// Handshake payload from the TS runtime.
@@ -416,6 +493,33 @@ pub struct ConnectionOpMessage {
 pub struct ReturnMessage {
     pub call_id: String,
     pub value: serde_json::Value,
+}
+
+/// SSR — initial response headers emitted before body chunks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponseStartMessage {
+    pub call_id: String,
+    /// HTTP status code (200, 404, 500, ...). Default 200 if absent.
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// Response headers. Multi-value headers join with `, `.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+/// SSR — a base64-encoded chunk of the rendered response body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenderChunkMessage {
+    pub call_id: String,
+    /// Base64-encoded body bytes. Decoded by the host before writing
+    /// to the streaming response.
+    pub data: String,
+}
+
+/// SSR — render completed cleanly. No more chunks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenderDoneMessage {
+    pub call_id: String,
 }
 
 /// Function failed.

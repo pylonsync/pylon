@@ -996,6 +996,7 @@ mod tests {
             mode: "server".into(),
             query: Some("allX".into()),
             auth: Some("user".into()),
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(!diags.iter().any(|d| d.code.starts_with("ROUTE_")));
@@ -1008,7 +1009,7 @@ mod tests {
             path: "/x".into(),
             mode: "server".into(),
             query: Some("doesNotExist".into()),
-            auth: None,
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "ROUTE_QUERY_NOT_FOUND"));
@@ -1020,8 +1021,8 @@ mod tests {
         s.routes = vec![ManifestRoute {
             path: "/x".into(),
             mode: "server".into(),
-            query: None,
             auth: Some("admin".into()),
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "ROUTE_AUTH_INVALID"));
@@ -1033,8 +1034,8 @@ mod tests {
         s.routes = vec![ManifestRoute {
             path: "/".into(),
             mode: "server".into(),
-            query: None,
             auth: Some("public".into()),
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(!diags.iter().any(|d| d.code.starts_with("ROUTE_")));
@@ -1148,6 +1149,7 @@ mod tests {
             mode: "server".into(),
             query: query.map(|s| s.into()),
             auth: auth.map(|s| s.into()),
+            ..Default::default()
         }
     }
 

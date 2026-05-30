@@ -2250,6 +2250,7 @@ dependencies = [
 name = "pylon-functions"
 version = "0.3.220"
 dependencies = [
+ "base64",
  "pylon-http",
  "pylon-kernel",
  "serde",

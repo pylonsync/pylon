@@ -30,6 +30,20 @@ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The server layer converts these into SSE events on the HTTP response.
 pub type StreamCallback = Box<dyn FnMut(&str) + Send>;
 
+/// Byte-flavored stream callback for SSR. Receives base64-decoded
+/// chunks of the rendered response body. Kept separate from
+/// `StreamCallback` (string SSE) so the existing SSE path stays
+/// untouched — that path framed every chunk as `data: <text>\n\n`,
+/// SSR streams raw HTML bytes.
+pub type ByteStreamCallback = Box<dyn FnMut(&[u8]) + Send>;
+
+/// Callback invoked when the SSR handler emits `response_start`.
+/// Receives the HTTP status + header map BEFORE any body chunks.
+/// The host wires these into the response head. Fires at most once
+/// per render.
+pub type ResponseStartCallback =
+    Box<dyn FnMut(u16, std::collections::HashMap<String, String>) + Send>;
+
 /// Information about the function CALLING `ctx.scheduler.runAfter/runAt`,
 /// passed to the schedule hook so it can enforce "public functions can't
 /// smuggle work to internal:true targets via the scheduler" — caught in
@@ -492,6 +506,119 @@ impl FnRunner {
         // `std::sync::Mutex` is not re-entrant, so doing otherwise wedges.
         let _io = self.io_lock.lock().unwrap();
         self.call_inner(store, fn_name, fn_type, args, auth, on_stream, request)
+    }
+
+    /// Render an SSR route — peer to `call()` but uses the
+    /// `render_route` message + `RenderChunk`/`RenderDone`/`RenderError`
+    /// reply protocol instead of `call`/`return`. Streams base64-
+    /// decoded body chunks via `on_chunk` and the response head via
+    /// `on_response_start`. Returns when the renderer emits
+    /// `RenderDone` (Ok) or `Error` (Err).
+    ///
+    /// `params` holds dynamic-segment matches (e.g. `{slug: "hello"}`).
+    /// `search_params` is the parsed query string. `headers` and
+    /// `cookies` are forwarded so the page component can render
+    /// auth-aware UI. `auth` is the full Pylon auth context, same
+    /// shape as a `call()` envelope.
+    ///
+    /// If `on_response_start` is never invoked before the first
+    /// chunk arrives, the host defaults to `200 OK` +
+    /// `Content-Type: text/html; charset=utf-8`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_route(
+        &self,
+        component: &str,
+        route_path: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: crate::protocol::AuthInfo,
+        on_response_start: Option<ResponseStartCallback>,
+        on_chunk: ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        let _io = self.io_lock.lock().unwrap();
+        self.render_route_inner(
+            component,
+            route_path,
+            url,
+            params,
+            search_params,
+            headers,
+            cookies,
+            auth,
+            on_response_start,
+            on_chunk,
+        )
+    }
+
+    /// Body of `render_route()` minus the io_lock acquisition.
+    #[allow(clippy::too_many_arguments)]
+    fn render_route_inner(
+        &self,
+        component: &str,
+        route_path: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: crate::protocol::AuthInfo,
+        mut on_response_start: Option<ResponseStartCallback>,
+        mut on_chunk: ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        use base64::Engine;
+        let timeout = *self.call_timeout.lock().unwrap();
+        let deadline = Instant::now() + timeout;
+        let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+
+        let msg = crate::protocol::RenderRouteMessage::new(
+            call_id.clone(),
+            component.to_string(),
+            route_path.to_string(),
+            url.to_string(),
+            params,
+            search_params,
+            headers,
+            cookies,
+            auth,
+        );
+        self.send(&msg)?;
+
+        loop {
+            let m = self.recv(deadline)?;
+            match m {
+                TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
+                    if let Some(ref mut cb) = on_response_start {
+                        cb(rs.status.unwrap_or(200), rs.headers);
+                    }
+                }
+                TsMessage::RenderChunk(c) if c.call_id == call_id => {
+                    let bytes = match base64::engine::general_purpose::STANDARD.decode(&c.data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return Err(FnCallError {
+                                code: "RENDER_CHUNK_DECODE_FAILED".into(),
+                                message: format!("base64 decode failed: {e}"),
+                            });
+                        }
+                    };
+                    on_chunk(&bytes);
+                }
+                TsMessage::RenderDone(d) if d.call_id == call_id => {
+                    return Ok(());
+                }
+                TsMessage::Error(err) if err.call_id == call_id => {
+                    return Err(FnCallError {
+                        code: err.code,
+                        message: err.message,
+                    });
+                }
+                // Different call_id or unrelated message — skip.
+                _ => {}
+            }
+        }
     }
 
     /// Lock-acquiring variant that propagates the caller's `internal`

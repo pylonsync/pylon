@@ -1338,8 +1338,7 @@ mod tests {
             routes: vec![ManifestRoute {
                 path: "/".into(),
                 mode: "server".into(),
-                query: None,
-                auth: None,
+                ..Default::default()
             }],
             queries: vec![],
             actions: vec![],
@@ -1426,8 +1425,7 @@ mod tests {
         new.routes.push(ManifestRoute {
             path: "/about".into(),
             mode: "static".into(),
-            query: None,
-            auth: None,
+            ..Default::default()
         });
         let changes = compute_diff(&old, &new);
         assert!(changes
