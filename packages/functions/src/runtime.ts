@@ -210,6 +210,26 @@ function dispatch(line: string): void {
         message: err?.message || String(err),
       });
     });
+  } else if (msg.type === "render_route") {
+    // SSR dispatch — file-based page render. Lazy-imported so
+    // projects without SSR routes don't pay the react-dom cost on
+    // startup. handleRenderRoute manages its own error frames; we
+    // still catch here so a bare throw can't kill the runtime.
+    import("./ssr-runtime")
+      .then((mod) =>
+        mod.handleRenderRoute(
+          msg as unknown as Parameters<typeof mod.handleRenderRoute>[0],
+          send,
+        ),
+      )
+      .catch((err) => {
+        send({
+          type: "error",
+          call_id: (msg as unknown as { call_id: string }).call_id,
+          code: "SSR_RUNTIME_CRASH",
+          message: err?.message || String(err),
+        });
+      });
   } else if (msg.type === "result") {
     const res = msg as unknown as ResultMessage & { op_id?: string };
     // Prefer op_id when the host sent it. Fall back to call_id for replies

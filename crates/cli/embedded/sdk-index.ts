@@ -2,7 +2,7 @@
 // Route modes
 // ---------------------------------------------------------------------------
 
-export type RouteMode = "static" | "server" | "live";
+export type RouteMode = "static" | "server" | "live" | "ssr";
 
 // ---------------------------------------------------------------------------
 // Field types
@@ -205,6 +205,18 @@ export interface RouteDefinition {
   mode: RouteMode;
   query?: string;
   auth?: AuthMode;
+  /**
+   * Project-relative module path (e.g. `app/hello/page`) for SSR
+   * routes. Required when `mode === "ssr"`. Discovered automatically
+   * by `discoverAppRoutes()`; only specify manually for one-off
+   * SSR routes outside the `app/` tree.
+   */
+  component?: string;
+  /**
+   * Layout module path chain (root→leaf). Each layout wraps the
+   * next as `children`. Only relevant for `mode === "ssr"`.
+   */
+  layouts?: string[];
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -351,6 +363,17 @@ export interface ManifestRoute {
   mode: string;
   query?: string;
   auth?: string;
+  /**
+   * Project-relative module path (e.g. `app/hello/page`) for
+   * file-based SSR routes. Populated by the discoverer; absent
+   * for legacy mode:"static" / "server" / "live" routes.
+   */
+  component?: string;
+  /**
+   * Layout chain walked root→leaf. Each entry is a project-
+   * relative module path. Empty when no layouts apply.
+   */
+  layouts?: string[];
 }
 
 export interface ManifestInputField {
@@ -456,8 +479,136 @@ export function routesToManifest(routes: RouteDefinition[]): ManifestRoute[] {
     const result: ManifestRoute = { path: r.path, mode: r.mode };
     if (r.query) result.query = r.query;
     if (r.auth) result.auth = r.auth;
+    if (r.component) result.component = r.component;
+    if (r.layouts && r.layouts.length > 0) result.layouts = r.layouts;
     return result;
   });
+}
+
+/**
+ * Walk the project's `app/` directory and discover file-based SSR
+ * routes. Returns a list of `RouteDefinition` ready to slot into
+ * `buildManifest({ routes })`.
+ *
+ * Mapping rules (Next App Router-shaped):
+ *   - `app/page.tsx` → `/`
+ *   - `app/about/page.tsx` → `/about`
+ *   - `app/blog/[slug]/page.tsx` → `/blog/:slug`
+ *   - `app/layout.tsx` wraps every page below; `app/blog/layout.tsx`
+ *     wraps `/blog/*`.
+ *
+ * All discovered routes are `mode: "ssr"`. Phase 1 doesn't yet
+ * support `loading.tsx` / `error.tsx` / `not-found.tsx` — those
+ * surface as warnings in `pylon lint` (Phase 2 wires them).
+ *
+ * Pure Node `readdirSync` walk — no glob dep. Sorts deterministically:
+ * literal segments before parameterized ones at each depth, so the
+ * Rust matcher's first-match-wins lookup picks the right route.
+ *
+ * `appDir` defaults to `<cwd>/app`. Pass an absolute path to scan a
+ * different layout (monorepo subprojects, etc.).
+ */
+export function discoverAppRoutes(opts?: {
+  appDir?: string;
+}): RouteDefinition[] {
+  // Pull `fs` + `path` lazily so users without an `app/` dir don't
+  // pay the import cost (and so this file stays browser-loadable
+  // for any future codegen client that imports the same module).
+  // Bun resolves these synchronously from the user-process side.
+  const fs: typeof import("node:fs") = require("node:fs");
+  const path: typeof import("node:path") = require("node:path");
+
+  const cwd = process.cwd();
+  const appDir =
+    opts?.appDir && path.isAbsolute(opts.appDir)
+      ? opts.appDir
+      : path.join(cwd, opts?.appDir ?? "app");
+  if (!fs.existsSync(appDir) || !fs.statSync(appDir).isDirectory()) {
+    return [];
+  }
+
+  type PageHit = {
+    /** Relative slugs from app root (e.g. ["blog", "[slug]"]). */
+    segments: string[];
+    /** Project-relative module path WITHOUT extension. */
+    component: string;
+    /** Project-relative layout chain (closest-root-first). */
+    layouts: string[];
+  };
+
+  const pages: PageHit[] = [];
+
+  function walk(dir: string, segments: string[], layouts: string[]): void {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // Layout file at THIS depth (applied to every page beneath).
+    const layoutHere = ["layout.tsx", "layout.ts", "layout.jsx", "layout.js"]
+      .map((n) => path.join(dir, n))
+      .find((p) => fs.existsSync(p));
+    const nextLayouts = layoutHere
+      ? [...layouts, path.relative(cwd, layoutHere).replace(/\.(tsx?|jsx?)$/, "")]
+      : layouts;
+    // Page file at THIS depth.
+    const pageHere = ["page.tsx", "page.ts", "page.jsx", "page.js"]
+      .map((n) => path.join(dir, n))
+      .find((p) => fs.existsSync(p));
+    if (pageHere) {
+      pages.push({
+        segments: [...segments],
+        component: path.relative(cwd, pageHere).replace(/\.(tsx?|jsx?)$/, ""),
+        layouts: nextLayouts,
+      });
+    }
+    // Recurse into subdirs.
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      // Skip dotfiles, node_modules, and Next-style private "(group)"
+      // segments don't affect the URL path — strip them out so
+      // `app/(marketing)/about/page.tsx` resolves to `/about`.
+      if (e.name.startsWith(".") || e.name === "node_modules") continue;
+      const sub = path.join(dir, e.name);
+      const isGroup = e.name.startsWith("(") && e.name.endsWith(")");
+      const newSegments = isGroup ? segments : [...segments, e.name];
+      walk(sub, newSegments, nextLayouts);
+    }
+  }
+
+  walk(appDir, [], []);
+
+  // Sort: literal segments before parameterized ones at each depth.
+  // Otherwise `/blog/:slug` could shadow `/blog/featured` depending
+  // on FS order.
+  const isParam = (s: string): boolean =>
+    s.startsWith("[") && s.endsWith("]");
+  pages.sort((a, b) => {
+    const minLen = Math.min(a.segments.length, b.segments.length);
+    for (let i = 0; i < minLen; i++) {
+      const ap = isParam(a.segments[i]);
+      const bp = isParam(b.segments[i]);
+      if (ap !== bp) return ap ? 1 : -1;
+      if (a.segments[i] !== b.segments[i]) {
+        return a.segments[i] < b.segments[i] ? -1 : 1;
+      }
+    }
+    return a.segments.length - b.segments.length;
+  });
+
+  return pages.map((p) => ({
+    path:
+      "/" +
+      p.segments
+        .map((s) =>
+          isParam(s) ? `:${s.slice(1, -1)}` : s,
+        )
+        .join("/"),
+    mode: "ssr" as const,
+    component: p.component,
+    layouts: p.layouts,
+  }));
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
