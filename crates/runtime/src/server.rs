@@ -596,32 +596,20 @@ fn start_server(
                 "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
             );
         }
-    } else if !runtime.is_in_memory() {
-        // File-backed SQLite. Persist the seq through a single-row table
-        // so process restarts resume from the last minted seq instead of
-        // resetting to 0. In-memory SQLite skips this — its rows
-        // disappear on restart too, so there's no stale-cursor case.
-        if let Err(e) = runtime.bootstrap_sqlite_change_seq() {
-            tracing::warn!(
-                "[change_log] failed to bootstrap SQLite _pylon_change_seq; falling back to per-instance seq: {}",
-                e.message
-            );
-        } else {
-            let rt_for_provider = Arc::clone(&runtime);
-            let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
-            let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
-            let local_for_provider = std::sync::Arc::clone(&local_fallback);
-            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
-                rt_for_provider.next_sqlite_change_seq().unwrap_or_else(|| {
-                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-                })
-            });
-            change_log_builder = change_log_builder
-                .with_seq(provider)
-                .with_initial_seq(initial);
-            tracing::info!("[change_log] using SQLite _pylon_change_seq (initial seq = {initial})");
-        }
     }
+    // SQLite seq persistence used to live here (v0.3.218) but caused a
+    // recursive write_conn deadlock: the mutation pipeline holds
+    // write_conn → calls change_log.append → calls the seq provider →
+    // tries to lock write_conn AGAIN. std::sync::Mutex isn't re-entrant,
+    // so every mutation (markChannelRead, etc.) hung forever on chat-api.
+    //
+    // Reverted to v0.3.217 in-memory behavior to unblock production.
+    // The original 410 RESYNC_REQUIRED problem (cursor outliving
+    // server restart) comes back, but it's RECOVERABLE — the client
+    // already handles 410 with reset+repull. Re-adding monotonic-
+    // across-restart seqs needs the persist to happen OFF the
+    // mutation hot path (background thread with its own SQLite
+    // connection, write-ahead reservation). Tracked for v0.3.222.
     let change_log = Arc::new(change_log_builder);
 
     // Seed the change log with one synthetic insert per extant row so that
