@@ -512,12 +512,30 @@ export class SyncEngine {
     // applied changes broadcast by the leader. The election settles
     // in ~250ms; if the broker is unavailable (no BroadcastChannel)
     // every tab is implicitly its own leader.
-    await this.initMultiTab();
+    //
+    // Bootstrap parallelization: the election (~250ms) and
+    // /api/auth/me (~60ms) are independent — kick both off, then
+    // await election first. If we lose the election we discard the
+    // session result and let the leader broadcast its session over
+    // the multi-tab channel; the "leader-only network writes"
+    // invariant is preserved because no peers have observed our
+    // pending /api/auth/me request and no apply has happened yet.
+    const electionPromise = this.initMultiTab();
+    const sessionPromise = this.fetchSessionBootstrap().catch(() => null);
+    await electionPromise;
 
     if (!this.isMultiTabLeader) {
       // Follower path: rely on the leader's broadcasts for session +
       // applied changes. Nothing else to do here — the broker is
-      // wired to forward inbound messages into the engine.
+      // wired to forward inbound messages into the engine. The
+      // sessionPromise we kicked off above resolves into the void;
+      // the leader's broadcast will deliver the authoritative view.
+      // Swallow any pending error so it doesn't surface as an
+      // unhandled rejection.
+      void sessionPromise.then(
+        () => {},
+        () => {},
+      );
       return;
     }
 
@@ -533,15 +551,29 @@ export class SyncEngine {
     // Seed the server-resolved session before the first pull so
     // `useSession` subscribers see the right tenant from frame one,
     // and the resolver's lastSeenTenant is populated before any
-    // subsequent flip can race with it.
-    await this.refreshResolvedSession();
+    // subsequent flip can race with it. We pre-fired the HTTP fetch
+    // above (in parallel with election); apply its result now.
+    // Falls through to a normal refresh on network/parse error so
+    // we don't get stuck without a session.
+    const bootstrapSession = await sessionPromise;
+    if (bootstrapSession !== null) {
+      await this.applySessionTransition(bootstrapSession, /* broadcast */ true);
+    } else {
+      await this.refreshResolvedSession();
+    }
 
     // Pull from server, then connect real-time transport.
     await this.pull();
 
-    // Save cursor after pull.
+    // Save cursor after pull. Fire-and-forget on bootstrap — the
+    // enqueueApply path already persists per-batch as pull lands rows,
+    // so this final save is belt-and-braces. Awaiting it adds 5-30ms
+    // of IDB tail latency to the critical path before transport.start
+    // runs; the apply path's idempotent op_id-keyed merge handles the
+    // worst case (one re-applied batch on next cold pull if the tab
+    // crashes between this line and the saveCursor task completing).
     if (this.persistence) {
-      await this.persistence.saveCursor(this.cursor);
+      void this.persistence.saveCursor(this.cursor);
     }
 
     // First-load reconciliation pass — closes the "phantom row" gap when
@@ -1046,6 +1078,12 @@ export class SyncEngine {
       void this.refreshResolvedSession();
     }
 
+    // Capture whether this pull started from cursor=0 BEFORE the
+    // snapshot loop mutates the cursor. On successful exhaustion the
+    // WS onConnected hook reads the flag to skip the redundant
+    // bootstrap reconcile (the snapshot path already returned every
+    // policy-visible row, per-entity refetch right after is waste).
+    const startedFromZero = this.cursor.last_seq === 0;
     try {
       // Snapshot pagination: when the cursor is 0 and the server's
       // table is larger than a single batch, the response carries
@@ -1080,6 +1118,11 @@ export class SyncEngine {
           break;
         }
       }
+      // Snapshot+tail loop exhausted without throwing: if we started
+      // from cursor=0 we just hydrated the full replica from server
+      // truth. Record it so onConnected skips the reconcile that would
+      // otherwise re-fetch every entity via cursor pagination.
+      this.lastPullStartedFromZero = startedFromZero;
     } catch (err) {
       // Swallow network + transient errors so the poll/reconnect loop
       // keeps trying — but on 429 bump the backoff counter so the next
@@ -1136,6 +1179,17 @@ export class SyncEngine {
    *  storm against a misconfigured server. Resets to 0 on any pull
    *  that doesn't throw a 410. */
   private consecutive_410s = 0;
+
+  /** Set by pullInner whenever the just-completed pull started with
+   *  `cursor.last_seq === 0` (cold load OR post-reset). The WS
+   *  onConnected hook reads this to skip the reconcile() that would
+   *  otherwise fire immediately after the bootstrap pull — the
+   *  snapshot path of pull already returned every row visible under
+   *  current policy, so per-entity reconcile fetches right after are
+   *  pure waste (~300ms on the critical path). One-shot: the flag is
+   *  cleared on read so a subsequent reconnect-after-disconnect still
+   *  runs reconcile normally. */
+  private lastPullStartedFromZero = false;
 
   /** Timestamp of the last `reconcile()` invocation. Used to debounce —
    *  reconcile runs on connect, WS reconnect, AND visibility-change, so
@@ -1207,64 +1261,73 @@ export class SyncEngine {
     // the current cursor means future inserts (which have higher seqs)
     // bypass the tombstone — re-creation server-side still propagates.
     const tombstoneSeq = this.cursor.last_seq;
-    for (const entity of names) {
-      // Capture cursor + resolved session BEFORE the fetch so we can
-      // detect drift mid-reconcile. Two distinct races:
-      //
-      //   1. Cursor moves: a WS event for this (or another) entity
-      //      landed while the page-paginated fetch was in flight. Our
-      //      snapshot is stale; applying it would clobber the fresher
-      //      WS-delivered row.
-      //
-      //   2. Session flips: the resolved tenant/user changed while
-      //      the fetch was in flight (e.g., the app called
-      //      /api/auth/select-org just after we issued the fetch).
-      //      The server filtered the response under the OLD tenant
-      //      context, so applying the result would tombstone rows
-      //      that ARE visible under the NEW tenant. This is the
-      //      "dashboard flashes data away on first load" bug — the
-      //      engine starts before the app calls selectOrg, fetches
-      //      under tenant=null, returns 0 rows, then the apply pass
-      //      nukes every locally-cached row. Skip the apply when
-      //      the session signature changed; the next reconcile
-      //      (triggered by session-changed envelope) will re-fetch
-      //      under the new context.
-      const cursorBeforeFetch = this.cursor.last_seq;
-      const sessionBeforeFetch = this.session.signature();
-      let serverRows: Row[];
-      try {
-        serverRows = await this.fetchEntityRows(entity);
-      } catch (err) {
-        // Network errors are expected (offline, transient 5xx). Skip
-        // this entity; the next reconcile trigger will retry.
-        const status = (err as { status?: number })?.status;
-        if (status === 403 || status === 404) {
-          // Entity is no longer readable (policy revoked) or removed
-          // from the manifest. Drop every local row for it — keeping
-          // them around just leaks invisible state.
-          await this.dropEntity(entity, tombstoneSeq);
+    // Fan out the per-entity fetches in parallel. Bootstrap reconcile
+    // used to serialize 5 entities × ~60ms each → 300ms of dead time
+    // on the critical path before channels render. The per-entity
+    // drift checks (cursor + session signature) are captured inside
+    // each task's closure, so each entity still bails individually
+    // if its OWN fetch raced a WS event or a session flip — parallel
+    // fan-out doesn't weaken either guard.
+    await Promise.all(
+      names.map(async (entity) => {
+        // Capture cursor + resolved session BEFORE the fetch so we can
+        // detect drift mid-reconcile. Two distinct races:
+        //
+        //   1. Cursor moves: a WS event for this (or another) entity
+        //      landed while the page-paginated fetch was in flight. Our
+        //      snapshot is stale; applying it would clobber the fresher
+        //      WS-delivered row.
+        //
+        //   2. Session flips: the resolved tenant/user changed while
+        //      the fetch was in flight (e.g., the app called
+        //      /api/auth/select-org just after we issued the fetch).
+        //      The server filtered the response under the OLD tenant
+        //      context, so applying the result would tombstone rows
+        //      that ARE visible under the NEW tenant. This is the
+        //      "dashboard flashes data away on first load" bug — the
+        //      engine starts before the app calls selectOrg, fetches
+        //      under tenant=null, returns 0 rows, then the apply pass
+        //      nukes every locally-cached row. Skip the apply when
+        //      the session signature changed; the next reconcile
+        //      (triggered by session-changed envelope) will re-fetch
+        //      under the new context.
+        const cursorBeforeFetch = this.cursor.last_seq;
+        const sessionBeforeFetch = this.session.signature();
+        let serverRows: Row[];
+        try {
+          serverRows = await this.fetchEntityRows(entity);
+        } catch (err) {
+          // Network errors are expected (offline, transient 5xx). Skip
+          // this entity; the next reconcile trigger will retry.
+          const status = (err as { status?: number })?.status;
+          if (status === 403 || status === 404) {
+            // Entity is no longer readable (policy revoked) or removed
+            // from the manifest. Drop every local row for it — keeping
+            // them around just leaks invisible state.
+            await this.dropEntity(entity, tombstoneSeq);
+          }
+          return;
         }
-        continue;
-      }
-      if (this.cursor.last_seq !== cursorBeforeFetch) {
-        // Cursor moved during fetch — at least one WS event for this
-        // (or another) entity landed and might have a fresher value
-        // for a row our snapshot just captured. Bail out for this
-        // entity; reconcile() is triggered again on visibility-change
-        // and reconnect, and the WS event already carried the latest
-        // state for the affected row.
-        continue;
-      }
-      if (this.session.signature() !== sessionBeforeFetch) {
-        // Session changed (token flipped, tenant switched, user
-        // signed out → in, etc.). The rows we fetched reflect the
-        // OLD session's policy view; applying them now would
-        // tombstone rows visible under the NEW session. Bail and let
-        // the session-changed envelope drive the next reconcile.
-        continue;
-      }
-      await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);
-    }
+        if (this.cursor.last_seq !== cursorBeforeFetch) {
+          // Cursor moved during fetch — at least one WS event for this
+          // (or another) entity landed and might have a fresher value
+          // for a row our snapshot just captured. Bail out for this
+          // entity; reconcile() is triggered again on visibility-change
+          // and reconnect, and the WS event already carried the latest
+          // state for the affected row.
+          return;
+        }
+        if (this.session.signature() !== sessionBeforeFetch) {
+          // Session changed (token flipped, tenant switched, user
+          // signed out → in, etc.). The rows we fetched reflect the
+          // OLD session's policy view; applying them now would
+          // tombstone rows visible under the NEW session. Bail and let
+          // the session-changed envelope drive the next reconcile.
+          return;
+        }
+        await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);
+      }),
+    );
   }
 
   /** Fetch every row for an entity. Uses cursor pagination so big tables
@@ -1375,17 +1438,36 @@ export class SyncEngine {
     // broadcasts the result, which `handleMultiTabMessage` routes
     // into the resolver.
     if (!this.isMultiTabLeader) return;
-    let next: ResolvedSession;
+    const next = await this.fetchSessionBootstrap();
+    if (next === null) return;
+    await this.applySessionTransition(next, /* broadcast */ true);
+  }
+
+  /**
+   * Pure HTTP fetch of /api/auth/me → ResolvedSession. Unlike
+   * `refreshResolvedSession`, this does NOT gate on `isMultiTabLeader`
+   * — bootstrap callers in `start()` fire this in PARALLEL with the
+   * multi-tab election to overlap two independent latency windows
+   * (election ~250ms || auth/me ~60ms). At that point no other tabs'
+   * messages have been observed yet, so there's no broadcast-policy
+   * violation; the caller is responsible for discarding the result
+   * if it lost the election.
+   *
+   * Returns null on HTTP error / network failure / parse error — the
+   * caller's next pull cycle (or the WS `session-changed` envelope)
+   * will retry. Errors must not abort bootstrap.
+   */
+  private async fetchSessionBootstrap(): Promise<ResolvedSession | null> {
     try {
       const res = await this.rawFetch("/api/auth/me");
-      if (!res.ok) return;
+      if (!res.ok) return null;
       const raw = (await res.json()) as {
         user_id?: string | null;
         tenant_id?: string | null;
         is_admin?: boolean;
         roles?: string[];
       };
-      next = {
+      return {
         userId: raw.user_id ?? null,
         tenantId: raw.tenant_id ?? null,
         isAdmin: raw.is_admin ?? false,
@@ -1394,9 +1476,8 @@ export class SyncEngine {
     } catch {
       // Swallow — /api/auth/me errors are transient and the next pull
       // will retry. Don't take down the sync loop for this.
-      return;
+      return null;
     }
-    await this.applySessionTransition(next, /* broadcast */ true);
   }
 
   /**
@@ -2057,7 +2138,21 @@ export class SyncEngine {
         // opening. Reconcile fires after the pull since pull is the
         // cheap incremental path; reconcile is the server-truth
         // backstop for anything pull couldn't replay.
-        void this.pull().then(() => this.reconcile());
+        //
+        // Cold-load fast path: if pull just hydrated a full snapshot
+        // from cursor=0, the snapshot already returned every row
+        // visible under current policy. The reconcile pass that would
+        // normally follow is pure waste — same rows, second time,
+        // ~60ms × N entities. Skip it once; visibility-change and
+        // reconnect-after-disconnect paths invoke reconcile() directly
+        // (not gated by this flag) so the safety net still triggers.
+        void this.pull().then(() => {
+          if (this.lastPullStartedFromZero) {
+            this.lastPullStartedFromZero = false;
+            return;
+          }
+          return this.reconcile();
+        });
       },
       onDisconnected: () => {
         /* Engine has no work on disconnect — the transport's own
