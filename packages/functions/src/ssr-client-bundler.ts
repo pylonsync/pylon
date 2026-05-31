@@ -504,6 +504,70 @@ async function _doBuild(): Promise<BuildOutput> {
   return _doBuildInner(fs, path, cwd);
 }
 
+/**
+ * Compile `app/globals.css` through Tailwind v4 (`@tailwindcss/cli`)
+ * if both are present. Returns the relative output path (under
+ * outdir) when produced, else null. Skipped silently when the
+ * project hasn't opted in to Tailwind — we don't want every SSR
+ * project to need Tailwind installed.
+ */
+async function buildTailwind(
+  fs: any,
+  path: any,
+  cwd: string,
+  outdir: string,
+): Promise<string | null> {
+  const globalsPath = path.join(cwd, "app", "globals.css");
+  if (!fs.existsSync(globalsPath)) return null;
+  // Resolve @tailwindcss/cli. The package only exports
+  // `./package.json` in its `exports` map (it's a binary, not a
+  // library), so we resolve THAT and reach for `dist/index.mjs`
+  // next to it. If the dep isn't installed, surface a clear hint.
+  let cliPath: string;
+  try {
+    const pkgPath = (Bun as any).resolveSync(
+      "@tailwindcss/cli/package.json",
+      cwd,
+    );
+    cliPath = path.join(path.dirname(pkgPath), "dist", "index.mjs");
+    if (!fs.existsSync(cliPath)) {
+      throw new Error(`tailwindcss CLI entry not found at ${cliPath}`);
+    }
+  } catch (err: any) {
+    throw new Error(
+      `app/globals.css exists but @tailwindcss/cli is not installed — run \`bun add @tailwindcss/cli tailwindcss\` (resolver said: ${err?.message ?? err})`,
+    );
+  }
+
+  // Hash the source content so we can name the output uniquely +
+  // serve it with long-cache immutable headers.
+  const src = fs.readFileSync(globalsPath, "utf8");
+  let hash = 0;
+  for (let i = 0; i < src.length; i++) {
+    hash = (hash * 31 + src.charCodeAt(i)) >>> 0;
+  }
+  // Mix in the discovered routes so adding/removing pages changes
+  // the hash (Tailwind v4 auto-discovers `@source` paths; we still
+  // want the cache to bust on layout changes).
+  const stylesName = `styles-${hash.toString(36)}.css`;
+  const outPath = path.join(outdir, stylesName);
+
+  // Spawn the CLI. Bun is already running; reuse it as the
+  // interpreter so the user doesn't need node on PATH.
+  const proc = (Bun as any).spawn({
+    cmd: [process.execPath, cliPath, "-i", globalsPath, "-o", outPath, "--minify"],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`tailwindcss build failed (exit ${exitCode}): ${err}`);
+  }
+  return stylesName;
+}
+
 async function _doBuildInner(fs: any, path: any, cwd: string): Promise<BuildOutput> {
   const routes = discoverRoutes(fs, path, cwd);
     if (routes.length === 0) {
@@ -686,6 +750,23 @@ async function _doBuildInner(fs: any, path: any, cwd: string): Promise<BuildOutp
       throw new Error(
         `manifest missing entries for routes: ${missing.join(", ")}`,
       );
+    }
+
+    // Tailwind v4 compile. Optional — only fires if the project has
+    // `app/globals.css`. Adds the stylesheet to every route's css
+    // array so SSR head injection emits `<link rel="stylesheet">`.
+    try {
+      const styles = await buildTailwind(fs, path, cwd, outdir);
+      if (styles) {
+        for (const r of Object.values(manifest.routes)) {
+          r.css = [styles];
+        }
+      }
+    } catch (twErr: any) {
+      // Tailwind failure shouldn't kill the SSR build — log a loud
+      // warning + ship the bundle without styles so devs can iterate.
+      // eslint-disable-next-line no-console
+      console.warn(`[pylon ssr] tailwind compile failed: ${twErr?.message ?? twErr}`);
     }
 
   const manifestPath = path.join(outdir, "manifest.json");

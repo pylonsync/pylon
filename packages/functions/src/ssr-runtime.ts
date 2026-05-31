@@ -218,20 +218,102 @@ export async function handleRenderRoute(
       headers: { "content-type": "text/html; charset=utf-8" },
     });
 
+    // Pre-load the manifest BEFORE the React stream starts emitting
+    // so we know which `<link rel="stylesheet">` and
+    // `<link rel="modulepreload">` tags to inject into the HEAD.
+    // We splice them in before `</head>` so the browser starts
+    // fetching CSS + chunks concurrently with parsing the body —
+    // no FOUC, no waterfall.
+    let preloadManifestRoute:
+      | { file: string; imports: string[]; css: string[] }
+      | null = null;
+    let preloadManifestErr: string | null = null;
+    let preloadPublicPrefix = "/_pylon/build/";
+    try {
+      const { getManifest } = await import("./ssr-client-bundler");
+      const manifest = await getManifest();
+      preloadPublicPrefix = manifest.public_prefix || preloadPublicPrefix;
+      preloadManifestRoute = manifest.routes[msg.component] ?? null;
+      if (!preloadManifestRoute) {
+        preloadManifestErr = `manifest has no entry for "${msg.component}"`;
+      }
+    } catch (e: any) {
+      preloadManifestErr = e?.message || String(e);
+    }
+
+    // Build the head-injection blob — stylesheet first, then
+    // modulepreloads. The entry script tag stays in the body-tail
+    // (it needs the inline __PYLON_DATA__ to have been parsed first).
+    let headBlob = "";
+    if (preloadManifestRoute) {
+      for (const css of preloadManifestRoute.css) {
+        headBlob += `<link rel="stylesheet" href="${preloadPublicPrefix}${css}">`;
+      }
+      for (const chunk of preloadManifestRoute.imports) {
+        headBlob += `<link rel="modulepreload" href="${preloadPublicPrefix}${chunk}">`;
+      }
+    }
+
+    // Stream-rewrite: watch for `</head>` and inject `headBlob`
+    // before it. `</head>` may straddle chunk boundaries so we
+    // keep a small carry buffer (7 bytes — len("</head>")) at the
+    // tail of each chunk.
     const reader = stream.getReader();
+    let headInjected = headBlob.length === 0;
+    let carry = ""; // utf8 tail from previous chunk for boundary detection
+    const HEAD_CLOSE = "</head>";
+    const sendChunk = (text: string) => {
+      if (!text) return;
+      send({
+        type: "render_chunk",
+        call_id: msg.call_id,
+        data: Buffer.from(text, "utf8").toString("base64"),
+      });
+    };
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       if (!value || value.byteLength === 0) continue;
-      // base64 in pure JS via Buffer (Bun ships it). For large
-      // pages this is O(n) per chunk; fine for Phase 1.
-      const b64 = Buffer.from(value).toString("base64");
-      send({
-        type: "render_chunk",
-        call_id: msg.call_id,
-        data: b64,
-      });
+      let text = Buffer.from(value).toString("utf8");
+      if (!headInjected) {
+        const combined = carry + text;
+        const idx = combined.indexOf(HEAD_CLOSE);
+        if (idx >= 0) {
+          // Send everything up to the </head> position, then the
+          // headBlob, then </head>, then the remainder.
+          const before = combined.slice(0, idx);
+          const after = combined.slice(idx + HEAD_CLOSE.length);
+          // Drop the carry portion from `before` that we already
+          // emitted as part of the previous chunk's send. But since
+          // we DIDN'T emit `carry` previously (it was withheld), we
+          // can send the full `before` here.
+          sendChunk(before);
+          sendChunk(headBlob);
+          sendChunk(HEAD_CLOSE);
+          if (after) sendChunk(after);
+          headInjected = true;
+          carry = "";
+        } else {
+          // No </head> yet — emit everything except the last
+          // (HEAD_CLOSE.length - 1) bytes so a tag split across
+          // chunk boundaries still gets caught next pass.
+          const keep = HEAD_CLOSE.length - 1;
+          if (combined.length > keep) {
+            sendChunk(combined.slice(0, combined.length - keep));
+            carry = combined.slice(combined.length - keep);
+          } else {
+            carry = combined;
+          }
+        }
+      } else {
+        // base64 in pure JS via Buffer (Bun ships it). For large
+        // pages this is O(n) per chunk; fine for Phase 1.
+        sendChunk(text);
+      }
     }
+    // Flush any residual carry (head close never seen — page
+    // didn't have a </head>, which is fine for fragment renders).
+    if (carry) sendChunk(carry);
 
     // Hydration tail. After React's stream EOFs we append the
     // hydration markers so the browser can hydrate:
@@ -258,35 +340,15 @@ export async function handleRenderRoute(
     };
     const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
 
-    let manifestRoute: { file: string; imports: string[]; css: string[] } | null = null;
-    let manifestErr: string | null = null;
-    let publicPrefix = "/_pylon/build/";
-    try {
-      const { getManifest } = await import("./ssr-client-bundler");
-      const manifest = await getManifest();
-      publicPrefix = manifest.public_prefix || publicPrefix;
-      manifestRoute = manifest.routes[msg.component] ?? null;
-      if (!manifestRoute) {
-        manifestErr = `manifest has no entry for "${msg.component}"`;
-      }
-    } catch (e: any) {
-      manifestErr = e?.message || String(e);
-    }
-
     let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
-    if (manifestRoute) {
-      // Preload shared chunks (react + runtime) first so they're
-      // already in cache by the time the entry script's import
-      // resolution starts. Order: preloads first, then entry.
-      for (const chunk of manifestRoute.imports) {
-        tail += `<link rel="modulepreload" href="${publicPrefix}${chunk}">`;
-      }
-      for (const css of manifestRoute.css) {
-        tail += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
-      }
-      tail += `<script type="module" src="${publicPrefix}${manifestRoute.file}"></script>`;
+    if (preloadManifestRoute) {
+      // Per-route entry script comes last — it needs the inline
+      // `__PYLON_DATA__` above to have been parsed before it runs.
+      // CSS + modulepreload links were already injected into `<head>`
+      // above so they could start fetching as early as possible.
+      tail += `<script type="module" src="${preloadPublicPrefix}${preloadManifestRoute.file}"></script>`;
     } else {
-      tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${manifestErr}`)})</script>`;
+      tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${preloadManifestErr}`)})</script>`;
     }
     send({
       type: "render_chunk",

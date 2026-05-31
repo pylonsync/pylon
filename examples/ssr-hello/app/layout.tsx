@@ -22,9 +22,10 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Pylon SSR</title>
-        {/* Tailwind via Play CDN for the demo. Production projects
-            wire the Tailwind v4 build into their bundler. */}
-        <script src="https://cdn.tailwindcss.com" />
+        {/* Tailwind is compiled by the Pylon SSR bundler from
+            app/globals.css and emitted as a hashed asset under
+            /_pylon/build/. The link tag is injected by the SSR
+            head adapter from the manifest — no work needed here. */}
       </head>
       <body className="min-h-screen text-zinc-900 antialiased">
         <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/80 backdrop-blur">
