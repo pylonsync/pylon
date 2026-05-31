@@ -56,6 +56,32 @@ ring = { workspace = true }
 # SHA-256 for ctx.connections.* stable id (hash of user+connection
 # name fits Pylon's 40-char id constraint).
 sha2 = { workspace = true }
+# Image processing pipeline for <Image>.
+#
+# Decode: `image` crate (pure Rust). Handles JPEG, PNG, WebP, GIF
+# inputs. Decode is the cheap part; we don't need a faster decoder.
+#
+# Resize: `fast_image_resize` — SIMD-accelerated (AVX2 / NEON).
+# Benchmarks show 10-50x faster than `image::imageops::resize` at
+# the same Lanczos3 quality. Pure Rust, no sys deps.
+#
+# Encode (JPEG): `mozjpeg` — bundles Mozilla's mozjpeg C source via
+# cc-rs. ~15-25% smaller files than libjpeg-turbo at the same
+# perceptual quality. Adds ~2MB to the binary but no runtime sys
+# dep.
+#
+# Encode (WebP): `webp` — bundles libwebp source via cc-rs. Lossy
+# WebP, which produces 30-40% smaller files than the pure-Rust
+# `image` crate's lossless-only WebP. ~1MB binary growth.
+#
+# AVIF deliberately omitted — would pull `ravif` + `rav1e` (encoder),
+# adding ~10MB to the binary and 5-20x slower encodes than WebP for
+# similar quality. Worth revisiting in a follow-up if Pylon Cloud
+# wants to A/B AVIF for high-traffic sites.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+fast_image_resize = { version = "5", features = ["image"] }
+mozjpeg = { version = "0.10", default-features = false }
+webp = "0.3"
 
 [dev-dependencies]
 rand = { workspace = true }

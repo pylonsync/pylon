@@ -7,8 +7,9 @@
     "dev": "pylon dev"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@pylonsync/sdk": "workspace:*"
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@pylonsync/sdk": "workspace:*",
+    "@pylonsync/react": "workspace:*"
   }
 }

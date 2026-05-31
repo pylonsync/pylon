@@ -350,6 +350,18 @@ pub fn try_handle(
         return serve_pylon_client_bundle(cfg, request, path_only, cors_origin);
     }
 
+    // Optimized image endpoint. `<Image>` renders an `<img>` whose
+    // src points here; the handler resizes + re-encodes the source
+    // on demand and caches the result under `<cwd>/.pylon/.cache/
+    // images/<hash>.<ext>`.
+    if path_only == "/_pylon/image" {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let pylon_dir = cwd.join(".pylon");
+        let _ = std::fs::create_dir_all(&pylon_dir);
+        crate::image_optim::serve(request, &pylon_dir, cfg.dir.as_deref(), cors_origin);
+        return Ok(());
+    }
+
     // SSR branch sits ABOVE dev_proxy so file-based pages take
     // precedence over Vite's catch-all (Vite would serve the SPA
     // shell, masking the SSR'd output). Falls through to proxy/disk

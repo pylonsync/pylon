@@ -9,6 +9,7 @@ pub mod cron;
 pub mod datastore;
 pub mod encryption;
 pub mod frontend;
+pub mod image_optim;
 pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;

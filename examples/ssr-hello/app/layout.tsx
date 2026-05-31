@@ -1,4 +1,5 @@
 import React from "react";
+import { Link } from "@pylonsync/react";
 
 interface AuthShape {
   user_id: string | null;
@@ -16,33 +17,46 @@ interface LayoutProps {
 export default function RootLayout({ children, url, auth }: LayoutProps) {
   const signedIn = Boolean(auth?.user_id);
   return (
-    <html>
+    <html lang="en" className="bg-zinc-50">
       <head>
         <meta charSet="utf-8" />
-        <title>Pylon SSR — root layout</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Pylon SSR</title>
+        {/* Tailwind via Play CDN for the demo. Production projects
+            wire the Tailwind v4 build into their bundler. */}
+        <script src="https://cdn.tailwindcss.com" />
       </head>
-      <body>
-        <header
-          style={{
-            borderBottom: "1px solid #ddd",
-            padding: "8px 16px",
-            display: "flex",
-            justifyContent: "space-between",
-          }}
-        >
-          <span>
-            <strong>Pylon SSR</strong>{" "}
-            <span style={{ color: "#888" }}>· {url}</span>
-          </span>
-          <span style={{ color: signedIn ? "#080" : "#888" }}>
-            {signedIn ? `signed in (${auth.user_id})` : "anonymous"}
-          </span>
+      <body className="min-h-screen text-zinc-900 antialiased">
+        <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/80 backdrop-blur">
+          <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
+            <Link
+              href="/"
+              className="text-sm font-semibold tracking-tight hover:text-zinc-600"
+            >
+              Pylon SSR
+            </Link>
+            <nav className="flex items-center gap-4 text-sm text-zinc-600">
+              <Link href="/" className="hover:text-zinc-900">
+                Home
+              </Link>
+              <Link href="/hello" className="hover:text-zinc-900">
+                Hello
+              </Link>
+              <Link href="/gallery" className="hover:text-zinc-900">
+                Gallery
+              </Link>
+              <span
+                className={signedIn ? "text-emerald-600" : "text-zinc-400"}
+                title={url}
+              >
+                {signedIn ? `· ${auth.user_id}` : "· anon"}
+              </span>
+            </nav>
+          </div>
         </header>
-        <main style={{ padding: "16px" }}>{children}</main>
-        <footer
-          style={{ borderTop: "1px solid #ddd", padding: "8px 16px", color: "#888" }}
-        >
-          Rendered by Pylon · Phase 1.5b (auth context)
+        <main className="mx-auto max-w-3xl px-4 py-10">{children}</main>
+        <footer className="border-t border-zinc-200 py-6 text-center text-xs text-zinc-500">
+          Rendered by Pylon · Phase 2 (Link + Image)
         </footer>
       </body>
     </html>

@@ -1,6 +1,13 @@
 export { defineRoute } from "@pylonsync/sdk";
 export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 
+// SSR primitives — Next.js-style <Link> and <Image>. Both render
+// progressively (work without JS) and enhance on the client.
+export { Link } from "./Link";
+export type { LinkProps } from "./Link";
+export { Image } from "./Image";
+export type { ImageProps } from "./Image";
+
 import {
   defaultStorage,
   pylonFetch,
