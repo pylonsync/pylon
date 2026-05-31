@@ -1,15 +1,9 @@
-//! `ChangeLogStore` impl backed by SQLite via [`Runtime`].
+//! `ChangeLogStore` impls backed by SQLite + Postgres via [`Runtime`].
 //!
-//! Writes go through [`crate::change_log_persister::ChangeLogPersister`]
-//! — a bg-thread persister with a bounded mpsc channel. The change
-//! log's hot path enqueues from inside a held `write_conn` lock; the
-//! persister thread drains and writes from outside that lock so the
-//! mutation never blocks on its own connection (the v0.3.218 +
-//! v0.3.224 deadlock shape).
-//!
-//! Reads (load_recent / pull_range) go directly to the runtime — they
-//! happen on cold paths (boot, late-cursor pull) and are not under
-//! held locks.
+//! Both impls share a bg-thread persister (see
+//! [`crate::change_log_persister`]) — the hot path holds the
+//! write_conn / pg client for its own mutation tx and would deadlock
+//! or queue badly if append touched the connection inline.
 
 use std::sync::Arc;
 
@@ -18,8 +12,8 @@ use pylon_sync::{ChangeEvent, ChangeLogStore};
 use crate::change_log_persister::ChangeLogPersister;
 use crate::Runtime;
 
-/// `ChangeLogStore` impl: routes `append` through a bg-thread
-/// persister; routes reads through `Runtime`'s direct SQL.
+/// SQLite-backed store. Reads route directly to the runtime; writes
+/// go through the bg-thread persister.
 pub struct SqliteChangeLogStore {
     runtime: Arc<Runtime>,
     persister: ChangeLogPersister,
@@ -32,18 +26,19 @@ impl std::fmt::Debug for SqliteChangeLogStore {
 }
 
 impl SqliteChangeLogStore {
-    /// Spawn the bg-thread persister and return the wired store. The
-    /// persister inherits the runtime's lifetime via `Arc::clone`.
     pub fn new(runtime: Arc<Runtime>) -> Self {
-        let persister = ChangeLogPersister::spawn(Arc::clone(&runtime));
+        let persister = ChangeLogPersister::spawn_sqlite(Arc::clone(&runtime));
         Self { runtime, persister }
+    }
+
+    /// Snapshot the persister's counters for observability.
+    pub fn metrics(&self) -> crate::change_log_persister::PersisterMetricsSnapshot {
+        self.persister.metrics()
     }
 }
 
 impl ChangeLogStore for SqliteChangeLogStore {
     fn append(&self, event: &ChangeEvent) {
-        // Non-blocking handoff. The hot path holds write_conn for its
-        // own mutation tx — we MUST NOT touch write_conn from here.
         self.persister.enqueue(event.clone());
     }
     fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
@@ -51,5 +46,41 @@ impl ChangeLogStore for SqliteChangeLogStore {
     }
     fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
         self.runtime.sqlite_change_log_pull_range(since, limit)
+    }
+}
+
+/// Postgres-backed store. Same shape as SQLite — bg-thread persister
+/// over the runtime's PG client.
+pub struct PgChangeLogStore {
+    runtime: Arc<Runtime>,
+    persister: ChangeLogPersister,
+}
+
+impl std::fmt::Debug for PgChangeLogStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgChangeLogStore").finish()
+    }
+}
+
+impl PgChangeLogStore {
+    pub fn new(runtime: Arc<Runtime>) -> Self {
+        let persister = ChangeLogPersister::spawn_pg(Arc::clone(&runtime));
+        Self { runtime, persister }
+    }
+
+    pub fn metrics(&self) -> crate::change_log_persister::PersisterMetricsSnapshot {
+        self.persister.metrics()
+    }
+}
+
+impl ChangeLogStore for PgChangeLogStore {
+    fn append(&self, event: &ChangeEvent) {
+        self.persister.enqueue(event.clone());
+    }
+    fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+        self.runtime.pg_change_log_load_recent(limit)
+    }
+    fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
+        self.runtime.pg_change_log_pull_range(since, limit)
     }
 }

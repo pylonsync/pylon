@@ -486,6 +486,28 @@ fn change_kind_from_str(s: &str) -> Option<pylon_sync::ChangeKind> {
     }
 }
 
+/// Postgres row → `Option<ChangeEvent>`. Counterpart to the
+/// rusqlite mapper below.
+fn pg_row_to_change_event(row: &postgres::Row) -> Option<pylon_sync::ChangeEvent> {
+    let seq: i64 = row.try_get(0).ok()?;
+    let entity: String = row.try_get(1).ok()?;
+    let row_id: String = row.try_get(2).ok()?;
+    let kind_str: String = row.try_get(3).ok()?;
+    let kind = change_kind_from_str(&kind_str)?;
+    let data: Option<serde_json::Value> = row.try_get(4).ok();
+    let prev_data: Option<serde_json::Value> = row.try_get(5).ok();
+    let timestamp: String = row.try_get(6).ok()?;
+    Some(pylon_sync::ChangeEvent {
+        seq: seq as u64,
+        entity,
+        row_id,
+        kind,
+        data,
+        prev_data,
+        timestamp,
+    })
+}
+
 /// rusqlite row → `Option<ChangeEvent>` mapper shared by the two
 /// SELECT helpers. Returns `None` if the persisted `kind` doesn't
 /// match a known variant (would indicate schema drift).
@@ -675,6 +697,223 @@ impl Runtime {
             .ok()
     }
 
+    /// Create the `pylon_change_log` table in Postgres if it doesn't
+    /// exist. Postgres analog of `bootstrap_sqlite_change_log`.
+    /// Idempotent. Called once at boot for Pg-backed runtimes.
+    pub fn bootstrap_pg_change_log(&self) -> Result<(), RuntimeError> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Ok(());
+        };
+        pg.store
+            .with_client(|c| {
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS pylon_change_log (\
+                     seq BIGINT PRIMARY KEY,\
+                     entity TEXT NOT NULL,\
+                     row_id TEXT NOT NULL,\
+                     kind TEXT NOT NULL,\
+                     data JSONB,\
+                     prev_data JSONB,\
+                     ts TEXT NOT NULL\
+                     )",
+                    &[],
+                )
+                .map_err(|e| pylon_http::DataError {
+                    code: "PG_CHANGE_LOG_BOOTSTRAP_FAILED".into(),
+                    message: format!("CREATE TABLE pylon_change_log: {e}"),
+                })?;
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS pylon_change_log_entity_seq \
+                     ON pylon_change_log(entity, seq)",
+                    &[],
+                )
+                .map_err(|e| pylon_http::DataError {
+                    code: "PG_CHANGE_LOG_BOOTSTRAP_FAILED".into(),
+                    message: format!("CREATE INDEX: {e}"),
+                })?;
+                Ok::<(), pylon_http::DataError>(())
+            })
+            .map_err(data_err_to_runtime)
+    }
+
+    /// Persist a batch of events to `pylon_change_log`. Postgres
+    /// analog of `sqlite_change_log_persist_batch`. Uses a single
+    /// transaction + a prepared statement for batched INSERT.
+    pub fn pg_change_log_persist_batch(
+        &self,
+        events: &[pylon_sync::ChangeEvent],
+    ) -> Result<(), RuntimeError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Ok(());
+        };
+        pg.store
+            .with_client(|c| {
+                let mut tx = c.transaction().map_err(|e| pylon_http::DataError {
+                    code: "PG_CHANGE_LOG_TX_BEGIN_FAILED".into(),
+                    message: e.to_string(),
+                })?;
+                let stmt = tx
+                    .prepare(
+                        "INSERT INTO pylon_change_log \
+                         (seq, entity, row_id, kind, data, prev_data, ts) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                         ON CONFLICT (seq) DO NOTHING",
+                    )
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_PREPARE_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                for event in events {
+                    let data = event.data.clone();
+                    let prev_data = event.prev_data.clone();
+                    tx.execute(
+                        &stmt,
+                        &[
+                            &(event.seq as i64),
+                            &event.entity,
+                            &event.row_id,
+                            &change_kind_to_str(event.kind.clone()),
+                            &data,
+                            &prev_data,
+                            &event.timestamp,
+                        ],
+                    )
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_INSERT_FAILED".into(),
+                        message: format!("INSERT seq={}: {e}", event.seq),
+                    })?;
+                }
+                tx.commit().map_err(|e| pylon_http::DataError {
+                    code: "PG_CHANGE_LOG_COMMIT_FAILED".into(),
+                    message: e.to_string(),
+                })?;
+                Ok::<(), pylon_http::DataError>(())
+            })
+            .map_err(data_err_to_runtime)
+    }
+
+    /// Read recent events from `pylon_change_log` ordered ASC. Used at
+    /// boot to hydrate the in-memory ring.
+    pub fn pg_change_log_load_recent(&self, limit: usize) -> Vec<pylon_sync::ChangeEvent> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Vec::new();
+        };
+        let result: Result<Vec<pylon_sync::ChangeEvent>, pylon_http::DataError> =
+            pg.store.with_client(|c| {
+                let rows = c
+                    .query(
+                        "SELECT seq, entity, row_id, kind, data, prev_data, ts \
+                         FROM (SELECT seq, entity, row_id, kind, data, prev_data, ts \
+                               FROM pylon_change_log ORDER BY seq DESC LIMIT $1) sub \
+                         ORDER BY seq ASC",
+                        &[&(limit as i64)],
+                    )
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_LOAD_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                let mut out = Vec::with_capacity(rows.len());
+                for r in rows {
+                    if let Some(ev) = pg_row_to_change_event(&r) {
+                        out.push(ev);
+                    }
+                }
+                Ok(out)
+            });
+        result.unwrap_or_default()
+    }
+
+    /// Read events `seq > since` from `pylon_change_log`. Backs the
+    /// pull-fallback path when the in-memory ring no longer covers
+    /// the cursor.
+    pub fn pg_change_log_pull_range(
+        &self,
+        since: u64,
+        limit: usize,
+    ) -> Vec<pylon_sync::ChangeEvent> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Vec::new();
+        };
+        let result: Result<Vec<pylon_sync::ChangeEvent>, pylon_http::DataError> =
+            pg.store.with_client(|c| {
+                let rows = c
+                    .query(
+                        "SELECT seq, entity, row_id, kind, data, prev_data, ts \
+                         FROM pylon_change_log WHERE seq > $1 ORDER BY seq ASC LIMIT $2",
+                        &[&(since as i64), &(limit as i64)],
+                    )
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_PULL_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                let mut out = Vec::with_capacity(rows.len());
+                for r in rows {
+                    if let Some(ev) = pg_row_to_change_event(&r) {
+                        out.push(ev);
+                    }
+                }
+                Ok(out)
+            });
+        result.unwrap_or_default()
+    }
+
+    /// Prune `pylon_change_log` to at most `retain` events.
+    pub fn pg_change_log_prune(&self, retain: u64) -> Result<u64, RuntimeError> {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return Ok(0);
+        };
+        pg.store
+            .with_client(|c| {
+                let row = c
+                    .query_one("SELECT MAX(seq) FROM pylon_change_log", &[])
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_PRUNE_QUERY_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                let max_seq: Option<i64> = row.get(0);
+                let max_seq = match max_seq {
+                    Some(m) => m,
+                    None => return Ok(0u64),
+                };
+                let cutoff = max_seq.saturating_sub(retain as i64);
+                if cutoff <= 0 {
+                    return Ok(0u64);
+                }
+                let n = c
+                    .execute("DELETE FROM pylon_change_log WHERE seq <= $1", &[&cutoff])
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_PRUNE_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                Ok(n)
+            })
+            .map_err(data_err_to_runtime)
+    }
+
+    /// Has any event for the named entity been persisted?
+    pub fn pg_change_log_has_entity(&self, entity: &str) -> bool {
+        let RuntimeBackend::Postgres(pg) = &self.backend else {
+            return false;
+        };
+        pg.store
+            .with_client(|c| {
+                let row = c
+                    .query_opt(
+                        "SELECT 1 FROM pylon_change_log WHERE entity = $1 LIMIT 1",
+                        &[&entity],
+                    )
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_CHANGE_LOG_HAS_ENTITY_FAILED".into(),
+                        message: e.to_string(),
+                    })?;
+                Ok::<bool, pylon_http::DataError>(row.is_some())
+            })
+            .unwrap_or(false)
+    }
+
     /// SQLite analog of `bootstrap_global_change_seq`. Creates a
     /// `_pylon_change_seq` row whose single `value` column carries the
     /// highest seq the server has ever minted. Without this, every
@@ -825,6 +1064,49 @@ impl Runtime {
             message: format!("COMMIT: {e}"),
         })?;
         Ok(())
+    }
+
+    /// Prune `_pylon_change_log` to at most `retain` events. Returns
+    /// the number of rows deleted. Idempotent (returns 0 when the
+    /// table is already at or below the retention bound). Runs from
+    /// the persister thread on a low-frequency tick, so the
+    /// `write_conn` acquisition queues behind active mutations
+    /// rather than racing them.
+    ///
+    /// Semantics: the most-recent `retain` events are kept. A client
+    /// whose cursor falls behind that window will see `ResyncRequired`
+    /// from `/api/sync/pull` (existing behavior — the in-memory ring
+    /// + persisted log are the storage for delta deliverability, and
+    /// past the retention window the client must rehydrate from
+    /// entity snapshots). Sizing `retain` trades disk for acceptable
+    /// client-disconnect window.
+    pub fn sqlite_change_log_prune(&self, retain: u64) -> Result<usize, RuntimeError> {
+        let sb = self.sqlite_backend()?;
+        let conn = sb.write_conn.lock().map_err(|e| RuntimeError {
+            code: "SQLITE_LOCK_FAILED".into(),
+            message: format!("write_conn lock poisoned: {e}"),
+        })?;
+        let max_seq: Option<i64> = conn
+            .query_row("SELECT MAX(seq) FROM _pylon_change_log", [], |row| {
+                row.get(0)
+            })
+            .ok();
+        let max_seq = match max_seq {
+            Some(m) => m,
+            None => return Ok(0),
+        };
+        let cutoff = max_seq.saturating_sub(retain as i64);
+        if cutoff <= 0 {
+            return Ok(0);
+        }
+        conn.execute(
+            "DELETE FROM _pylon_change_log WHERE seq <= ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| RuntimeError {
+            code: "SQLITE_CHANGE_LOG_PRUNE_FAILED".into(),
+            message: format!("DELETE: {e}"),
+        })
     }
 
     /// Return `true` when `_pylon_change_log` already has at least

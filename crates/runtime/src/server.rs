@@ -660,7 +660,38 @@ fn start_server(
     // post-boot pulls cover the same window the previous process
     // was serving.
     let mut change_log_persistent = false;
-    if !runtime.is_postgres() && !runtime.is_in_memory() {
+    enum PersistedBackend {
+        None,
+        Sqlite,
+        Postgres,
+    }
+    let mut persisted_backend = PersistedBackend::None;
+    if runtime.is_postgres() {
+        // Pg deployment: persistence lives in `pylon_change_log`.
+        // Without this, every rolling deploy silently desyncs every
+        // connected client — same bug class the SQLite path fixed
+        // in v0.3.224, just on the cluster path.
+        if let Err(e) = runtime.bootstrap_pg_change_log() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap pylon_change_log; PG persistent log disabled: {}",
+                e.message
+            );
+        } else {
+            use pylon_sync::ChangeLogStore as _;
+            let store = std::sync::Arc::new(crate::change_log_store::PgChangeLogStore::new(
+                Arc::clone(&runtime),
+            ));
+            let hydrated_any = !store.load_recent(1).is_empty();
+            change_log_builder = change_log_builder.with_store(store);
+            change_log_persistent = true;
+            persisted_backend = PersistedBackend::Postgres;
+            if hydrated_any {
+                tracing::info!("[change_log] hydrated in-memory ring from pylon_change_log (PG)");
+            } else {
+                tracing::info!("[change_log] using PG pylon_change_log (empty on first boot)");
+            }
+        }
+    } else if !runtime.is_in_memory() {
         if let Err(e) = runtime.bootstrap_sqlite_change_log() {
             tracing::warn!(
                 "[change_log] failed to bootstrap _pylon_change_log; persistent log disabled: {}",
@@ -674,6 +705,7 @@ fn start_server(
             let hydrated_any = !store.load_recent(1).is_empty();
             change_log_builder = change_log_builder.with_store(store);
             change_log_persistent = true;
+            persisted_backend = PersistedBackend::Sqlite;
             if hydrated_any {
                 tracing::info!("[change_log] hydrated in-memory ring from _pylon_change_log");
             } else {
@@ -701,8 +733,12 @@ fn start_server(
     // had-any-persisted-event gate would silently make new
     // entities invisible to /api/sync/pull until the next write.
     for entity in runtime.manifest().entities.iter() {
-        let already_seeded =
-            change_log_persistent && runtime.sqlite_change_log_has_entity(&entity.name);
+        let already_seeded = match persisted_backend {
+            PersistedBackend::Sqlite => runtime.sqlite_change_log_has_entity(&entity.name),
+            PersistedBackend::Postgres => runtime.pg_change_log_has_entity(&entity.name),
+            PersistedBackend::None => false,
+        };
+        let _ = change_log_persistent;
         if already_seeded {
             continue;
         }
