@@ -25,6 +25,8 @@ import {
   MessageSquare,
   ChevronDown,
   Smile,
+  Menu,
+  ArrowLeft,
 } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
@@ -318,6 +320,15 @@ export function ChatApp() {
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const [channelDetailsId, setChannelDetailsId] = useState<string | null>(null);
 
+  // Mobile navigation: on small screens we can only show one panel at
+  // a time. `mobileView` tracks which. Desktop (≥ md) ignores this
+  // state — both the sidebar and the channel always render side by
+  // side via the responsive grid. Switching channels / opening
+  // threads on mobile auto-advances the view.
+  const [mobileView, setMobileView] = useState<"sidebar" | "channel" | "thread">(
+    "sidebar",
+  );
+
   const { data: liveUser } = db.useQueryOne<User>(
     "User",
     currentUser?.id ?? "",
@@ -414,39 +425,84 @@ export function ChatApp() {
     openChannelDetails: (id: string) => setChannelDetailsId(id),
   };
 
+  // Auto-advance the mobile view when the user picks a channel or
+  // opens a thread. Desktop layout ignores `mobileView` (everything
+  // is visible side-by-side), so these no-op on `md+`.
+  const selectChannel = (id: string | null) => {
+    setActiveChannelId(id);
+    if (id) setMobileView("channel");
+  };
+  const openThread = (id: string | null) => {
+    setThreadMessageId(id);
+    if (id) setMobileView("thread");
+    else setMobileView("channel");
+  };
+
   return (
     <UIContext.Provider value={ui}>
-      <div className="grid h-screen grid-cols-[260px_1fr] overflow-hidden bg-background text-foreground data-[thread=true]:grid-cols-[260px_1fr_380px]" data-thread={!!threadMessageId}>
-        <Sidebar
-          currentUser={currentUser}
-          activeChannelId={activeChannelId}
-          onSelectChannel={setActiveChannelId}
-          onSignOut={signOut}
-          dmPickerOpen={dmPickerOpen}
-          setDmPickerOpen={setDmPickerOpen}
-        />
-        {activeChannelId ? (
-          <ChannelView
-            channelId={activeChannelId}
+      {/* Mobile-first responsive shell:
+          - On < md: a single column (`grid-cols-1`). The visible
+            panel is controlled by `mobileView` via the `hidden`/`flex`
+            toggles below.
+          - On ≥ md: the original two-column layout. A third column
+            opens when a thread is active (data-[thread=true] →
+            md:grid-cols-[260px_1fr_380px]).
+          Both rows / cols use `min-h-0` so the inner overflow-y-auto
+          regions size correctly under flex/grid. */}
+      <div
+        className="grid h-screen grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[260px_1fr] md:data-[thread=true]:grid-cols-[260px_1fr_380px]"
+        data-thread={!!threadMessageId}
+      >
+        <div
+          data-mobile-view={mobileView}
+          className="flex min-h-0 flex-col data-[mobile-view=sidebar]:flex data-[mobile-view=channel]:hidden data-[mobile-view=thread]:hidden md:!flex"
+        >
+          <Sidebar
             currentUser={currentUser}
-            threadMessageId={threadMessageId}
-            onOpenThread={setThreadMessageId}
+            activeChannelId={activeChannelId}
+            onSelectChannel={selectChannel}
+            onSignOut={signOut}
+            dmPickerOpen={dmPickerOpen}
+            setDmPickerOpen={setDmPickerOpen}
           />
-        ) : (
-          <main className="flex min-h-0 flex-col">
-            <EmptyState
-              title="Welcome to Pylon Chat"
-              body="Pick a channel on the left or start a direct message."
+        </div>
+        <div
+          data-mobile-view={mobileView}
+          className="min-h-0 data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:flex data-[mobile-view=thread]:hidden md:!flex"
+        >
+          {activeChannelId ? (
+            <ChannelView
+              channelId={activeChannelId}
+              currentUser={currentUser}
+              threadMessageId={threadMessageId}
+              onOpenThread={openThread}
+              onOpenMobileSidebar={() => setMobileView("sidebar")}
             />
-          </main>
-        )}
+          ) : (
+            <main className="flex min-h-0 flex-1 flex-col">
+              <MobileChannelHeaderShell
+                title="Welcome"
+                onOpenSidebar={() => setMobileView("sidebar")}
+              />
+              <EmptyState
+                title="Welcome to Pylon Chat"
+                body="Pick a channel on the left or start a direct message."
+              />
+            </main>
+          )}
+        </div>
         {threadMessageId && activeChannelId && (
-          <ThreadPanel
-            parentId={threadMessageId}
-            channelId={activeChannelId}
-            currentUser={currentUser}
-            onClose={() => setThreadMessageId(null)}
-          />
+          <div
+            data-mobile-view={mobileView}
+            className="min-h-0 data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:hidden data-[mobile-view=thread]:flex md:!flex"
+          >
+            <ThreadPanel
+              parentId={threadMessageId}
+              channelId={activeChannelId}
+              currentUser={currentUser}
+              onClose={() => openThread(null)}
+            />
+          </div>
         )}
         {paletteOpen && (
           <CommandPalette
@@ -495,6 +551,36 @@ const UIContext = React.createContext<{
   openProfile: () => {},
   openChannelDetails: () => {},
 });
+
+/**
+ * Mobile-only stub header rendered above the empty-state when no
+ * channel is selected on a small screen. Surfaces the hamburger
+ * button so the user can still reach the sidebar without first
+ * picking a channel. Hidden on `md+` (the sidebar is always
+ * visible there).
+ */
+function MobileChannelHeaderShell({
+  title,
+  onOpenSidebar,
+}: {
+  title: string;
+  onOpenSidebar: () => void;
+}) {
+  return (
+    <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:hidden">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-10 shrink-0"
+        onClick={onOpenSidebar}
+        aria-label="Open sidebar"
+      >
+        <Menu className="size-5" />
+      </Button>
+      <div className="text-[14.5px] font-semibold tracking-tight">{title}</div>
+    </header>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Login
@@ -1278,11 +1364,14 @@ function ChannelView({
   currentUser,
   threadMessageId,
   onOpenThread,
+  onOpenMobileSidebar,
 }: {
   channelId: string;
   currentUser: User;
   threadMessageId: string | null;
   onOpenThread: (id: string | null) => void;
+  /** Mobile-only: opens the sidebar drawer. Hidden on `md+`. */
+  onOpenMobileSidebar: () => void;
 }) {
   const { data: channel } = db.useQueryOne<Channel>("Channel", channelId);
   const markRead = db.useMutation<{ channelId: string }, unknown>(
@@ -1300,13 +1389,25 @@ function ChannelView({
   const ui = React.useContext(UIContext);
 
   return (
-    <main className="flex min-h-0 flex-col bg-background">
+    <main className="flex min-h-0 flex-1 flex-col bg-background">
       {/* Channel header: cleaner two-column layout with a thin
           vertical separator between the channel name and the
           topic input. The topic gets more horizontal room
           because it's the part that benefits most from space
-          (the placeholder + collaborative-text demo). */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-2.5">
+          (the placeholder + collaborative-text demo). The
+          hamburger button at the start of the row only shows
+          below `md` — desktop has the sidebar permanently open
+          so it's redundant there. */}
+      <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:gap-3 md:px-5 md:py-2.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-10 shrink-0 md:hidden"
+          onClick={onOpenMobileSidebar}
+          aria-label="Open sidebar"
+        >
+          <Menu className="size-5" />
+        </Button>
         <div className="flex min-w-0 flex-1 items-center gap-3">
           {isDm ? (
             <DmHeader channel={channel} currentUser={currentUser} />
@@ -1823,10 +1924,25 @@ function ThreadPanel({
 
   if (!parent) {
     return (
-      <aside className="flex min-h-0 flex-col border-l border-border bg-card/40">
-        <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-          <div className="text-sm font-semibold">Thread</div>
-          <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
+      <aside className="flex min-h-0 flex-1 flex-col border-l border-border bg-card/40">
+        <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:px-4 md:py-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-10 shrink-0 md:hidden"
+            onClick={onClose}
+            aria-label="Back to channel"
+          >
+            <ArrowLeft className="size-5" />
+          </Button>
+          <div className="flex-1 text-sm font-semibold">Thread</div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="hidden size-7 md:flex"
+            onClick={onClose}
+            aria-label="Close thread"
+          >
             <X className="size-4" />
           </Button>
         </header>
@@ -1840,15 +1956,30 @@ function ThreadPanel({
   const replyList = replies ?? [];
 
   return (
-    <aside className="flex min-h-0 flex-col border-l border-border bg-card/40">
-      <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-        <div>
+    <aside className="flex min-h-0 flex-1 flex-col border-l border-border bg-card/40">
+      <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:px-4 md:py-3">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-10 shrink-0 md:hidden"
+          onClick={onClose}
+          aria-label="Back to channel"
+        >
+          <ArrowLeft className="size-5" />
+        </Button>
+        <div className="flex-1">
           <div className="text-sm font-semibold">Thread</div>
           <div className="text-xs text-muted-foreground">
             {replyList.length} {replyList.length === 1 ? "reply" : "replies"}
           </div>
         </div>
-        <Button variant="ghost" size="icon" className="size-7" onClick={onClose} aria-label="Close thread">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="hidden size-7 md:flex"
+          onClick={onClose}
+          aria-label="Close thread"
+        >
           <X className="size-4" />
         </Button>
       </header>
