@@ -19,6 +19,23 @@ export interface RenderRouteMessage {
    * adapter joins cwd + this + the right extension (.tsx → .ts).
    */
   component: string;
+  /**
+   * Project-relative module paths for the layout chain, walked
+   * root → leaf. Each layout's default export wraps the next as
+   * `children`. Absent / empty when no layouts apply.
+   *
+   * Example:
+   *   layouts: ["app/layout", "app/blog/layout"]
+   *   component: "app/blog/[slug]/page"
+   *
+   * Resolves to:
+   *   <RootLayout>
+   *     <BlogLayout>
+   *       <Page {...props} />
+   *     </BlogLayout>
+   *   </RootLayout>
+   */
+  layouts?: string[];
   /** The matched route pattern (e.g. `/blog/:slug`). */
   route_path: string;
   /** The incoming URL path (e.g. `/blog/hello-world`). */
@@ -133,7 +150,51 @@ export async function handleRenderRoute(
       auth: msg.auth,
     };
 
-    const element = React.createElement(Component, props);
+    // Resolve the layout chain. Each layout module exports a default
+    // function that accepts the same props + `children`. Walk leaf →
+    // root: start with the page component as `tree`, then for each
+    // layout (innermost first) wrap it as the new tree. Result is
+    // the outermost layout containing all nested layouts down to
+    // the page.
+    let tree: any = React.createElement(Component, props);
+    const layouts = msg.layouts ?? [];
+    if (layouts.length > 0) {
+      // Resolve all layouts first so we fail fast on a missing one
+      // BEFORE we start emitting headers / chunks.
+      const layoutMods: any[] = [];
+      for (const layoutPath of layouts) {
+        const lBase = `${cwd}/${layoutPath}`;
+        let lMod: any = null;
+        for (const ext of [".tsx", ".ts", ".jsx", ".js"]) {
+          try {
+            lMod = await import(`${lBase}${ext}`);
+            break;
+          } catch {
+            // try next extension
+          }
+        }
+        if (!lMod) {
+          throw new Error(
+            `could not import layout "${layoutPath}" — checked .tsx / .ts / .jsx / .js`,
+          );
+        }
+        const LayoutComp =
+          lMod.default ?? lMod.Layout ?? lMod.layout;
+        if (typeof LayoutComp !== "function") {
+          throw new Error(
+            `layout "${layoutPath}" has no default export (or named export "Layout")`,
+          );
+        }
+        layoutMods.push(LayoutComp);
+      }
+      // Walk LEAF → ROOT (reverse iteration on the layouts array).
+      // The innermost layout wraps the page first; each outer layout
+      // wraps the result.
+      for (let i = layoutMods.length - 1; i >= 0; i--) {
+        tree = React.createElement(layoutMods[i], props, tree);
+      }
+    }
+    const element = tree;
     const stream: ReadableStream<Uint8Array> = await renderToReadableStream(
       element,
       {

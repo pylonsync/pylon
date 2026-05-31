@@ -851,6 +851,7 @@ fn serve_via_ssr_rpc(
 
     let render_result = fn_ops.render_route(
         &component,
+        matched.route.layouts.clone(),
         &matched.route.path,
         &path_only,
         params_json,

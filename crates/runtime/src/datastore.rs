@@ -4050,6 +4050,7 @@ impl pylon_router::FnOps for FnOpsImpl {
     fn render_route(
         &self,
         component: &str,
+        layouts: Vec<String>,
         route_path: &str,
         url: &str,
         params: serde_json::Value,
@@ -4066,6 +4067,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         let runner = self.pool.pick();
         runner.render_route(
             component,
+            layouts,
             route_path,
             url,
             params,

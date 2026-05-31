@@ -528,6 +528,7 @@ impl FnRunner {
     pub fn render_route(
         &self,
         component: &str,
+        layouts: Vec<String>,
         route_path: &str,
         url: &str,
         params: serde_json::Value,
@@ -541,6 +542,7 @@ impl FnRunner {
         let _io = self.io_lock.lock().unwrap();
         self.render_route_inner(
             component,
+            layouts,
             route_path,
             url,
             params,
@@ -558,6 +560,7 @@ impl FnRunner {
     fn render_route_inner(
         &self,
         component: &str,
+        layouts: Vec<String>,
         route_path: &str,
         url: &str,
         params: serde_json::Value,
@@ -576,6 +579,7 @@ impl FnRunner {
         let msg = crate::protocol::RenderRouteMessage::new(
             call_id.clone(),
             component.to_string(),
+            layouts,
             route_path.to_string(),
             url.to_string(),
             params,

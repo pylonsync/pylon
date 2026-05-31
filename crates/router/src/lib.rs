@@ -514,6 +514,7 @@ pub trait FnOps: Send + Sync {
     fn render_route(
         &self,
         _component: &str,
+        _layouts: Vec<String>,
         _route_path: &str,
         _url: &str,
         _params: serde_json::Value,

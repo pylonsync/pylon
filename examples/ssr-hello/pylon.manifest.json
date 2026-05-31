@@ -20,12 +20,18 @@
     {
       "path": "/",
       "mode": "ssr",
-      "component": "app/page"
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
     },
     {
       "path": "/hello",
       "mode": "ssr",
-      "component": "app/hello/page"
+      "component": "app/hello/page",
+      "layouts": [
+        "app/layout"
+      ]
     }
   ],
   "queries": [],

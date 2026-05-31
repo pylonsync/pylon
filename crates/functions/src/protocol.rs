@@ -92,6 +92,14 @@ pub struct RenderRouteMessage {
     pub msg_type: &'static str, // always "render_route"
     pub call_id: String,
     pub component: String,
+    /// Layout chain walked root → leaf. Each entry is a project-
+    /// relative module path. The Bun adapter dynamically imports
+    /// each layout's default export and wraps them around the page
+    /// component (leaf → root assembly so the outermost layout's
+    /// children is the next layout, terminating with the page).
+    /// Empty when no layouts apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<String>,
     pub route_path: String,
     pub url: String,
     pub params: serde_json::Value,
@@ -102,9 +110,11 @@ pub struct RenderRouteMessage {
 }
 
 impl RenderRouteMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         call_id: String,
         component: String,
+        layouts: Vec<String>,
         route_path: String,
         url: String,
         params: serde_json::Value,
@@ -117,6 +127,7 @@ impl RenderRouteMessage {
             msg_type: "render_route",
             call_id,
             component,
+            layouts,
             route_path,
             url,
             params,
