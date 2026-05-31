@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+
+@theme {
+  /* Warm cream + charcoal palette. Acme-inspired. */
+  --color-cream: #faf8f4;
+  --color-cream-deep: #f3efe7;
+  --color-ink: #1c1b19;
+  --color-ink-soft: #2c2c2b;
+  --color-stone: #6d6863;
+  --color-stone-soft: #b8b2a8;
+  --color-line: #e8e3d8;
+
+  /* Brand accent — vivid orange that pops against cream. */
+  --color-brand: #ff5a1f;
+  --color-brand-deep: #d94a14;
+
+  --font-sans: "Inter", "Inter Placeholder", ui-sans-serif, -apple-system,
+    "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+}
+
+body {
+  background: var(--color-cream);
+  color: var(--color-ink-soft);
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Display headlines tighten by default — Acme-style. */
+.display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+
+/* Soft horizontal rule used between sections. */
+.hairline {
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--color-line),
+    transparent
+  );
+  height: 1px;
+}

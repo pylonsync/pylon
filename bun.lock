@@ -62,6 +62,16 @@
         "react-dom": "^19.0.0",
       },
     },
+    "examples/acme": {
+      "name": "acme",
+      "version": "0.1.0",
+      "dependencies": {
+        "@tailwindcss/cli": "^4.3.0",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "tailwindcss": "^4.3.0",
+      },
+    },
     "examples/arena": {
       "name": "arena-example",
       "version": "0.1.0",
@@ -280,6 +290,8 @@
       "name": "ssr-hello",
       "version": "0.1.0",
       "dependencies": {
+        "@pylonsync/react": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
         "@tailwindcss/cli": "^4.3.0",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
@@ -1122,6 +1134,8 @@
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
+
+    "acme": ["acme@workspace:examples/acme"],
 
     "acorn": ["acorn@8.16.0", "", { "bin": { "acorn": "bin/acorn" } }, "sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw=="],
 
