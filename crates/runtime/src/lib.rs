@@ -3,6 +3,7 @@ pub mod api_key_backend;
 pub mod audit_backend;
 pub mod cache_handlers;
 pub mod cache_server;
+pub mod change_log_persister;
 pub mod change_log_store;
 pub mod config;
 pub mod connections;
@@ -762,44 +763,93 @@ impl Runtime {
         Ok(())
     }
 
-    /// Persist a single change event to `_pylon_change_log`. Called
-    /// from `SqliteChangeLogStore::append` on every mutation. Failure
-    /// is logged and swallowed so a transient disk error doesn't
-    /// break the live broadcast — same trade-off as the change_log's
-    /// in-memory ring-buffer eviction policy.
-    pub fn sqlite_change_log_append(&self, event: &pylon_sync::ChangeEvent) {
+    /// Persist a batch of change events to `_pylon_change_log` in a
+    /// single SQLite transaction. Called from the background
+    /// `ChangeLogPersister` worker, NOT from the mutation hot path —
+    /// the hot path already holds `write_conn` for its own BEGIN/
+    /// COMMIT, and trying to re-acquire here would deadlock
+    /// (`std::sync::Mutex` is not reentrant — same shape as the
+    /// v0.3.218 seq-persistence regression). The persister thread
+    /// queues behind any active mutation tx, gets the lock when
+    /// it's free, runs the batched INSERT, releases.
+    pub fn sqlite_change_log_persist_batch(
+        &self,
+        events: &[pylon_sync::ChangeEvent],
+    ) -> Result<(), RuntimeError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let sb = self.sqlite_backend()?;
+        let mut conn = sb.write_conn.lock().map_err(|e| RuntimeError {
+            code: "SQLITE_LOCK_FAILED".into(),
+            message: format!("write_conn lock poisoned: {e}"),
+        })?;
+        let tx = conn.transaction().map_err(|e| RuntimeError {
+            code: "SQLITE_CHANGE_LOG_TX_BEGIN_FAILED".into(),
+            message: format!("BEGIN: {e}"),
+        })?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT OR REPLACE INTO _pylon_change_log \
+                     (seq, entity, row_id, kind, data, prev_data, timestamp) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|e| RuntimeError {
+                    code: "SQLITE_CHANGE_LOG_PREPARE_FAILED".into(),
+                    message: format!("prepare INSERT: {e}"),
+                })?;
+            for event in events {
+                let data_blob = event.data.as_ref().and_then(|v| serde_json::to_vec(v).ok());
+                let prev_blob = event
+                    .prev_data
+                    .as_ref()
+                    .and_then(|v| serde_json::to_vec(v).ok());
+                stmt.execute(rusqlite::params![
+                    event.seq as i64,
+                    event.entity,
+                    event.row_id,
+                    change_kind_to_str(event.kind.clone()),
+                    data_blob,
+                    prev_blob,
+                    event.timestamp,
+                ])
+                .map_err(|e| RuntimeError {
+                    code: "SQLITE_CHANGE_LOG_INSERT_FAILED".into(),
+                    message: format!("INSERT seq={}: {e}", event.seq),
+                })?;
+            }
+        }
+        tx.commit().map_err(|e| RuntimeError {
+            code: "SQLITE_CHANGE_LOG_COMMIT_FAILED".into(),
+            message: format!("COMMIT: {e}"),
+        })?;
+        Ok(())
+    }
+
+    /// Return `true` when `_pylon_change_log` already has at least
+    /// one event for the named entity. Used by the boot-time seed
+    /// loop to decide PER ENTITY whether to skip seeding. A binary
+    /// "any persisted event" gate (the original v0.3.224 shape)
+    /// silently broke every entity added to the manifest after the
+    /// database had any writes — the new entity's pre-existing rows
+    /// never got Insert events into the log. Per-entity gating closes
+    /// that gap.
+    pub fn sqlite_change_log_has_entity(&self, entity: &str) -> bool {
         let sb = match self.sqlite_backend() {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => return false,
         };
         let conn = match sb.write_conn.lock() {
             Ok(c) => c,
-            Err(_) => {
-                tracing::warn!("[change_log] write_conn poisoned; skipping persist");
-                return;
-            }
+            Err(_) => return false,
         };
-        let data_blob = event.data.as_ref().and_then(|v| serde_json::to_vec(v).ok());
-        let prev_blob = event
-            .prev_data
-            .as_ref()
-            .and_then(|v| serde_json::to_vec(v).ok());
-        if let Err(e) = conn.execute(
-            "INSERT OR REPLACE INTO _pylon_change_log \
-             (seq, entity, row_id, kind, data, prev_data, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                event.seq as i64,
-                event.entity,
-                event.row_id,
-                change_kind_to_str(event.kind.clone()),
-                data_blob,
-                prev_blob,
-                event.timestamp,
-            ],
-        ) {
-            tracing::warn!(seq = event.seq, error = %e, "[change_log] persist failed");
-        }
+        conn.query_row(
+            "SELECT 1 FROM _pylon_change_log WHERE entity = ?1 LIMIT 1",
+            rusqlite::params![entity],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok()
     }
 
     /// Read the most recent `limit` events from `_pylon_change_log`,

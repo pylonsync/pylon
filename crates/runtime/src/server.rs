@@ -659,7 +659,7 @@ fn start_server(
     // ring with the most recent `capacity` events ordered ASC, so
     // post-boot pulls cover the same window the previous process
     // was serving.
-    let mut had_persisted_events = false;
+    let mut change_log_persistent = false;
     if !runtime.is_postgres() && !runtime.is_in_memory() {
         if let Err(e) = runtime.bootstrap_sqlite_change_log() {
             tracing::warn!(
@@ -671,9 +671,10 @@ fn start_server(
             let store = std::sync::Arc::new(crate::change_log_store::SqliteChangeLogStore::new(
                 Arc::clone(&runtime),
             ));
-            had_persisted_events = !store.load_recent(1).is_empty();
+            let hydrated_any = !store.load_recent(1).is_empty();
             change_log_builder = change_log_builder.with_store(store);
-            if had_persisted_events {
+            change_log_persistent = true;
+            if hydrated_any {
                 tracing::info!("[change_log] hydrated in-memory ring from _pylon_change_log");
             } else {
                 tracing::info!("[change_log] using SQLite _pylon_change_log (empty on first boot)");
@@ -691,28 +692,30 @@ fn start_server(
     // whose cursors are ahead of `self.seq` get a 410 and full resync,
     // which then hits this seeded log and gets every current row back.
     //
-    // SKIP this when the persistent store already hydrated events —
-    // those events ARE the current state, and re-seeding would assign
-    // fresh seqs to rows that already have older Insert events on
-    // disk, bloating the log without changing observable behavior.
-    if !had_persisted_events {
-        for entity in runtime.manifest().entities.iter() {
-            match runtime.list(&entity.name) {
-                Ok(rows) => {
-                    for row in rows {
-                        if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
-                            change_log.append(
-                                &entity.name,
-                                id,
-                                ChangeKind::Insert,
-                                Some(row.clone()),
-                            );
-                        }
+    // PER-ENTITY gating when persistence is on: skip seeding for
+    // entities whose rows are already covered by events in
+    // `_pylon_change_log`, but DO seed entities that are absent from
+    // the persisted log (e.g. a new entity added to the manifest
+    // after the previous boot, a table restored from a snapshot,
+    // an entity migrated in via out-of-band SQL). A binary
+    // had-any-persisted-event gate would silently make new
+    // entities invisible to /api/sync/pull until the next write.
+    for entity in runtime.manifest().entities.iter() {
+        let already_seeded =
+            change_log_persistent && runtime.sqlite_change_log_has_entity(&entity.name);
+        if already_seeded {
+            continue;
+        }
+        match runtime.list(&entity.name) {
+            Ok(rows) => {
+                for row in rows {
+                    if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                        change_log.append(&entity.name, id, ChangeKind::Insert, Some(row.clone()));
                     }
                 }
-                Err(_) => {
-                    // Entity table may not exist yet on first boot — skip.
-                }
+            }
+            Err(_) => {
+                // Entity table may not exist yet on first boot — skip.
             }
         }
     }
