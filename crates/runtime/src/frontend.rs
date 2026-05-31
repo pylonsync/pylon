@@ -339,6 +339,15 @@ pub fn try_handle(
         return Err(request);
     }
 
+    // Hydration client bundle. SSR pages emit a
+    // `<script type="module" src="/_pylon/client.js">` tag; this
+    // handler serves the Bun-built bundle. Cached on disk by the
+    // bundler; we just stream the file.
+    let path_only = url.split('?').next().unwrap_or(&url);
+    if path_only == "/_pylon/client.js" && cfg.fn_ops.is_some() {
+        return serve_pylon_client_bundle(cfg, request, cors_origin);
+    }
+
     // SSR branch sits ABOVE dev_proxy so file-based pages take
     // precedence over Vite's catch-all (Vite would serve the SPA
     // shell, masking the SSR'd output). Falls through to proxy/disk
@@ -947,6 +956,113 @@ fn serve_via_ssr_rpc(
     Ok(())
 }
 
+/// Memoized client-bundle path. The first request triggers Bun.build
+/// via the RPC; subsequent requests serve the same file off disk.
+/// Phase 1.5d: cached for the process lifetime (no file-watcher
+/// invalidation yet — restart pylon dev to pick up app/ changes).
+fn cached_client_bundle_path() -> &'static std::sync::Mutex<Option<String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Serve the hydration client bundle. Calls `bundle_client` on the
+/// function runner on first request, caches the path, then streams
+/// the file off disk on every request thereafter.
+///
+/// Returns a 500 (or falls through to API routing on
+/// HYDRATION_NOT_IMPLEMENTED) if the bundler fails. The SSR'd HTML
+/// stays renderable without hydration — pages just don't become
+/// interactive.
+fn serve_pylon_client_bundle(
+    cfg: &FrontendConfig,
+    request: Request,
+    cors_origin: &str,
+) -> Result<(), Request> {
+    let fn_ops = match cfg.fn_ops.as_ref() {
+        Some(f) => f.clone(),
+        None => return Err(request),
+    };
+
+    let mut cache = cached_client_bundle_path().lock().unwrap();
+    if cache.is_none() {
+        match fn_ops.bundle_client() {
+            Ok(path) => {
+                tracing::info!(path = %path, "SSR client bundle built");
+                *cache = Some(path);
+            }
+            Err(e) => {
+                drop(cache);
+                tracing::error!(
+                    code = %e.code,
+                    message = %e.message,
+                    "SSR client bundle failed"
+                );
+                let body = format!(
+                    "// Pylon client bundle failed to build:\n// {}: {}\n",
+                    e.code, e.message
+                );
+                let response = Response::from_data(body.into_bytes())
+                    .with_status_code(500u16)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
+                            .unwrap(),
+                    )
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    );
+                let _ = request.respond(response);
+                return Ok(());
+            }
+        }
+    }
+    let path = cache.clone().unwrap();
+    drop(cache);
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            // Bundle was deleted from disk between build + read.
+            // Invalidate cache so the next request rebuilds.
+            *cached_client_bundle_path().lock().unwrap() = None;
+            tracing::error!(
+                path = %path,
+                error = %e,
+                "SSR client bundle disappeared; invalidating cache"
+            );
+            let body = b"// Pylon client bundle missing\n".to_vec();
+            let response = Response::from_data(body)
+                .with_status_code(500u16)
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
+                        .unwrap(),
+                );
+            let _ = request.respond(response);
+            return Ok(());
+        }
+    };
+
+    let response = Response::from_data(bytes)
+        .with_status_code(200u16)
+        .with_header(
+            Header::from_bytes("Content-Type", "application/javascript; charset=utf-8").unwrap(),
+        )
+        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+        .with_header(
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        );
+    let _ = request.respond(response);
+    Ok(())
+}
+
 /// Build the AuthInfo for an SSR render by looking up the request's
 /// session cookie in the configured SessionStore. Returns anonymous
 /// AuthInfo when:
@@ -967,8 +1083,7 @@ fn resolve_request_auth(
         tenant_id: None,
         roles: vec![],
     };
-    let (Some(store), Some(cookie_cfg)) =
-        (cfg.session_store.as_ref(), cfg.cookie_config.as_ref())
+    let (Some(store), Some(cookie_cfg)) = (cfg.session_store.as_ref(), cfg.cookie_config.as_ref())
     else {
         return anonymous;
     };

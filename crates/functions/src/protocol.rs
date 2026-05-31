@@ -300,6 +300,12 @@ pub enum TsMessage {
     /// beyond `call_id` (status + headers came in ResponseStart).
     #[serde(rename = "render_done")]
     RenderDone(RenderDoneMessage),
+
+    /// Hydration — Bun finished bundling the client entry; the
+    /// `path` field carries the absolute path on disk to read from.
+    /// One-shot reply to `BundleClientMessage`.
+    #[serde(rename = "bundle_client_result")]
+    BundleClientResult(BundleClientResultMessage),
 }
 
 /// Handshake payload from the TS runtime.
@@ -531,6 +537,49 @@ pub struct RenderChunkMessage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RenderDoneMessage {
     pub call_id: String,
+}
+
+/// Hydration — host asks Bun to bundle the client entry. Bun
+/// discovers `app/**/page.tsx` + `app/**/layout.tsx`, generates a
+/// hydration entry that imports each, wraps it with React +
+/// react-dom/client, calls Bun.build({ target: "browser" }), and
+/// writes the result to `.pylon/client.js` under the project cwd.
+/// Returns the absolute path so the host can stream it directly
+/// from disk on `/_pylon/client.js` requests — no base64 round-trip
+/// over NDJSON for a ~150kB bundle.
+///
+/// Phase 1.5d: built once at boot, cached forever. File-watcher
+/// invalidation comes with the dev-time HMR plumbing in Phase 1.5e.
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleClientMessage {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str, // always "bundle_client"
+    pub call_id: String,
+}
+
+impl BundleClientMessage {
+    pub fn new(call_id: String) -> Self {
+        Self {
+            msg_type: "bundle_client",
+            call_id,
+        }
+    }
+}
+
+/// Hydration — Bun → host with the absolute path of the freshly
+/// built bundle (or an error if Bun.build failed). The host
+/// `fs::read`s the path on each `/_pylon/client.js` request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BundleClientResultMessage {
+    pub call_id: String,
+    /// Absolute path on disk. Empty when an error occurred — the
+    /// `error` field carries the failure detail in that case.
+    #[serde(default)]
+    pub path: String,
+    /// Optional failure message. Mutually exclusive with a useful
+    /// `path` value.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Function failed.

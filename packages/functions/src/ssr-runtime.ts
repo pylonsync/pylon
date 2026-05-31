@@ -232,6 +232,36 @@ export async function handleRenderRoute(
         data: b64,
       });
     }
+
+    // Hydration tail. After React's stream EOFs we append two
+    // script tags so the browser can:
+    //   1. Read the per-route hydration payload (component +
+    //      layouts + props) from a JSON-typed script tag.
+    //   2. Fetch + execute the bundled client entry at
+    //      `/_pylon/client.js`, which dispatches on the payload
+    //      and calls hydrateRoot.
+    //
+    // The JSON payload is HTML-escaped inside a `type="application/
+    // json"` script tag. Browsers don't execute non-script types,
+    // so `</script>` inside the body needs to be escaped — JSON
+    // never contains a raw `</script>`, but a malicious URL /
+    // searchParams pair could. Replace `<` with `<` to be
+    // safe; JSON parsers accept the escape transparently.
+    const hydrationPayload = {
+      component: msg.component,
+      layouts: msg.layouts ?? [],
+      props,
+    };
+    const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
+    const tail =
+      `<script id="__PYLON_DATA__" type="application/json">${json}</script>` +
+      `<script type="module" src="/_pylon/client.js"></script>`;
+    send({
+      type: "render_chunk",
+      call_id: msg.call_id,
+      data: Buffer.from(tail, "utf8").toString("base64"),
+    });
+
     send({ type: "render_done", call_id: msg.call_id });
   } catch (err: any) {
     // Pre-first-chunk error → host returns 500.

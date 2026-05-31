@@ -4080,6 +4080,11 @@ impl pylon_router::FnOps for FnOpsImpl {
         )
     }
 
+    fn bundle_client(&self) -> Result<String, FnCallError> {
+        let runner = self.pool.pick();
+        runner.bundle_client()
+    }
+
     fn recent_traces(&self, limit: usize) -> Vec<FnTrace> {
         self.pool.recent_traces(limit)
     }

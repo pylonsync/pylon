@@ -230,6 +230,24 @@ function dispatch(line: string): void {
           message: err?.message || String(err),
         });
       });
+  } else if (msg.type === "bundle_client") {
+    // Hydration — build the client-side bundle once and report
+    // the path back. Lazy-imported for the same reason as SSR.
+    import("./ssr-client-bundler")
+      .then((mod) =>
+        mod.handleBundleClient(
+          msg as unknown as Parameters<typeof mod.handleBundleClient>[0],
+          send,
+        ),
+      )
+      .catch((err) => {
+        send({
+          type: "bundle_client_result",
+          call_id: (msg as unknown as { call_id: string }).call_id,
+          path: "",
+          error: err?.message || String(err),
+        });
+      });
   } else if (msg.type === "result") {
     const res = msg as unknown as ResultMessage & { op_id?: string };
     // Prefer op_id when the host sent it. Fall back to call_id for replies

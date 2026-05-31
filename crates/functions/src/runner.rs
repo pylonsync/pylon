@@ -625,6 +625,51 @@ impl FnRunner {
         }
     }
 
+    /// Hydration — bundle the user's `app/**/page.tsx` +
+    /// `app/**/layout.tsx` tree into a single client-side ES module
+    /// for browsers to load. Bun does the work; this method just
+    /// drives the RPC.
+    ///
+    /// Returns the absolute path of the built bundle on success.
+    /// Phase 1.5d: caller is expected to read the file from disk
+    /// and serve it directly — the path is cheaper to pass over
+    /// stdio than the ~150kB bundle bytes themselves.
+    pub fn bundle_client(&self) -> Result<String, FnCallError> {
+        let _io = self.io_lock.lock().unwrap();
+        let timeout = *self.call_timeout.lock().unwrap();
+        let deadline = Instant::now() + timeout;
+        let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+        let msg = crate::protocol::BundleClientMessage::new(call_id.clone());
+        self.send(&msg)?;
+        loop {
+            let m = self.recv(deadline)?;
+            match m {
+                TsMessage::BundleClientResult(r) if r.call_id == call_id => {
+                    if let Some(err) = r.error {
+                        return Err(FnCallError {
+                            code: "BUNDLE_CLIENT_FAILED".into(),
+                            message: err,
+                        });
+                    }
+                    if r.path.is_empty() {
+                        return Err(FnCallError {
+                            code: "BUNDLE_CLIENT_EMPTY_PATH".into(),
+                            message: "Bun returned no path".into(),
+                        });
+                    }
+                    return Ok(r.path);
+                }
+                TsMessage::Error(err) if err.call_id == call_id => {
+                    return Err(FnCallError {
+                        code: err.code,
+                        message: err.message,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Lock-acquiring variant that propagates the caller's `internal`
     /// flag so the schedule hook can refuse public-to-internal smuggle
     /// attempts. Used by `FnOpsImpl::call` which knows `def.internal`
