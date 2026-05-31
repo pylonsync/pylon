@@ -20,10 +20,10 @@ export default function RootLayout({ children, url }: LayoutProps) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Acme — The intelligent operating system for modern teams</title>
+        <title>Acme</title>
         <meta
           name="description"
-          content="Acme replaces the patchwork of tools your team is stitching together. One workspace, one keyboard shortcut, one source of truth."
+          content="Acme learns how you work, drafts the busywork, and hands you back the day."
         />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
@@ -48,45 +48,46 @@ export default function RootLayout({ children, url }: LayoutProps) {
 function Nav({ url }: { url: string }) {
   const links = [
     { href: "/pricing", label: "Pricing" },
+    { href: "/about", label: "Enterprise" },
+    { href: "/about", label: "Security" },
     { href: "/about", label: "About" },
-    { href: "/blog", label: "Blog" },
   ];
   return (
-    <header className="sticky top-0 z-30 border-b border-[var(--color-line)] bg-[var(--color-cream)]/85 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+    <header className="sticky top-0 z-30 bg-[var(--color-page)]/85 backdrop-blur">
+      <div className="mx-auto grid h-16 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-8 px-6">
         <Link
           href="/"
-          className="flex items-center gap-2 text-[var(--color-ink)]"
+          className="flex items-center gap-2 justify-self-start text-[var(--color-ink)]"
         >
           <BrandMark />
           <span className="text-base font-semibold tracking-tight">Acme</span>
         </Link>
-        <nav className="hidden items-center gap-8 text-sm text-[var(--color-stone)] md:flex">
-          {links.map((l) => (
+        <nav className="hidden items-center gap-8 text-sm text-[var(--color-ink-soft)] md:flex">
+          {links.map((l, i) => (
             <Link
-              key={l.href}
+              key={i}
               href={l.href}
               className={
-                "transition hover:text-[var(--color-ink)] " +
-                (url.startsWith(l.href) ? "text-[var(--color-ink)]" : "")
+                "transition hover:opacity-60 " +
+                (url === l.href ? "" : "")
               }
             >
               {l.label}
             </Link>
           ))}
         </nav>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4 justify-self-end">
           <Link
             href="/sign-in"
-            className="hidden text-sm text-[var(--color-stone)] transition hover:text-[var(--color-ink)] md:inline"
+            className="hidden text-sm text-[var(--color-ink-soft)] transition hover:opacity-60 md:inline"
           >
-            Sign in
+            Login
           </Link>
           <Link
             href="/sign-up"
-            className="rounded-full bg-[var(--color-ink)] px-4 py-2 text-sm font-medium text-[var(--color-cream)] shadow-sm transition hover:bg-[var(--color-ink-soft)]"
+            className="rounded-lg bg-[var(--color-ink)] px-3.5 py-1.5 text-sm font-medium text-white transition hover:bg-[var(--color-ink-soft)]"
           >
-            Get started
+            Get Started
           </Link>
         </div>
       </div>
@@ -95,13 +96,18 @@ function Nav({ url }: { url: string }) {
 }
 
 function BrandMark() {
+  // Acme-style minimal logo mark — three stacked lines, soft blue.
   return (
-    <span
+    <svg
       aria-hidden
-      className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-brand)] text-[var(--color-cream)]"
+      viewBox="0 0 24 18"
+      className="h-4 w-6 text-[var(--color-blue)]"
+      fill="none"
     >
-      <span className="text-base font-bold">A</span>
-    </span>
+      <rect x="0" y="0" width="20" height="3" rx="1.5" fill="currentColor" />
+      <rect x="2" y="6" width="18" height="3" rx="1.5" fill="currentColor" opacity="0.85" />
+      <rect x="4" y="12" width="14" height="3" rx="1.5" fill="currentColor" opacity="0.65" />
+    </svg>
   );
 }
 
@@ -111,9 +117,9 @@ function Footer() {
       heading: "Product",
       links: [
         { href: "/pricing", label: "Pricing" },
-        { href: "/changelog", label: "Changelog" },
-        { href: "/security", label: "Security" },
-        { href: "/integrations", label: "Integrations" },
+        { href: "/", label: "Changelog" },
+        { href: "/", label: "Security" },
+        { href: "/", label: "Integrations" },
       ],
     },
     {
@@ -121,31 +127,31 @@ function Footer() {
       links: [
         { href: "/about", label: "About" },
         { href: "/blog", label: "Blog" },
-        { href: "/careers", label: "Careers" },
-        { href: "/contact", label: "Contact" },
+        { href: "/", label: "Careers" },
+        { href: "/", label: "Contact" },
       ],
     },
     {
       heading: "Resources",
       links: [
-        { href: "/docs", label: "Docs" },
-        { href: "/community", label: "Community" },
-        { href: "/customers", label: "Customers" },
-        { href: "/status", label: "Status" },
+        { href: "/", label: "Docs" },
+        { href: "/", label: "Customers" },
+        { href: "/", label: "Status" },
+        { href: "/", label: "Brand" },
       ],
     },
     {
       heading: "Legal",
       links: [
-        { href: "/terms", label: "Terms" },
-        { href: "/privacy", label: "Privacy" },
-        { href: "/cookies", label: "Cookies" },
-        { href: "/dpa", label: "DPA" },
+        { href: "/", label: "Terms" },
+        { href: "/", label: "Privacy" },
+        { href: "/", label: "Cookies" },
+        { href: "/", label: "DPA" },
       ],
     },
   ];
   return (
-    <footer className="mt-32 border-t border-[var(--color-line)]">
+    <footer className="mt-32">
       <div className="mx-auto max-w-6xl px-6 py-16">
         <div className="grid grid-cols-2 gap-10 md:grid-cols-5">
           <div className="col-span-2 md:col-span-1">
@@ -155,8 +161,8 @@ function Footer() {
                 Acme
               </span>
             </div>
-            <p className="mt-4 max-w-xs text-sm text-[var(--color-stone)]">
-              The intelligent operating system for modern teams.
+            <p className="mt-4 max-w-xs text-sm text-[var(--color-muted)]">
+              The intelligent workspace.
             </p>
           </div>
           {cols.map((c) => (
@@ -164,9 +170,9 @@ function Footer() {
               <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-ink)]">
                 {c.heading}
               </h4>
-              <ul className="mt-4 space-y-2.5 text-sm text-[var(--color-stone)]">
-                {c.links.map((l) => (
-                  <li key={l.href}>
+              <ul className="mt-4 space-y-2.5 text-sm text-[var(--color-muted)]">
+                {c.links.map((l, i) => (
+                  <li key={i}>
                     <Link
                       href={l.href}
                       className="transition hover:text-[var(--color-ink)]"
@@ -179,8 +185,8 @@ function Footer() {
             </div>
           ))}
         </div>
-        <div className="mt-16 flex flex-col items-start justify-between gap-4 border-t border-[var(--color-line)] pt-8 text-xs text-[var(--color-stone)] md:flex-row md:items-center">
-          <span>© {new Date().getFullYear()} Acme, Inc. All rights reserved.</span>
+        <div className="mt-16 flex flex-col items-start justify-between gap-2 pt-8 text-xs text-[var(--color-muted)] md:flex-row md:items-center">
+          <span>© {new Date().getFullYear()} Acme, Inc.</span>
           <span>Made for teams that ship.</span>
         </div>
       </div>

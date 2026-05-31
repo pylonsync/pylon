@@ -3,50 +3,60 @@
 @source "../app/**/*.{tsx,ts,jsx,js}";
 
 @theme {
-  /* Warm cream + charcoal palette. Acme-inspired. */
-  --color-cream: #faf8f4;
-  --color-cream-deep: #f3efe7;
-  --color-ink: #1c1b19;
+  /* Acme-inspired palette: near-white surfaces, warm near-black ink,
+     soft neutral cards. Color shows up only as an inline highlight. */
+  --color-page: #fbfaf7;
+  --color-card: #f3f1ec;
+  --color-card-soft: #f7f5f1;
+  --color-ink: #1a1a19;
   --color-ink-soft: #2c2c2b;
-  --color-stone: #6d6863;
-  --color-stone-soft: #b8b2a8;
-  --color-line: #e8e3d8;
+  --color-muted: #696460;
+  --color-muted-soft: #a8a39c;
+  --color-line: #e6e1d6;
 
-  /* Brand accent — vivid orange that pops against cream. */
-  --color-brand: #ff5a1f;
-  --color-brand-deep: #d94a14;
+  /* Highlight accent — used only behind a single word in a section
+     title. Subdued coral, not vivid orange. */
+  --color-highlight: #ffdacc;
+  --color-highlight-ink: #c44a1f;
+
+  /* Subtle blue accent used inline (Acme uses a soft blue for the
+     mark / icon). Used sparingly. */
+  --color-blue: #5b8cf5;
 
   --font-sans: "Inter", "Inter Placeholder", ui-sans-serif, -apple-system,
     "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
-
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-  --radius-2xl: 1.25rem;
 }
 
 body {
-  background: var(--color-cream);
+  background: var(--color-page);
   color: var(--color-ink-soft);
   font-feature-settings: "ss01", "cv11";
 }
 
-/* Display headlines tighten by default — Acme-style. */
+/* Acme uses very tight, very bold display headlines. */
 .display {
   font-family: var(--font-display);
   font-weight: 700;
-  letter-spacing: -0.025em;
-  line-height: 1;
+  letter-spacing: -0.035em;
+  line-height: 0.98;
 }
 
-/* Soft horizontal rule used between sections. */
-.hairline {
-  background: linear-gradient(
-    to right,
-    transparent,
-    var(--color-line),
-    transparent
-  );
-  height: 1px;
+/* Inline word-highlight. Drop into a headline:
+   <span class="hl">GPT slop</span>  */
+.hl {
+  background: var(--color-highlight);
+  color: var(--color-highlight-ink);
+  padding: 0.05em 0.25em;
+  border-radius: 0.2em;
+}
+
+/* Product mockup chrome — soft rounded card with subtle inner border. */
+.mock {
+  background: white;
+  border: 1px solid var(--color-line);
+  border-radius: 1.25rem;
+  box-shadow:
+    0 1px 0 0 rgb(0 0 0 / 0.02),
+    0 24px 60px -28px rgb(28 27 25 / 0.18);
 }
