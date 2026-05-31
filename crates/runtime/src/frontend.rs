@@ -840,64 +840,75 @@ fn serve_via_ssr_rpc(
     // AuthInfo — matches Phase 1 behavior.
     let auth = resolve_request_auth(cfg, &cookies_map);
 
-    // Buffer the full render. Phase 1.5 streams this through tiny_http
-    // chunked transfer.
-    let body_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let status_holder = std::sync::Arc::new(std::sync::Mutex::new(200u16));
-    let headers_holder = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-        String,
-        String,
-    >::new()));
+    // Stream render output via tiny_http chunked transfer encoding.
+    // The render thread writes each base64-decoded chunk into `tx`;
+    // the response writer thread reads from `rx` through
+    // `StreamingBody`. Dropping `tx` (render completion or error)
+    // closes the stream cleanly.
+    //
+    // Phase 1.5c: response status + headers are NOT yet plumbed from
+    // the Bun handler's response_start. Always 200 + text/html. A
+    // future revision threads response_start through a oneshot so
+    // the handler can set status before the body is committed; for
+    // Phase 1 + 1.5 use cases (marketing / SEO / app pages) the
+    // defaults are right.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+    let streaming_body = crate::server::StreamingBody::new(rx);
 
-    let body_clone = std::sync::Arc::clone(&body_buf);
-    let status_clone = std::sync::Arc::clone(&status_holder);
-    let headers_clone = std::sync::Arc::clone(&headers_holder);
-
-    let on_chunk: pylon_functions::runner::ByteStreamCallback = Box::new(move |bytes: &[u8]| {
-        if let Ok(mut buf) = body_clone.lock() {
-            buf.extend_from_slice(bytes);
-        }
-    });
-    let on_response_start: Option<pylon_functions::runner::ResponseStartCallback> =
-        Some(Box::new(move |status, hdrs| {
-            if let Ok(mut s) = status_clone.lock() {
-                *s = status;
+    let fn_ops_for_render = std::sync::Arc::clone(&fn_ops);
+    let component_owned = component.clone();
+    let layouts = matched.route.layouts.clone();
+    let route_path_owned = matched.route.path.clone();
+    let path_only_owned = path_only.clone();
+    let tx_for_render = tx.clone();
+    let render_thread = std::thread::Builder::new()
+        .name("pylon-ssr-render".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let on_chunk: pylon_functions::runner::ByteStreamCallback =
+                Box::new(move |bytes: &[u8]| {
+                    // sync_channel(64) bounds memory; full channel
+                    // blocks the render thread (= backpressure from
+                    // the slow client). Send failures (rx dropped)
+                    // means the client disconnected — drop quietly.
+                    let _ = tx_for_render.send(bytes.to_vec());
+                });
+            let render_result = fn_ops_for_render.render_route(
+                &component_owned,
+                layouts,
+                &route_path_owned,
+                &path_only_owned,
+                params_json,
+                search_params_json,
+                headers_map,
+                cookies_map,
+                auth,
+                None, // response_start (Phase 1.5c+: thread via oneshot)
+                on_chunk,
+            );
+            if let Err(e) = render_result {
+                tracing::error!(
+                    code = %e.code,
+                    message = %e.message,
+                    "SSR render failed"
+                );
+                // Failure AFTER the response head + (possibly some)
+                // body bytes have already been written. Best we can
+                // do is drop the connection by letting tx fall out
+                // of scope — partial HTML reaches the browser, no
+                // structured 500 page possible at this point.
+                // React's renderToReadableStream onError hook
+                // already logged to stderr for the operator.
             }
-            if let Ok(mut h) = headers_clone.lock() {
-                *h = hdrs;
-            }
-        }));
+            // tx drops here → rx closes → StreamingBody EOF →
+            // tiny_http finalizes the chunked transfer.
+        });
 
-    let render_result = fn_ops.render_route(
-        &component,
-        matched.route.layouts.clone(),
-        &matched.route.path,
-        &path_only,
-        params_json,
-        search_params_json,
-        headers_map,
-        cookies_map,
-        auth,
-        on_response_start,
-        on_chunk,
-    );
-
-    if let Err(e) = render_result {
-        // Render failed BEFORE the first chunk — return 500 with the
-        // error code embedded. Phase 1.5 will distinguish "before any
-        // bytes flushed" (recoverable to 500) vs "mid-stream" (must
-        // truncate-and-drop).
-        tracing::error!(
-            code = %e.code,
-            message = %e.message,
-            "SSR render failed"
-        );
-        let body = format!(
-            "<!DOCTYPE html><html><body><h1>SSR error</h1><pre>{}: {}</pre></body></html>",
-            html_escape(&e.code),
-            html_escape(&e.message)
-        );
-        let response = Response::from_data(body.into_bytes())
+    if let Err(e) = render_thread {
+        // Couldn't spawn the render thread. Inline 500.
+        tracing::error!(error = ?e, "failed to spawn SSR render thread");
+        let body = b"<!DOCTYPE html><html><body><h1>SSR error</h1><p>internal scheduling error</p></body></html>".to_vec();
+        let response = Response::from_data(body)
             .with_status_code(500u16)
             .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
             .with_header(
@@ -911,37 +922,27 @@ fn serve_via_ssr_rpc(
         return Ok(());
     }
 
-    let final_status = *status_holder.lock().unwrap();
-    let final_headers = headers_holder.lock().unwrap().clone();
-    let body_vec = body_buf.lock().unwrap().clone();
+    // Drop our own tx clone so the render thread is the sole sender.
+    drop(tx);
 
-    let content_type = final_headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| "text/html; charset=utf-8".to_string());
-
-    let mut response = Response::from_data(body_vec)
-        .with_status_code(final_status)
-        .with_header(Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap())
-        .with_header(
+    let response = Response::new(
+        tiny_http::StatusCode(200),
+        vec![
+            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+            Header::from_bytes("Cache-Control", "no-cache").unwrap(),
             Header::from_bytes(
                 "Access-Control-Allow-Origin",
                 cors_origin.as_bytes().to_vec(),
             )
             .unwrap(),
-        );
-    for (k, v) in final_headers.iter() {
-        if k.eq_ignore_ascii_case("content-type")
-            || k.eq_ignore_ascii_case("content-length")
-            || k.eq_ignore_ascii_case("access-control-allow-origin")
-        {
-            continue;
-        }
-        if let Ok(h) = Header::from_bytes(k.as_bytes(), v.as_bytes().to_vec()) {
-            response.add_header(h);
-        }
-    }
+        ],
+        streaming_body,
+        None, // content-length unknown → tiny_http uses chunked transfer
+        None,
+    );
+    // request.respond drains StreamingBody chunk-by-chunk, writing
+    // each as an HTTP chunked-transfer frame. Returns when EOF
+    // (render thread drops tx).
     let _ = request.respond(response);
     Ok(())
 }

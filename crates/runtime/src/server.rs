@@ -240,14 +240,14 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
 /// When used as the body of a `tiny_http::Response`, it causes the server to
 /// write data as it arrives through the channel. Dropping the sender closes
 /// the stream (EOF).
-struct StreamingBody {
+pub(crate) struct StreamingBody {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     buf: Vec<u8>,
     pos: usize,
 }
 
 impl StreamingBody {
-    fn new(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+    pub(crate) fn new(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
         Self {
             rx,
             buf: Vec::new(),
