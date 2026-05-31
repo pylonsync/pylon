@@ -57,10 +57,33 @@ export interface ImageProps
   sizes?: string;
   /** Skip lazy-loading + bump fetch priority. Use for above-the-fold hero images. */
   priority?: boolean;
+  /**
+   * Skip the Pylon optimizer and render `src` directly. Useful for
+   * SVGs (the optimizer rejects them as a security precaution),
+   * animated GIFs, or formats Pylon doesn't process. The browser
+   * still gets `width`/`height` for layout stability, but there's
+   * no `srcset` and no caching beyond whatever the source URL
+   * declares.
+   */
+  unoptimized?: boolean;
 }
 
 const DEFAULT_QUALITY = 75;
 const MAX_WIDTH = 3840;
+
+/**
+ * Default srcset widths — must match (be a subset of) the server's
+ * `PYLON_IMAGE_DEVICE_SIZES + PYLON_IMAGE_IMAGE_SIZES`. The server
+ * rejects requests for widths outside its allowlist (cache-fill
+ * DoS protection), so the React component has to stay in lock-step.
+ *
+ * If you customize the server's allowed widths, pass `widths={...}`
+ * on each `<Image>` (or wrap with your own component) to make sure
+ * the React-side candidates land in your custom set.
+ */
+const DEFAULT_WIDTHS = [
+  16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 1080, 1200, 1920, 2048, 3840,
+];
 
 /**
  * Build the optimized URL for a given width / quality. The server
@@ -82,17 +105,46 @@ export function Image({
   widths,
   sizes = "100vw",
   priority = false,
+  unoptimized = false,
   className,
   style,
   ...rest
 }: ImageProps) {
-  // Candidate widths: explicit list, else 1x + 2x (capped).
-  const candidates =
-    widths && widths.length > 0
-      ? Array.from(new Set(widths.map((w) => Math.round(w)))).sort((a, b) => a - b)
-      : Array.from(new Set([width, Math.min(width * 2, MAX_WIDTH)])).sort(
-          (a, b) => a - b,
-        );
+  // Bypass route — render the source directly. No srcset, no
+  // optimizer round-trip. Width/height still set for layout.
+  if (unoptimized) {
+    return (
+      <img
+        src={src}
+        width={width}
+        height={height}
+        alt={alt}
+        loading={priority ? "eager" : "lazy"}
+        {...({ fetchPriority: priority ? "high" : "auto" } as Record<string, string>)}
+        decoding="async"
+        className={className}
+        style={style}
+        {...rest}
+      />
+    );
+  }
+
+  // Candidate widths: explicit list, else default ladder filtered
+  // to "smallest that satisfies 1x" through "smallest that
+  // satisfies 2x", picked from DEFAULT_WIDTHS. Picking from the
+  // ladder (rather than [width, width*2]) keeps URLs in the
+  // server's allowed-widths set so we never get back a 400.
+  const candidates = (() => {
+    if (widths && widths.length > 0) {
+      return Array.from(new Set(widths.map((w) => Math.round(w)))).sort(
+        (a, b) => a - b,
+      );
+    }
+    const oneX = DEFAULT_WIDTHS.find((w) => w >= width) ?? MAX_WIDTH;
+    const targetTwoX = Math.min(width * 2, MAX_WIDTH);
+    const twoX = DEFAULT_WIDTHS.find((w) => w >= targetTwoX) ?? MAX_WIDTH;
+    return Array.from(new Set([oneX, twoX])).sort((a, b) => a - b);
+  })();
 
   const baseSrc = optimizedUrl(src, candidates[candidates.length - 1], quality);
   const srcSet = candidates

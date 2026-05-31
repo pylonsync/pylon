@@ -107,18 +107,97 @@ The `sizes` attribute is the most important knob — it tells the browser how wi
 
 Useful for avatar grids where you know the exact DPR multipliers you care about.
 
-## Source resolution
+## Safety & configuration
 
-- `src` starting with `/` → resolves to the frontend dir (`PYLON_FRONTEND_DIR` or `<app>/web/dist`). Path traversal is rejected.
-- `src` starting with `http://` or `https://` → only allowed when the host is in `PYLON_IMAGE_REMOTE_ALLOWLIST` (comma-separated). Without that env, remote sources return 400.
+The optimizer is opinionated about what it'll process. Every knob has a safe default, and you tune them via env. The same defaults apply across `pylon dev` and production.
 
-Set the allowlist in your deploy environment:
+### Allowed widths
+
+The server rejects requests whose `w` isn't in its width set. This prevents cache-fill DoS where an attacker requests thousands of slightly-different widths to balloon your disk.
 
 ```bash
-PYLON_IMAGE_REMOTE_ALLOWLIST=images.unsplash.com,cdn.example.com
+# Defaults (mirror Next.js):
+PYLON_IMAGE_DEVICE_SIZES=640,750,828,1080,1200,1920,2048,3840
+PYLON_IMAGE_IMAGE_SIZES=16,32,48,64,96,128,256,384
 ```
 
-This prevents SSRF — random visitors can't make your server fetch arbitrary URLs.
+`<Image>` generates srcset URLs only with widths from this combined set, so default-config usage just works. If you customize the env, also pass `widths={[...]}` on each `<Image>` to keep srcset URLs in range.
+
+### Allowed qualities
+
+Same defense, applied to the `q` parameter.
+
+```bash
+PYLON_IMAGE_QUALITIES=50,75,90   # default
+```
+
+If you need finer-grained quality control, append it: `PYLON_IMAGE_QUALITIES=50,65,75,85,90,95`.
+
+### Allowed formats
+
+```bash
+PYLON_IMAGE_FORMATS=webp,jpeg   # default
+```
+
+Locks the optimizer to a specific output set. The server picks the best match for the request's `Accept` header from this list. `<Image>` lets the server pick by default; pass `format=` in your own URLs if you want explicit control.
+
+### Remote source allowlist
+
+```bash
+PYLON_IMAGE_REMOTE_ALLOWLIST=cdn.example.com,images.unsplash.com/photos/
+```
+
+Each entry is `host` or `host/pathPrefix`:
+
+| Pattern | Matches |
+|---|---|
+| `cdn.example.com` | any path on this exact host |
+| `cdn.example.com/users/` | only paths starting with `/users/` |
+| `*.example.com` | one-level wildcard — `foo.example.com`, not `foo.bar.example.com` |
+
+Without this env, any `src` starting with `http://` or `https://` returns 400. This prevents SSRF — random visitors can't make your server fetch arbitrary internal URLs.
+
+### Source size cap
+
+```bash
+PYLON_IMAGE_MAX_BYTES=26214400   # 25MB default
+```
+
+Applies to both local files and remote fetches. Remote responses that exceed it are rejected mid-stream.
+
+### Pixel-bomb protection
+
+```bash
+PYLON_IMAGE_MAX_PIXELS=100000000   # 100M (≈10000×10000) default
+```
+
+A tiny PNG can declare a 100000×100000 canvas. Decoding that would allocate 40GB of RGBA. Pylon reads the image header BEFORE decoding and rejects any source whose declared `width × height` exceeds this cap.
+
+### Fetch timeout
+
+```bash
+PYLON_IMAGE_FETCH_TIMEOUT_MS=15000   # 15s default
+```
+
+Applies to remote source fetches.
+
+### SVG handling
+
+SVG is **always rejected**, both as input and output. SVG can carry inline `<script>` and CSS — letting users serve arbitrary SVG through an optimization endpoint would be an XSS vector. There's no `dangerouslyAllowSVG` toggle by design: if you need SVGs, render them with plain `<img src="/icon.svg">` (not through `<Image>`), serve them with `Content-Security-Policy: script-src 'none'`, and you're fine.
+
+For embedded `<Image unoptimized>` use, see below.
+
+### Local file source
+
+`src` starting with `/` resolves under the frontend dir (`PYLON_FRONTEND_DIR` or `<app>/web/dist`). Path traversal is hard-rejected — canonicalize + prefix-check, so `..` segments and symlinks pointing outside the dir return 400.
+
+### Bypassing the optimizer per-image
+
+```tsx
+<Image src="/icon.svg" alt="" width={32} height={32} unoptimized />
+```
+
+Renders a plain `<img src="/icon.svg">` with no srcset and no optimizer round-trip. Useful for SVGs, animated GIFs, or images where the source is already pre-sized.
 
 ## Format selection
 
@@ -147,12 +226,19 @@ Benchmarks on a 2400×1600 source JPEG (~250KB) on Apple Silicon:
 
 Tail latency is bounded by the encoder; cache hits are bounded by your disk. For high-traffic surfaces, put a CDN in front and Pylon never re-processes anything — the `immutable` URL takes care of the rest.
 
-## Configuration
+## Env reference
 
 | Env | Default | Purpose |
 |---|---|---|
-| `PYLON_FRONTEND_DIR` | `<app>/web/dist` | Source root for `/` paths. |
-| `PYLON_IMAGE_REMOTE_ALLOWLIST` | (empty) | Comma-separated hostnames for `http(s)://` sources. Empty = local only. |
+| `PYLON_FRONTEND_DIR` | `<app>/web/dist` | Source root for local (`/path`) images. |
+| `PYLON_IMAGE_REMOTE_ALLOWLIST` | (empty) | `host` or `host/pathPrefix` entries for `http(s)://` sources. Empty = local only. |
+| `PYLON_IMAGE_DEVICE_SIZES` | `640,750,828,1080,1200,1920,2048,3840` | Allowed widths (full-bleed). |
+| `PYLON_IMAGE_IMAGE_SIZES` | `16,32,48,64,96,128,256,384` | Allowed widths (thumbnails). |
+| `PYLON_IMAGE_QUALITIES` | `50,75,90` | Allowed quality values. |
+| `PYLON_IMAGE_FORMATS` | `webp,jpeg` | Allowed output formats. |
+| `PYLON_IMAGE_MAX_BYTES` | `26214400` (25MB) | Source byte cap. |
+| `PYLON_IMAGE_MAX_PIXELS` | `100000000` (≈10000×10000) | Decoded pixel cap. Pixel-bomb protection. |
+| `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
 
 The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneration. There's no LRU eviction yet — content-addressed entries are append-only, so the cache grows with the variety of (src, width, quality, format) tuples you serve. For production this is rarely a problem; the entire long-tail of a site's images is usually < 1GB. A `pylon cache clean` command will arrive when it actually matters.
 
@@ -162,8 +248,15 @@ The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneratio
 |---|---|---|
 | Backend | Built-in Rust pipeline | Sharp (libvips, separate npm install) |
 | Formats | WebP, JPEG, PNG | AVIF, WebP, JPEG, PNG |
-| Sources | Local + allowlisted remote | Local + remote with `images.remotePatterns` |
+| Sources | Local + remote with host + path-prefix patterns | Local + remote with `images.remotePatterns` |
+| Width allowlist | `PYLON_IMAGE_DEVICE_SIZES` + `PYLON_IMAGE_IMAGE_SIZES` | `deviceSizes` + `imageSizes` |
+| Quality allowlist | `PYLON_IMAGE_QUALITIES` | `qualities` |
+| Format allowlist | `PYLON_IMAGE_FORMATS` | `formats` |
+| Source size cap | `PYLON_IMAGE_MAX_BYTES` (25MB default) | `contentLengthLimit` |
+| Pixel-bomb cap | `PYLON_IMAGE_MAX_PIXELS` (100M default) | implicit (Sharp's `limitInputPixels`) |
+| SVG | always rejected (no toggle) | `dangerouslyAllowSVG` opt-in |
+| Per-image bypass | `<Image unoptimized />` | `<Image unoptimized />` |
 | Placeholder | Pass a CSS color or data URI yourself | Built-in `placeholder="blur"` with auto-generated blur data |
 | Static import | Not yet | Yes (resolves intrinsic dims at compile time) |
 
-`placeholder="blur"` and AVIF are on the roadmap.
+`placeholder="blur"` and AVIF are on the roadmap. SVG support is deliberately off the roadmap — render SVG with a plain `<img>` tag, not through `<Image>`.

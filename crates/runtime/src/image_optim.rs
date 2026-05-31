@@ -6,18 +6,21 @@
 //! file under `.pylon/.cache/images/<hash>.<ext>` so subsequent
 //! requests for the same params return instantly.
 //!
-//! Source resolution:
-//!   - Path starts with `/`: treated as a relative path under the
-//!     frontend dir. Out-of-tree paths are rejected.
-//!   - Path starts with `http://` or `https://`: fetched via ureq.
-//!     For production, gate with `PYLON_IMAGE_REMOTE_ALLOWLIST`
-//!     (comma-separated hostnames). Without that env, only same-
-//!     origin paths work.
-//!
-//! Format selection:
-//!   - Explicit `format=webp|jpeg|png` always wins.
-//!   - Otherwise: WebP when the request's `Accept` advertises it
-//!     (every modern browser does), else JPEG.
+//! Security model — see [`ImageConfig`] for the full surface:
+//!   - Local sources: must live under the frontend dir, canonicalized
+//!     + prefix-checked (no path traversal).
+//!   - Remote sources: must match a `PYLON_IMAGE_REMOTE_ALLOWLIST`
+//!     entry. Supports `host` and `host/pathPrefix` patterns.
+//!   - Width must be in the `deviceSizes ∪ imageSizes` set
+//!     (configurable; Next-style defaults). Prevents cache-fill DoS
+//!     where an attacker requests N variations.
+//!   - Quality must be in the `qualities` set (default 50/75/90).
+//!   - Format must be in the `formats` set (default webp/jpeg).
+//!   - Source bytes capped at `maxBytes` (default 25MB).
+//!   - Decoded pixel count capped at `maxPixels` (default 100M).
+//!     Prevents image-bomb DoS (tiny file, huge dimensions).
+//!   - SVG inputs hard-rejected. We never accept or emit SVG —
+//!     it can carry script.
 //!
 //! Cache-Control: hashed responses get `public, max-age=31536000,
 //! immutable`. The hash encodes the exact transform so any change
@@ -30,12 +33,177 @@ use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response};
 
 /// Allowed output formats. We deliberately exclude AVIF — see the
-/// Cargo.toml comment for the dep cost trade-off.
+/// Cargo.toml comment for the dep cost trade-off. SVG is excluded
+/// at the format level: never accepted as output, never accepted as
+/// input either (parseable image-bomb / script vector).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutFormat {
     Webp,
     Jpeg,
     Png,
+}
+
+/// Per-instance image optimizer config. Read from env at startup
+/// (cheap; the parse only runs once). All fields have safe-by-
+/// default values that match Next.js's defaults where possible.
+///
+/// Env variables (all comma-separated where they're lists):
+///
+/// | Env | Default | Effect |
+/// |---|---|---|
+/// | `PYLON_IMAGE_REMOTE_ALLOWLIST` | (empty) | Hosts or `host/pathPrefix` entries allowed as remote sources. Empty = local only. |
+/// | `PYLON_IMAGE_DEVICE_SIZES` | `640,750,828,1080,1200,1920,2048,3840` | Widths allowed for full-bleed images. Used for `srcset`. |
+/// | `PYLON_IMAGE_IMAGE_SIZES` | `16,32,48,64,96,128,256,384` | Widths allowed for thumbnails / icons. Unioned with device sizes. |
+/// | `PYLON_IMAGE_QUALITIES` | `50,75,90` | Quality values allowed. |
+/// | `PYLON_IMAGE_FORMATS` | `webp,jpeg` | Output formats allowed. |
+/// | `PYLON_IMAGE_MAX_BYTES` | `26214400` (25MB) | Source byte cap. |
+/// | `PYLON_IMAGE_MAX_PIXELS` | `100000000` (100M) | Decoded pixel cap. Prevents image bombs. |
+/// | `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
+#[derive(Debug, Clone)]
+struct ImageConfig {
+    remote_allowlist: Vec<RemotePattern>,
+    allowed_widths: Vec<u32>,
+    allowed_qualities: Vec<u8>,
+    allowed_formats: Vec<OutFormat>,
+    max_bytes: u64,
+    max_pixels: u64,
+    fetch_timeout: std::time::Duration,
+}
+
+/// An entry in `PYLON_IMAGE_REMOTE_ALLOWLIST`. Syntax:
+///
+///   - `cdn.example.com` — any path on this host.
+///   - `cdn.example.com/users/` — only paths starting with `/users/`.
+///   - `*.example.com` — wildcard host (single level: matches
+///     `foo.example.com`, not `foo.bar.example.com`).
+///
+/// Scheme + port are not part of the pattern; we always accept
+/// either http:// or https:// + any port. If you need stricter
+/// scheme/port matching, file an issue.
+#[derive(Debug, Clone)]
+struct RemotePattern {
+    /// Literal host or `*.suffix` for single-level wildcard.
+    host: String,
+    /// Optional path prefix (e.g. `/users/`). Empty = any path.
+    path_prefix: String,
+}
+
+impl RemotePattern {
+    fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let (host, path) = match s.find('/') {
+            Some(i) => (&s[..i], &s[i..]),
+            None => (s, ""),
+        };
+        Some(RemotePattern {
+            host: host.to_string(),
+            path_prefix: path.to_string(),
+        })
+    }
+    fn matches(&self, host: &str, path: &str) -> bool {
+        let host_ok = if let Some(suffix) = self.host.strip_prefix("*.") {
+            // Single-level wildcard: must have exactly one extra label.
+            host.ends_with(&format!(".{suffix}"))
+                && host.matches('.').count() == suffix.matches('.').count() + 1
+        } else {
+            self.host.eq_ignore_ascii_case(host)
+        };
+        if !host_ok {
+            return false;
+        }
+        if self.path_prefix.is_empty() {
+            return true;
+        }
+        path.starts_with(&self.path_prefix)
+    }
+}
+
+impl ImageConfig {
+    fn from_env() -> Self {
+        fn parse_csv<T, F>(name: &str, default: Vec<T>, f: F) -> Vec<T>
+        where
+            F: Fn(&str) -> Option<T>,
+        {
+            match std::env::var(name).ok().filter(|s| !s.is_empty()) {
+                Some(raw) => {
+                    let mut out: Vec<T> = raw.split(',').filter_map(|s| f(s.trim())).collect();
+                    if out.is_empty() {
+                        out = default;
+                    }
+                    out
+                }
+                None => default,
+            }
+        }
+
+        let remote_allowlist = std::env::var("PYLON_IMAGE_REMOTE_ALLOWLIST")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|raw| raw.split(',').filter_map(RemotePattern::parse).collect())
+            .unwrap_or_default();
+
+        // Device sizes = "full-bleed" image widths. Default mirrors
+        // Next.js 14 defaults.
+        let device_sizes = parse_csv(
+            "PYLON_IMAGE_DEVICE_SIZES",
+            vec![640, 750, 828, 1080, 1200, 1920, 2048, 3840],
+            |s| s.parse::<u32>().ok(),
+        );
+        // Image sizes = thumbnail widths. Unioned with device sizes
+        // to form the full allowed width set.
+        let image_sizes = parse_csv(
+            "PYLON_IMAGE_IMAGE_SIZES",
+            vec![16, 32, 48, 64, 96, 128, 256, 384],
+            |s| s.parse::<u32>().ok(),
+        );
+        let mut allowed_widths: Vec<u32> = device_sizes;
+        allowed_widths.extend(image_sizes);
+        allowed_widths.sort_unstable();
+        allowed_widths.dedup();
+
+        let allowed_qualities = parse_csv("PYLON_IMAGE_QUALITIES", vec![50, 75, 90], |s| {
+            s.parse::<u8>().ok()
+        });
+        let allowed_formats = parse_csv(
+            "PYLON_IMAGE_FORMATS",
+            vec![OutFormat::Webp, OutFormat::Jpeg],
+            OutFormat::from_str,
+        );
+
+        let max_bytes = std::env::var("PYLON_IMAGE_MAX_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(25 * 1024 * 1024);
+        let max_pixels = std::env::var("PYLON_IMAGE_MAX_PIXELS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(100_000_000);
+        let fetch_timeout_ms = std::env::var("PYLON_IMAGE_FETCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(15_000);
+
+        ImageConfig {
+            remote_allowlist,
+            allowed_widths,
+            allowed_qualities,
+            allowed_formats,
+            max_bytes,
+            max_pixels,
+            fetch_timeout: std::time::Duration::from_millis(fetch_timeout_ms),
+        }
+    }
+}
+
+/// Process-lifetime cached config. Loaded once from env on first
+/// image request. To override at runtime: set the env BEFORE
+/// `pylon dev` boots.
+fn config() -> &'static ImageConfig {
+    static CFG: std::sync::OnceLock<ImageConfig> = std::sync::OnceLock::new();
+    CFG.get_or_init(ImageConfig::from_env)
 }
 
 impl OutFormat {
@@ -77,15 +245,52 @@ struct ImageRequest {
     format: Option<OutFormat>,
 }
 
-/// Stringly-typed query parser — tiny_http gives us the path with
-/// the query as one chunk, so we split manually. No urlencoded
-/// values are expected for w/q/format; for src we percent-decode.
-fn parse_query(url: &str) -> Option<ImageRequest> {
-    let qs = url.split_once('?')?.1;
+/// Reason a request was rejected before processing started. We
+/// surface these as `400 Bad Request` with the variant name in the
+/// body so an operator can tell why their `<Image>` configuration
+/// isn't lining up with the allowlists.
+#[derive(Debug)]
+enum RejectReason {
+    MissingSrc,
+    DisallowedWidth(u32),
+    DisallowedQuality(u8),
+    DisallowedFormat(String),
+    SvgRejected,
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::MissingSrc => write!(f, "missing `src` param"),
+            RejectReason::DisallowedWidth(w) => write!(
+                f,
+                "width {w} not in PYLON_IMAGE_DEVICE_SIZES / PYLON_IMAGE_IMAGE_SIZES"
+            ),
+            RejectReason::DisallowedQuality(q) => {
+                write!(f, "quality {q} not in PYLON_IMAGE_QUALITIES")
+            }
+            RejectReason::DisallowedFormat(s) => {
+                write!(f, "format `{s}` not in PYLON_IMAGE_FORMATS")
+            }
+            RejectReason::SvgRejected => write!(
+                f,
+                "SVG sources are not supported (security: SVG can contain scripts)"
+            ),
+        }
+    }
+}
+
+/// Stringly-typed query parser. Width / quality / format are all
+/// validated against the [`ImageConfig`] allowlists — invalid
+/// combinations return a `Reject` instead of being clamped, so
+/// attackers can't enumerate the cache by passing arbitrary
+/// values.
+fn parse_query(url: &str, cfg: &ImageConfig) -> Result<ImageRequest, RejectReason> {
+    let qs = url.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut src: Option<String> = None;
-    let mut width: u32 = 0;
-    let mut quality: u8 = 75;
-    let mut format: Option<OutFormat> = None;
+    let mut width: Option<u32> = None;
+    let mut quality: Option<u8> = None;
+    let mut format_raw: Option<String> = None;
     for kv in qs.split('&') {
         let (k, v) = match kv.split_once('=') {
             Some(p) => p,
@@ -93,17 +298,44 @@ fn parse_query(url: &str) -> Option<ImageRequest> {
         };
         match k {
             "src" => src = Some(percent_decode(v)),
-            "w" => width = v.parse().unwrap_or(0),
-            "q" => quality = v.parse().unwrap_or(75).clamp(1, 100),
-            "format" => format = OutFormat::from_str(v),
+            "w" => width = v.parse().ok(),
+            "q" => quality = v.parse().ok(),
+            "format" => format_raw = Some(v.to_string()),
             _ => {}
         }
     }
-    let src = src?;
-    if !(32..=4096).contains(&width) {
-        return None;
+
+    let src = src.ok_or(RejectReason::MissingSrc)?;
+
+    // SVG hard-rejected — never decoded, never produced. Same call
+    // a Next.js `dangerouslyAllowSVG=false` makes.
+    let lower_src = src.to_ascii_lowercase();
+    if lower_src.ends_with(".svg") || lower_src.contains(".svg?") {
+        return Err(RejectReason::SvgRejected);
     }
-    Some(ImageRequest {
+
+    let width = width.unwrap_or(0);
+    if !cfg.allowed_widths.contains(&width) {
+        return Err(RejectReason::DisallowedWidth(width));
+    }
+    let quality = quality.unwrap_or(75);
+    if !cfg.allowed_qualities.contains(&quality) {
+        return Err(RejectReason::DisallowedQuality(quality));
+    }
+
+    let format = match format_raw {
+        Some(raw) => {
+            let fmt = OutFormat::from_str(&raw)
+                .ok_or_else(|| RejectReason::DisallowedFormat(raw.clone()))?;
+            if !cfg.allowed_formats.contains(&fmt) {
+                return Err(RejectReason::DisallowedFormat(raw));
+            }
+            Some(fmt)
+        }
+        None => None,
+    };
+
+    Ok(ImageRequest {
         src,
         width,
         quality,
@@ -155,26 +387,36 @@ fn hex_digit(b: u8) -> Option<u8> {
 }
 
 /// Read the source bytes — either off the local frontend dir or
-/// over HTTP for remote allowlisted URLs.
-fn load_source(src: &str, frontend_dir: Option<&Path>) -> Result<Vec<u8>, String> {
+/// over HTTP for remote allowlisted URLs. Enforces the byte cap
+/// from [`ImageConfig::max_bytes`] for both paths.
+fn load_source(
+    src: &str,
+    frontend_dir: Option<&Path>,
+    cfg: &ImageConfig,
+) -> Result<Vec<u8>, String> {
     if src.starts_with("http://") || src.starts_with("https://") {
-        let allowlist = std::env::var("PYLON_IMAGE_REMOTE_ALLOWLIST").unwrap_or_default();
-        if allowlist.is_empty() {
+        if cfg.remote_allowlist.is_empty() {
             return Err(format!(
                 "remote image source not allowed (set PYLON_IMAGE_REMOTE_ALLOWLIST): {src}"
             ));
         }
-        // Hand-extract the host. `src` starts with http:// or https://.
-        // Skip scheme, then take up to the first `/`, `?`, or end.
-        // Strip any `user:pass@` prefix. Strip any `:port` suffix.
+        // Hand-extract the host + path. `src` starts with http:// or
+        // https://. Skip scheme, split host from path on the first
+        // `/`. Strip any `user:pass@` prefix from the host. Strip
+        // any `:port` suffix.
         let after_scheme = src
             .strip_prefix("http://")
             .or_else(|| src.strip_prefix("https://"))
             .unwrap_or("");
-        let host_with_port = after_scheme
-            .split(|c: char| c == '/' || c == '?' || c == '#')
-            .next()
-            .unwrap_or("");
+        let (host_with_port, path_with_query) =
+            match after_scheme.find(|c: char| c == '/' || c == '?' || c == '#') {
+                Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+                None => (after_scheme, ""),
+            };
+        let path = match path_with_query.find(|c: char| c == '?' || c == '#') {
+            Some(i) => &path_with_query[..i],
+            None => path_with_query,
+        };
         let host_no_auth = match host_with_port.rsplit_once('@') {
             Some((_, h)) => h,
             None => host_with_port,
@@ -183,22 +425,32 @@ fn load_source(src: &str, frontend_dir: Option<&Path>) -> Result<Vec<u8>, String
             Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
             _ => host_no_auth,
         };
-        let ok = allowlist
-            .split(',')
-            .map(|s| s.trim())
-            .any(|allowed| !allowed.is_empty() && host == allowed);
+
+        let ok = cfg.remote_allowlist.iter().any(|p| p.matches(host, path));
         if !ok {
-            return Err(format!("host {host} not in PYLON_IMAGE_REMOTE_ALLOWLIST"));
+            return Err(format!(
+                "host {host} (path {path}) not allowed by PYLON_IMAGE_REMOTE_ALLOWLIST"
+            ));
         }
         let res = ureq::get(src)
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(cfg.fetch_timeout)
             .call()
             .map_err(|e| format!("fetch failed: {e}"))?;
         let mut buf: Vec<u8> = Vec::new();
+        // `.take(N)` silently truncates; we want a hard error so
+        // the operator knows their cap is too tight or the source
+        // is unexpectedly huge. Take(max_bytes + 1) lets us detect
+        // overshoot.
         res.into_reader()
-            .take(20_000_000) // 20MB safety cap
+            .take(cfg.max_bytes + 1)
             .read_to_end(&mut buf)
             .map_err(|e| format!("read failed: {e}"))?;
+        if (buf.len() as u64) > cfg.max_bytes {
+            return Err(format!(
+                "remote source exceeds PYLON_IMAGE_MAX_BYTES ({})",
+                cfg.max_bytes
+            ));
+        }
         Ok(buf)
     } else if let Some(p) = src.strip_prefix('/') {
         // Local file — must be under frontend dir.
@@ -216,6 +468,13 @@ fn load_source(src: &str, frontend_dir: Option<&Path>) -> Result<Vec<u8>, String
             .map_err(|e| format!("image not found: {e}"))?;
         if !full_canon.starts_with(&dir_canon) {
             return Err("path escapes frontend dir".into());
+        }
+        let meta = std::fs::metadata(&full_canon).map_err(|e| format!("metadata failed: {e}"))?;
+        if meta.len() > cfg.max_bytes {
+            return Err(format!(
+                "local source exceeds PYLON_IMAGE_MAX_BYTES ({})",
+                cfg.max_bytes
+            ));
         }
         std::fs::read(&full_canon).map_err(|e| format!("read failed: {e}"))
     } else {
@@ -236,7 +495,13 @@ fn load_source(src: &str, frontend_dir: Option<&Path>) -> Result<Vec<u8>, String
 /// Synchronous because the HTTP path is synchronous (tiny_http
 /// worker thread). On the worker thread pool the CPU work
 /// happens in parallel across requests.
-fn process(input: &[u8], width: u32, quality: u8, fmt: OutFormat) -> Result<Vec<u8>, String> {
+fn process(
+    input: &[u8],
+    width: u32,
+    quality: u8,
+    fmt: OutFormat,
+    cfg: &ImageConfig,
+) -> Result<Vec<u8>, String> {
     use fast_image_resize as fir;
     use image::ImageReader;
 
@@ -244,6 +509,25 @@ fn process(input: &[u8], width: u32, quality: u8, fmt: OutFormat) -> Result<Vec<
     let reader = ImageReader::new(cursor)
         .with_guessed_format()
         .map_err(|e| format!("guess format failed: {e}"))?;
+
+    // Image-bomb protection: peek dimensions BEFORE decode. A 2KB
+    // PNG can declare a 100000x100000 pixel canvas which would
+    // allocate 40GB of RGBA storage. ImageReader::into_dimensions
+    // reads the header only.
+    let dim_reader = ImageReader::new(Cursor::new(input))
+        .with_guessed_format()
+        .map_err(|e| format!("guess format failed (dims): {e}"))?;
+    let (sw, sh) = dim_reader
+        .into_dimensions()
+        .map_err(|e| format!("read dimensions failed: {e}"))?;
+    let pixels = (sw as u64).saturating_mul(sh as u64);
+    if pixels > cfg.max_pixels {
+        return Err(format!(
+            "source declares {pixels} pixels ({sw}x{sh}), exceeds PYLON_IMAGE_MAX_PIXELS ({})",
+            cfg.max_pixels
+        ));
+    }
+
     let img = reader.decode().map_err(|e| format!("decode failed: {e}"))?;
 
     // Compute target dims preserving aspect ratio. Never upscale —
@@ -349,17 +633,28 @@ fn flatten_to_rgb(img: &image::DynamicImage) -> Vec<u8> {
 /// Pick a default output format when the request didn't specify.
 /// Browsers ship WebP support universally; check the Accept header
 /// just in case (curl, oldreader bots).
-fn default_format(headers: &[Header]) -> OutFormat {
+fn default_format(headers: &[Header], cfg: &ImageConfig) -> OutFormat {
     let accept = headers
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("accept"))
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
-    if accept.contains("image/webp") || accept.is_empty() {
-        OutFormat::Webp
-    } else {
-        OutFormat::Jpeg
+    // Prefer WebP when the browser accepts it AND it's allowed.
+    if (accept.contains("image/webp") || accept.is_empty())
+        && cfg.allowed_formats.contains(&OutFormat::Webp)
+    {
+        return OutFormat::Webp;
     }
+    // Otherwise fall back to whatever's allowed in order: jpeg, png, webp.
+    for candidate in [OutFormat::Jpeg, OutFormat::Png, OutFormat::Webp] {
+        if cfg.allowed_formats.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // Allowed formats is empty (mis-config). Default to jpeg so
+    // we don't 500 on every image request — the operator will see
+    // the warning in logs.
+    OutFormat::Jpeg
 }
 
 /// Content-addressed cache path for a transform.
@@ -378,19 +673,19 @@ fn cache_path(cache_dir: &Path, src: &str, width: u32, quality: u8, fmt: OutForm
 /// the project's `.pylon` directory; we create
 /// `<cache_root>/.cache/images/` lazily.
 pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, cors_origin: &str) {
+    let cfg = config();
     let url = request.url().to_string();
-    let parsed = match parse_query(&url) {
-        Some(p) => p,
-        None => {
-            let body = b"bad request: src / w required, w in [32, 4096]".to_vec();
-            let _ = request.respond(Response::from_data(body).with_status_code(400u16));
+    let parsed = match parse_query(&url, cfg) {
+        Ok(p) => p,
+        Err(reason) => {
+            respond_err(request, 400, &reason.to_string());
             return;
         }
     };
 
     let fmt = parsed
         .format
-        .unwrap_or_else(|| default_format(request.headers()));
+        .unwrap_or_else(|| default_format(request.headers(), cfg));
 
     let cache_dir = cache_root.join(".cache").join("images");
     if let Err(e) = std::fs::create_dir_all(&cache_dir) {
@@ -407,14 +702,14 @@ pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, c
             }
         }
     } else {
-        let source = match load_source(&parsed.src, frontend_dir) {
+        let source = match load_source(&parsed.src, frontend_dir, cfg) {
             Ok(s) => s,
             Err(e) => {
                 respond_err(request, 400, &e);
                 return;
             }
         };
-        let processed = match process(&source, parsed.width, parsed.quality, fmt) {
+        let processed = match process(&source, parsed.width, parsed.quality, fmt, cfg) {
             Ok(b) => b,
             Err(e) => {
                 respond_err(request, 500, &e);

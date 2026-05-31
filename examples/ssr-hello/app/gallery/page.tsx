@@ -37,7 +37,7 @@ export default function GalleryPage({ url }: PageProps) {
               alt={shot.alt}
               width={600}
               height={400}
-              quality={70}
+              quality={75}
               sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
               className="aspect-[3/2] w-full object-cover"
             />
