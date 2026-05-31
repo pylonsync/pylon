@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
 pub mod reactive;
+pub mod seq_allocator;
 // org_backend removed in v0.3.74 — org/member/invite now flow through
 // the manifest's entity layer via the DataStore. See
 // crates/auth/src/org.rs for the new EntityOrgStore.
@@ -673,19 +674,31 @@ impl Runtime {
         Some(v as u64)
     }
 
-    /// Atomically increment + return the persisted seq. SQLite serializes
-    /// this through the write_conn mutex, so concurrent appenders
-    /// produce strictly-monotonic seqs without a separate lock. Returns
-    /// `None` on any storage error; caller falls back to the local
-    /// in-memory atomic, which keeps writes flowing under disk pressure
-    /// (correctness restored on the next successful call via the
-    /// `max(prev, current)` guard inside `ChangeLog::append`).
-    pub fn next_sqlite_change_seq(&self) -> Option<u64> {
+    /// Reserve a chunk of `amount` seqs atomically — bumps the persisted
+    /// high-water mark by `amount` and returns the new value. The
+    /// caller treats the returned value as the upper bound of a
+    /// reservation: seqs in `(returned - amount, returned]` are now
+    /// safe to issue from in-memory state without further disk
+    /// writes.
+    ///
+    /// This is the boot-time + background-thread persistence path.
+    /// CRITICALLY: it does NOT run inside the mutation hot path —
+    /// `change_log.append` returns from an in-memory atomic without
+    /// ever touching SQLite. The bg thread holds its own
+    /// write_conn lock long enough to do this one UPDATE and
+    /// nothing else, so even on heavy mutation load there's no
+    /// recursive-mutex deadlock (the bg thread just waits in line
+    /// behind active mutation txs and gets its turn).
+    ///
+    /// Returns `None` on storage error; the SqliteSeqAllocator
+    /// keeps using its existing reservation in that case (the next
+    /// retry will eventually catch up).
+    pub fn reserve_sqlite_change_seq(&self, amount: u64) -> Option<u64> {
         let sb = self.sqlite_backend().ok()?;
         let conn = sb.write_conn.lock().ok()?;
         conn.execute(
-            "UPDATE _pylon_change_seq SET value = value + 1 WHERE id = 1",
-            [],
+            "UPDATE _pylon_change_seq SET value = value + ? WHERE id = 1",
+            rusqlite::params![amount as i64],
         )
         .ok()?;
         let v: i64 = conn
@@ -3400,6 +3413,10 @@ mod tests {
     /// the prior incarnation that's >= N permanently 410s — observed
     /// in production as "cursor last_seq=49 is older than the oldest
     /// retained seq=49" after a deploy roll.
+    ///
+    /// Pinned at the runtime-helper layer; SqliteSeqAllocator's own
+    /// monotonic-across-restart test (in crate::seq_allocator)
+    /// exercises the full allocator wrapper.
     #[test]
     fn sqlite_change_seq_persists_across_restart() {
         let dir = std::env::temp_dir().join("pylon-seq-persist");
@@ -3411,22 +3428,24 @@ mod tests {
             let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
             rt.bootstrap_sqlite_change_seq().unwrap();
             assert_eq!(rt.current_sqlite_change_seq().unwrap(), 0);
-            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 1);
-            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 2);
-            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 3);
-            assert_eq!(rt.current_sqlite_change_seq().unwrap(), 3);
+            // Reserve 100 seqs. After: persisted = 100, returned = 100.
+            assert_eq!(rt.reserve_sqlite_change_seq(100).unwrap(), 100);
+            // Reserve another 50. After: persisted = 150.
+            assert_eq!(rt.reserve_sqlite_change_seq(50).unwrap(), 150);
+            assert_eq!(rt.current_sqlite_change_seq().unwrap(), 150);
         }
         {
             // Reopen the same file — simulating a process restart. The
-            // counter must resume from 3, not 0.
+            // counter must resume from 150, not 0.
             let rt = Runtime::open(db_path.to_str().unwrap(), test_manifest()).unwrap();
             rt.bootstrap_sqlite_change_seq().unwrap();
             assert_eq!(
                 rt.current_sqlite_change_seq().unwrap(),
-                3,
+                150,
                 "restart must resume from persisted seq, not reset to 0"
             );
-            assert_eq!(rt.next_sqlite_change_seq().unwrap(), 4);
+            // Next reservation continues from there.
+            assert_eq!(rt.reserve_sqlite_change_seq(25).unwrap(), 175);
         }
 
         let _ = std::fs::remove_file(&db_path);

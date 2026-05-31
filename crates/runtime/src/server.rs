@@ -596,20 +596,57 @@ fn start_server(
                 "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
             );
         }
+    } else if !runtime.is_in_memory() {
+        // File-backed SQLite: persist a high-water mark on disk via a
+        // background thread so seqs stay monotonic across process
+        // restarts (no 410 RESYNC_REQUIRED storm on redeploy).
+        //
+        // The earlier v0.3.218 attempt persisted INLINE inside the
+        // SeqProvider closure, which the mutation pipeline calls while
+        // holding write_conn. That recursive write_conn acquisition
+        // deadlocked every mutation (`markChannelRead` etc. on
+        // chat-api). The current shape moves persistence off the hot
+        // path: an in-memory atomic issues seqs from a reserved
+        // chunk, and a bg thread writes the next chunk's high-water
+        // mark to disk before that chunk gets used. The bg thread has
+        // its own write_conn lock acquisition, queued behind any
+        // active mutation tx — no recursive lock, no deadlock.
+        // See crates/runtime/src/seq_allocator.rs for the full design.
+        if let Err(e) = runtime.bootstrap_sqlite_change_seq() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap SQLite _pylon_change_seq; falling back to per-instance seq: {}",
+                e.message
+            );
+        } else {
+            match crate::seq_allocator::SqliteSeqAllocator::new(Arc::clone(&runtime)) {
+                Some(allocator) => {
+                    let allocator = std::sync::Arc::new(allocator);
+                    let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
+                    let alloc_for_provider = std::sync::Arc::clone(&allocator);
+                    let provider: pylon_sync::SeqProvider =
+                        std::sync::Arc::new(move || alloc_for_provider.next());
+                    change_log_builder = change_log_builder
+                        .with_seq(provider)
+                        .with_initial_seq(initial);
+                    // Hold the allocator past this scope so the bg
+                    // thread isn't dropped immediately. The closure
+                    // holds its own Arc to the allocator; this binding
+                    // keeps the bg thread alive for the runtime's
+                    // lifetime by escaping into the ChangeLog's seq
+                    // provider field.
+                    std::mem::forget(allocator);
+                    tracing::info!(
+                        "[change_log] using SQLite _pylon_change_seq (initial reservation past = {initial})"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "[change_log] failed to initialize SqliteSeqAllocator; falling back to per-instance seq"
+                    );
+                }
+            }
+        }
     }
-    // SQLite seq persistence used to live here (v0.3.218) but caused a
-    // recursive write_conn deadlock: the mutation pipeline holds
-    // write_conn → calls change_log.append → calls the seq provider →
-    // tries to lock write_conn AGAIN. std::sync::Mutex isn't re-entrant,
-    // so every mutation (markChannelRead, etc.) hung forever on chat-api.
-    //
-    // Reverted to v0.3.217 in-memory behavior to unblock production.
-    // The original 410 RESYNC_REQUIRED problem (cursor outliving
-    // server restart) comes back, but it's RECOVERABLE — the client
-    // already handles 410 with reset+repull. Re-adding monotonic-
-    // across-restart seqs needs the persist to happen OFF the
-    // mutation hot path (background thread with its own SQLite
-    // connection, write-ahead reservation). Tracked for v0.3.222.
     let change_log = Arc::new(change_log_builder);
 
     // Seed the change log with one synthetic insert per extant row so that
