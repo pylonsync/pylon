@@ -1,0 +1,169 @@
+---
+title: <Image>
+description: "Optimized images with built-in Rust resizer + mozjpeg + libwebp. Same binary, no Sharp / libvips install."
+---
+
+```tsx
+import { Image } from "@pylonsync/react";
+
+<Image
+  src="/hero.jpg"
+  alt="Mountain at dawn"
+  width={1200}
+  height={800}
+/>
+```
+
+`<Image>` renders a plain `<img>` pointing at Pylon's built-in optimizer endpoint. The browser fetches a WebP (or JPEG, depending on `Accept`) sized for the user's viewport, served from disk cache on every subsequent request.
+
+The pipeline is pure Rust: `image` for decode, `fast_image_resize` (SIMD) for the actual resize, `mozjpeg` and `libwebp` (both bundled via cc-rs) for encode. No Sharp install, no libvips on the host, no Node child-process. It all lives in the Pylon binary.
+
+## What it does
+
+For a single `<Image src="/hero.jpg" width={1200} height={800} />`:
+
+- Renders `<img srcset>` with multiple width candidates (default: 1x and 2x of `width`, capped at 3840px).
+- Each candidate points at `/_pylon/image?src=/hero.jpg&w=<width>&q=<quality>`.
+- Browser picks the smallest candidate that satisfies the viewport DPR.
+- Server decodes once, resizes with SIMD (Lanczos3), encodes with mozjpeg or libwebp depending on `Accept`.
+- Result is hashed by (src, width, quality, format) and cached at `.pylon/.cache/images/<hash>.<ext>`. Cache hits skip decode + encode entirely — just a file serve.
+- Response carries `Cache-Control: public, max-age=31536000, immutable`.
+
+## API
+
+```tsx
+interface ImageProps {
+  /** Source — site-relative ("/foo.jpg") or http(s) URL (allowlisted via env). */
+  src: string;
+  /** Intrinsic width in CSS px. Used for aspect ratio + the 1x srcset candidate. */
+  width: number;
+  /** Intrinsic height in CSS px. */
+  height: number;
+  /** Required alt text. Pass "" for purely decorative images. */
+  alt: string;
+  /** JPEG/WebP quality 1..=100. Default 75. PNG ignores it. */
+  quality?: number;
+  /** Override srcset widths. Default: [width, width*2] capped at 3840. */
+  widths?: number[];
+  /** `<img sizes>`. Default "100vw" — tighten for grid layouts. */
+  sizes?: string;
+  /** Skip lazy-loading, bump fetchPriority to "high". Use for above-the-fold heroes. */
+  priority?: boolean;
+  /** Plus any other <img> attribute (className, style, onClick, etc.). */
+}
+```
+
+## Examples
+
+### Hero image (above the fold)
+
+```tsx
+<Image
+  src="/hero.jpg"
+  alt="Mountain at dawn"
+  width={1920}
+  height={1080}
+  priority
+  sizes="100vw"
+  className="w-full h-[60vh] object-cover"
+/>
+```
+
+`priority` skips `loading="lazy"` and sets `fetchPriority="high"` so the browser prioritizes it during the initial paint.
+
+### Responsive grid
+
+```tsx
+<ul className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+  {photos.map((p) => (
+    <li key={p.id}>
+      <Image
+        src={p.src}
+        alt={p.caption}
+        width={600}
+        height={400}
+        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+        className="aspect-[3/2] w-full object-cover rounded-2xl"
+      />
+    </li>
+  ))}
+</ul>
+```
+
+The `sizes` attribute is the most important knob — it tells the browser how wide the image will actually render at each breakpoint, so it picks the smallest viable srcset candidate. Without it, the browser assumes `100vw` and downloads a 4K image for a 200px thumbnail.
+
+### Custom srcset
+
+```tsx
+<Image
+  src="/avatar.png"
+  alt={user.name}
+  width={64}
+  height={64}
+  widths={[64, 96, 128]}
+  quality={85}
+/>
+```
+
+Useful for avatar grids where you know the exact DPR multipliers you care about.
+
+## Source resolution
+
+- `src` starting with `/` → resolves to the frontend dir (`PYLON_FRONTEND_DIR` or `<app>/web/dist`). Path traversal is rejected.
+- `src` starting with `http://` or `https://` → only allowed when the host is in `PYLON_IMAGE_REMOTE_ALLOWLIST` (comma-separated). Without that env, remote sources return 400.
+
+Set the allowlist in your deploy environment:
+
+```bash
+PYLON_IMAGE_REMOTE_ALLOWLIST=images.unsplash.com,cdn.example.com
+```
+
+This prevents SSRF — random visitors can't make your server fetch arbitrary URLs.
+
+## Format selection
+
+| Request `format=` query | Behavior |
+|---|---|
+| `webp` | Always WebP, lossy (libwebp). |
+| `jpeg` / `jpg` | Always JPEG (mozjpeg). |
+| `png` | Always PNG (lossless). |
+| `(omitted)` | WebP if `Accept` advertises it (every modern browser), else JPEG. |
+
+WebP is the default because it produces ~30% smaller files than mozjpeg at the same perceptual quality.
+
+AVIF is not yet supported — the encoders (`ravif` + `rav1e`) would add ~10MB to the binary and 5-20x slower encodes. We may add it behind a feature flag once Pylon Cloud demonstrates the bandwidth win is worth the latency cost.
+
+## Performance
+
+Benchmarks on a 2400×1600 source JPEG (~250KB) on Apple Silicon:
+
+| Operation | Time |
+|---|---|
+| Cold: decode + Lanczos3 resize to 1200×800 + WebP encode | 46–74ms |
+| Cold: same path + JPEG (mozjpeg) encode | 50–80ms |
+| Hot: cache hit, served from disk | 9ms (file serve only) |
+| WebP output size @ q=75 | 35KB (7.7× smaller than source) |
+| JPEG output size @ q=75 | 51KB (5.4× smaller than source) |
+
+Tail latency is bounded by the encoder; cache hits are bounded by your disk. For high-traffic surfaces, put a CDN in front and Pylon never re-processes anything — the `immutable` URL takes care of the rest.
+
+## Configuration
+
+| Env | Default | Purpose |
+|---|---|---|
+| `PYLON_FRONTEND_DIR` | `<app>/web/dist` | Source root for `/` paths. |
+| `PYLON_IMAGE_REMOTE_ALLOWLIST` | (empty) | Comma-separated hostnames for `http(s)://` sources. Empty = local only. |
+
+The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneration. There's no LRU eviction yet — content-addressed entries are append-only, so the cache grows with the variety of (src, width, quality, format) tuples you serve. For production this is rarely a problem; the entire long-tail of a site's images is usually < 1GB. A `pylon cache clean` command will arrive when it actually matters.
+
+## Differences from Next.js's `<Image>`
+
+| | Pylon `<Image>` | Next.js `<Image>` |
+|---|---|---|
+| Backend | Built-in Rust pipeline | Sharp (libvips, separate npm install) |
+| Formats | WebP, JPEG, PNG | AVIF, WebP, JPEG, PNG |
+| Sources | Local + allowlisted remote | Local + remote with `images.remotePatterns` |
+| Placeholder | Pass a CSS color or data URI yourself | Built-in `placeholder="blur"` with auto-generated blur data |
+| Static import | Not yet | Yes (resolves intrinsic dims at compile time) |
+
+`placeholder="blur"` and AVIF are on the roadmap.

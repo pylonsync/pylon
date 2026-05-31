@@ -31,6 +31,10 @@ Visit `http://localhost:4321/studio` for the inspector.
   - Handler IS the transaction (atomic by default)
   - Streaming responses for AI chat / live data
 - **Auth** — sessions, magic codes, OAuth (Google + GitHub), RBAC
+- **SSR** — file-based React routes, `<Link>` with instant client nav, `<Image>`
+  with built-in Rust optimizer (mozjpeg + libwebp), Tailwind v4 first-class —
+  full-stack apps without Next.js. See [examples/ssr-hello](examples/ssr-hello/)
+  and the [SSR docs](https://docs.pylonsync.com/ssr/overview).
 - **Real-time shards** for multiplayer games & collab apps
   - Tick-driven simulations
   - Matchmaker, area-of-interest, replay

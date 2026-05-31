@@ -46,6 +46,15 @@
             ]
           },
           {
+            "group": "SSR",
+            "pages": [
+              "ssr/overview",
+              "ssr/link",
+              "ssr/image",
+              "ssr/styling"
+            ]
+          },
+          {
             "group": "Auth",
             "pages": [
               "auth/overview",

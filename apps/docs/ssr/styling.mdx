@@ -1,0 +1,89 @@
+---
+title: Styling (Tailwind)
+description: "Tailwind v4 is a first-class part of the Pylon SSR bundler. Drop an app/globals.css and you're done."
+---
+
+Pylon's SSR bundler auto-compiles Tailwind v4 if it finds `app/globals.css`. The output ships as a content-hashed `<link rel="stylesheet">` injected straight into `<head>` — no FOUC, no Tailwind Play CDN script, no separate build step.
+
+## Setup
+
+```bash
+bun add @tailwindcss/cli tailwindcss
+```
+
+Create `app/globals.css`:
+
+```css
+/* app/globals.css */
+@import "tailwindcss";
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+```
+
+That's it. `pylon dev` picks up the file on the next bundle and emits `/_pylon/build/styles-<hash>.css`. The SSR runtime adds `<link rel="stylesheet">` to every page's `<head>`.
+
+You don't need a `tailwind.config.js` — Tailwind v4 uses the CSS-first config. Theme tokens go in the `@theme` block:
+
+```css
+@import "tailwindcss";
+
+@theme {
+  --color-brand: oklch(72% 0.18 240);
+  --font-sans: "Inter", system-ui, sans-serif;
+}
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+```
+
+`bg-brand`, `text-brand`, `font-sans` are now available throughout your app.
+
+## How the head injection works
+
+Tailwind in SSR has a chicken-and-egg problem: the `<head>` is rendered by your root layout before the SSR runtime knows which CSS file to include. Pylon solves it by stream-rewriting React's HTML output.
+
+1. The bundler compiles `app/globals.css` → `styles-<hash>.css` in the build output.
+2. On render, the SSR runtime reads the manifest to find the hash.
+3. As React's HTML stream flows past, the runtime watches for `</head>` (with a small carry buffer to handle chunk-boundary splits) and splices in `<link rel="stylesheet" href="/_pylon/build/styles-<hash>.css">` before the close tag.
+4. Browser starts fetching CSS while still parsing the body — no FOUC, no extra round-trip.
+
+Your `RootLayout` doesn't need to know anything about it. Write the head you want, Pylon adds the right links.
+
+## Class scanning
+
+Tailwind v4 scans your source files for class names at build time. The `@source` directive in `globals.css` controls which files get scanned:
+
+```css
+@source "../app/**/*.{tsx,ts,jsx,js}";
+@source "../components/**/*.tsx";
+@source "../../packages/ui/src/**/*.tsx";  /* monorepo packages */
+```
+
+Without `@source`, Tailwind's auto-discovery walks `package.json` deps + obvious-looking source folders. Adding the directive is more explicit and survives unusual layouts.
+
+## Hot rebuild
+
+`pylon dev` rebuilds the bundle (and the Tailwind CSS) when you save a source file. Refresh the browser to see styles update. Hot-reload-without-refresh for CSS is on the roadmap.
+
+## Production
+
+Same flow — `pylon` (the production binary) compiles Tailwind at boot. The output is fingerprinted, so CDNs and browsers cache it forever. Editing `globals.css` produces a new hash, breaks the cache automatically.
+
+There's no separate "build" step. The single binary handles dev + prod identically.
+
+## Other CSS
+
+Tailwind is the recommended path because it's wired into the bundler. For other CSS — vanilla, a different framework, CSS-in-JS — you have two options:
+
+**Stylesheet in `web/dist/`** — drop a `styles.css` next to your other static assets and link to it from your root layout:
+
+```tsx
+<head>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+```
+
+The frontend dir serves it directly. No bundler involvement, no fingerprinting.
+
+**Per-component styles** — for component-scoped CSS (CSS modules, styled-components, etc.), apply it the same way you would in any React app. The SSR runtime renders whatever React renders.
+
+If you want CSS modules or PostCSS plugins wired into the bundler, file an issue — the plumbing is in `packages/functions/src/ssr-client-bundler.ts` and we're happy to extend it.

@@ -1,0 +1,121 @@
+---
+title: SSR Overview
+description: "File-based server-side rendering with React, layouts, per-route chunks, and instant client navigation. Replaces Next.js for Pylon apps."
+---
+
+Pylon ships a native SSR runtime so you can serve dynamic pages without bolting on Next.js. Drop a file under `app/`, get a route. React renders on the server, hydrates on the client, and `<Link>` makes navigation instant.
+
+```
+my-app/
+├── app.ts                 # manifest entry (entities, routes, etc.)
+└── app/
+    ├── layout.tsx         # wraps every page below
+    ├── globals.css        # Tailwind (optional)
+    ├── page.tsx           # GET /
+    ├── hello/
+    │   └── page.tsx       # GET /hello
+    └── gallery/
+        └── page.tsx       # GET /gallery
+```
+
+No `next.config.js`, no separate `apps/web`, no proxy in front. `pylon dev` (or the production binary) serves the API, the SSR pages, the JS bundles, the optimized images, and the WebSocket all on one port.
+
+## File-based routes
+
+`app/<path>/page.tsx` becomes `GET /<path>`. Use `[slug]` for dynamic segments and `(group)` for grouping folders that don't show up in the URL.
+
+```
+app/blog/[slug]/page.tsx       → /blog/:slug
+app/(marketing)/about/page.tsx → /about
+```
+
+Page components receive:
+
+```tsx
+interface PageProps {
+  url: string;                         // full request path
+  params: Record<string, string>;      // dynamic segments
+  searchParams: Record<string, string>;
+  headers: Record<string, string>;     // lowercased
+  cookies: Record<string, string>;
+  auth: {
+    user_id: string | null;
+    is_admin: boolean;
+    tenant_id: string | null;
+    roles: string[];
+  };
+}
+
+export default function BlogPost({ params, auth }: PageProps) {
+  return <h1>{params.slug} — {auth.user_id ?? "anon"}</h1>;
+}
+```
+
+`auth` is resolved from the session cookie. Anonymous requests get `user_id: null`. There is no extra "get the session" call from your page — the SSR runtime hands it in.
+
+## Layouts
+
+`app/layout.tsx` wraps every page below it. Nested layouts compose:
+
+```tsx
+// app/layout.tsx
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <head><title>My App</title></head>
+      <body>
+        <Header />
+        {children}
+      </body>
+    </html>
+  );
+}
+
+// app/dashboard/layout.tsx — wraps every page under /dashboard
+export default function DashboardLayout({ children }) {
+  return (
+    <div className="flex">
+      <Sidebar />
+      <div className="flex-1">{children}</div>
+    </div>
+  );
+}
+```
+
+Layouts survive client-side navigation — when the user clicks a `<Link>` from `/dashboard/projects` to `/dashboard/settings`, the `DashboardLayout` instance stays mounted and only its `children` swap. Sidebar scroll position, open menus, and form state persist.
+
+## How it works
+
+1. Request arrives → Pylon's router matches the URL against `ssr_routes` (auto-discovered from `app/`).
+2. Pylon dispatches `render_route` to the Bun runtime over its NDJSON pipe.
+3. The Bun adapter `import()`s the page + layout modules, calls `react-dom/server.renderToReadableStream`, and pipes chunks back to Rust.
+4. Rust streams them over HTTP chunked-transfer-encoding, splicing `<link rel="stylesheet">` and `<link rel="modulepreload">` into `<head>` from the build manifest as the stream flows past.
+5. After React's stream ends, Pylon appends `<script id="__PYLON_DATA__">` with the hydration payload and a per-route `<script type="module">`.
+6. Browser executes the module, which dispatches to `hydrateRoot` and installs the click + popstate handlers for `<Link>`.
+
+The whole pipeline is streaming — first byte goes to the client as soon as React emits its first chunk, not after the whole page is built.
+
+## Per-route code splitting
+
+Each page becomes its own entry chunk (~500 bytes gzipped) sharing one big chunk with React + react-dom + Pylon's runtime (~98KB gz). When the user lands on `/hello`, the browser downloads the shared chunk + the `/hello` entry. When they navigate to `/about`, only the `/about` entry hits the wire (a couple hundred bytes); the shared chunk is already cached with `Cache-Control: immutable`.
+
+Add a 50th route → the shared chunk stays the same size and the new page contributes its own tiny entry. The bundle does not grow linearly with route count.
+
+The bundler emits a `manifest.json` listing every route's entry file + the chunks it depends on. The SSR head adapter reads it on each render and emits the right preload tags.
+
+## What's not here yet
+
+- **`loading.tsx` / `error.tsx` / `not-found.tsx`** — special files like Next.js's app router. Phase 3.
+- **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components today. Functions + the typed client handle the same use cases.
+- **Streaming with `<Suspense>`** — the stream itself works (React emits multiple chunks), but boundary-level suspense fallbacks aren't yet wired through the manifest.
+
+## Try it
+
+```bash
+git clone https://github.com/pylonsync/pylon
+cd pylon/examples/ssr-hello
+bun install
+pylon dev
+```
+
+Open `http://localhost:4321/` — three pages, all served by Pylon, no Next.js anywhere.

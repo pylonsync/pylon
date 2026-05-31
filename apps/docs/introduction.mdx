@@ -16,11 +16,11 @@ No separate realtime layer. No glue between your database, your API, and your We
   <Card title="Core concepts" icon="book" href="/concepts/entities">
     Entities, policies, functions, live queries.
   </Card>
+  <Card title="SSR" icon="window" href="/ssr/overview">
+    File-based routes, instant nav, image optimizer — Pylon replaces Next.js for full-stack apps.
+  </Card>
   <Card title="Deploy" icon="rocket" href="/operations/deploy">
     Self-host, Pylon Cloud, or Vercel + Pylon Cloud.
-  </Card>
-  <Card title="Pylon Cloud" icon="cloud" href="/cloud">
-    Managed hosting in one push.
   </Card>
 </CardGroup>
 
@@ -31,6 +31,7 @@ No separate realtime layer. No glue between your database, your API, and your We
 - **Server functions** — queries, mutations, actions, all RPC-callable from the client.
 - **Live queries** — `db.useQuery(...)` subscribes to results and updates on write.
 - **Auth** — email magic links, OAuth, guest sessions. No third-party SDK.
+- **SSR** — file-based React routes with [`<Link>`](/ssr/link), [`<Image>`](/ssr/image), and built-in [Tailwind](/ssr/styling) — no Next.js required.
 - **One binary** — the runtime is a single Rust executable. Deploy anywhere.
 
 ## Why another backend framework?
@@ -54,9 +55,8 @@ Pylon runs on **SQLite** or **Postgres**. SQLite is the default — a single fil
 ## What it's not
 
 - *Only* a BaaS you rent. Pylon is self-hostable infrastructure first. A managed cloud is also available at [cloud.pylonsync.com](https://cloud.pylonsync.com) if you'd rather not run it yourself — same binary, same APIs, hosted.
-- A full-stack framework. Pylon is the backend; pair it with Next.js, Vite, or any client.
 - An analytics engine. Heavy OLAP / warehouse workloads belong in ClickHouse, DuckDB, or BigQuery — Pylon is for transactional, realtime application state.
 
 ## How to read these docs
 
-Start with the [Quickstart](/quickstart) to feel the shape of a Pylon app in five minutes. Then [Core concepts](/concepts/entities) walks through entities, policies, functions, and live queries in depth. [Deploy](/operations/deploy) covers self-hosting, and [Deploying to Vercel](/operations/vercel) is the canonical Next.js + Pylon Cloud production stack. Browse [examples on GitHub](https://github.com/pylonsync/pylon/tree/main/examples) for end-to-end apps (CRM, ERP, chat, 3D world, ten total) you can clone.
+Start with the [Quickstart](/quickstart) to feel the shape of a Pylon app in five minutes. Then [Core concepts](/concepts/entities) walks through entities, policies, functions, and live queries in depth. [SSR](/ssr/overview) covers file-based routing, `<Link>`, `<Image>`, and the rest of the full-stack story. [Deploy](/operations/deploy) covers self-hosting, and [Deploying to Vercel](/operations/vercel) is the canonical Next.js + Pylon Cloud production stack. Browse [examples on GitHub](https://github.com/pylonsync/pylon/tree/main/examples) for end-to-end apps (CRM, ERP, chat, 3D world, SSR demos, ten+ total) you can clone.

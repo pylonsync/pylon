@@ -1,0 +1,112 @@
+---
+title: <Link>
+description: "Instant client-side navigation between SSR routes, with viewport-based prefetch. Drop-in <a> replacement."
+---
+
+```tsx
+import { Link } from "@pylonsync/react";
+
+<Link href="/hello">Hello</Link>
+```
+
+`<Link>` renders a plain `<a>` server-side, so it works with JavaScript off, on slow links, and during the brief moment before hydration completes. Once Pylon's runtime is live, clicks get intercepted and Pylon does a client-side navigation instead of a full page reload.
+
+## What it does
+
+| Phase | Behavior |
+|---|---|
+| SSR / no JS | Renders `<a href data-pylon-link>...</a>`. Same as a regular anchor. |
+| In viewport | IntersectionObserver fires `__pylon.prefetch(href)` — adds `<link rel="prefetch" as="document">` for the URL + `<link rel="modulepreload">` for the shared chunk. |
+| Hover / touchstart | Same prefetch logic, escalated for users who never saw the link in the viewport (touch devices, fast scrollers). |
+| Click | `preventDefault()`, fetch the new SSR HTML, dynamic-import the new route's entry chunk (already preloaded), and re-render the React root in place. |
+| Modifier keys / target="_blank" | Falls through to the browser's default behavior — open in new tab, etc. |
+
+The React root persists across navigations, so any layout that's shared between the old and new route keeps its instance. State, scroll position, video playback — all survive the nav.
+
+## API
+
+```tsx
+interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
+  /** Destination path. Same-origin paths get client-side nav; off-origin renders as plain <a>. */
+  href: string;
+  /** Default true. Set false to skip prefetch (long lists, pagination tails). */
+  prefetch?: boolean;
+  children?: React.ReactNode;
+}
+```
+
+Any other anchor prop (`className`, `target`, `rel`, `onClick`, etc.) passes through.
+
+## Examples
+
+### Basic
+
+```tsx
+import { Link } from "@pylonsync/react";
+
+export default function Nav() {
+  return (
+    <nav className="flex gap-4">
+      <Link href="/">Home</Link>
+      <Link href="/dashboard">Dashboard</Link>
+      <Link href="/settings">Settings</Link>
+    </nav>
+  );
+}
+```
+
+### Disable prefetch for off-screen links
+
+A large paginated list with a "next page" link the user might never click:
+
+```tsx
+<Link href={`/posts?page=${page + 1}`} prefetch={false}>
+  Next →
+</Link>
+```
+
+### Open in a new tab
+
+```tsx
+<Link href="/spec.pdf" target="_blank" rel="noopener">
+  Spec (PDF)
+</Link>
+```
+
+Modifier keys + middle-click also fall through automatically — no special handling needed.
+
+### Programmatic navigation
+
+`<Link>` is the prop-based API. For imperative nav (after a form submit, post-login redirect, etc.), call the global runtime:
+
+```tsx
+"use client";
+window.__pylon?.navigate("/welcome");
+```
+
+The runtime is loaded as part of the shared chunk; `window.__pylon` is defined as soon as hydration completes. Use the `?.` form to be safe on the first render.
+
+## How nav actually works
+
+1. User clicks a `<Link>`. The runtime's delegated handler picks it off `a[data-pylon-link]` clicks.
+2. Runtime fetches the target URL with the standard `Accept: text/html` header. The server SSRs the new page just like a direct navigation would.
+3. Runtime parses the response and extracts the `__PYLON_DATA__` JSON tag (component name, layouts, props).
+4. Runtime looks up the new component in the bundle manifest and dynamically imports its entry chunk.
+5. The entry chunk's `hydrate(component, Page, Layouts)` populates the route cache without re-rendering (the cache is keyed on component path).
+6. Runtime calls `root.render(buildTree(Page, Layouts, newProps))`. React's reconciler diffs against the existing tree — shared layouts get reused, the page subtree swaps.
+7. `history.pushState`, scroll to top, done.
+
+If anything fails (fetch errored, response wasn't HTML, manifest didn't know the component), the runtime falls back to `window.location.href = href` so the browser handles it the old-fashioned way.
+
+## Differences from Next.js's `<Link>`
+
+| | Pylon `<Link>` | Next.js `<Link>` |
+|---|---|---|
+| Prefetch trigger | IntersectionObserver (256px rootMargin) | IntersectionObserver |
+| Hover escalation | Yes (once) | Yes |
+| Prefetch payload | HTML + shared chunk | RSC payload + per-route JS |
+| Nav model | Re-render in place, layouts preserved | App router preserves layouts the same way |
+| `scroll={false}` prop | Not yet | Yes |
+| Hash-only links (`#section`) | Falls through to browser | Smooth-scrolls in app router |
+
+The hash-link + `scroll` props are on the roadmap.
