@@ -450,12 +450,12 @@ export function ChatApp() {
           Both rows / cols use `min-h-0` so the inner overflow-y-auto
           regions size correctly under flex/grid. */}
       <div
-        className="grid h-screen grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[260px_1fr] md:data-[thread=true]:grid-cols-[260px_1fr_380px]"
+        className="grid h-screen h-dvh grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[260px_1fr] md:data-[thread=true]:grid-cols-[260px_1fr_380px]"
         data-thread={!!threadMessageId}
       >
         <div
           data-mobile-view={mobileView}
-          className="flex min-h-0 flex-col data-[mobile-view=sidebar]:flex data-[mobile-view=channel]:hidden data-[mobile-view=thread]:hidden md:!flex"
+          className="flex min-h-0 min-w-0 flex-col data-[mobile-view=sidebar]:flex data-[mobile-view=channel]:hidden data-[mobile-view=thread]:hidden md:!flex"
         >
           <Sidebar
             currentUser={currentUser}
@@ -468,7 +468,7 @@ export function ChatApp() {
         </div>
         <div
           data-mobile-view={mobileView}
-          className="min-h-0 data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:flex data-[mobile-view=thread]:hidden md:!flex"
+          className="flex min-h-0 min-w-0 flex-col data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:flex data-[mobile-view=thread]:hidden md:!flex"
         >
           {activeChannelId ? (
             <ChannelView
@@ -479,7 +479,7 @@ export function ChatApp() {
               onOpenMobileSidebar={() => setMobileView("sidebar")}
             />
           ) : (
-            <main className="flex min-h-0 flex-1 flex-col">
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col">
               <MobileChannelHeaderShell
                 title="Welcome"
                 onOpenSidebar={() => setMobileView("sidebar")}
@@ -494,7 +494,7 @@ export function ChatApp() {
         {threadMessageId && activeChannelId && (
           <div
             data-mobile-view={mobileView}
-            className="min-h-0 data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:hidden data-[mobile-view=thread]:flex md:!flex"
+            className="flex min-h-0 min-w-0 flex-col data-[mobile-view=sidebar]:hidden data-[mobile-view=channel]:hidden data-[mobile-view=thread]:flex md:!flex"
           >
             <ThreadPanel
               parentId={threadMessageId}
@@ -1389,7 +1389,7 @@ function ChannelView({
   const ui = React.useContext(UIContext);
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col bg-background">
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       {/* Channel header: cleaner two-column layout with a thin
           vertical separator between the channel name and the
           topic input. The topic gets more horizontal room
@@ -1427,9 +1427,11 @@ function ChannelView({
               </button>
               <div
                 aria-hidden="true"
-                className="h-4 w-px shrink-0 bg-border"
+                className="hidden h-4 w-px shrink-0 bg-border md:block"
               />
-              <CollabTopic channelId={channel.id} />
+              <div className="hidden flex-1 min-w-0 md:flex">
+                <CollabTopic channelId={channel.id} />
+              </div>
             </>
           )}
         </div>
@@ -1663,7 +1665,7 @@ function MessageList({
 
   if (visible.length === 0) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" ref={scrollRef}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain" ref={scrollRef}>
         <EmptyState
           title="No messages yet"
           body="Say something — the whole channel is listening."
@@ -1716,7 +1718,7 @@ function MessageList({
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto pt-2 pb-1"
@@ -1983,7 +1985,7 @@ function ThreadPanel({
           <X className="size-4" />
         </Button>
       </header>
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-1 pb-1" ref={scrollRef}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain px-1 pb-1" ref={scrollRef}>
         <div className="border-b border-border px-4 py-3">
           <div className="flex items-start gap-3">
             <ColorAvatar name={parentAuthor?.displayName} color={parentAuthor?.avatarColor} />
@@ -2359,7 +2361,7 @@ function Composer({
 
   return (
     <form
-      className="shrink-0 px-4 pb-3 pt-1"
+      className="shrink-0 px-4 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
