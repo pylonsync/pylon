@@ -14,7 +14,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-sync = { path = "../sync", version = "0.3.224" }
+pylon-sync = { path = "../sync", version = "0.3.225" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
