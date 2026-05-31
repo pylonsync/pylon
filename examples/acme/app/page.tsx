@@ -133,8 +133,8 @@ function FeatureGrid() {
     },
     {
       eyebrow: "Ridiculous speed",
-      title: "Built on Rust. Feels like it.",
-      body: "Sub-30ms p95 on every interaction. No spinners, no loading screens, no waiting. You forget you're using software.",
+      title: "Sub-30ms on every click.",
+      body: "No spinners, no loading screens, no \"give us a moment\" toasts. You forget you're using software. Your team gets the hour back.",
       src: "/feat-speed.jpg",
     },
   ];

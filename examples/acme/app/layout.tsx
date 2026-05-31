@@ -156,8 +156,7 @@ function Footer() {
               </span>
             </div>
             <p className="mt-4 max-w-xs text-sm text-[var(--color-stone)]">
-              The intelligent operating system for modern teams. Built in
-              Dallas.
+              The intelligent operating system for modern teams.
             </p>
           </div>
           {cols.map((c) => (
@@ -182,7 +181,7 @@ function Footer() {
         </div>
         <div className="mt-16 flex flex-col items-start justify-between gap-4 border-t border-[var(--color-line)] pt-8 text-xs text-[var(--color-stone)] md:flex-row md:items-center">
           <span>© {new Date().getFullYear()} Acme, Inc. All rights reserved.</span>
-          <span>Rendered by Pylon · one binary, one port.</span>
+          <span>Made for teams that ship.</span>
         </div>
       </div>
     </footer>

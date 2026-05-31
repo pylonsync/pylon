@@ -14,9 +14,9 @@ const POSTS = [
   },
   {
     slug: "scaling-fast",
-    title: "Scaling Acme to 50,000 teams on a single Rust binary.",
+    title: "What we learned scaling Acme from 100 to 50,000 teams.",
     excerpt:
-      "How a deliberately boring architecture and a lot of cache-line discipline let us run our entire production fleet on six small machines.",
+      "We refused to hire ahead of revenue. We deleted features. We deprecated integrations our biggest customers didn't use. Here's what changed, what didn't, and the decisions we'd defend at gunpoint.",
     cover: "/blog-2.jpg",
     author: "James Patel",
     date: "April 2026",

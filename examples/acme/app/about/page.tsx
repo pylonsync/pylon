@@ -104,7 +104,7 @@ const BELIEFS = [
   {
     eyebrow: "02",
     title: "Speed is a feature.",
-    body: "If it takes more than 30ms, we treat it as a bug, not a tradeoff. We rewrote our backend in Rust because the alternative was watching loading spinners ship.",
+    body: "If it takes more than 30ms, we treat it as a bug, not a tradeoff. Every part of Acme is designed around the idea that your team's time is the actual scarce resource.",
   },
   {
     eyebrow: "03",
