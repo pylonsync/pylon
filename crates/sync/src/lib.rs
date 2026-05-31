@@ -205,6 +205,43 @@ pub struct ClientChange {
 /// generates seqs locally.
 pub type SeqProvider = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
 
+/// Persistence layer for the change log. Single-process / SQLite
+/// deployments hydrate the in-memory ring buffer from this on boot
+/// and append every new event here as well, so clients that survive
+/// a server restart still pull the changes they missed.
+///
+/// Postgres / cluster mode doesn't use this — the cluster bus +
+/// per-instance ChangeLog::append_peer already converge state across
+/// nodes, and rows live in the entity tables that the
+/// `pylon_change_seq` sequence stamps. The trait lives in
+/// `pylon-sync` so `ChangeLog` can call it without depending on
+/// `pylon-runtime`.
+///
+/// All methods are sync because the change log is consulted on the
+/// mutation hot path; implementors should make `append` fast
+/// (single INSERT, no fsync per-event) and treat eviction / pruning
+/// as a background concern.
+pub trait ChangeLogStore: Send + Sync + std::fmt::Debug {
+    /// Persist a single event. Called from `append_with_prev` AFTER
+    /// the event has been pushed into the in-memory deque, so a
+    /// failure here doesn't lose the live broadcast — the next
+    /// boot would re-seed without it, which is what happens in
+    /// non-persistent deployments today.
+    fn append(&self, event: &ChangeEvent);
+
+    /// Read the most recent `limit` events from disk, oldest first.
+    /// Used at boot to seed the in-memory ring buffer so post-restart
+    /// pulls cover the same window as pre-restart pulls.
+    fn load_recent(&self, limit: usize) -> Vec<ChangeEvent>;
+
+    /// Read events with `seq > since` ordered by seq, up to `limit`
+    /// rows. Pull falls back to this when the in-memory ring no
+    /// longer covers the cursor — typically because the client was
+    /// disconnected long enough for the ring to roll past their
+    /// cursor.
+    fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent>;
+}
+
 pub struct ChangeLog {
     events: Mutex<std::collections::VecDeque<ChangeEvent>>,
     seq: Mutex<u64>,
@@ -213,6 +250,12 @@ pub struct ChangeLog {
     /// event's seq AND tracks max-seen in `seq` so `current_seq()` /
     /// `append_peer()` interop correctly with the global counter.
     seq_provider: Option<SeqProvider>,
+    /// Optional on-disk persistence. SQLite deployments wire this to
+    /// the `_pylon_change_log` table so clients that survive a server
+    /// restart still see the changes they missed. Postgres / cluster
+    /// mode leaves it `None` — the cluster bus + the entity tables'
+    /// `pylon_change_seq` SEQUENCE already handle persistence.
+    store: Option<std::sync::Arc<dyn ChangeLogStore>>,
     /// Op-id idempotency tracker. State + FIFO order live behind ONE
     /// mutex — splitting them across two mutexes (as a prior revision
     /// did) created a lock-order deadlock risk: `claim_op_id` held
@@ -344,8 +387,40 @@ impl ChangeLog {
             seq: Mutex::new(0),
             capacity,
             seq_provider: None,
+            store: None,
             op_tracker: Mutex::new(OpTracker::with_capacity(10_000)),
         }
+    }
+
+    /// Attach an on-disk store and hydrate the in-memory ring buffer
+    /// from it. Loads the most recent `capacity` events ordered by
+    /// `seq` ascending and seeds the local seq counter to the max
+    /// seen, so `current_seq()` resumes from the last persisted
+    /// value instead of restarting at 0 on every process boot.
+    ///
+    /// Call this BEFORE any append fires (typically at the very end
+    /// of runtime construction). Builder-style to compose with
+    /// `with_capacity` / `with_seq` / `with_initial_seq`.
+    pub fn with_store(mut self, store: std::sync::Arc<dyn ChangeLogStore>) -> Self {
+        let loaded = store.load_recent(self.capacity);
+        if !loaded.is_empty() {
+            let max_seq = loaded.iter().map(|e| e.seq).max().unwrap_or(0);
+            {
+                let mut events = self.events.lock().unwrap();
+                events.clear();
+                for e in loaded.into_iter() {
+                    events.push_back(e);
+                }
+            }
+            {
+                let mut seq = self.seq.lock().unwrap();
+                if max_seq > *seq {
+                    *seq = max_seq;
+                }
+            }
+        }
+        self.store = Some(store);
+        self
     }
 
     /// Install an external seq provider — typically a closure that
@@ -511,6 +586,17 @@ impl ChangeLog {
         while events.len() > self.capacity {
             events.pop_front();
         }
+        // Persist AFTER in-memory push so a slow / failing store
+        // never blocks the live broadcast. The mutation hot path
+        // pays one INSERT per event; the SQLite impl batches via
+        // WAL and prepared statements so this is sub-millisecond
+        // on commodity hardware. Failures here are logged by the
+        // store but not propagated — the in-memory state is still
+        // correct, and the next restart will just miss this event
+        // (same behavior as non-persistent deployments today).
+        if let Some(store) = self.store.as_ref() {
+            store.append(&returned);
+        }
         returned
     }
 
@@ -574,17 +660,40 @@ impl ChangeLog {
 
         // Detect "cursor too old": the caller's cursor is before the oldest
         // retained event by more than one seq. EXCEPT cursor=0 — a fresh
-        // client gets whatever the log currently holds. The previous
-        // policy 410'd cursor=0 whenever the seeded entity replay had
-        // been evicted, which the React client handled by resetting
-        // back to cursor=0 and re-pulling — an infinite loop. The
-        // partial-tail risk the old comment warned about is real but
-        // narrow: the runtime now also re-seeds entity rows on demand
-        // (see `Runtime::seed_change_log`), so cursor=0 always gets a
-        // current snapshot of state.
+        // client gets whatever the log currently holds.
+        //
+        // When a disk store is attached, we fall back to it instead of
+        // forcing the client into a full resync. The store covers gaps
+        // that the in-memory ring can no longer hold (it's bounded by
+        // `capacity`), so a client whose cursor predates the in-memory
+        // window but is still within the persisted window gets a real
+        // page of events.
         if cursor.last_seq > 0 {
             if let Some(front) = events.front() {
                 if cursor.last_seq + 1 < front.seq {
+                    if let Some(store) = self.store.as_ref() {
+                        drop(events);
+                        let changes = store.pull_range(cursor.last_seq, limit);
+                        if !changes.is_empty() {
+                            let last_seq = changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
+                            let has_more = changes.len() >= limit;
+                            return Ok(PullResponse {
+                                changes,
+                                cursor: SyncCursor { last_seq },
+                                has_more,
+                            });
+                        }
+                        // Store returned nothing — the cursor is
+                        // ahead of disk too. Return an empty page
+                        // rather than 410 — avoids the resync loop
+                        // for clients that just happened to be at
+                        // the tip.
+                        return Ok(PullResponse {
+                            changes: Vec::new(),
+                            cursor: cursor.clone(),
+                            has_more: false,
+                        });
+                    }
                     return Err(PullError::ResyncRequired {
                         oldest_seq: front.seq,
                         cursor: cursor.clone(),
@@ -1069,5 +1178,106 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "concurrent claim/complete/forget took too long — possible deadlock"
         );
+    }
+
+    /// In-memory `ChangeLogStore` for testing the persistence hooks
+    /// without dragging SQLite into `pylon-sync`'s tests.
+    #[derive(Debug, Default)]
+    struct MemStore {
+        events: Mutex<Vec<ChangeEvent>>,
+    }
+    impl ChangeLogStore for MemStore {
+        fn append(&self, event: &ChangeEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+            let v = self.events.lock().unwrap();
+            let start = v.len().saturating_sub(limit);
+            v[start..].to_vec()
+        }
+        fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.seq > since)
+                .take(limit)
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Persisted events are visible after a fresh ChangeLog is rebuilt
+    /// from the same store — proves the "send message, restart server,
+    /// refresh page" sequence works.
+    #[test]
+    fn store_hydrates_in_memory_ring_after_restart() {
+        let store = std::sync::Arc::new(MemStore::default());
+
+        // First session: append a few events.
+        let log1 = ChangeLog::new().with_store(store.clone());
+        log1.append(
+            "Message",
+            "m1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"body": "hello"})),
+        );
+        log1.append(
+            "Message",
+            "m2",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"body": "world"})),
+        );
+        let current_seq_before = log1.current_seq();
+        assert_eq!(current_seq_before, 2);
+
+        // Simulate process restart: drop log1, build a fresh ChangeLog
+        // from the same store.
+        drop(log1);
+        let log2 = ChangeLog::new().with_store(store.clone());
+
+        // current_seq must resume from the hydrated state — otherwise
+        // a client cursor from before the restart trips ResyncRequired
+        // (the bug we're fixing).
+        assert_eq!(log2.current_seq(), 2);
+
+        // Pulling from cursor=0 returns both hydrated events.
+        let resp = log2
+            .pull(&SyncCursor { last_seq: 0 }, 10)
+            .expect("pull from 0");
+        assert_eq!(resp.changes.len(), 2);
+        assert_eq!(resp.changes[0].row_id, "m1");
+        assert_eq!(resp.changes[1].row_id, "m2");
+    }
+
+    /// When the in-memory ring is smaller than the persisted log,
+    /// pull falls back to the store instead of 410-ing. Critical for
+    /// long-running deployments — a client offline for a day still
+    /// gets a clean catch-up.
+    #[test]
+    fn pull_falls_back_to_store_when_ring_evicts() {
+        let store = std::sync::Arc::new(MemStore::default());
+        // Capacity = 2; we'll append 5 events so the ring rolls.
+        let log = ChangeLog::with_capacity(2).with_store(store.clone());
+        for i in 1..=5 {
+            log.append(
+                "Message",
+                &format!("m{}", i),
+                ChangeKind::Insert,
+                Some(serde_json::json!({"i": i})),
+            );
+        }
+        // In-memory ring now holds seqs [4, 5]; store has all 5.
+        assert_eq!(log.current_seq(), 5);
+
+        // Cursor=1 is past the ring's oldest (seq=4) — without a
+        // store this would be ResyncRequired. With the store, pull
+        // returns events 2..=5.
+        let resp = log
+            .pull(&SyncCursor { last_seq: 1 }, 10)
+            .expect("pull from old cursor with store fallback");
+        assert_eq!(resp.changes.len(), 4);
+        assert_eq!(resp.changes[0].seq, 2);
+        assert_eq!(resp.changes[3].seq, 5);
     }
 }

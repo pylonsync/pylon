@@ -647,6 +647,40 @@ fn start_server(
             }
         }
     }
+
+    // Attach the SQLite-backed persistent change log so deltas
+    // survive restarts. Without this, the in-memory ring buffer
+    // resets on every process boot; clients with a persisted
+    // cursor get a `ResyncRequired` and lose any events that
+    // landed post-restart but pre-reconnect.
+    //
+    // Bootstrap is idempotent (CREATE TABLE IF NOT EXISTS). The
+    // hydrate-from-disk inside `with_store` seeds the in-memory
+    // ring with the most recent `capacity` events ordered ASC, so
+    // post-boot pulls cover the same window the previous process
+    // was serving.
+    let mut had_persisted_events = false;
+    if !runtime.is_postgres() && !runtime.is_in_memory() {
+        if let Err(e) = runtime.bootstrap_sqlite_change_log() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap _pylon_change_log; persistent log disabled: {}",
+                e.message
+            );
+        } else {
+            use pylon_sync::ChangeLogStore as _;
+            let store = std::sync::Arc::new(crate::change_log_store::SqliteChangeLogStore::new(
+                Arc::clone(&runtime),
+            ));
+            had_persisted_events = !store.load_recent(1).is_empty();
+            change_log_builder = change_log_builder.with_store(store);
+            if had_persisted_events {
+                tracing::info!("[change_log] hydrated in-memory ring from _pylon_change_log");
+            } else {
+                tracing::info!("[change_log] using SQLite _pylon_change_log (empty on first boot)");
+            }
+        }
+    }
+
     let change_log = Arc::new(change_log_builder);
 
     // Seed the change log with one synthetic insert per extant row so that
@@ -656,23 +690,29 @@ fn start_server(
     // pull nothing and see an empty replica). Seqs here are fresh; clients
     // whose cursors are ahead of `self.seq` get a 410 and full resync,
     // which then hits this seeded log and gets every current row back.
-    // Documented exception to the "all writes go through `apply_mutation`"
-    // invariant: this is startup seeding, not a mutation. No clients are
-    // connected yet, so there's nothing to broadcast — we're seeding the
-    // change log so cursors at last_seq=0 see the current rows when they
-    // pull. Policy / plugin hooks / CRDT broadcast don't apply: nothing
-    // is changing, this is "the state at boot."
-    for entity in runtime.manifest().entities.iter() {
-        match runtime.list(&entity.name) {
-            Ok(rows) => {
-                for row in rows {
-                    if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
-                        change_log.append(&entity.name, id, ChangeKind::Insert, Some(row.clone()));
+    //
+    // SKIP this when the persistent store already hydrated events —
+    // those events ARE the current state, and re-seeding would assign
+    // fresh seqs to rows that already have older Insert events on
+    // disk, bloating the log without changing observable behavior.
+    if !had_persisted_events {
+        for entity in runtime.manifest().entities.iter() {
+            match runtime.list(&entity.name) {
+                Ok(rows) => {
+                    for row in rows {
+                        if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                            change_log.append(
+                                &entity.name,
+                                id,
+                                ChangeKind::Insert,
+                                Some(row.clone()),
+                            );
+                        }
                     }
                 }
-            }
-            Err(_) => {
-                // Entity table may not exist yet on first boot — skip.
+                Err(_) => {
+                    // Entity table may not exist yet on first boot — skip.
+                }
             }
         }
     }

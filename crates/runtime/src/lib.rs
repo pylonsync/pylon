@@ -3,6 +3,7 @@ pub mod api_key_backend;
 pub mod audit_backend;
 pub mod cache_handlers;
 pub mod cache_server;
+pub mod change_log_store;
 pub mod config;
 pub mod connections;
 pub mod cron;
@@ -464,6 +465,55 @@ fn data_err_to_runtime(e: pylon_http::DataError) -> RuntimeError {
     }
 }
 
+/// Map a `pylon_sync::ChangeKind` to the string form persisted in
+/// `_pylon_change_log.kind`. The strings are stable wire format —
+/// don't rename them without a migration.
+fn change_kind_to_str(kind: pylon_sync::ChangeKind) -> &'static str {
+    match kind {
+        pylon_sync::ChangeKind::Insert => "insert",
+        pylon_sync::ChangeKind::Update => "update",
+        pylon_sync::ChangeKind::Delete => "delete",
+    }
+}
+
+fn change_kind_from_str(s: &str) -> Option<pylon_sync::ChangeKind> {
+    match s {
+        "insert" => Some(pylon_sync::ChangeKind::Insert),
+        "update" => Some(pylon_sync::ChangeKind::Update),
+        "delete" => Some(pylon_sync::ChangeKind::Delete),
+        _ => None,
+    }
+}
+
+/// rusqlite row → `Option<ChangeEvent>` mapper shared by the two
+/// SELECT helpers. Returns `None` if the persisted `kind` doesn't
+/// match a known variant (would indicate schema drift).
+fn change_log_row_map(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Option<pylon_sync::ChangeEvent>> {
+    let seq: i64 = row.get(0)?;
+    let entity: String = row.get(1)?;
+    let row_id: String = row.get(2)?;
+    let kind_str: String = row.get(3)?;
+    let data_blob: Option<Vec<u8>> = row.get(4)?;
+    let prev_blob: Option<Vec<u8>> = row.get(5)?;
+    let timestamp: String = row.get(6)?;
+    let Some(kind) = change_kind_from_str(&kind_str) else {
+        return Ok(None);
+    };
+    let data = data_blob.and_then(|b| serde_json::from_slice(&b).ok());
+    let prev_data = prev_blob.and_then(|b| serde_json::from_slice(&b).ok());
+    Ok(Some(pylon_sync::ChangeEvent {
+        seq: seq as u64,
+        entity,
+        row_id,
+        kind,
+        data,
+        prev_data,
+        timestamp,
+    }))
+}
+
 impl Runtime {
     /// Open a runtime against either a SQLite file path or a Postgres URL.
     ///
@@ -673,6 +723,145 @@ impl Runtime {
             )
             .ok()?;
         Some(v as u64)
+    }
+
+    /// Create the `_pylon_change_log` table if it doesn't exist.
+    /// Called once at boot for SQLite deployments to enable
+    /// persistent change-log replay across restarts. Idempotent.
+    pub fn bootstrap_sqlite_change_log(&self) -> Result<(), RuntimeError> {
+        let sb = self.sqlite_backend()?;
+        let conn = sb.write_conn.lock().map_err(|e| RuntimeError {
+            code: "SQLITE_LOCK_FAILED".into(),
+            message: format!("write_conn lock poisoned: {e}"),
+        })?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _pylon_change_log (\
+             seq INTEGER PRIMARY KEY,\
+             entity TEXT NOT NULL,\
+             row_id TEXT NOT NULL,\
+             kind TEXT NOT NULL,\
+             data BLOB,\
+             prev_data BLOB,\
+             timestamp TEXT NOT NULL\
+             )",
+            [],
+        )
+        .map_err(|e| RuntimeError {
+            code: "SQLITE_CHANGE_LOG_BOOTSTRAP_FAILED".into(),
+            message: format!("CREATE TABLE _pylon_change_log: {e}"),
+        })?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS _pylon_change_log_entity_seq \
+             ON _pylon_change_log(entity, seq)",
+            [],
+        )
+        .map_err(|e| RuntimeError {
+            code: "SQLITE_CHANGE_LOG_BOOTSTRAP_FAILED".into(),
+            message: format!("CREATE INDEX _pylon_change_log_entity_seq: {e}"),
+        })?;
+        Ok(())
+    }
+
+    /// Persist a single change event to `_pylon_change_log`. Called
+    /// from `SqliteChangeLogStore::append` on every mutation. Failure
+    /// is logged and swallowed so a transient disk error doesn't
+    /// break the live broadcast — same trade-off as the change_log's
+    /// in-memory ring-buffer eviction policy.
+    pub fn sqlite_change_log_append(&self, event: &pylon_sync::ChangeEvent) {
+        let sb = match self.sqlite_backend() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let conn = match sb.write_conn.lock() {
+            Ok(c) => c,
+            Err(_) => {
+                tracing::warn!("[change_log] write_conn poisoned; skipping persist");
+                return;
+            }
+        };
+        let data_blob = event.data.as_ref().and_then(|v| serde_json::to_vec(v).ok());
+        let prev_blob = event
+            .prev_data
+            .as_ref()
+            .and_then(|v| serde_json::to_vec(v).ok());
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO _pylon_change_log \
+             (seq, entity, row_id, kind, data, prev_data, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                event.seq as i64,
+                event.entity,
+                event.row_id,
+                change_kind_to_str(event.kind.clone()),
+                data_blob,
+                prev_blob,
+                event.timestamp,
+            ],
+        ) {
+            tracing::warn!(seq = event.seq, error = %e, "[change_log] persist failed");
+        }
+    }
+
+    /// Read the most recent `limit` events from `_pylon_change_log`,
+    /// oldest-first. Used at boot to hydrate the in-memory ring
+    /// buffer.
+    pub fn sqlite_change_log_load_recent(&self, limit: usize) -> Vec<pylon_sync::ChangeEvent> {
+        let sb = match self.sqlite_backend() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let conn = match sb.write_conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
+             FROM (SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
+                   FROM _pylon_change_log ORDER BY seq DESC LIMIT ?1) \
+             ORDER BY seq ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(rusqlite::params![limit as i64], change_log_row_map) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.flatten().flatten().collect()
+    }
+
+    /// Read events with seq > `since` from `_pylon_change_log`,
+    /// ordered ascending, capped at `limit`. Used by the pull
+    /// fallback when the in-memory ring no longer covers the
+    /// requested cursor range.
+    pub fn sqlite_change_log_pull_range(
+        &self,
+        since: u64,
+        limit: usize,
+    ) -> Vec<pylon_sync::ChangeEvent> {
+        let sb = match self.sqlite_backend() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let conn = match sb.write_conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
+             FROM _pylon_change_log WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(
+            rusqlite::params![since as i64, limit as i64],
+            change_log_row_map,
+        ) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.flatten().flatten().collect()
     }
 
     /// Reserve a chunk of `amount` seqs atomically — bumps the persisted
