@@ -339,13 +339,15 @@ pub fn try_handle(
         return Err(request);
     }
 
-    // Hydration client bundle. SSR pages emit a
-    // `<script type="module" src="/_pylon/client.js">` tag; this
-    // handler serves the Bun-built bundle. Cached on disk by the
-    // bundler; we just stream the file.
+    // Hydration build assets. SSR pages emit per-route
+    // `<script type="module" src="/_pylon/build/<file>">` tags
+    // and `<link rel="modulepreload" href="/_pylon/build/chunks/...">`,
+    // which all route through this handler. First request triggers
+    // the Bun.build via the bundle_client RPC; subsequent requests
+    // stream files off disk from the cached outdir.
     let path_only = url.split('?').next().unwrap_or(&url);
-    if path_only == "/_pylon/client.js" && cfg.fn_ops.is_some() {
-        return serve_pylon_client_bundle(cfg, request, cors_origin);
+    if path_only.starts_with("/_pylon/build/") && cfg.fn_ops.is_some() {
+        return serve_pylon_client_bundle(cfg, request, path_only, cors_origin);
     }
 
     // SSR branch sits ABOVE dev_proxy so file-based pages take
@@ -956,19 +958,42 @@ fn serve_via_ssr_rpc(
     Ok(())
 }
 
-/// Memoized client-bundle path. The first request triggers Bun.build
-/// via the RPC; subsequent requests serve the same file off disk.
-/// Phase 1.5d: cached for the process lifetime (no file-watcher
-/// invalidation yet — restart pylon dev to pick up app/ changes).
-fn cached_client_bundle_path() -> &'static std::sync::Mutex<Option<String>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+/// Memoized bundle outdir. The first request triggers `Bun.build`
+/// via the `bundle_client` RPC; subsequent requests stream files
+/// out of the cached directory. Phase 1.5e: cached for the process
+/// lifetime — file-watcher invalidation (Phase 1.5f) will clear
+/// this on app/ changes.
+fn cached_bundle_outdir() -> &'static std::sync::Mutex<Option<std::path::PathBuf>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// Serve the hydration client bundle. Calls `bundle_client` on the
-/// function runner on first request, caches the path, then streams
-/// the file off disk on every request thereafter.
+/// Pick a content-type for a build asset based on its extension.
+/// Phase 1.5e emits `.js` entries + `.js` chunks; `.json` for the
+/// manifest; `.css` reserved for 1.5f.
+fn bundle_content_type_for(name: &str) -> &'static str {
+    if name.ends_with(".js") || name.ends_with(".mjs") {
+        "application/javascript; charset=utf-8"
+    } else if name.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if name.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if name.ends_with(".map") {
+        "application/json; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Serve any file under the bundle outdir. Calls `bundle_client`
+/// on the function runner on first hit, caches the outdir, then
+/// reads files relative to it. Path traversal is rejected hard.
+///
+/// Hash-named entries (`*-<hash>.js`) get `Cache-Control: public,
+/// max-age=31536000, immutable` — they're content-addressed so
+/// safe forever. The manifest (`manifest.json`) gets `no-cache`
+/// since it's the only mutable URL.
 ///
 /// Returns a 500 (or falls through to API routing on
 /// HYDRATION_NOT_IMPLEMENTED) if the bundler fails. The SSR'd HTML
@@ -977,6 +1002,7 @@ fn cached_client_bundle_path() -> &'static std::sync::Mutex<Option<String>> {
 fn serve_pylon_client_bundle(
     cfg: &FrontendConfig,
     request: Request,
+    request_path: &str,
     cors_origin: &str,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
@@ -984,12 +1010,17 @@ fn serve_pylon_client_bundle(
         None => return Err(request),
     };
 
-    let mut cache = cached_client_bundle_path().lock().unwrap();
+    // Acquire the outdir — build on first miss.
+    let mut cache = cached_bundle_outdir().lock().unwrap();
     if cache.is_none() {
         match fn_ops.bundle_client() {
-            Ok(path) => {
-                tracing::info!(path = %path, "SSR client bundle built");
-                *cache = Some(path);
+            Ok(paths) => {
+                tracing::info!(
+                    outdir = %paths.outdir,
+                    manifest = %paths.manifest_path,
+                    "SSR client bundle built"
+                );
+                *cache = Some(std::path::PathBuf::from(paths.outdir));
             }
             Err(e) => {
                 drop(cache);
@@ -1020,21 +1051,40 @@ fn serve_pylon_client_bundle(
             }
         }
     }
-    let path = cache.clone().unwrap();
+    let outdir = cache.clone().unwrap();
     drop(cache);
 
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            // Bundle was deleted from disk between build + read.
-            // Invalidate cache so the next request rebuilds.
-            *cached_client_bundle_path().lock().unwrap() = None;
-            tracing::error!(
-                path = %path,
-                error = %e,
-                "SSR client bundle disappeared; invalidating cache"
+    // Extract the path component after `/_pylon/build/`. Anything
+    // containing `..`, NUL, or backslash gets rejected — we don't
+    // want a hostile request asking for `../../etc/passwd`.
+    let suffix = request_path.strip_prefix("/_pylon/build/").unwrap_or("");
+    if suffix.is_empty()
+        || suffix.contains("..")
+        || suffix.contains('\0')
+        || suffix.contains('\\')
+        || suffix.starts_with('/')
+    {
+        let response = Response::from_data(b"// invalid bundle path\n".to_vec())
+            .with_status_code(400u16)
+            .with_header(
+                Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
+                    .unwrap(),
             );
-            let body = b"// Pylon client bundle missing\n".to_vec();
+        let _ = request.respond(response);
+        return Ok(());
+    }
+
+    let file_path = outdir.join(suffix);
+    // Belt-and-suspenders: canonicalize to make sure the resolved
+    // path still lives under outdir. If outdir itself can't be
+    // canonicalized (rare — disk vanished between build + read)
+    // bail out.
+    let outdir_canon = match outdir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // Invalidate cache so the next request rebuilds.
+            *cached_bundle_outdir().lock().unwrap() = None;
+            let body = b"// bundle outdir missing\n".to_vec();
             let response = Response::from_data(body)
                 .with_status_code(500u16)
                 .with_header(
@@ -1045,13 +1095,52 @@ fn serve_pylon_client_bundle(
             return Ok(());
         }
     };
+    if let Ok(canon) = file_path.canonicalize() {
+        if !canon.starts_with(&outdir_canon) {
+            let response = Response::from_data(b"// path escapes outdir\n".to_vec())
+                .with_status_code(400u16)
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
+                        .unwrap(),
+                );
+            let _ = request.respond(response);
+            return Ok(());
+        }
+    }
+
+    let bytes = match std::fs::read(&file_path) {
+        Ok(b) => b,
+        Err(_) => {
+            // 404 — no such bundle file. Don't invalidate the
+            // outdir cache; just this one file is missing.
+            let body = format!("// not found: {suffix}\n");
+            let response = Response::from_data(body.into_bytes())
+                .with_status_code(404u16)
+                .with_header(
+                    Header::from_bytes("Content-Type", "application/javascript; charset=utf-8")
+                        .unwrap(),
+                );
+            let _ = request.respond(response);
+            return Ok(());
+        }
+    };
+
+    // Hash-named files are content-addressed and safe to cache
+    // forever. `manifest.json` is the only mutable URL: it gets
+    // no-cache. Heuristic: files containing `-` followed by 8+
+    // hex chars before the extension are hash-named.
+    let cache_control = if suffix == "manifest.json" {
+        "no-cache"
+    } else if is_hashed_name(suffix) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
 
     let response = Response::from_data(bytes)
         .with_status_code(200u16)
-        .with_header(
-            Header::from_bytes("Content-Type", "application/javascript; charset=utf-8").unwrap(),
-        )
-        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
+        .with_header(Header::from_bytes("Content-Type", bundle_content_type_for(suffix)).unwrap())
+        .with_header(Header::from_bytes("Cache-Control", cache_control).unwrap())
         .with_header(
             Header::from_bytes(
                 "Access-Control-Allow-Origin",
@@ -1061,6 +1150,29 @@ fn serve_pylon_client_bundle(
         );
     let _ = request.respond(response);
     Ok(())
+}
+
+/// Heuristic: does this filename look hash-stamped? Matches
+/// `<name>-<hash>.<ext>` where `<hash>` is at least 8 chars long
+/// and uses only the base36 alphabet (Bun's hashing emits lowercase
+/// alphanumerics — 0-9, a-z). Used to decide whether to send a long
+/// `Cache-Control: immutable`. False negatives (no immutable) are
+/// harmless; false positives would cache a mutable file, so we err
+/// strict on the alphabet.
+fn is_hashed_name(name: &str) -> bool {
+    let base = name.rsplit_once('/').map(|(_, b)| b).unwrap_or(name);
+    let stem = match base.rsplit_once('.') {
+        Some((s, _)) => s,
+        None => return false,
+    };
+    let hash = match stem.rsplit_once('-') {
+        Some((_, h)) => h,
+        None => return false,
+    };
+    hash.len() >= 8
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
 }
 
 /// Build the AuthInfo for an SSR render by looking up the request's

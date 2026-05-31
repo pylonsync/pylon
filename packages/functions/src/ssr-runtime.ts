@@ -233,29 +233,61 @@ export async function handleRenderRoute(
       });
     }
 
-    // Hydration tail. After React's stream EOFs we append two
-    // script tags so the browser can:
-    //   1. Read the per-route hydration payload (component +
-    //      layouts + props) from a JSON-typed script tag.
-    //   2. Fetch + execute the bundled client entry at
-    //      `/_pylon/client.js`, which dispatches on the payload
-    //      and calls hydrateRoot.
+    // Hydration tail. After React's stream EOFs we append the
+    // hydration markers so the browser can hydrate:
+    //   1. `__PYLON_DATA__` — JSON-typed script with the props the
+    //      page was rendered with. The per-route bundle reads this
+    //      to seed hydrateRoot.
+    //   2. `<link rel="modulepreload">` for every transitive shared
+    //      chunk (react, react-dom, client-runtime). These preload
+    //      tags fire as soon as the parser sees them; the browser
+    //      can start fetching while it's still parsing the body.
+    //   3. `<script type="module" src="<route-entry>.js">` — the
+    //      per-route entry. It imports the shared chunks, which
+    //      were already in the cache from step 2.
     //
-    // The JSON payload is HTML-escaped inside a `type="application/
-    // json"` script tag. Browsers don't execute non-script types,
-    // so `</script>` inside the body needs to be escaped — JSON
-    // never contains a raw `</script>`, but a malicious URL /
-    // searchParams pair could. Replace `<` with `<` to be
-    // safe; JSON parsers accept the escape transparently.
+    // Per-route entry + chunk paths come from
+    // `.pylon/client-build/manifest.json`, which the bundler writes
+    // and `getManifest` parses with mtime-keyed caching. Falls back
+    // to a no-hydration warning if the manifest can't be loaded
+    // (rare — usually means the bundler crashed).
     const hydrationPayload = {
       component: msg.component,
       layouts: msg.layouts ?? [],
       props,
     };
     const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
-    const tail =
-      `<script id="__PYLON_DATA__" type="application/json">${json}</script>` +
-      `<script type="module" src="/_pylon/client.js"></script>`;
+
+    let manifestRoute: { file: string; imports: string[]; css: string[] } | null = null;
+    let manifestErr: string | null = null;
+    let publicPrefix = "/_pylon/build/";
+    try {
+      const { getManifest } = await import("./ssr-client-bundler");
+      const manifest = await getManifest();
+      publicPrefix = manifest.public_prefix || publicPrefix;
+      manifestRoute = manifest.routes[msg.component] ?? null;
+      if (!manifestRoute) {
+        manifestErr = `manifest has no entry for "${msg.component}"`;
+      }
+    } catch (e: any) {
+      manifestErr = e?.message || String(e);
+    }
+
+    let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
+    if (manifestRoute) {
+      // Preload shared chunks (react + runtime) first so they're
+      // already in cache by the time the entry script's import
+      // resolution starts. Order: preloads first, then entry.
+      for (const chunk of manifestRoute.imports) {
+        tail += `<link rel="modulepreload" href="${publicPrefix}${chunk}">`;
+      }
+      for (const css of manifestRoute.css) {
+        tail += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
+      }
+      tail += `<script type="module" src="${publicPrefix}${manifestRoute.file}"></script>`;
+    } else {
+      tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${manifestErr}`)})</script>`;
+    }
     send({
       type: "render_chunk",
       call_id: msg.call_id,

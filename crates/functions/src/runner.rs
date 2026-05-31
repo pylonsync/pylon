@@ -625,16 +625,11 @@ impl FnRunner {
         }
     }
 
-    /// Hydration — bundle the user's `app/**/page.tsx` +
-    /// `app/**/layout.tsx` tree into a single client-side ES module
-    /// for browsers to load. Bun does the work; this method just
-    /// drives the RPC.
-    ///
-    /// Returns the absolute path of the built bundle on success.
-    /// Phase 1.5d: caller is expected to read the file from disk
-    /// and serve it directly — the path is cheaper to pass over
-    /// stdio than the ~150kB bundle bytes themselves.
-    pub fn bundle_client(&self) -> Result<String, FnCallError> {
+    /// Result of a `bundle_client` RPC. Phase 1.5e shipped per-route
+    /// entries + shared chunks, so the host needs both the manifest
+    /// path (for SSR-side script-tag emission) and the output
+    /// directory (for serving files at `/_pylon/build/<rel>`).
+    pub fn bundle_client(&self) -> Result<BundleClientPaths, FnCallError> {
         let _io = self.io_lock.lock().unwrap();
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
@@ -654,10 +649,19 @@ impl FnRunner {
                     if r.path.is_empty() {
                         return Err(FnCallError {
                             code: "BUNDLE_CLIENT_EMPTY_PATH".into(),
-                            message: "Bun returned no path".into(),
+                            message: "Bun returned no manifest path".into(),
                         });
                     }
-                    return Ok(r.path);
+                    if r.outdir.is_empty() {
+                        return Err(FnCallError {
+                            code: "BUNDLE_CLIENT_EMPTY_OUTDIR".into(),
+                            message: "Bun returned no build outdir".into(),
+                        });
+                    }
+                    return Ok(BundleClientPaths {
+                        manifest_path: r.path,
+                        outdir: r.outdir,
+                    });
                 }
                 TsMessage::Error(err) if err.call_id == call_id => {
                     return Err(FnCallError {
@@ -1483,6 +1487,22 @@ fn execute_db_op(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hydration bundle return type
+// ---------------------------------------------------------------------------
+
+/// Result returned by [`FnRunner::bundle_client`]. The host serves
+/// any file under `outdir` at `/_pylon/build/<rel>` and reads
+/// `manifest_path` to drive the per-route `<script>` +
+/// `<link rel="modulepreload">` injection in the SSR head.
+#[derive(Debug, Clone)]
+pub struct BundleClientPaths {
+    /// Absolute path to the manifest JSON.
+    pub manifest_path: String,
+    /// Absolute path to the bundle output directory.
+    pub outdir: String,
 }
 
 // ---------------------------------------------------------------------------

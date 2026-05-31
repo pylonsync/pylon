@@ -566,18 +566,31 @@ impl BundleClientMessage {
     }
 }
 
-/// Hydration — Bun → host with the absolute path of the freshly
-/// built bundle (or an error if Bun.build failed). The host
-/// `fs::read`s the path on each `/_pylon/client.js` request.
+/// Hydration — Bun → host after `Bun.build` finishes. Phase 1.5e
+/// switched from a single-file model to per-route entries with
+/// shared chunks, so we now return:
+///   - `path`: absolute path to the manifest JSON
+///     (`<cwd>/.pylon/client-build/manifest.json`). The host reads
+///     this to discover which entry file + chunks each route needs.
+///   - `outdir`: absolute path to the build output directory. The
+///     host serves any file under it at `/_pylon/build/<rel>`.
+///
+/// `path` stayed in the schema (instead of being renamed
+/// `manifest_path`) so single-version old/new Bun runtimes can talk
+/// to a matching-version host — the wire field name is the contract.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BundleClientResultMessage {
     pub call_id: String,
-    /// Absolute path on disk. Empty when an error occurred — the
-    /// `error` field carries the failure detail in that case.
+    /// Absolute path to the manifest JSON. Empty on error.
     #[serde(default)]
     pub path: String,
-    /// Optional failure message. Mutually exclusive with a useful
-    /// `path` value.
+    /// Absolute path to the build output directory. Files under
+    /// this directory are served at `/_pylon/build/<relative>`.
+    /// Empty on error.
+    #[serde(default)]
+    pub outdir: String,
+    /// Optional failure message. Mutually exclusive with usable
+    /// `path` / `outdir`.
     #[serde(default)]
     pub error: Option<String>,
 }

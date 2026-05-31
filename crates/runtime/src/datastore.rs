@@ -4080,7 +4080,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         )
     }
 
-    fn bundle_client(&self) -> Result<String, FnCallError> {
+    fn bundle_client(&self) -> Result<pylon_functions::runner::BundleClientPaths, FnCallError> {
         let runner = self.pool.pick();
         runner.bundle_client()
     }

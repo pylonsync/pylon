@@ -532,13 +532,17 @@ pub trait FnOps: Send + Sync {
     }
 
     /// Hydration — bundle the user's `app/**/page.tsx` +
-    /// `app/**/layout.tsx` into a single browser-target client
-    /// entry. Returns the absolute path of the freshly built
-    /// bundle on disk; the host reads + serves that file at
-    /// `/_pylon/client.js`. Default impl returns
+    /// `app/**/layout.tsx` into per-route entries with shared
+    /// chunks. Returns a `BundleClientPaths` carrying the manifest
+    /// path + outdir; the host serves files from outdir at
+    /// `/_pylon/build/<rel>` and reads the manifest to drive
+    /// SSR head injection. Default impl returns
     /// HYDRATION_NOT_IMPLEMENTED so backends that don't expose
     /// bundling (test stubs) compile without no-op stubs.
-    fn bundle_client(&self) -> Result<String, pylon_functions::runner::FnCallError> {
+    fn bundle_client(
+        &self,
+    ) -> Result<pylon_functions::runner::BundleClientPaths, pylon_functions::runner::FnCallError>
+    {
         Err(pylon_functions::runner::FnCallError {
             code: "HYDRATION_NOT_IMPLEMENTED".into(),
             message: "this FnOps backend does not implement bundle_client".into(),
