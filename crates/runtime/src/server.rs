@@ -1361,7 +1361,8 @@ fn start_server(
             .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>);
         Arc::new(
             crate::frontend::FrontendConfig::from_env(&app_dir)
-                .with_ssr(Arc::new(ssr_routes), fn_ops_arc),
+                .with_ssr(Arc::new(ssr_routes), fn_ops_arc)
+                .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config)),
         )
     };
     if frontend_config.is_active() {

@@ -110,6 +110,13 @@ pub struct FrontendConfig {
     /// matches. None when no functions backend is wired (test stubs,
     /// pre-functions builds) — SSR branch falls through.
     pub fn_ops: Option<std::sync::Arc<dyn pylon_router::FnOps>>,
+    /// Session store for resolving the SSR request's auth context
+    /// from the request's session cookie. None → SSR pages render
+    /// with anonymous AuthInfo (Phase 1 behavior).
+    pub session_store: Option<std::sync::Arc<pylon_auth::SessionStore>>,
+    /// Cookie config — used to find the session cookie by name on
+    /// the incoming request. Pair with session_store.
+    pub cookie_config: Option<std::sync::Arc<pylon_auth::CookieConfig>>,
 }
 
 impl std::fmt::Debug for FrontendConfig {
@@ -119,6 +126,7 @@ impl std::fmt::Debug for FrontendConfig {
             .field("dev_proxy", &self.dev_proxy)
             .field("ssr_routes_count", &self.ssr_routes.len())
             .field("has_fn_ops", &self.fn_ops.is_some())
+            .field("has_session_store", &self.session_store.is_some())
             .finish()
     }
 }
@@ -170,6 +178,8 @@ impl FrontendConfig {
             dev_proxy,
             ssr_routes: std::sync::Arc::new(Vec::new()),
             fn_ops: None,
+            session_store: None,
+            cookie_config: None,
         }
     }
 
@@ -184,6 +194,20 @@ impl FrontendConfig {
     ) -> Self {
         self.ssr_routes = routes;
         self.fn_ops = fn_ops;
+        self
+    }
+
+    /// Wire session resolution so SSR pages render with the right
+    /// auth context. Without this, render_route fires with anonymous
+    /// `AuthInfo` regardless of whether the request carries a valid
+    /// session cookie.
+    pub fn with_session(
+        mut self,
+        session_store: std::sync::Arc<pylon_auth::SessionStore>,
+        cookie_config: std::sync::Arc<pylon_auth::CookieConfig>,
+    ) -> Self {
+        self.session_store = Some(session_store);
+        self.cookie_config = Some(cookie_config);
         self
     }
 
@@ -810,16 +834,11 @@ fn serve_via_ssr_rpc(
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
     let search_params_json = parse_query_string(&query);
 
-    // Phase 1: no auth plumbing yet (Phase 2). Anonymous AuthInfo so
-    // the page renders public-mode HTML for the smoke test. Auth-aware
-    // rendering follows the session-cookie resolution + needs the same
-    // SessionStore wiring that /api/auth/me uses.
-    let auth = pylon_functions::protocol::AuthInfo {
-        user_id: None,
-        is_admin: false,
-        tenant_id: None,
-        roles: vec![],
-    };
+    // Resolve auth from the request's session cookie if a
+    // SessionStore + CookieConfig are wired (the standard case for
+    // pylon dev / pylon start). Without them, fall back to anonymous
+    // AuthInfo — matches Phase 1 behavior.
+    let auth = resolve_request_auth(cfg, &cookies_map);
 
     // Buffer the full render. Phase 1.5 streams this through tiny_http
     // chunked transfer.
@@ -925,6 +944,41 @@ fn serve_via_ssr_rpc(
     }
     let _ = request.respond(response);
     Ok(())
+}
+
+/// Build the AuthInfo for an SSR render by looking up the request's
+/// session cookie in the configured SessionStore. Returns anonymous
+/// AuthInfo when:
+///   - no SessionStore is wired (test stubs, in-memory smoke tests)
+///   - no session cookie is present on the request
+///   - the cookie token doesn't resolve to a live session
+///
+/// Only covers session cookies — bearer tokens / API keys / JWTs
+/// don't apply to SSR HTML routes (those auth modes target
+/// programmatic / API consumers, not browser-rendered pages).
+fn resolve_request_auth(
+    cfg: &FrontendConfig,
+    cookies: &std::collections::HashMap<String, String>,
+) -> pylon_functions::protocol::AuthInfo {
+    let anonymous = pylon_functions::protocol::AuthInfo {
+        user_id: None,
+        is_admin: false,
+        tenant_id: None,
+        roles: vec![],
+    };
+    let (Some(store), Some(cookie_cfg)) =
+        (cfg.session_store.as_ref(), cfg.cookie_config.as_ref())
+    else {
+        return anonymous;
+    };
+    let token = cookies.get(&cookie_cfg.name);
+    let ctx = store.resolve(token.map(|s| s.as_str()));
+    pylon_functions::protocol::AuthInfo {
+        user_id: ctx.user_id.clone(),
+        is_admin: ctx.is_admin,
+        tenant_id: ctx.tenant_id.clone(),
+        roles: ctx.roles.clone(),
+    }
 }
 
 fn parse_query_string(q: &str) -> serde_json::Value {
