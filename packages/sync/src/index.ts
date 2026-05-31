@@ -1976,21 +1976,23 @@ export class SyncEngine {
               typeof r.error === "string"
                 ? r.error
                 : r.error?.message ?? "unknown";
-            this.mutations.markFailed(m.id, msg);
+            this.failPushedMutation(m, msg);
           }
         }
       } else {
         // Legacy server response (pre-0.3.188): count-based mapping.
         // Buggy on partial failures but the best we can do without
-        // the per-op envelope.
+        // the per-op envelope. Guard `resp.errors` — older test
+        // mocks omit the field entirely; pre-0.3.224 the `[]` index
+        // threw and was swallowed by the bare catch below, which
+        // silently dropped the success path for legacy responses.
+        const applied = typeof resp.applied === "number" ? resp.applied : 0;
+        const errors = Array.isArray(resp.errors) ? resp.errors : [];
         for (let i = 0; i < pending.length; i++) {
-          if (i < resp.applied) {
+          if (i < applied) {
             this.mutations.markApplied(pending[i].id);
-          } else if (resp.errors[i - resp.applied]) {
-            this.mutations.markFailed(
-              pending[i].id,
-              resp.errors[i - resp.applied],
-            );
+          } else if (errors[i - applied]) {
+            this.failPushedMutation(pending[i], errors[i - applied]);
           }
         }
       }
@@ -2046,9 +2048,60 @@ export class SyncEngine {
           void this.push();
         }, 250);
       }
-    } catch {
-      // Will retry on next tick. op_id makes retries idempotent on the server.
+    } catch (err) {
+      // Transport-level failure (network down, CORS, 5xx without a
+      // typed body, parse error). Pre-0.3.224 swallowed silently:
+      // the mutation stayed `pending` forever and the optimistic
+      // ghost survived even though the server never accepted the
+      // write. That's the "I sent it, it's there, then it's gone"
+      // pattern users see after a reload.
+      //
+      // Now: fail every pending mutation in this batch, roll back
+      // any optimistic ghost, surface via mutations-failed so the
+      // UI can prompt + retry. op_id keeps a retry idempotent on
+      // the server if the failure was a transient transport error
+      // — the next push() will re-include the user's intent.
+      const msg = err instanceof Error ? err.message : String(err);
+      const failedOps: { opId: string; error: string }[] = [];
+      for (const m of pending) {
+        this.failPushedMutation(m, msg);
+        const opId = m.change.op_id;
+        if (typeof opId === "string") {
+          failedOps.push({ opId, error: msg });
+        }
+      }
+      if (failedOps.length > 0) {
+        this.broadcastToTabs({ type: "mutations-failed", ops: failedOps });
+      }
+      this.mutations.clear();
+      // eslint-disable-next-line no-console
+      console.warn("[sync] /api/sync/push failed:", msg);
     }
+  }
+
+  /**
+   * Mark a pending mutation as failed AND undo its optimistic ghost
+   * in the local replica. Without the rollback step, a server-
+   * rejected insert leaves a ghost row that survives indefinitely
+   * (reconcile skips rows with pending/failed mutations to avoid
+   * sweeping the user's in-flight edit). The exact failure mode is
+   * "send a message, the server says no, refresh — the ghost is
+   * still there until you find the failed-state UI."
+   *
+   * Updates can't be rolled back without a pre-update snapshot
+   * (not captured today); the user-visible ghost-update sticks
+   * until the next reconcile observes the canonical row. Deletes
+   * leave a tombstone that should also be cleared, but the current
+   * `LocalStore` API doesn't expose the un-tombstone path — flagged
+   * for follow-up. Inserts are the dominant case (chat send is an
+   * insert; collaborative-edit is an update with a separate CRDT
+   * channel) so insert-only rollback is the right shape to ship now.
+   */
+  private failPushedMutation(m: PendingMutation, error: string): void {
+    if (m.change.kind === "insert") {
+      this.store.rollbackOptimisticInsert(m.change.entity, m.change.row_id);
+    }
+    this.mutations.markFailed(m.id, error);
   }
 
   /** Insert a row with optimistic local update.

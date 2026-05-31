@@ -169,22 +169,52 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         };
         let mut entity_after = initial_after;
         loop {
-            let raw =
-                match ctx
-                    .store
-                    .list_after(&entity.name, entity_after.as_deref(), RAW_FETCH_CHUNK)
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!(
-                            entity = %entity.name,
-                            after = ?entity_after,
-                            error = ?e,
-                            "snapshot pagination list_after failed; truncating entity"
-                        );
-                        break;
-                    }
-                };
+            let raw = match ctx.store.list_after(
+                &entity.name,
+                entity_after.as_deref(),
+                RAW_FETCH_CHUNK,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Mid-snapshot read failure. The original code
+                    // logged + `break`'d out of the entity loop —
+                    // but if no later entity overflowed the batch
+                    // limit, `has_more` ended up `false` and the
+                    // cursor advanced to `snapshot_seq`. The
+                    // truncated entity's missing rows became
+                    // structurally invisible: pull retry wouldn't
+                    // recover them because the cursor was past
+                    // the snapshot.
+                    //
+                    // Return 503 with the SAME `snapshot_after`
+                    // the client sent (or a freshly-encoded one
+                    // pointing at where we got to in this entity)
+                    // so retry resumes at the same row. Cursor
+                    // MUST NOT advance for a truncated entity.
+                    tracing::error!(
+                        entity = %entity.name,
+                        after = ?entity_after,
+                        error = ?e,
+                        "snapshot pagination list_after failed; returning 503 for client retry"
+                    );
+                    let resume_payload = serde_json::json!({
+                        "e": entity.name.clone(),
+                        "a": entity_after.clone(),
+                        "s": snapshot_seq,
+                    })
+                    .to_string();
+                    let body = serde_json::json!({
+                            "error": {
+                                "code": "SNAPSHOT_PAGE_FAILED",
+                                "hint": "transient storage error mid-snapshot — retry with the same snapshot_after",
+                                "message": format!("snapshot pagination failed for entity `{}` after id={:?}", entity.name, entity_after),
+                                "snapshot_after": url_encode(&resume_payload),
+                            }
+                        })
+                        .to_string();
+                    return (503, body);
+                }
+            };
             if raw.is_empty() {
                 break;
             }
