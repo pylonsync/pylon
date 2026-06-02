@@ -1778,9 +1778,9 @@ export function LandingPage({
 				<section className="block" id="features">
 					<div className="shell">
 						<div className="eyebrow">The model</div>
-						<h2 className="h2">Three lines of code. One running backend.</h2>
+						<h2 className="h2">Three lines of code. The whole stack.</h2>
 						<p className="section-lede">
-							Most realtime backends are three systems glued together — a database, an API server, and a pub/sub layer. Pylon collapses the stack: the handler is the transaction, the query is the subscription.
+							Most stacks are a database, an API server, a pub/sub layer, and a separate frontend framework glued together. Pylon collapses it — the handler is the transaction, the query is the subscription, and the same server renders your React pages.
 						</p>
 
 						<div className="feature-row">
@@ -1945,17 +1945,17 @@ export function LandingPage({
 				{/* CLIENT BINDINGS */}
 				<section className="block" id="clients">
 					<div className="shell">
-						<div className="eyebrow">Client bindings</div>
-						<h2 className="h2">One backend. Every client you ship.</h2>
-						<p className="section-lede">Real-time subscriptions, optimistic mutations, and a typed client — across the runtimes you already use. One Pylon backend serves them all.</p>
+						<div className="eyebrow">Frontends</div>
+						<h2 className="h2">Renders the web. Serves every other client.</h2>
+						<p className="section-lede">Pylon server-renders your React app from the same process that runs your data — and the same backend feeds your SPA, mobile, and native clients with realtime subscriptions, optimistic mutations, and a typed client.</p>
 
 						<div className="lanes">
 							<div className="lane">
-								<div className="top"><span><span className="num">WEB</span> · SSR</span><span>vercel-ready</span></div>
-								<h4>Next.js</h4>
-								<div className="cmd">@pylonsync/next</div>
-								<p>App Router and Pages. Server components query directly; client components subscribe via React hooks. Streams across the SSR boundary without a second fetch.</p>
-								<div className="footer-line"><span>react 19</span><span>ws + sse</span></div>
+								<div className="top"><span><span className="num">WEB</span> · SSR</span><span>built in</span></div>
+								<h4>Pylon SSR</h4>
+								<div className="cmd">app/page.tsx</div>
+								<p>Server-rendered React from the same server as your data. Streaming SSR, per-route code splitting, <code>&lt;Link&gt;</code> and <code>&lt;Image&gt;</code> built in. No separate Next.js process. <code>@pylonsync/next</code> is there if you want it.</p>
+								<div className="footer-line"><span>react 19</span><span>streaming</span></div>
 							</div>
 							<div className="lane">
 								<div className="top"><span><span className="num">WEB</span> · SPA</span><span>any bundler</span></div>
@@ -1987,7 +1987,7 @@ export function LandingPage({
 					<div className="shell">
 						<div className="eyebrow">How it compares</div>
 						<h2 className="h2">Convex velocity. Rails ownership.</h2>
-						<p className="section-lede">Pick a managed backend and you inherit its boundaries. Pick raw infrastructure and you rebuild the framework. Pylon keeps one product model across both.</p>
+						<p className="section-lede">Pick a managed backend and you inherit its boundaries — and still bolt on a separate frontend framework. Pick raw infrastructure and you rebuild everything. Pylon is one model for the frontend and the backend, across both.</p>
 
 						<div className="compare-wrap">
 							<div className="compare">
@@ -2015,6 +2015,13 @@ export function LandingPage({
 											<td><span className="ind"><span className="dot-yes" />Yes</span></td>
 											<td><span className="ind"><span className="dot-yes" />Yes</span></td>
 											<td><span className="ind"><span className="dot-yes" />Yes</span></td>
+										</tr>
+										<tr>
+											<td className="label">Server-rendered frontend</td>
+											<td className="us"><span className="ind"><span className="dot-yes" />Built in</span></td>
+											<td><span className="ind"><span className="dot-no" />—</span></td>
+											<td><span className="ind"><span className="dot-no" />—</span></td>
+											<td><span className="ind"><span className="dot-no" />—</span></td>
 										</tr>
 										<tr>
 											<td className="label">TypeScript server functions</td>
@@ -2062,8 +2069,8 @@ export function LandingPage({
 				<section className="block" id="deploy" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
 						<div className="eyebrow">Deploy</div>
-						<h2 className="h2">Same binary, four ways to run it.</h2>
-						<p className="section-lede">Pylon is not a hosting bet. One app model running locally, on Pylon Cloud, on a VPS, or inside your AWS account — without rewriting handlers.</p>
+						<h2 className="h2">One app, four ways to run it.</h2>
+						<p className="section-lede">Pylon is not a hosting bet. The same frontend-and-backend app runs locally, on Pylon Cloud, on a VPS, or inside your AWS account — without rewriting handlers.</p>
 
 						<div className="lanes">
 							<div className="lane">
@@ -2077,7 +2084,7 @@ export function LandingPage({
 								<div className="top"><span><span className="num">02</span> · CLOUD</span><span>managed</span></div>
 								<h4>Pylon Cloud</h4>
 								<div className="cmd">$ pylon deploy</div>
-								<p>Hosted infra when you want the framework, not another ops project. Same binary, same APIs.</p>
+								<p>Hosted infra when you want the framework, not another ops project. Same app, same APIs.</p>
 								<div className="footer-line"><span>global</span><span>SOC2 in flight</span></div>
 							</div>
 							<div className="lane">
@@ -2102,8 +2109,8 @@ export function LandingPage({
 				<section className="block">
 					<div className="shell">
 						<div className="eyebrow">Quickstart</div>
-						<h2 className="h2">Four commands to a running backend.</h2>
-						<p className="section-lede">Local app in minutes. Move to Pylon Cloud or your own infrastructure later — without changing a line of programming model.</p>
+						<h2 className="h2">Four commands to a running app.</h2>
+						<p className="section-lede">Frontend and backend live in minutes. Move to Pylon Cloud or your own infrastructure later — without changing a line of programming model.</p>
 
 						<div className="qs-wrap">
 							<div className="qs-term">
