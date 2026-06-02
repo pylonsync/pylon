@@ -487,6 +487,44 @@ describe("sync scenarios", () => {
     expect(env.server.snapshotPullCount - before).toBe(1);
   });
 
+  // EMPTY-ENTITY RECONCILE GAP (pins observeEntity). A server row in an
+  // entity the local replica has NEVER cached stays invisible: useQuery
+  // reads the empty local store, a delta pull can't recover a row
+  // created before the cursor, and the no-arg reconcile sweeps only
+  // entities with ≥1 local row (store.entityNames()) — so it skips the
+  // empty entity entirely. The user hit this as "I attached the domain
+  // but the Domains list is empty"; clearing IndexedDB (cursor→0→
+  // snapshot) was the only recovery. observeEntity (called by useQuery
+  // on mount) adds the entity to the sweep + fires a one-shot fetch.
+  test("observing an entity recovers a server row the local cache never had", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    // Client has rows for Note, but none for Domain.
+    env.server.seed("Note", [{ id: "n1", title: "x" }]);
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.list("Domain")).toHaveLength(0);
+
+    // A Domain row exists server-side but was never delivered to this
+    // client (created on another surface / a missed insert). Inserted
+    // after start so the initial snapshot didn't include it; poll
+    // transport means no auto-delivery.
+    env.server.insert("Domain", { id: "d1", host: "chat.example.com" });
+
+    // A no-arg reconcile sweeps only entities with local rows (Note),
+    // so it never touches Domain — the row stays invisible. The bug.
+    await env.engine.reconcile(["Note"]);
+    await env.flush();
+    expect(env.engine.store.get("Domain", "d1")).toBeNull();
+
+    // observeEntity (what useQuery now calls on mount) adds Domain to
+    // the sweep and fires a one-shot scoped reconcile — the row appears
+    // without a cache clear.
+    env.engine.observeEntity("Domain");
+    await env.flush();
+    expect(env.engine.store.get("Domain", "d1")).not.toBeNull();
+  });
+
   // Row-revoked envelope: server pushes `row-revoked` to a
   // subscriber whose read policy was revoked for a specific row.
   // The engine must drop the row from the local replica and

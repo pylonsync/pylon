@@ -1414,6 +1414,17 @@ export class SyncEngine {
    *  entity twice within seconds. Configurable via `reconcileMinIntervalMs`. */
   private lastReconcileAt = 0;
 
+  /** Entities the app has subscribed to via `useQuery` / `useQueryOne`,
+   *  even ones the local replica has zero rows for. The reconcile
+   *  safety net defaults to `store.entityNames()` — entities with at
+   *  least one local row — so a server row in a NEVER-cached entity (a
+   *  row created on another surface, or a freshly-added entity) stayed
+   *  invisible until a full snapshot / cache clear: `useQuery` reads
+   *  the local store and a delta `pull()` can't recover a row created
+   *  before the cursor. Tracking observed entities lets the no-arg
+   *  reconcile sweep them too. See `observeEntity`. */
+  private observedEntities = new Set<string>();
+
   /**
    * Reconcile the local replica against server truth.
    *
@@ -1447,8 +1458,38 @@ export class SyncEngine {
    *
    * Pass an explicit entity list to scope the reconcile (callers like
    * `db.useQueryOne` that know what they care about). When called with
-   * no arg, every entity with local rows is checked.
+   * no arg, every entity with local rows OR observed via `useQuery`
+   * (see `observeEntity`) is checked.
    */
+  /**
+   * Register interest in an entity — called by `useQuery` /
+   * `useQueryOne` on mount. Two effects:
+   *
+   *   1. Adds the entity to the reconcile sweep so the safety net
+   *      covers it even with zero local rows (see `observedEntities`).
+   *   2. The FIRST time an entity is observed while the replica is
+   *      hydrated and that entity is locally empty, fires a one-shot
+   *      scoped reconcile so a server row this client never cached
+   *      appears on page-open — instead of waiting for the next
+   *      reconnect / visibility-change trigger. Bounded: at most once
+   *      per entity per engine (the `observedEntities` guard).
+   *
+   * Genuinely-empty entities just pay one cheap policy-filtered fetch;
+   * entities where the client missed an insert get the row back.
+   */
+  observeEntity(entity: string): void {
+    if (this.observedEntities.has(entity)) return;
+    this.observedEntities.add(entity);
+    // Only the leader talks to the network; follower tabs converge via
+    // the multi-tab channel once the leader reconciles.
+    if (!this.isMultiTabLeader) return;
+    if (this.isHydrated() && this.store.list(entity).length === 0) {
+      // Scoped reconcile bypasses the no-arg debounce and reuses the
+      // session-flip / cursor-drift guards in reconcileInner.
+      void this.reconcile([entity]);
+    }
+  }
+
   async reconcile(entities?: string[]): Promise<void> {
     const minIntervalMs = this.config.reconcileMinIntervalMs ?? 2_000;
     const now = Date.now();
@@ -1472,7 +1513,13 @@ export class SyncEngine {
     // Same reasoning as pullInner: the leader reconciles, broadcasts
     // results, and follower replicas converge via the channel.
     if (!this.isMultiTabLeader) return;
-    const names = entities ?? this.store.entityNames();
+    // Sweep entities with local rows PLUS entities the app has observed
+    // via useQuery (even when empty locally). Without the observed set,
+    // a server row in a never-cached entity is never reconciled and
+    // stays invisible until a full snapshot.
+    const names =
+      entities ??
+      [...new Set([...this.store.entityNames(), ...this.observedEntities])];
     if (names.length === 0) return;
     // Tombstone seq for any local row the server doesn't return. Using
     // the current cursor means future inserts (which have higher seqs)

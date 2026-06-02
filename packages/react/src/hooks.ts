@@ -129,6 +129,16 @@ export function useQuery<T = Row>(
 
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
+  // Register interest so the reconcile safety net sweeps this entity
+  // even when the local replica has zero rows for it. Without this, a
+  // server row in a never-cached entity (created on another surface, a
+  // freshly-added entity) stays invisible until a full snapshot / cache
+  // clear. The first observe of an empty+hydrated entity also fires a
+  // one-shot fetch so it appears on mount. See SyncEngine.observeEntity.
+  useEffect(() => {
+    sync.observeEntity(entity);
+  }, [sync, entity]);
+
   const refetch = useCallback(() => {
     loading.current = true;
     error.current = null;
@@ -200,6 +210,12 @@ export function useQueryOne<T = Row>(
   const getServerSnapshot = useCallback((): T | null => null, []);
 
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+  // Register interest so reconcile sweeps this entity even with zero
+  // local rows. See SyncEngine.observeEntity.
+  useEffect(() => {
+    sync.observeEntity(entity);
+  }, [sync, entity]);
 
   const refetch = useCallback(() => {
     loading.current = true;
