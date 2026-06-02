@@ -36,6 +36,23 @@ use pylon_sync::ChangeEvent;
 
 use crate::Runtime;
 
+/// Item flowing through the worker channel. Events are the common case;
+/// a `Flush` is a barrier the worker acks only AFTER every event ahead
+/// of it in the FIFO has been persisted + committed.
+///
+/// Putting flushes in the same channel (rather than a side channel the
+/// worker would have to `select` on — which std mpsc can't do) gives a
+/// clean ordering guarantee for free: everything enqueued before
+/// `flush()` was called sits ahead of the sentinel, so by the time the
+/// worker reaches it, those events are already on disk.
+enum WorkerMsg {
+    Event(ChangeEvent),
+    /// Persist everything ahead of this barrier, then `send(())` on the
+    /// paired channel. Used by clean shutdown (durability) and tests
+    /// (determinism over the otherwise-async persist).
+    Flush(SyncSender<()>),
+}
+
 /// Channel buffer. Each entry is a single `ChangeEvent`. The hot
 /// path's `send` is `try_send`; full buffer drops + warns rather
 /// than blocking the mutation tx that's holding `write_conn`.
@@ -168,7 +185,7 @@ impl ChangeLogBackend for PgBackend {
 /// backend so SQLite + Postgres share one struct.
 #[derive(Clone)]
 pub struct ChangeLogPersister {
-    tx: SyncSender<ChangeEvent>,
+    tx: SyncSender<WorkerMsg>,
     metrics: Arc<PersisterMetrics>,
 }
 
@@ -182,7 +199,7 @@ impl ChangeLogPersister {
     /// Spawn the worker thread bound to `backend`. Returns the
     /// send-side handle.
     pub fn spawn(backend: Arc<dyn ChangeLogBackend>) -> Self {
-        let (tx, rx) = sync_channel::<ChangeEvent>(CHANNEL_BOUND);
+        let (tx, rx) = sync_channel::<WorkerMsg>(CHANNEL_BOUND);
         let metrics = Arc::new(PersisterMetrics::default());
         let metrics_for_worker = Arc::clone(&metrics);
         let retain = std::env::var("PYLON_CHANGE_LOG_RETAIN")
@@ -211,7 +228,7 @@ impl ChangeLogPersister {
     /// full the event is dropped, the drop counter ticks, and a
     /// warning fires — better than wedging the mutation tx.
     pub fn enqueue(&self, event: ChangeEvent) {
-        match self.tx.try_send(event) {
+        match self.tx.try_send(WorkerMsg::Event(event)) {
             Ok(()) => {
                 self.metrics.events_enqueued.fetch_add(1, Ordering::Relaxed);
             }
@@ -228,6 +245,38 @@ impl ChangeLogPersister {
         }
     }
 
+    /// Block until every event enqueued before this call has been
+    /// persisted + committed to disk, or `timeout` elapses. Returns
+    /// `true` if the flush completed, `false` on timeout or a dead
+    /// worker.
+    ///
+    /// Two callers:
+    ///   - **Clean shutdown.** The graceful-exit path drains HTTP
+    ///     workers, then flushes the change log BEFORE the WAL
+    ///     checkpoint, so events still sitting in the channel at exit
+    ///     reach disk. Without this, the last few mutations before a
+    ///     redeploy are silently lost — the "send a message, restart,
+    ///     refresh, it's gone" bug, just narrowed to the shutdown
+    ///     window instead of the whole in-memory log.
+    ///   - **Tests.** The persister is async by design (off the
+    ///     mutation hot path); a lifecycle test that mutates then
+    ///     "restarts" needs a barrier to know the write landed before
+    ///     it tears down the runtime.
+    ///
+    /// Mechanism: a `Flush` sentinel rides the same FIFO as events, so
+    /// the worker only acks it after everything ahead of it has
+    /// committed. No polling, no counter races.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (ack_tx, ack_rx) = sync_channel::<()>(1);
+        // Blocking send (not try_send): under a full channel the worker
+        // is actively draining, so the barrier gets in shortly. Only a
+        // dead worker (all receivers gone) errors here.
+        if self.tx.send(WorkerMsg::Flush(ack_tx)).is_err() {
+            return false;
+        }
+        ack_rx.recv_timeout(timeout).is_ok()
+    }
+
     /// Snapshot the current counters for observability. Cheap —
     /// atomic loads with `Relaxed` ordering.
     pub fn metrics(&self) -> PersisterMetricsSnapshot {
@@ -239,40 +288,63 @@ impl ChangeLogPersister {
 /// inside one tx per batch, periodically prunes. Backend-agnostic.
 fn worker(
     backend: Arc<dyn ChangeLogBackend>,
-    rx: std::sync::mpsc::Receiver<ChangeEvent>,
+    rx: std::sync::mpsc::Receiver<WorkerMsg>,
     metrics: Arc<PersisterMetrics>,
     retain: u64,
 ) {
     let mut last_prune_at = Instant::now();
     loop {
         let first = match rx.recv() {
-            Ok(e) => e,
+            Ok(m) => m,
             Err(_) => return, // sender dropped — runtime shutting down
         };
         let mut batch: Vec<ChangeEvent> = Vec::with_capacity(BATCH_LIMIT);
-        batch.push(first);
+        // Flush acks collected this iteration. A `Flush` is a barrier:
+        // we stop draining at it so everything ahead of it is in this
+        // (or an already-committed prior) batch, then ack AFTER commit.
+        let mut acks: Vec<SyncSender<()>> = Vec::new();
+        match first {
+            WorkerMsg::Event(e) => batch.push(e),
+            WorkerMsg::Flush(ack) => acks.push(ack),
+        }
         while batch.len() < BATCH_LIMIT {
             match rx.try_recv() {
-                Ok(e) => batch.push(e),
+                Ok(WorkerMsg::Event(e)) => batch.push(e),
+                Ok(WorkerMsg::Flush(ack)) => {
+                    // Barrier reached — drain no further this round so
+                    // the ack strictly follows the commit of everything
+                    // before it.
+                    acks.push(ack);
+                    break;
+                }
                 Err(_) => break,
             }
         }
-        let batch_size = batch.len() as u64;
-        match backend.persist_batch(&batch) {
-            Ok(()) => {
-                metrics
-                    .events_persisted
-                    .fetch_add(batch_size, Ordering::Relaxed);
+        if !batch.is_empty() {
+            let batch_size = batch.len() as u64;
+            match backend.persist_batch(&batch) {
+                Ok(()) => {
+                    metrics
+                        .events_persisted
+                        .fetch_add(batch_size, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    metrics.batches_failed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        error = %e,
+                        count = batch_size,
+                        backend = backend.name(),
+                        "[change_log] batch persist failed; events kept in-memory only"
+                    );
+                }
             }
-            Err(e) => {
-                metrics.batches_failed.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    error = %e,
-                    count = batch_size,
-                    backend = backend.name(),
-                    "[change_log] batch persist failed; events kept in-memory only"
-                );
-            }
+        }
+
+        // Signal any flush barriers now that the batch is committed.
+        // Send is non-blocking (ack channel has a free slot) and a
+        // dropped receiver (caller already timed out) is ignored.
+        for ack in acks {
+            let _ = ack.send(());
         }
 
         if last_prune_at.elapsed() >= PRUNE_INTERVAL {
@@ -304,5 +376,108 @@ fn worker(
         }
 
         thread::sleep(IDLE_POLL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    fn ev(seq: u64) -> ChangeEvent {
+        ChangeEvent {
+            seq,
+            entity: "Message".into(),
+            row_id: format!("r{seq}"),
+            kind: pylon_sync::ChangeKind::Insert,
+            data: None,
+            prev_data: None,
+            timestamp: "0Z".into(),
+        }
+    }
+
+    /// Counts persisted events; optional per-batch delay lets a test
+    /// prove `flush` actually waits for an in-flight batch rather than
+    /// returning on a stale counter read.
+    struct CountingBackend {
+        persisted: Arc<AtomicU64>,
+        delay: Duration,
+    }
+    impl ChangeLogBackend for CountingBackend {
+        fn persist_batch(&self, events: &[ChangeEvent]) -> Result<(), String> {
+            if !self.delay.is_zero() {
+                thread::sleep(self.delay);
+            }
+            self.persisted
+                .fetch_add(events.len() as u64, Ordering::SeqCst);
+            Ok(())
+        }
+        fn prune(&self, _retain: u64) -> Result<usize, String> {
+            Ok(0)
+        }
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+    }
+
+    /// The core barrier guarantee: once `flush` returns true, every
+    /// event enqueued before it has been persisted — even when the
+    /// backend is slow enough that an un-synchronised caller would race
+    /// ahead of the worker.
+    #[test]
+    fn flush_waits_for_all_enqueued_events() {
+        let persisted = Arc::new(AtomicU64::new(0));
+        let backend = Arc::new(CountingBackend {
+            persisted: Arc::clone(&persisted),
+            delay: Duration::from_millis(5),
+        });
+        let p = ChangeLogPersister::spawn(backend);
+
+        for seq in 1..=500 {
+            p.enqueue(ev(seq));
+        }
+        assert!(p.flush(Duration::from_secs(5)), "flush should complete");
+        assert_eq!(
+            persisted.load(Ordering::SeqCst),
+            500,
+            "flush must not return until every enqueued event is committed"
+        );
+    }
+
+    /// A flush with nothing pending returns immediately (still true).
+    #[test]
+    fn flush_with_empty_queue_succeeds() {
+        let persisted = Arc::new(AtomicU64::new(0));
+        let backend = Arc::new(CountingBackend {
+            persisted,
+            delay: Duration::ZERO,
+        });
+        let p = ChangeLogPersister::spawn(backend);
+        assert!(p.flush(Duration::from_secs(1)));
+    }
+
+    /// Events enqueued AFTER a flush barrier are not required to be
+    /// committed by that flush — only a subsequent flush covers them.
+    #[test]
+    fn flush_is_a_point_in_time_barrier() {
+        let persisted = Arc::new(AtomicU64::new(0));
+        let backend = Arc::new(CountingBackend {
+            persisted: Arc::clone(&persisted),
+            delay: Duration::ZERO,
+        });
+        let p = ChangeLogPersister::spawn(backend);
+
+        for seq in 1..=10 {
+            p.enqueue(ev(seq));
+        }
+        assert!(p.flush(Duration::from_secs(5)));
+        let after_first = persisted.load(Ordering::SeqCst);
+        assert_eq!(after_first, 10);
+
+        for seq in 11..=20 {
+            p.enqueue(ev(seq));
+        }
+        assert!(p.flush(Duration::from_secs(5)));
+        assert_eq!(persisted.load(Ordering::SeqCst), 20);
     }
 }

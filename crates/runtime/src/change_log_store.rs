@@ -47,6 +47,9 @@ impl ChangeLogStore for SqliteChangeLogStore {
     fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
         self.runtime.sqlite_change_log_pull_range(since, limit)
     }
+    fn flush(&self, timeout: std::time::Duration) -> bool {
+        self.persister.flush(timeout)
+    }
 }
 
 /// Postgres-backed store. Same shape as SQLite — bg-thread persister
@@ -82,5 +85,8 @@ impl ChangeLogStore for PgChangeLogStore {
     }
     fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
         self.runtime.pg_change_log_pull_range(since, limit)
+    }
+    fn flush(&self, timeout: std::time::Duration) -> bool {
+        self.persister.flush(timeout)
     }
 }

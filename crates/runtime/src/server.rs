@@ -432,6 +432,224 @@ pub fn start_with_shards(
     start_server(runtime, port, plugins, Some(shard_registry))
 }
 
+/// Build the boot-time change log: seq provider + persistent on-disk
+/// store + per-entity seed. This is the exact wiring `start_server`
+/// uses; it's a standalone function so the lifecycle test harness
+/// (`crate::lifecycle_scenario`) drives the real code path rather than
+/// a reimplementation. Every restart/reload correctness P0 (the
+/// reentrant-write_conn deadlock, the per-database seed gate that hid
+/// new entities, the hydrate-from-disk path) lives somewhere in here,
+/// so a test that reimplemented the wiring would test the wrong thing.
+///
+/// Returns an `Arc<ChangeLog>` ready to hand to the WS hub + routes.
+pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeLog> {
+    // Postgres backends: wire a global SEQUENCE-backed seq provider so
+    // every instance writing to the same database shares one
+    // monotonically-increasing seq space. Without this, instance A and
+    // instance B can independently mint seq=N for different events;
+    // a client connected to one and pulling from the other drops
+    // events as "duplicate seq" (codex P1).
+    //
+    // SQLite backends: wire a _pylon_change_seq-row-backed provider so
+    // seqs persist across process restarts. Without this, every deploy
+    // resets the in-memory seq counter to 0 + seeds to ~entity_count;
+    // any cached client cursor ahead of the new seed range fires a
+    // permanent 410 RESYNC_REQUIRED → reset → re-pull (visible churn
+    // on every deploy). Persisted seqs are strictly monotonic across
+    // boots so the 410 path only ever fires under genuine retention
+    // eviction.
+    let mut change_log_builder = ChangeLog::new();
+    if runtime.is_postgres() {
+        if let Err(e) = runtime.bootstrap_global_change_seq() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap PG SEQUENCE; falling back to per-instance seq: {}",
+                e.message
+            );
+        } else {
+            let rt_for_provider = Arc::clone(runtime);
+            let initial = runtime.current_global_change_seq().unwrap_or(0);
+            let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
+            let local_for_provider = std::sync::Arc::clone(&local_fallback);
+            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
+                // Try Postgres first; on transient failure fall back
+                // to a local atomic incremented from the last known PG
+                // value. Single-instance behavior under outage; the
+                // next successful PG call resyncs via the max() guard
+                // inside ChangeLog::append.
+                rt_for_provider.next_global_change_seq().unwrap_or_else(|| {
+                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+                })
+            });
+            change_log_builder = change_log_builder
+                .with_seq(provider)
+                .with_initial_seq(initial);
+            tracing::info!(
+                "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
+            );
+        }
+    } else if !runtime.is_in_memory() {
+        // File-backed SQLite: persist a high-water mark on disk via a
+        // background thread so seqs stay monotonic across process
+        // restarts (no 410 RESYNC_REQUIRED storm on redeploy).
+        //
+        // The earlier v0.3.218 attempt persisted INLINE inside the
+        // SeqProvider closure, which the mutation pipeline calls while
+        // holding write_conn. That recursive write_conn acquisition
+        // deadlocked every mutation (`markChannelRead` etc. on
+        // chat-api). The current shape moves persistence off the hot
+        // path: an in-memory atomic issues seqs from a reserved
+        // chunk, and a bg thread writes the next chunk's high-water
+        // mark to disk before that chunk gets used. The bg thread has
+        // its own write_conn lock acquisition, queued behind any
+        // active mutation tx — no recursive lock, no deadlock.
+        // See crates/runtime/src/seq_allocator.rs for the full design.
+        if let Err(e) = runtime.bootstrap_sqlite_change_seq() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap SQLite _pylon_change_seq; falling back to per-instance seq: {}",
+                e.message
+            );
+        } else {
+            match crate::seq_allocator::SqliteSeqAllocator::new(Arc::clone(runtime)) {
+                Some(allocator) => {
+                    let allocator = std::sync::Arc::new(allocator);
+                    let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
+                    let alloc_for_provider = std::sync::Arc::clone(&allocator);
+                    let provider: pylon_sync::SeqProvider =
+                        std::sync::Arc::new(move || alloc_for_provider.next());
+                    change_log_builder = change_log_builder
+                        .with_seq(provider)
+                        .with_initial_seq(initial);
+                    // Hold the allocator past this scope so the bg
+                    // thread isn't dropped immediately. The closure
+                    // holds its own Arc to the allocator; this binding
+                    // keeps the bg thread alive for the runtime's
+                    // lifetime by escaping into the ChangeLog's seq
+                    // provider field.
+                    std::mem::forget(allocator);
+                    tracing::info!(
+                        "[change_log] using SQLite _pylon_change_seq (initial reservation past = {initial})"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "[change_log] failed to initialize SqliteSeqAllocator; falling back to per-instance seq"
+                    );
+                }
+            }
+        }
+    }
+
+    // Attach the SQLite-backed persistent change log so deltas
+    // survive restarts. Without this, the in-memory ring buffer
+    // resets on every process boot; clients with a persisted
+    // cursor get a `ResyncRequired` and lose any events that
+    // landed post-restart but pre-reconnect.
+    //
+    // Bootstrap is idempotent (CREATE TABLE IF NOT EXISTS). The
+    // hydrate-from-disk inside `with_store` seeds the in-memory
+    // ring with the most recent `capacity` events ordered ASC, so
+    // post-boot pulls cover the same window the previous process
+    // was serving.
+    let mut change_log_persistent = false;
+    enum PersistedBackend {
+        None,
+        Sqlite,
+        Postgres,
+    }
+    let mut persisted_backend = PersistedBackend::None;
+    if runtime.is_postgres() {
+        // Pg deployment: persistence lives in `pylon_change_log`.
+        // Without this, every rolling deploy silently desyncs every
+        // connected client — same bug class the SQLite path fixed
+        // in v0.3.224, just on the cluster path.
+        if let Err(e) = runtime.bootstrap_pg_change_log() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap pylon_change_log; PG persistent log disabled: {}",
+                e.message
+            );
+        } else {
+            use pylon_sync::ChangeLogStore as _;
+            let store = std::sync::Arc::new(crate::change_log_store::PgChangeLogStore::new(
+                Arc::clone(runtime),
+            ));
+            let hydrated_any = !store.load_recent(1).is_empty();
+            change_log_builder = change_log_builder.with_store(store);
+            change_log_persistent = true;
+            persisted_backend = PersistedBackend::Postgres;
+            if hydrated_any {
+                tracing::info!("[change_log] hydrated in-memory ring from pylon_change_log (PG)");
+            } else {
+                tracing::info!("[change_log] using PG pylon_change_log (empty on first boot)");
+            }
+        }
+    } else if !runtime.is_in_memory() {
+        if let Err(e) = runtime.bootstrap_sqlite_change_log() {
+            tracing::warn!(
+                "[change_log] failed to bootstrap _pylon_change_log; persistent log disabled: {}",
+                e.message
+            );
+        } else {
+            use pylon_sync::ChangeLogStore as _;
+            let store = std::sync::Arc::new(crate::change_log_store::SqliteChangeLogStore::new(
+                Arc::clone(runtime),
+            ));
+            let hydrated_any = !store.load_recent(1).is_empty();
+            change_log_builder = change_log_builder.with_store(store);
+            change_log_persistent = true;
+            persisted_backend = PersistedBackend::Sqlite;
+            if hydrated_any {
+                tracing::info!("[change_log] hydrated in-memory ring from _pylon_change_log");
+            } else {
+                tracing::info!("[change_log] using SQLite _pylon_change_log (empty on first boot)");
+            }
+        }
+    }
+
+    let change_log = Arc::new(change_log_builder);
+
+    // Seed the change log with one synthetic insert per extant row so that
+    // a pull from seq=0 after a restart reconstructs current state. The
+    // change log is in-memory — restarting the process without this would
+    // leave SQLite rows unreachable via /api/sync/pull (clients would
+    // pull nothing and see an empty replica). Seqs here are fresh; clients
+    // whose cursors are ahead of `self.seq` get a 410 and full resync,
+    // which then hits this seeded log and gets every current row back.
+    //
+    // PER-ENTITY gating when persistence is on: skip seeding for
+    // entities whose rows are already covered by events in
+    // `_pylon_change_log`, but DO seed entities that are absent from
+    // the persisted log (e.g. a new entity added to the manifest
+    // after the previous boot, a table restored from a snapshot,
+    // an entity migrated in via out-of-band SQL). A binary
+    // had-any-persisted-event gate would silently make new
+    // entities invisible to /api/sync/pull until the next write.
+    for entity in runtime.manifest().entities.iter() {
+        let already_seeded = match persisted_backend {
+            PersistedBackend::Sqlite => runtime.sqlite_change_log_has_entity(&entity.name),
+            PersistedBackend::Postgres => runtime.pg_change_log_has_entity(&entity.name),
+            PersistedBackend::None => false,
+        };
+        let _ = change_log_persistent;
+        if already_seeded {
+            continue;
+        }
+        match runtime.list(&entity.name) {
+            Ok(rows) => {
+                for row in rows {
+                    if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                        change_log.append(&entity.name, id, ChangeKind::Insert, Some(row.clone()));
+                    }
+                }
+            }
+            Err(_) => {
+                // Entity table may not exist yet on first boot — skip.
+            }
+        }
+    }
+
+    change_log
+}
+
 fn start_server(
     runtime: Arc<Runtime>,
     port: u16,
@@ -552,209 +770,15 @@ fn start_server(
     policy_engine.set_resolver(Arc::new(crate::datastore::DataStoreResolver::new(
         Arc::clone(&runtime) as Arc<dyn pylon_http::DataStore>,
     )));
-    // Postgres backends: wire a global SEQUENCE-backed seq provider so
-    // every instance writing to the same database shares one
-    // monotonically-increasing seq space. Without this, instance A and
-    // instance B can independently mint seq=N for different events;
-    // a client connected to one and pulling from the other drops
-    // events as "duplicate seq" (codex P1).
-    //
-    // SQLite backends: wire a _pylon_change_seq-row-backed provider so
-    // seqs persist across process restarts. Without this, every deploy
-    // resets the in-memory seq counter to 0 + seeds to ~entity_count;
-    // any cached client cursor ahead of the new seed range fires a
-    // permanent 410 RESYNC_REQUIRED → reset → re-pull (visible churn
-    // on every deploy). Persisted seqs are strictly monotonic across
-    // boots so the 410 path only ever fires under genuine retention
-    // eviction.
-    let mut change_log_builder = ChangeLog::new();
-    if runtime.is_postgres() {
-        if let Err(e) = runtime.bootstrap_global_change_seq() {
-            tracing::warn!(
-                "[change_log] failed to bootstrap PG SEQUENCE; falling back to per-instance seq: {}",
-                e.message
-            );
-        } else {
-            let rt_for_provider = Arc::clone(&runtime);
-            let initial = runtime.current_global_change_seq().unwrap_or(0);
-            let local_fallback = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
-            let local_for_provider = std::sync::Arc::clone(&local_fallback);
-            let provider: pylon_sync::SeqProvider = std::sync::Arc::new(move || {
-                // Try Postgres first; on transient failure fall back
-                // to a local atomic incremented from the last known PG
-                // value. Single-instance behavior under outage; the
-                // next successful PG call resyncs via the max() guard
-                // inside ChangeLog::append.
-                rt_for_provider.next_global_change_seq().unwrap_or_else(|| {
-                    local_for_provider.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-                })
-            });
-            change_log_builder = change_log_builder
-                .with_seq(provider)
-                .with_initial_seq(initial);
-            tracing::info!(
-                "[change_log] using PG SEQUENCE pylon_change_seq (initial seq = {initial})"
-            );
-        }
-    } else if !runtime.is_in_memory() {
-        // File-backed SQLite: persist a high-water mark on disk via a
-        // background thread so seqs stay monotonic across process
-        // restarts (no 410 RESYNC_REQUIRED storm on redeploy).
-        //
-        // The earlier v0.3.218 attempt persisted INLINE inside the
-        // SeqProvider closure, which the mutation pipeline calls while
-        // holding write_conn. That recursive write_conn acquisition
-        // deadlocked every mutation (`markChannelRead` etc. on
-        // chat-api). The current shape moves persistence off the hot
-        // path: an in-memory atomic issues seqs from a reserved
-        // chunk, and a bg thread writes the next chunk's high-water
-        // mark to disk before that chunk gets used. The bg thread has
-        // its own write_conn lock acquisition, queued behind any
-        // active mutation tx — no recursive lock, no deadlock.
-        // See crates/runtime/src/seq_allocator.rs for the full design.
-        if let Err(e) = runtime.bootstrap_sqlite_change_seq() {
-            tracing::warn!(
-                "[change_log] failed to bootstrap SQLite _pylon_change_seq; falling back to per-instance seq: {}",
-                e.message
-            );
-        } else {
-            match crate::seq_allocator::SqliteSeqAllocator::new(Arc::clone(&runtime)) {
-                Some(allocator) => {
-                    let allocator = std::sync::Arc::new(allocator);
-                    let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
-                    let alloc_for_provider = std::sync::Arc::clone(&allocator);
-                    let provider: pylon_sync::SeqProvider =
-                        std::sync::Arc::new(move || alloc_for_provider.next());
-                    change_log_builder = change_log_builder
-                        .with_seq(provider)
-                        .with_initial_seq(initial);
-                    // Hold the allocator past this scope so the bg
-                    // thread isn't dropped immediately. The closure
-                    // holds its own Arc to the allocator; this binding
-                    // keeps the bg thread alive for the runtime's
-                    // lifetime by escaping into the ChangeLog's seq
-                    // provider field.
-                    std::mem::forget(allocator);
-                    tracing::info!(
-                        "[change_log] using SQLite _pylon_change_seq (initial reservation past = {initial})"
-                    );
-                }
-                None => {
-                    tracing::warn!(
-                        "[change_log] failed to initialize SqliteSeqAllocator; falling back to per-instance seq"
-                    );
-                }
-            }
-        }
-    }
+    // Build the persistent change log: seq provider (PG SEQUENCE /
+    // SQLite high-water allocator) + on-disk store (hydrate the
+    // in-memory ring) + per-entity seed. Extracted so the lifecycle
+    // test harness exercises the exact wiring a real boot does — the
+    // four restart/reload P0s all lived in this seam, so the harness
+    // must drive it directly, not a reimplementation. See
+    // `build_persistent_change_log`.
+    let change_log = build_persistent_change_log(&runtime);
 
-    // Attach the SQLite-backed persistent change log so deltas
-    // survive restarts. Without this, the in-memory ring buffer
-    // resets on every process boot; clients with a persisted
-    // cursor get a `ResyncRequired` and lose any events that
-    // landed post-restart but pre-reconnect.
-    //
-    // Bootstrap is idempotent (CREATE TABLE IF NOT EXISTS). The
-    // hydrate-from-disk inside `with_store` seeds the in-memory
-    // ring with the most recent `capacity` events ordered ASC, so
-    // post-boot pulls cover the same window the previous process
-    // was serving.
-    let mut change_log_persistent = false;
-    enum PersistedBackend {
-        None,
-        Sqlite,
-        Postgres,
-    }
-    let mut persisted_backend = PersistedBackend::None;
-    if runtime.is_postgres() {
-        // Pg deployment: persistence lives in `pylon_change_log`.
-        // Without this, every rolling deploy silently desyncs every
-        // connected client — same bug class the SQLite path fixed
-        // in v0.3.224, just on the cluster path.
-        if let Err(e) = runtime.bootstrap_pg_change_log() {
-            tracing::warn!(
-                "[change_log] failed to bootstrap pylon_change_log; PG persistent log disabled: {}",
-                e.message
-            );
-        } else {
-            use pylon_sync::ChangeLogStore as _;
-            let store = std::sync::Arc::new(crate::change_log_store::PgChangeLogStore::new(
-                Arc::clone(&runtime),
-            ));
-            let hydrated_any = !store.load_recent(1).is_empty();
-            change_log_builder = change_log_builder.with_store(store);
-            change_log_persistent = true;
-            persisted_backend = PersistedBackend::Postgres;
-            if hydrated_any {
-                tracing::info!("[change_log] hydrated in-memory ring from pylon_change_log (PG)");
-            } else {
-                tracing::info!("[change_log] using PG pylon_change_log (empty on first boot)");
-            }
-        }
-    } else if !runtime.is_in_memory() {
-        if let Err(e) = runtime.bootstrap_sqlite_change_log() {
-            tracing::warn!(
-                "[change_log] failed to bootstrap _pylon_change_log; persistent log disabled: {}",
-                e.message
-            );
-        } else {
-            use pylon_sync::ChangeLogStore as _;
-            let store = std::sync::Arc::new(crate::change_log_store::SqliteChangeLogStore::new(
-                Arc::clone(&runtime),
-            ));
-            let hydrated_any = !store.load_recent(1).is_empty();
-            change_log_builder = change_log_builder.with_store(store);
-            change_log_persistent = true;
-            persisted_backend = PersistedBackend::Sqlite;
-            if hydrated_any {
-                tracing::info!("[change_log] hydrated in-memory ring from _pylon_change_log");
-            } else {
-                tracing::info!("[change_log] using SQLite _pylon_change_log (empty on first boot)");
-            }
-        }
-    }
-
-    let change_log = Arc::new(change_log_builder);
-
-    // Seed the change log with one synthetic insert per extant row so that
-    // a pull from seq=0 after a restart reconstructs current state. The
-    // change log is in-memory — restarting the process without this would
-    // leave SQLite rows unreachable via /api/sync/pull (clients would
-    // pull nothing and see an empty replica). Seqs here are fresh; clients
-    // whose cursors are ahead of `self.seq` get a 410 and full resync,
-    // which then hits this seeded log and gets every current row back.
-    //
-    // PER-ENTITY gating when persistence is on: skip seeding for
-    // entities whose rows are already covered by events in
-    // `_pylon_change_log`, but DO seed entities that are absent from
-    // the persisted log (e.g. a new entity added to the manifest
-    // after the previous boot, a table restored from a snapshot,
-    // an entity migrated in via out-of-band SQL). A binary
-    // had-any-persisted-event gate would silently make new
-    // entities invisible to /api/sync/pull until the next write.
-    for entity in runtime.manifest().entities.iter() {
-        let already_seeded = match persisted_backend {
-            PersistedBackend::Sqlite => runtime.sqlite_change_log_has_entity(&entity.name),
-            PersistedBackend::Postgres => runtime.pg_change_log_has_entity(&entity.name),
-            PersistedBackend::None => false,
-        };
-        let _ = change_log_persistent;
-        if already_seeded {
-            continue;
-        }
-        match runtime.list(&entity.name) {
-            Ok(rows) => {
-                for row in rows {
-                    if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
-                        change_log.append(&entity.name, id, ChangeKind::Insert, Some(row.clone()));
-                    }
-                }
-            }
-            Err(_) => {
-                // Entity table may not exist yet on first boot — skip.
-            }
-        }
-    }
     // Snapshot the manifest once for every component that needs to
     // read it on the broadcast hot path. The hubs use it at the
     // wire-serialization step to project `serverOnly` fields — after
@@ -5506,6 +5530,25 @@ fn start_server(
         final_pending,
         final_streams,
     );
+
+    // Flush the change-log persister BEFORE the WAL checkpoint. The
+    // persister batches appends on a background thread (off the
+    // mutation hot path), so at shutdown the last few events may still
+    // be sitting in its channel. Draining them here is what makes a
+    // clean redeploy durable — without it, the final messages before a
+    // restart die in the channel and the next boot's hydration misses
+    // them ("send a message, restart, refresh, it's gone", narrowed to
+    // the shutdown window). Bounded by the same drain timeout; a
+    // timeout just means we exit with a few events un-persisted, same
+    // as a hard kill.
+    if change_log.flush(drain_timeout) {
+        tracing::info!("Change-log persister flushed");
+    } else {
+        tracing::warn!(
+            "Change-log persister flush timed out after {}s; some events may not have persisted",
+            drain_timeout.as_secs()
+        );
+    }
 
     // Force-checkpoint the WAL so the next boot doesn't have to recover
     // any uncommitted journal pages. The wedge we hit on dev.db.jobs.db

@@ -240,6 +240,22 @@ pub trait ChangeLogStore: Send + Sync + std::fmt::Debug {
     /// disconnected long enough for the ring to roll past their
     /// cursor.
     fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent>;
+
+    /// Block until every event handed to `append` before this call has
+    /// durably landed, or `timeout` elapses. Returns `true` on success.
+    ///
+    /// Stores that persist asynchronously (the runtime's SQLite /
+    /// Postgres backends batch appends on a background thread) override
+    /// this to drain their queue. The default is a no-op returning
+    /// `true` — synchronous stores have nothing to flush.
+    ///
+    /// Called on graceful shutdown so the last writes before a redeploy
+    /// reach disk instead of dying in the persister channel, and by
+    /// lifecycle tests that need a barrier before simulating a restart.
+    fn flush(&self, timeout: std::time::Duration) -> bool {
+        let _ = timeout;
+        true
+    }
 }
 
 pub struct ChangeLog {
@@ -717,6 +733,17 @@ impl ChangeLog {
             cursor: SyncCursor { last_seq },
             has_more,
         })
+    }
+
+    /// Flush the attached store (if any) so every appended event is
+    /// durably persisted, or `timeout` elapses. Returns `true` when
+    /// there's no store (nothing to flush) or the store's flush
+    /// succeeded. See [`ChangeLogStore::flush`].
+    pub fn flush(&self, timeout: std::time::Duration) -> bool {
+        match self.store.as_ref() {
+            Some(store) => store.flush(timeout),
+            None => true,
+        }
     }
 
     /// Get the total number of events in the log.

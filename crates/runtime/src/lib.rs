@@ -50,6 +50,12 @@ pub mod workflow_store;
 pub mod workflows;
 pub mod ws;
 
+/// End-to-end lifecycle harness — boots the real runtime + change-log
+/// wiring against a file-backed SQLite DB and drives it through
+/// restart / reload / reconnect / sleep transitions. Test-only.
+#[cfg(test)]
+mod lifecycle_scenario;
+
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
