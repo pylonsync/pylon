@@ -4248,10 +4248,10 @@ pub fn try_spawn_functions(
         Some(p) => p,
         None => {
             tracing::warn!(
-                "[functions] No TypeScript runtime script found. TypeScript functions will be unavailable."
+                "[functions] No TypeScript runtime found — server functions AND native SSR routes will be unavailable. Add @pylonsync/functions to your dependencies (`bun add @pylonsync/functions`)."
             );
             tracing::warn!(
-                "[functions] Tried: $PYLON_FUNCTIONS_RUNTIME, node_modules/@pylon/functions/src/runtime.ts, ~/.pylon/runtime.ts, packages/functions/src/runtime.ts"
+                "[functions] Tried: $PYLON_FUNCTIONS_RUNTIME, node_modules/@pylonsync/functions/{{src/runtime.ts,dist/runtime.js}}, ~/.pylon/runtime.ts, packages/functions/src/runtime.ts"
             );
             return None;
         }

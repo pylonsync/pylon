@@ -71,6 +71,16 @@ const PYLON_VERSION = JSON.parse(
 const PLATFORMS_AVAILABLE = ["web", "vite", "ios", "mac", "expo"];
 
 const TEMPLATE_REGISTRY = {
+	ssr: {
+		blurb:
+			"Full-stack SSR — server-rendered React + Link/Image/Tailwind, one server, no Next.js.",
+		// `unified` templates are a single Pylon app (app.ts + app/ routes +
+		// functions/), NOT a monorepo of apps/api + apps/web. `pylon dev`
+		// serves the SSR frontend and the API from one port. They take no
+		// `--platforms` — the app IS the whole stack.
+		platforms: [],
+		unified: true,
+	},
 	barebones: {
 		blurb: "Single entity, list + create. The smallest working app.",
 		platforms: ["web", "ios", "mac", "expo"],
@@ -128,7 +138,8 @@ function pickValue(arr, ...candidates) {
 
 if (flags.help) {
 	const tmplLines = Object.entries(TEMPLATE_REGISTRY).map(
-		([k, v]) => `    ${k.padEnd(10)} ${v.blurb} (${v.platforms.join(", ")})`,
+		([k, v]) =>
+			`    ${k.padEnd(10)} ${v.blurb} (${v.unified ? "single app" : v.platforms.join(", ")})`,
 	);
 	process.stdout.write(`
 Usage: npm create @pylonsync/pylon [name] [options]
@@ -137,10 +148,12 @@ Usage: npm create @pylonsync/pylon [name] [options]
 ${tmplLines.join("\n")}
 
   --platforms <list>     comma list: ${PLATFORMS_AVAILABLE.join(",")}  (default: web)
+                         ignored for ssr — it's a single full-stack app, no platforms
   --bun|--pnpm|--yarn|--npm
   --skip-install         scaffold only, don't run install
 
 Examples:
+  npm create @pylonsync/pylon my-app --template ssr         # full-stack SSR, no Next.js
   npm create @pylonsync/pylon my-app
   npm create @pylonsync/pylon my-app --template todo --platforms web,ios
   npm create @pylonsync/pylon my-app --template b2b --platforms web,mac
@@ -167,7 +180,10 @@ if (!flags.template) {
 		.toLowerCase();
 	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "todo";
 }
-if (!flags.platforms) {
+// `unified` templates (ssr) are a single app, not a monorepo — they take
+// no platforms. Skip the platform prompt + validation for them entirely.
+const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;
+if (!isUnified && !flags.platforms) {
 	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
 	const ans = (
 		await rl.question(
@@ -188,29 +204,35 @@ if (!flags.pm) {
 }
 rl.close();
 
-const platforms = flags.platforms
-	.split(",")
-	.map((p) => p.trim().toLowerCase())
-	.filter(Boolean);
-const unknownPlatforms = platforms.filter(
-	(p) => !PLATFORMS_AVAILABLE.includes(p),
-);
-if (unknownPlatforms.length > 0) {
-	console.error(
-		`\nError: unknown platform(s): ${unknownPlatforms.join(", ")}. Valid: ${PLATFORMS_AVAILABLE.join(", ")}\n`,
+// Unified templates own no platforms — they ARE the whole app. For
+// everything else, parse + validate the platform list.
+const platforms = isUnified
+	? []
+	: (flags.platforms ?? "web")
+			.split(",")
+			.map((p) => p.trim().toLowerCase())
+			.filter(Boolean);
+if (!isUnified) {
+	const unknownPlatforms = platforms.filter(
+		(p) => !PLATFORMS_AVAILABLE.includes(p),
 	);
-	exit(1);
-}
-if (platforms.length === 0) {
-	console.error(`\nError: at least one platform required.\n`);
-	exit(1);
-}
-if (platforms.includes("web") && platforms.includes("vite")) {
-	console.error(
-		`\nError: --platforms web and vite are mutually exclusive (both render into apps/web).\n` +
-			`       Pick one: web for Next.js 16, vite for plain Vite + React.\n`,
-	);
-	exit(1);
+	if (unknownPlatforms.length > 0) {
+		console.error(
+			`\nError: unknown platform(s): ${unknownPlatforms.join(", ")}. Valid: ${PLATFORMS_AVAILABLE.join(", ")}\n`,
+		);
+		exit(1);
+	}
+	if (platforms.length === 0) {
+		console.error(`\nError: at least one platform required.\n`);
+		exit(1);
+	}
+	if (platforms.includes("web") && platforms.includes("vite")) {
+		console.error(
+			`\nError: --platforms web and vite are mutually exclusive (both render into apps/web).\n` +
+				`       Pick one: web for Next.js 16, vite for plain Vite + React.\n`,
+		);
+		exit(1);
+	}
 }
 if (!TEMPLATES_AVAILABLE.includes(flags.template)) {
 	console.error(
@@ -251,7 +273,7 @@ if (existsSync(root) && readdirSync(root).length > 0) {
 mkdirSync(root, { recursive: true });
 
 console.log(
-	`\nCreating ${projectName} (${flags.template}, ${platforms.join(" + ")}) in ${root}\n`,
+	`\nCreating ${projectName} (${flags.template}${isUnified ? "" : `, ${platforms.join(" + ")}`}) in ${root}\n`,
 );
 
 // ---------------------------------------------------------------------------
@@ -274,6 +296,7 @@ const SUBS = {
 	__APP_NAME_PASCAL__: APP_NAME_PASCAL,
 	__PYLON_VERSION__: PYLON_VERSION,
 	__WORKSPACE_DEP__: workspaceDepSpec,
+	__RUN_DEV__: flags.pm === "npm" ? "npm run dev" : `${flags.pm} run dev`,
 };
 
 // Filenames that contain placeholders get renamed AFTER copy. Keeps
@@ -302,7 +325,12 @@ function substituteFile(absPath) {
 function walkAndSubstitute(dir) {
 	for (const entry of readdirSync(dir)) {
 		const abs = join(dir, entry);
-		const renamed = substituteString(entry);
+		let renamed = substituteString(entry);
+		// npm strips a literal `.gitignore` from published tarballs, so
+		// templates ship it as `gitignore` and we restore the dot at
+		// scaffold time — otherwise the new project has no ignore file
+		// and node_modules / .pylon / *.db get committed.
+		if (renamed === "gitignore") renamed = ".gitignore";
 		let target = abs;
 		if (renamed !== entry) {
 			target = join(dir, renamed);
@@ -332,85 +360,94 @@ function copyTemplate(srcSubpath, destSubpath = "") {
 //   5. Root package.json — generated, not templated
 // ---------------------------------------------------------------------------
 
-copyTemplate("_root");
-copyTemplate(`backend/${flags.template}`);
+if (isUnified) {
+	// Single unified app: app.ts + app/ routes + functions/, served by
+	// `pylon dev` (frontend + API, one port). The template ships its own
+	// package.json — no monorepo root, no turbo, no workspaces.
+	copyTemplate(flags.template);
+} else {
+	copyTemplate("_root");
+	copyTemplate(`backend/${flags.template}`);
 
-// `web` (Next.js) and `vite` are alternative web-frontend toolchains;
-// the mutex check above guarantees at most one of them is set. Either
-// way we also pull in packages/ui so the shared primitives are present.
-if (platforms.includes("web")) {
-	copyTemplate("ui");
-	copyTemplate(`web/${flags.template}`);
-}
-if (platforms.includes("vite")) {
-	copyTemplate("ui");
-	copyTemplate(`vite/${flags.template}`);
-}
-for (const p of ["ios", "mac", "expo"]) {
-	if (platforms.includes(p)) copyTemplate(`${p}/${flags.template}`);
+	// `web` (Next.js) and `vite` are alternative web-frontend toolchains;
+	// the mutex check above guarantees at most one of them is set. Either
+	// way we also pull in packages/ui so the shared primitives are present.
+	if (platforms.includes("web")) {
+		copyTemplate("ui");
+		copyTemplate(`web/${flags.template}`);
+	}
+	if (platforms.includes("vite")) {
+		copyTemplate("ui");
+		copyTemplate(`vite/${flags.template}`);
+	}
+	for (const p of ["ios", "mac", "expo"]) {
+		if (platforms.includes(p)) copyTemplate(`${p}/${flags.template}`);
+	}
 }
 
 walkAndSubstitute(root);
 
 // ---------------------------------------------------------------------------
-// Root package.json — generated based on selected platforms. Workspace
-// scripts depend on which apps exist + which package manager the user
-// picked (each PM exposes "run X in workspace Y" differently).
+// Root package.json — generated based on selected platforms (monorepo
+// templates only). Unified templates ship their own single-app
+// package.json, so skip this entirely.
 // ---------------------------------------------------------------------------
 
-// Turborepo orchestrates the workspace. `turbo dev` runs the `dev`
-// task in every package that defines one (apps/api always; apps/web,
-// apps/expo when scaffolded). Native targets (ios, mac) aren't
-// `turbo dev`-shaped — Xcode / `swift run` block — so they get
-// dedicated escape-hatch scripts instead. turbo.json ships in
-// _root/, so it's already in the project.
-const helperScripts = {};
-if (platforms.includes("ios")) {
-	helperScripts["dev:ios"] =
-		"echo 'cd apps/ios && xcodegen generate && open *.xcodeproj  (or: swift run for a quick macOS preview)'";
-}
-if (platforms.includes("mac")) {
-	helperScripts["dev:mac"] =
-		"echo 'cd apps/mac && swift run  (or: xcodegen generate && open *.xcodeproj)'";
-}
+if (!isUnified) {
+	// Turborepo orchestrates the workspace. `turbo dev` runs the `dev`
+	// task in every package that defines one (apps/api always; apps/web,
+	// apps/expo when scaffolded). Native targets (ios, mac) aren't
+	// `turbo dev`-shaped — Xcode / `swift run` block — so they get
+	// dedicated escape-hatch scripts instead. turbo.json ships in
+	// _root/, so it's already in the project.
+	const helperScripts = {};
+	if (platforms.includes("ios")) {
+		helperScripts["dev:ios"] =
+			"echo 'cd apps/ios && xcodegen generate && open *.xcodeproj  (or: swift run for a quick macOS preview)'";
+	}
+	if (platforms.includes("mac")) {
+		helperScripts["dev:mac"] =
+			"echo 'cd apps/mac && swift run  (or: xcodegen generate && open *.xcodeproj)'";
+	}
 
-// Turbo 2.x refuses to run without packageManager set. Pick a recent-
-// stable for whichever PM the user picked. npm doesn't enforce this
-// field but turbo still expects it to be present.
-const PACKAGE_MANAGERS = {
-	bun: "bun@1.2.19",
-	pnpm: "pnpm@9.12.0",
-	yarn: "yarn@4.5.0",
-	npm: "npm@10.9.0",
-};
+	// Turbo 2.x refuses to run without packageManager set. Pick a recent-
+	// stable for whichever PM the user picked. npm doesn't enforce this
+	// field but turbo still expects it to be present.
+	const PACKAGE_MANAGERS = {
+		bun: "bun@1.2.19",
+		pnpm: "pnpm@9.12.0",
+		yarn: "yarn@4.5.0",
+		npm: "npm@10.9.0",
+	};
 
-const rootPkg = {
-	name: APP_NAME_KEBAB,
-	private: true,
-	type: "module",
-	packageManager: PACKAGE_MANAGERS[flags.pm],
-	workspaces: ["apps/*", "packages/*"].filter((p) => {
-		// Only declare packages/* as a workspace if we actually scaffolded
-		// packages/ui — otherwise the empty match warns on bun install.
-		if (p === "packages/*")
-			return platforms.includes("web") || platforms.includes("vite");
-		return true;
-	}),
-	scripts: {
-		dev: "turbo dev",
-		build: "turbo build",
-		check: "turbo check",
-		lint: "turbo lint",
-		...helperScripts,
-	},
-	devDependencies: {
-		turbo: "^2.3.0",
-	},
-};
-writeFileSync(
-	join(root, "package.json"),
-	JSON.stringify(rootPkg, null, 2) + "\n",
-);
+	const rootPkg = {
+		name: APP_NAME_KEBAB,
+		private: true,
+		type: "module",
+		packageManager: PACKAGE_MANAGERS[flags.pm],
+		workspaces: ["apps/*", "packages/*"].filter((p) => {
+			// Only declare packages/* as a workspace if we actually scaffolded
+			// packages/ui — otherwise the empty match warns on bun install.
+			if (p === "packages/*")
+				return platforms.includes("web") || platforms.includes("vite");
+			return true;
+		}),
+		scripts: {
+			dev: "turbo dev",
+			build: "turbo build",
+			check: "turbo check",
+			lint: "turbo lint",
+			...helperScripts,
+		},
+		devDependencies: {
+			turbo: "^2.3.0",
+		},
+	};
+	writeFileSync(
+		join(root, "package.json"),
+		JSON.stringify(rootPkg, null, 2) + "\n",
+	);
+}
 
 // ---------------------------------------------------------------------------
 // Optional: install dependencies
@@ -437,7 +474,10 @@ if (!flags.skipInstall) {
 const runDev = flags.pm === "npm" ? "npm run dev" : `${flags.pm} run dev`;
 
 const platformLines = [];
-platformLines.push("  → api      http://localhost:4321  (Pylon control plane)");
+if (isUnified)
+	platformLines.push("  → app      http://localhost:4321  (SSR frontend + API, one port)");
+else
+	platformLines.push("  → api      http://localhost:4321  (Pylon control plane)");
 if (platforms.includes("web"))
 	platformLines.push("  → web      http://localhost:3000  (Next.js)");
 if (platforms.includes("vite"))
@@ -449,8 +489,15 @@ if (platforms.includes("ios"))
 if (platforms.includes("mac"))
 	platformLines.push(`  → mac      cd apps/mac && swift run  (or xcodegen for .app)`);
 
-const layoutLines = ["  apps/api          schema + functions/ handlers"];
-if (platforms.includes("web")) {
+const layoutLines = isUnified
+	? [
+			"  app.ts            data model + manifest (entities, functions, routes)",
+			"  app/              file-based SSR routes (app/page.tsx → /)",
+			"  app/layout.tsx    root layout (receives url + auth)",
+			"  functions/        server functions (query/action)",
+		]
+	: ["  apps/api          schema + functions/ handlers"];
+if (!isUnified && platforms.includes("web")) {
 	layoutLines.push("  apps/web          Next.js 16 + React 19 + Tailwind v4");
 	layoutLines.push("  packages/ui       shared UI primitives");
 }

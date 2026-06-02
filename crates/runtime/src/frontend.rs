@@ -213,16 +213,26 @@ impl FrontendConfig {
 
     /// Is anything wired up?
     ///
-    /// True when we have a built dist on disk, a dev proxy URL, OR
-    /// the async builder was at least started. The build-state check
-    /// is what lets the runtime serve a "building" page during first
-    /// boot even though FrontendConfig::from_env at startup saw no
-    /// dist; the Ready branch keeps it active so the discover-after-
-    /// build path in `try_handle` can pick up the freshly-written
-    /// dist/. Only `Idle` (no build kicked off at all) returns false,
-    /// preserving the API-only behavior for projects without a `web/`.
+    /// True when we have a built dist on disk, a dev proxy URL, native
+    /// SSR routes from the manifest, OR the async builder was at least
+    /// started.
+    ///
+    /// The SSR-routes check is load-bearing for the native full-stack
+    /// app: a project whose `app/**/page.tsx` files produced `mode:"ssr"`
+    /// routes has NO `web/dist` (the per-route chunks live under
+    /// `.pylon/client-build`, built lazily by the function runtime on the
+    /// first `render_route`) and may not run the legacy `web/` build
+    /// thread at all — so without this clause `is_active()` returned false
+    /// and every page fell through to the API router as a 404. An app
+    /// with SSR routes IS a frontend app; activate the dispatcher so
+    /// `try_handle` can match + render them.
+    ///
+    /// The build-state check still lets the runtime serve a "building"
+    /// page during first boot of a legacy `web/` frontend. Only `Idle`
+    /// (no dist, no proxy, no SSR routes, no build kicked off) returns
+    /// false, preserving API-only behavior for backends with no frontend.
     pub fn is_active(&self) -> bool {
-        if self.dir.is_some() || self.dev_proxy.is_some() {
+        if self.dir.is_some() || self.dev_proxy.is_some() || !self.ssr_routes.is_empty() {
             return true;
         }
         !matches!(read_build_state(&shared_build_state()), BuildState::Idle)
@@ -1352,6 +1362,43 @@ mod tests {
         assert_eq!(
             cfg.dir.as_ref().map(|p| p.canonicalize().unwrap()),
             Some(app.join("web/dist").canonicalize().unwrap())
+        );
+
+        if let Some(v) = saved_dir {
+            std::env::set_var("PYLON_FRONTEND_DIR", v);
+        }
+        if let Some(v) = saved_proxy {
+            std::env::set_var("PYLON_FRONTEND_DEV_PROXY", v);
+        }
+    }
+
+    #[test]
+    fn ssr_routes_activate_dispatcher_without_a_dist() {
+        // A native full-stack app's app/**/page.tsx files produce
+        // mode:"ssr" routes but NO web/dist (per-route chunks live under
+        // .pylon/client-build, built lazily on first render). Pre-fix
+        // is_active() saw no dir, no proxy, and (for a fresh app) no
+        // build kicked off → returned false, so every page fell through
+        // to the API router as a 404. The SSR-routes clause fixes it.
+        let saved_dir = std::env::var("PYLON_FRONTEND_DIR").ok();
+        let saved_proxy = std::env::var("PYLON_FRONTEND_DEV_PROXY").ok();
+        std::env::remove_var("PYLON_FRONTEND_DIR");
+        std::env::remove_var("PYLON_FRONTEND_DEV_PROXY");
+
+        let tmp = TempDir::new().unwrap();
+        // No web/dist here → dir resolves to None.
+        let cfg = FrontendConfig::from_env(tmp.path()).with_ssr(
+            std::sync::Arc::new(vec![pylon_kernel::ManifestRoute {
+                path: "/".into(),
+                mode: "ssr".into(),
+                ..Default::default()
+            }]),
+            None,
+        );
+        assert!(cfg.dir.is_none(), "a fresh native-SSR app has no web/dist");
+        assert!(
+            cfg.is_active(),
+            "an app with mode:ssr routes must activate the frontend dispatcher"
         );
 
         if let Some(v) = saved_dir {
