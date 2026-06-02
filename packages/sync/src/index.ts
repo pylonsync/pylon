@@ -1296,7 +1296,6 @@ export class SyncEngine {
         const resp = await this.request<
           PullResponse & { snapshot_after?: string | null }
         >("GET", `/api/sync/pull?${params.toString()}`);
-        this.consecutive_410s = 0;
         await this.enqueueApply(resp.changes, resp.cursor);
         // `snapshot_after` is only set when the server is mid-snapshot.
         // Continue paginating in the same loop iteration so we don't
@@ -1310,6 +1309,25 @@ export class SyncEngine {
           await this.pull();
           break;
         }
+      }
+      // Clear the resync circuit breaker ONLY on a successful DELTA
+      // pull — one that started from a real, non-zero cursor the server
+      // honored. A snapshot pull from cursor=0 succeeding does NOT prove
+      // our cursor is stable, so it must NOT clear the breaker.
+      //
+      // Why this matters (the bug this replaced): the reset used to fire
+      // on every successful page, including the cursor=0 snapshot that a
+      // 410 triggers. So a stale-cursor 410 → full snapshot → fresh-
+      // cursor 410 ping-pong — a client bouncing between cluster
+      // instances whose in-memory change logs diverge, with no shared
+      // persistent log to serve the delta — reset the breaker every
+      // cycle. The exponential backoff below could never engage, and the
+      // client re-ran a full `select *` snapshot of EVERY entity roughly
+      // every 3 seconds, indefinitely. That drove a ~280GB PlanetScale
+      // egress bill. Resetting only on a delta means repeated resyncs
+      // escalate into the backoff instead of melting egress.
+      if (!startedFromZero) {
+        this.consecutive_410s = 0;
       }
       // Snapshot+tail loop exhausted without throwing: if we started
       // from cursor=0 we just hydrated the full replica from server
@@ -1335,31 +1353,37 @@ export class SyncEngine {
       // re-pull from seq=0. The server replays all current entity rows as
       // seed events on startup so the fresh pull reconstructs state.
       //
-      // Circuit breaker: if the immediate re-pull ALSO 410s, accept it.
-      // Don't recurse — that's the infinite loop we used to ship before
-      // the cursor=0 server fix landed (or against an old server binary
-      // that hasn't been rebuilt yet). Track 410 retries against an
-      // exponential backoff so a misconfigured server can't melt our CPU.
+      // Circuit breaker. The first resync in an episode snapshots
+      // immediately (good UX: a cursor that genuinely fell off retention
+      // recovers in one round trip). But a SECOND 410 with no successful
+      // delta pull in between means re-snapshotting isn't converging —
+      // the cursor we just minted from the snapshot is itself stale
+      // (instance ping-pong, or a server that can't serve our delta). At
+      // that point each snapshot is a full `select *` of every entity,
+      // so we MUST back off instead of looping. The breaker only clears
+      // on a successful delta pull (see the `!startedFromZero` reset
+      // above) — NOT on the snapshot itself, which is what made this
+      // loop unbounded and burned ~280GB of egress.
       if (status === 410) {
         const attempt = this.consecutive_410s;
         this.consecutive_410s += 1;
         if (attempt === 0) {
-          // Bypass the queue here — we ARE the pull op holding the
-          // queue slot. Calling the public pull() would re-enqueue and
-          // share our own promise back to us (deadlock).
+          // First resync of the episode — snapshot now. Bypass the queue
+          // (we ARE the pull op holding the slot; the public pull()
+          // would re-enqueue and share our own promise back → deadlock).
           await this.resetReplicaInner();
           await this.pullInner();
         } else {
-          // Already retried once and still 410. Stop. Schedule a
-          // back-off retry tied to the WS reconnect path so we don't
-          // spam the server. Resets when any pull succeeds.
+          // Snapshotted once and still 410 → not converging. Back off
+          // exponentially instead of re-snapshotting. Clears only when a
+          // delta pull finally succeeds (cursor stabilised).
           const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
           console.warn(
             `[pylon] persistent 410 RESYNC_REQUIRED (attempt ${attempt + 1}); backing off ${delayMs}ms`,
           );
           setTimeout(() => {
-            // Trigger one more attempt; either it succeeds (which resets
-            // the counter) or it 410s again (which extends the backoff).
+            // Retry after the delay; a delta success resets the counter,
+            // a repeat 410 extends the backoff (no snapshot).
             void this.pull();
           }, delayMs);
         }

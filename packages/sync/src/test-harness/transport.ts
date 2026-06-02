@@ -250,6 +250,14 @@ async function handle(
       };
     }
     const since = Number(new URL(url, "http://test").searchParams.get("since") ?? "0");
+    // Cluster-divergence sim: a delta pull lands on an instance that
+    // can't serve our cursor → 410. A snapshot (since=0) still succeeds.
+    if (since > 0 && server.force410OnDelta) {
+      return {
+        status: 410,
+        body: { error: { code: "RESYNC_REQUIRED" } },
+      };
+    }
     const resp = await server.pull(token, since);
     return { status: 200, body: resp };
   }

@@ -91,6 +91,17 @@ export class TestServer {
   /** When set, the next pull() returns this status instead of normal.
    *  Used to simulate 410 RESYNC_REQUIRED and similar transient errors. */
   private nextPullStatus: number | null = null;
+  /** When true, every DELTA pull (since > 0) 410s, but a snapshot pull
+   *  (since = 0) succeeds. Simulates a horizontally-scaled deployment
+   *  where a client bounces between instances whose in-memory change
+   *  logs diverge (no shared persistent log) — every cursor is "stale"
+   *  on the instance it lands on. This is the condition that drove the
+   *  280GB egress storm; the test asserts the client backs off instead
+   *  of re-snapshotting forever. */
+  force410OnDelta = false;
+  /** Count of snapshot pulls served (since = 0). The egress storm was a
+   *  runaway count here; the regression test bounds it. */
+  snapshotPullCount = 0;
   /** Captured outbound WS messages from clients — tests assert against
    *  this to verify `reactive-subscribe`, `crdt-subscribe`, etc., were
    *  actually sent over the wire. */
@@ -299,6 +310,7 @@ export class TestServer {
   }> {
     const auth = this.authContextFor(token);
     if (this.beforePullHook) await this.beforePullHook(auth, since);
+    if (since === 0) this.snapshotPullCount += 1;
     const visibleSet = (entity: string) => {
       const filtered = this.visible(
         entity,

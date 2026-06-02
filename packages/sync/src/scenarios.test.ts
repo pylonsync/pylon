@@ -452,6 +452,41 @@ describe("sync scenarios", () => {
     expect(env.engine.store.get("Note", "n2")).not.toBeNull();
   });
 
+  // EGRESS STORM GUARD (pins the circuit-breaker fix). When every delta
+  // pull 410s but snapshots succeed — a client bouncing between cluster
+  // instances whose in-memory change logs diverge — the client must
+  // snapshot ONCE then back off, NOT re-snapshot on every pull.
+  //
+  // The bug: the breaker reset `consecutive_410s = 0` on every
+  // successful pull, including the cursor=0 snapshot a 410 triggers. So
+  // a 410 → full snapshot → 410 ping-pong reset the breaker each cycle
+  // and the backoff never engaged. The result was a full `select *`
+  // snapshot of EVERY entity ~every 3 seconds, indefinitely — a ~280GB
+  // PlanetScale egress bill. The fix clears the breaker only on a
+  // successful DELTA pull (cursor stable), never on the snapshot itself.
+  test("repeated delta 410s back off instead of re-snapshotting (egress storm)", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "x" }]);
+    await env.start();
+    await env.flush();
+
+    // Baseline: start() did exactly one snapshot pull.
+    const before = env.server.snapshotPullCount;
+
+    // Now every delta pull 410s (snapshots still succeed).
+    env.server.force410OnDelta = true;
+    for (let i = 0; i < 6; i++) {
+      await env.engine.pull();
+      await env.flush();
+    }
+
+    // Exactly ONE additional snapshot (the first resync). Every pull
+    // after that 410s on the delta and routes to exponential backoff —
+    // no further full snapshots. Pre-fix this was 6 (one per pull).
+    expect(env.server.snapshotPullCount - before).toBe(1);
+  });
+
   // Row-revoked envelope: server pushes `row-revoked` to a
   // subscriber whose read policy was revoked for a specific row.
   // The engine must drop the row from the local replica and
