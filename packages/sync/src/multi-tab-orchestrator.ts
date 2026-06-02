@@ -69,8 +69,11 @@ export interface MultiTabOrchestratorHooks {
     removalIds: string[],
     tombstoneSeq: number,
   ): void;
-  /** Replica reset broadcast — identity flip happened on the leader. */
-  onResetReceived(): void;
+  /** Replica reset broadcast from the leader. `wipeMutations` is true
+   *  when the reset was an identity flip (drop the outgoing identity's
+   *  pending offline writes), false for a same-user 410 RESYNC (keep
+   *  them — they survive the snapshot refresh). */
+  onResetReceived(wipeMutations: boolean): void;
   /** Resolved session update from the leader. Engine funnels through
    *  its session chain so concurrent triggers commit in order. */
   onSessionReceived(resolved: ResolvedSession): void;
@@ -112,6 +115,16 @@ export interface MultiTabOrchestratorHooks {
   /** New leader → followers: re-forward your locally-wanted room subs.
    *  Triggered alongside CRDT/reactive replay after a leader change. */
   onReplayRoomSubs?(): void;
+
+  /** Follower → leader: a follower's `useQuery` observed an entity.
+   *  Leader-only. The leader adds it to its reconcile sweep and fetches
+   *  it so a server row the follower never cached is discovered and
+   *  broadcast back as a `reconciled` batch. Without this, a follower's
+   *  view on a never-cached entity stays empty forever. */
+  onEntityObserve?(entity: string, fromTabId: string): void;
+  /** New leader → followers: re-declare your observed entities so the
+   *  new leader's reconcile sweep covers them. */
+  onReplayObservedEntities?(): void;
 }
 
 export interface MultiTabOrchestratorConfig {
@@ -247,8 +260,8 @@ export class MultiTabOrchestrator {
     });
   }
 
-  broadcastReset(): void {
-    this.broadcastRaw({ type: "reset" });
+  broadcastReset(wipeMutations: boolean): void {
+    this.broadcastRaw({ type: "reset", wipeMutations });
   }
 
   broadcastSession(resolved: ResolvedSession): void {
@@ -328,7 +341,7 @@ export class MultiTabOrchestrator {
         break;
       }
       case "reset": {
-        this.hooks.onResetReceived();
+        this.hooks.onResetReceived(msg.wipeMutations === true);
         break;
       }
       case "session": {
@@ -388,6 +401,19 @@ export class MultiTabOrchestrator {
         // so the new leader can rebuild its forwarder sets and resend
         // `room-subscribe` on the WS.
         this.hooks.onReplayRoomSubs?.();
+        // ...and re-declare observed entities so the new leader's
+        // reconcile sweep covers them.
+        this.hooks.onReplayObservedEntities?.();
+        break;
+      }
+      case "entity-observe": {
+        // Follower → leader. Leader-only — a follower receiving this
+        // (own broadcast echo, or stale leader transition) ignores.
+        if (!this._isLeader) return;
+        const entity = msg.entity as string | undefined;
+        if (typeof entity === "string") {
+          this.hooks.onEntityObserve?.(entity, fromTabId);
+        }
         break;
       }
       case "room-sub-register": {

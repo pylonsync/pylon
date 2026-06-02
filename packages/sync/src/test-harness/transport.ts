@@ -259,6 +259,10 @@ async function handle(
       };
     }
     const resp = await server.pull(token, since);
+    // One-shot has_more on a delta pull → drives the tail-pull recursion.
+    if (since > 0 && server.consumeNextPullHasMore()) {
+      return { status: 200, body: { ...resp, has_more: true } };
+    }
     return { status: 200, body: resp };
   }
 
@@ -275,6 +279,18 @@ async function handle(
 
   // /api/sync/push — accept ops from optimistic mutations.
   if (url.endsWith("/api/sync/push") && method === "POST") {
+    const outcome = server.consumeNextPushOutcome();
+    if (outcome?.kind === "network") {
+      // Reject like a real offline fetch: no HTTP status → the engine
+      // classifies it as TRANSIENT (keep pending, retry).
+      throw new Error("simulated network failure (offline)");
+    }
+    if (outcome?.kind === "status") {
+      return {
+        status: outcome.status,
+        body: { error: { code: "PUSH_REJECTED" } },
+      };
+    }
     return { status: 200, body: { ops: [] } };
   }
 

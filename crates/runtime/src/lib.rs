@@ -835,13 +835,18 @@ impl Runtime {
     /// Read events `seq > since` from `pylon_change_log`. Backs the
     /// pull-fallback path when the in-memory ring no longer covers
     /// the cursor.
+    /// Read persisted change-log events with `seq > since`, oldest first.
+    /// Returns `None` on a backend mismatch or query failure so the
+    /// caller won't mistake a transient PG error for a confirmed-empty
+    /// (pruned) gap and force a resync storm. See
+    /// [`pylon_sync::ChangeLogStore::pull_range`].
     pub fn pg_change_log_pull_range(
         &self,
         since: u64,
         limit: usize,
-    ) -> Vec<pylon_sync::ChangeEvent> {
+    ) -> Option<Vec<pylon_sync::ChangeEvent>> {
         let RuntimeBackend::Postgres(pg) = &self.backend else {
-            return Vec::new();
+            return None;
         };
         let result: Result<Vec<pylon_sync::ChangeEvent>, pylon_http::DataError> =
             pg.store.with_client(|c| {
@@ -863,7 +868,7 @@ impl Runtime {
                 }
                 Ok(out)
             });
-        result.unwrap_or_default()
+        result.ok()
     }
 
     /// Prune `pylon_change_log` to at most `retain` events.
@@ -1172,34 +1177,31 @@ impl Runtime {
     /// ordered ascending, capped at `limit`. Used by the pull
     /// fallback when the in-memory ring no longer covers the
     /// requested cursor range.
+    /// Read persisted change-log events with `seq > since`, oldest first.
+    /// Returns `None` on any storage failure (wrong backend, poisoned
+    /// lock, prepare/query error) so the caller can distinguish "store
+    /// momentarily unreadable" from "store confirmed empty" — only the
+    /// latter should force a client resync. See [`pylon_sync::ChangeLogStore::pull_range`].
     pub fn sqlite_change_log_pull_range(
         &self,
         since: u64,
         limit: usize,
-    ) -> Vec<pylon_sync::ChangeEvent> {
-        let sb = match self.sqlite_backend() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let conn = match sb.write_conn.lock() {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        let mut stmt = match conn.prepare(
-            "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
-             FROM _pylon_change_log WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = match stmt.query_map(
-            rusqlite::params![since as i64, limit as i64],
-            change_log_row_map,
-        ) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        rows.flatten().flatten().collect()
+    ) -> Option<Vec<pylon_sync::ChangeEvent>> {
+        let sb = self.sqlite_backend().ok()?;
+        let conn = sb.write_conn.lock().ok()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, entity, row_id, kind, data, prev_data, timestamp \
+                 FROM _pylon_change_log WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+            )
+            .ok()?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![since as i64, limit as i64],
+                change_log_row_map,
+            )
+            .ok()?;
+        Some(rows.flatten().flatten().collect())
     }
 
     /// Reserve a chunk of `amount` seqs atomically — bumps the persisted

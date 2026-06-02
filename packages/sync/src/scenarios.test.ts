@@ -525,6 +525,152 @@ describe("sync scenarios", () => {
     expect(env.engine.store.get("Domain", "d1")).not.toBeNull();
   });
 
+  // TAIL-PULL DEADLOCK (pins index.ts:1310). When a delta pull reports
+  // has_more (the catch-up exceeds the server's per-pull limit), pullInner
+  // drains the tail by recursing. Pre-fix it called the PUBLIC pull(),
+  // which re-enters the op queue under key "pull" and coalesces onto the
+  // promise it's currently running inside → permanent self-deadlock that
+  // bricks the whole pull path. Post-fix it recurses into pullInner().
+  test("delta pull with has_more drains the tail without self-deadlocking", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "a" }]);
+    await env.start();
+    await env.flush();
+
+    // A later change exists; the next delta pull reports has_more once,
+    // forcing the tail recursion.
+    env.server.insert("Note", { id: "n2", title: "b" });
+    env.server.primeNextPullHasMore();
+
+    // Must complete, not hang. Pre-fix the pull never resolves and the
+    // race rejects with "pull deadlocked".
+    const e = env;
+    await Promise.race([
+      e.engine.pull().then(() => e.flush()),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("pull deadlocked")), 3000),
+      ),
+    ]);
+    expect(env.engine.store.get("Note", "n2")).not.toBeNull();
+  });
+
+  // OFFLINE WRITES (pins the transient/permanent split in pushInner).
+  // A push that fails with a NETWORK error (offline — fetch rejects, no
+  // HTTP status) must keep the mutation `pending` and the optimistic
+  // ghost intact, then re-send on reconnect. Pre-fix every transport
+  // failure marked the mutation `failed` + rolled back the ghost, so an
+  // offline insert vanished and was never re-sent.
+  test("offline push keeps the mutation pending and the ghost intact (not failed)", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    await env.start();
+    await env.flush();
+
+    env.server.primeNextPushOutcome({ kind: "network" });
+    const id = await env.engine.insert("Note", { title: "offline" });
+    await env.flush();
+
+    // Offline (network throw, no status): the ghost survives and the
+    // mutation stays PENDING — not `failed`. Pre-fix it was marked failed
+    // and the ghost rolled back, so the offline write vanished and (being
+    // `failed`, not `pending`) was never re-sent. Pending is exactly what
+    // makes the standard reconnect push re-ship it. (insert() returns the
+    // ROW id; match the mutation by row_id, not its op_id.)
+    expect(env.engine.store.get("Note", id)).not.toBeNull();
+    const mine = (env.engine.mutations as unknown as {
+      queue: { change: { row_id: string }; status: string }[];
+    }).queue.filter((m) => m.change.row_id === id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.status).toBe("pending");
+  });
+
+  // FAILED UPDATE ROLLBACK (pins failPushedMutation update path). A
+  // PERMANENT rejection (403) of an update must restore the row to its
+  // pre-update value. Pre-fix only inserts rolled back; a rejected update
+  // left the local row permanently wrong.
+  test("a permanently-rejected update restores the prior value", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "original" }]);
+    await env.start();
+    await env.flush();
+
+    env.server.primeNextPushOutcome({ kind: "status", status: 403 });
+    await env.engine.update("Note", "n1", { title: "edited" });
+    await env.flush();
+
+    const row = env.engine.store.get("Note", "n1") as { title?: string } | null;
+    expect(row?.title).toBe("original");
+  });
+
+  // FAILED DELETE ROLLBACK (pins failPushedMutation delete path). A
+  // rejected delete must bring the row back AND clear the optimistic
+  // tombstone, so a later server insert of the same id isn't fenced out.
+  // Pre-fix the row vanished and the tombstone blocked re-creation
+  // forever.
+  test("a permanently-rejected delete restores the row and un-fences it", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "keep" }]);
+    await env.start();
+    await env.flush();
+
+    env.server.primeNextPushOutcome({ kind: "status", status: 403 });
+    await env.engine.delete("Note", "n1");
+    await env.flush();
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+
+    // Un-fenced: a server insert of the same id now lands.
+    env.server.insert("Note", { id: "n1", title: "server-updated" });
+    await env.engine.pull();
+    await env.flush();
+    const row = env.engine.store.get("Note", "n1") as { title?: string } | null;
+    expect(row?.title).toBe("server-updated");
+  });
+
+  // CROSS-IDENTITY MUTATION WIPE (pins resetReplica wipeMutations). An
+  // identity flip (token / tenant change) must DROP the outgoing
+  // identity's pending offline writes — replaying them under the new
+  // session would attribute one user's writes to another. A same-user 410
+  // RESYNC must KEEP them (they survive the snapshot refresh).
+  test("an identity-flip reset wipes the outgoing identity's pending writes", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    await env.start();
+    await env.flush();
+
+    // Queue an offline write — network failure keeps it pending.
+    env.server.primeNextPushOutcome({ kind: "network" });
+    await env.engine.insert("Note", { title: "draft" });
+    await env.flush();
+    const queue = (env.engine.mutations as unknown as { queue: unknown[] }).queue;
+    expect(queue.length).toBeGreaterThan(0);
+
+    // Identity flip → wipe.
+    await env.engine.resetReplica({ wipeMutations: true });
+    expect((env.engine.mutations as unknown as { queue: unknown[] }).queue).toHaveLength(0);
+  });
+
+  test("a same-user 410 resync PRESERVES pending offline writes", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    await env.start();
+    await env.flush();
+
+    env.server.primeNextPushOutcome({ kind: "network" });
+    await env.engine.insert("Note", { title: "draft" });
+    await env.flush();
+    const before = (env.engine.mutations as unknown as { queue: unknown[] }).queue.length;
+    expect(before).toBeGreaterThan(0);
+
+    // 410 RESYNC path is the default (wipeMutations omitted) — KEEP writes.
+    await env.engine.resetReplica();
+    expect(
+      (env.engine.mutations as unknown as { queue: unknown[] }).queue.length,
+    ).toBe(before);
+  });
+
   // Row-revoked envelope: server pushes `row-revoked` to a
   // subscriber whose read policy was revoked for a specific row.
   // The engine must drop the row from the local replica and

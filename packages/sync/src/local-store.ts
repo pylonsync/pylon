@@ -199,12 +199,20 @@ export class LocalStore {
    * between the memory apply and the eventual disk write can persist
    * a cursor that's ahead of the replica, skipping those rows
    * forever on restart.
+   *
+   * Returns `true` when every persist write reached disk durably,
+   * `false` when at least one degraded (quota / abort). The engine
+   * uses the result to hold the PERSISTED cursor back: a row that
+   * didn't reach disk must not be skipped by an advanced on-disk
+   * cursor on the next cold start. The in-memory replica always
+   * reflects the change regardless.
    */
-  async applyChangesAsync(changes: ChangeEvent[]): Promise<void> {
+  async applyChangesAsync(changes: ChangeEvent[]): Promise<boolean> {
     for (const change of changes) {
       this.applyChange(change);
     }
     this.notify();
+    let allDurable = true;
     if (this._persistFn) {
       // Sequential await — concurrent IDB writes can resolve out of
       // order, racing an update behind its own delete on disk. The
@@ -213,10 +221,12 @@ export class LocalStore {
       for (const change of changes) {
         const result = this._persistFn(this.hydrateFromMemory(change));
         if (result instanceof Promise) {
-          await result;
+          const durable = await result;
+          if (durable === false) allDurable = false;
         }
       }
     }
+    return allDurable;
   }
 
   /**
@@ -234,9 +244,11 @@ export class LocalStore {
   }
 
   /** Persistence callback for auto-saving changes. Returns
-   *  `Promise<void>` so callers can await. Void-returning callbacks
-   *  are accepted for backwards compatibility (just not awaitable). */
-  _persistFn: ((change: ChangeEvent) => void | Promise<void>) | null = null;
+   *  `Promise<boolean>` (true = durable, false = degraded) so
+   *  `applyChangesAsync` can gate the on-disk cursor on durability.
+   *  Void-returning callbacks are accepted for backwards compatibility
+   *  (treated as durable / fire-and-forget). */
+  _persistFn: ((change: ChangeEvent) => void | Promise<boolean>) | null = null;
 
   /** Subscribe to store changes. Returns unsubscribe function. */
   subscribe(listener: () => void): () => void {
@@ -305,6 +317,46 @@ export class LocalStore {
       table.set(id, { ...existing, ...data });
       this.notify();
     }
+  }
+
+  /**
+   * Undo a rejected optimistic update/delete by restoring the row to its
+   * captured pre-mutation value and clearing any optimistic tombstone
+   * for it. `failPushedMutation` calls this when the server rejects an
+   * update (restore the prior field values) or a delete (bring the row
+   * back AND un-fence it so the row — and any future server insert of
+   * the id — isn't blocked by the lingering optimistic tombstone).
+   *
+   * `prev === null` means the row didn't exist before the mutation
+   * (e.g. an update on a row that was itself an un-acked insert) — in
+   * that case we just remove it + clear the fence.
+   *
+   * A REAL (server-issued) tombstone wins over the restore: if an
+   * authoritative delete/revocation for this id landed on the applyQueue
+   * while the rejected push was in flight (the opQueue and applyQueue run
+   * independently), resurrecting `prev` here would briefly un-delete a row
+   * the server says is gone — healed only at the next reconcile. So when a
+   * server tombstone is present we drop the row and let the canonical
+   * state stand; the failed mutation's own optimistic fence is cleared
+   * regardless so a later legitimate re-create of the id isn't blocked.
+   */
+  restoreRow(entity: string, id: string, prev: Row | null): void {
+    // The failed mutation's own optimistic fence always clears.
+    this.optimisticTombstones.get(entity)?.delete(id);
+    if (this.tombstones.get(entity)?.has(id)) {
+      // Server authoritatively removed this row mid-flight — its
+      // deletion outranks our local rollback.
+      this.tables.get(entity)?.delete(id);
+      this.notify();
+      return;
+    }
+    if (prev) {
+      if (!this.tables.has(entity)) this.tables.set(entity, new Map());
+      this.tables.get(entity)!.set(id, prev);
+    } else {
+      this.tables.get(entity)?.delete(id);
+    }
+    this.notify();
   }
 
   /** Apply an optimistic delete. Block any incoming insert/update

@@ -86,15 +86,47 @@ export class IndexedDBPersistence {
     });
   }
 
-  /** Save a row to IndexedDB. */
-  async saveRow(entity: string, id: string, data: Row): Promise<void> {
-    if (!this.db) return;
+  /** Resolve when a write transaction settles, reporting durability:
+   *  `true` on COMMIT, `false` if it aborts/errors — e.g.
+   *  QuotaExceededError on a storage-pressured device. NEVER rejects or
+   *  hangs: registering only `oncomplete` (the original shape) meant an
+   *  aborted tx never settled, and the engine awaits the persist before
+   *  advancing the cursor in `enqueueApply` — so ONE hung write wedged
+   *  the whole applyQueue and live sync silently died for the session.
+   *
+   *  But "resolve unconditionally" (the first fix) was also wrong: on an
+   *  abort the row never reached disk, yet `enqueueApply` still advanced
+   *  the PERSISTED cursor past it — so on restart the warm-load skipped
+   *  those rows forever (cursor ahead of replica). The boolean lets the
+   *  caller hold the on-disk cursor back when a row write fails, so the
+   *  next cold start re-pulls the gap. Best-effort: log once, keep the
+   *  in-memory replica authoritative, but never persist a cursor ahead of
+   *  what's actually durable. Mirrors the read paths (`getRow`/
+   *  `loadCursor`) which already degrade via `onerror`. */
+  private commit(tx: IDBTransaction, op: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => {
+        // eslint-disable-next-line no-console
+        console.warn(`[pylon-sync] IndexedDB ${op} failed; degrading to memory`, tx.error);
+        resolve(false);
+      };
+      tx.onabort = () => {
+        // eslint-disable-next-line no-console
+        console.warn(`[pylon-sync] IndexedDB ${op} aborted; degrading to memory`, tx.error);
+        resolve(false);
+      };
+    });
+  }
+
+  /** Save a row to IndexedDB. Resolves `true` when the write is durable,
+   *  `false` if it degraded (no DB / aborted) — see `commit`. */
+  async saveRow(entity: string, id: string, data: Row): Promise<boolean> {
+    if (!this.db) return false;
     const tx = this.db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
     store.put({ _key: `${entity}:${id}`, entity, id, data });
-    return new Promise((resolve) => {
-      tx.oncomplete = () => resolve();
-    });
+    return this.commit(tx, "saveRow");
   }
 
   /** Fetch a row from IndexedDB by key. Used by `persistChange` on update
@@ -113,15 +145,14 @@ export class IndexedDBPersistence {
     });
   }
 
-  /** Delete a row from IndexedDB. */
-  async deleteRow(entity: string, id: string): Promise<void> {
-    if (!this.db) return;
+  /** Delete a row from IndexedDB. Resolves `true` when durable, `false`
+   *  if it degraded — see `commit`. */
+  async deleteRow(entity: string, id: string): Promise<boolean> {
+    if (!this.db) return false;
     const tx = this.db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
     store.delete(`${entity}:${id}`);
-    return new Promise((resolve) => {
-      tx.oncomplete = () => resolve();
-    });
+    return this.commit(tx, "deleteRow");
   }
 
   /** Load all rows for an entity from IndexedDB. */
@@ -217,15 +248,14 @@ export class IndexedDBPersistence {
     });
   }
 
-  /** Save the sync cursor. */
-  async saveCursor(cursor: SyncCursor): Promise<void> {
-    if (!this.db) return;
+  /** Save the sync cursor. Resolves `true` when durable, `false` if it
+   *  degraded — see `commit`. */
+  async saveCursor(cursor: SyncCursor): Promise<boolean> {
+    if (!this.db) return false;
     const tx = this.db.transaction(CURSOR_STORE, "readwrite");
     const store = tx.objectStore(CURSOR_STORE);
     store.put({ key: "cursor", ...cursor });
-    return new Promise((resolve) => {
-      tx.oncomplete = () => resolve();
-    });
+    return this.commit(tx, "saveCursor");
   }
 
   /** Load the sync cursor. */
@@ -247,25 +277,34 @@ export class IndexedDBPersistence {
     });
   }
 
-  /** Clear all stored data. */
-  async clear(): Promise<void> {
-    if (!this.db) return;
+  /** Clear stored rows + cursor. Deliberately does NOT touch the
+   *  durable mutation queue: `resetReplica` calls this on a 410 RESYNC
+   *  (same user, needs a fresh snapshot) where pending offline writes
+   *  MUST survive. On an IDENTITY flip the old identity's pending
+   *  mutations must instead be discarded — that wipe runs through
+   *  `MutationQueue.clearAll()` (which persists an empty `MUTATIONS_STORE`
+   *  via its own backend), gated on `resetReplica({ wipeMutations })` at
+   *  the token/tenant-flip call sites. Splitting the two stores keeps each
+   *  reset path honest: 410 keeps writes, identity flip drops them. */
+  async clear(): Promise<boolean> {
+    if (!this.db) return false;
     const tx = this.db.transaction([STORE_NAME, CURSOR_STORE], "readwrite");
     tx.objectStore(STORE_NAME).clear();
     tx.objectStore(CURSOR_STORE).clear();
-    return new Promise((resolve) => {
-      tx.oncomplete = () => resolve();
-    });
+    return this.commit(tx, "clear");
   }
 }
 
 /**
- * Apply a change event to IndexedDB persistence.
+ * Apply a change event to IndexedDB persistence. Returns `true` when the
+ * write reached disk durably, `false` when it degraded (so `enqueueApply`
+ * can hold the persisted cursor back rather than skip the row on restart).
+ * A change with no `data` is a no-op and counts as durable.
  */
 export async function persistChange(
   persistence: IndexedDBPersistence,
   change: ChangeEvent
-): Promise<void> {
+): Promise<boolean> {
   switch (change.kind) {
     case "insert":
     case "update":
@@ -274,13 +313,13 @@ export async function persistChange(
         // change's `data` with the post-merge row from memory — so even
         // on update the full row lands here. Overwriting is correct;
         // pre-merge patches would have dropped unpatched columns.
-        await persistence.saveRow(change.entity, change.row_id, change.data);
+        return persistence.saveRow(change.entity, change.row_id, change.data);
       }
-      break;
+      return true;
     case "delete":
-      await persistence.deleteRow(change.entity, change.row_id);
-      break;
+      return persistence.deleteRow(change.entity, change.row_id);
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

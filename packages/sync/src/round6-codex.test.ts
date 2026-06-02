@@ -326,3 +326,160 @@ describe("codex round-6: peer leaving scrubs forwarded subs", () => {
     expect(engine.serverSubs.has("sub-1")).toBe(false);
   });
 });
+
+describe("sync hardening: multi-tab follower coverage", () => {
+  let env: TestEnv | null = null;
+  afterEach(async () => {
+    if (env) await env.dispose();
+    env = null;
+  });
+
+  // FOLLOWER GHOST ROLLBACK. The leader broadcasts `mutations-failed`;
+  // the follower must roll back its OWN optimistic ghost, not just mark
+  // the queue entry failed. Pre-fix onMutationsFailed called markFailed
+  // directly, so the ghost row stuck around in the tab the user sees.
+  test("a mutations-failed for an optimistic insert removes the follower's ghost", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+    const engine = env.engine;
+
+    // Optimistic ghost in the store + a matching queued mutation (as if
+    // this follower had forwarded the insert to the leader).
+    engine.store.optimisticInsertWithId("Todo", "t1", { id: "t1", text: "ghost" });
+    engine.mutations.add({
+      op_id: "op-1",
+      entity: "Todo",
+      row_id: "t1",
+      kind: "insert",
+      data: { id: "t1", text: "ghost" },
+    });
+    expect(engine.store.get("Todo", "t1")).not.toBeNull();
+
+    (engine as unknown as {
+      orchestrator: { handleMessage(msg: unknown, from: string): void };
+    }).orchestrator.handleMessage(
+      { type: "mutations-failed", ops: [{ opId: "op-1", error: "rejected" }] },
+      "leader-tab",
+    );
+
+    // Ghost gone (rolled back), mutation marked failed.
+    expect(engine.store.get("Todo", "t1")).toBeNull();
+  });
+
+  // ENTITY-OBSERVE FORWARDING. A leader that receives a forwarded
+  // `entity-observe` from a follower must add the entity to its reconcile
+  // sweep and fetch it — so a server row the follower never cached is
+  // discovered + broadcast back. Without this a follower's useQuery on a
+  // never-cached entity renders empty forever.
+  test("a leader fetches an entity a follower forwarded via entity-observe", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    await env.start(); // solo → this engine is the leader
+    const engine = env.engine;
+
+    // A server row exists for an entity this engine never cached.
+    env.server.insert("Domain", { id: "d1", host: "x.com" });
+    expect(engine.store.list("Domain")).toHaveLength(0);
+
+    (engine as unknown as {
+      orchestrator: { handleMessage(msg: unknown, from: string): void };
+    }).orchestrator.handleMessage(
+      { type: "entity-observe", entity: "Domain" },
+      "follower-tab",
+    );
+    await env.flush();
+
+    expect(engine.store.get("Domain", "d1")).not.toBeNull();
+  });
+
+  // FORWARDED-MUTATION ROLLBACK (pins onMutationsForwarded prevRow
+  // threading). When a follower forwards an update/delete and the leader's
+  // push of it is PERMANENTLY rejected, the leader must restore the
+  // canonical row — NOT delete it. Pre-fix the leader queued the forwarded
+  // op via mutations.add(op.change) WITHOUT prevRow, so failPushedMutation
+  // ran restoreRow(undefined ?? null) → restoreRow(null) → DELETED the
+  // leader's still-valid canonical row. Data loss on every rejected
+  // forwarded edit.
+  test("a rejected forwarded UPDATE keeps the leader's canonical row", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "canonical" }]);
+    await env.start(); // solo → leader, holds the canonical row
+    await env.flush();
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+
+    // A follower optimistically edited n1, captured the prior value as
+    // prevRow, and forwarded the update. The leader's push will 403.
+    env.server.primeNextPushOutcome({ kind: "status", status: 403 });
+    (env.engine as unknown as {
+      orchestrator: { handleMessage(msg: unknown, from: string): void };
+    }).orchestrator.handleMessage(
+      {
+        type: "mutations",
+        ops: [
+          {
+            id: "op-u",
+            change: {
+              op_id: "op-u",
+              entity: "Note",
+              row_id: "n1",
+              kind: "update",
+              data: { title: "edited" },
+            },
+            status: "pending",
+            prevRow: { id: "n1", title: "canonical" },
+          },
+        ],
+      },
+      "follower-tab",
+    );
+    // Wait behind the forwarded push (opQueue serializes), then drain.
+    await env.engine.push();
+    await env.flush();
+
+    const row = env.engine.store.get("Note", "n1") as { title?: string } | null;
+    expect(row).not.toBeNull();
+    expect(row?.title).toBe("canonical");
+  });
+
+  test("a rejected forwarded DELETE keeps the leader's canonical row", async () => {
+    env = createTestEnv({ transport: "poll" });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "keep" }]);
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+
+    env.server.primeNextPushOutcome({ kind: "status", status: 403 });
+    (env.engine as unknown as {
+      orchestrator: { handleMessage(msg: unknown, from: string): void };
+    }).orchestrator.handleMessage(
+      {
+        type: "mutations",
+        ops: [
+          {
+            id: "op-d",
+            change: {
+              op_id: "op-d",
+              entity: "Note",
+              row_id: "n1",
+              kind: "delete",
+            },
+            status: "pending",
+            prevRow: { id: "n1", title: "keep" },
+          },
+        ],
+      },
+      "follower-tab",
+    );
+    await env.engine.push();
+    await env.flush();
+
+    // Pre-fix the leader deleted its canonical row on the rejected
+    // forwarded delete; with prevRow threaded it survives.
+    const row = env.engine.store.get("Note", "n1") as { title?: string } | null;
+    expect(row).not.toBeNull();
+    expect(row?.title).toBe("keep");
+  });
+});

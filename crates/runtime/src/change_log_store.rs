@@ -44,7 +44,7 @@ impl ChangeLogStore for SqliteChangeLogStore {
     fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
         self.runtime.sqlite_change_log_load_recent(limit)
     }
-    fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
+    fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
         self.runtime.sqlite_change_log_pull_range(since, limit)
     }
     fn flush(&self, timeout: std::time::Duration) -> bool {
@@ -83,7 +83,7 @@ impl ChangeLogStore for PgChangeLogStore {
     fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
         self.runtime.pg_change_log_load_recent(limit)
     }
-    fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
+    fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
         self.runtime.pg_change_log_pull_range(since, limit)
     }
     fn flush(&self, timeout: std::time::Duration) -> bool {

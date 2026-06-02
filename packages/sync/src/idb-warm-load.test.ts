@@ -423,4 +423,148 @@ describe("IDB warm-load hydration", () => {
     // Fast path — no warning expected on a trivial load.
     expect(warned).toBe(false);
   });
+
+  // IDB WRITE HANG (pins persistence.commit). A write tx that ABORTS
+  // (quota-exceeded, or any storage error) must let the persist promise
+  // SETTLE — not hang. The engine awaits the persist before advancing
+  // the cursor in enqueueApply, so a hung write would wedge the whole
+  // apply queue and silently kill live sync. Pre-fix saveRow/deleteRow/
+  // saveCursor registered only `oncomplete`, so an abort never resolved.
+  test("a write tx that aborts resolves (degrades) instead of hanging", async () => {
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const p = new IndexedDBPersistence("idb-abort-degrade");
+      await p.open();
+      const db = p.connection!;
+      const realTx = db.transaction.bind(db);
+      // Abort the NEXT readwrite tx right after handing it back.
+      let armed = true;
+      (db as unknown as { transaction: typeof db.transaction }).transaction = ((
+        ...args: Parameters<typeof db.transaction>
+      ) => {
+        const tx = realTx(...args);
+        if (armed && String(args[1]) === "readwrite") {
+          armed = false;
+          queueMicrotask(() => {
+            try {
+              tx.abort();
+            } catch {
+              /* already settled */
+            }
+          });
+        }
+        return tx;
+      }) as typeof db.transaction;
+
+      // Pre-fix: this promise never settles → the race rejects.
+      await Promise.race([
+        p.saveRow("Note", "n1", { id: "n1", title: "x" } as Row),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("saveRow hung on abort")), 1000),
+        ),
+      ]);
+
+      // A subsequent (un-armed) write still commits — the engine degrades,
+      // it isn't permanently broken.
+      await p.saveRow("Note", "n2", { id: "n2", title: "y" } as Row);
+      const rows = await p.loadAll("Note");
+      expect(rows.some((r) => (r as { id?: string }).id === "n2")).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  // CURSOR-AHEAD-OF-DISK (pins the persistDegraded gate). When a row write
+  // ABORTS, the row never reaches disk — so the engine MUST NOT persist a
+  // cursor past it, or the next cold start's warm-load skips that row
+  // forever (cursor ahead of replica). The in-memory cursor still advances
+  // (live session stays correct); only the ON-DISK cursor is held back so
+  // a restart re-pulls the gap. This is the regression for the IDB-hang
+  // fix that (before this gate) traded a hang for silent data loss.
+  test("a row write that aborts holds the on-disk cursor back", async () => {
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const appName = "idb-cursor-drift";
+      const engine = makeEngine(appName);
+      await engine.start();
+
+      const internal = engine as unknown as {
+        persistence: IndexedDBPersistence;
+        cursor: { last_seq: number };
+        persistDegraded: boolean;
+        enqueueApply(
+          changes: unknown[],
+          targetCursor?: { last_seq: number },
+        ): Promise<void>;
+      };
+      const persistence = internal.persistence;
+      // Cursor on disk after start() (server.serverSeq seed) — capture it
+      // so we assert it does NOT advance to 50 below.
+      const onDiskBefore = (await persistence.loadCursor())?.last_seq ?? 0;
+
+      // Abort the next ENTITIES (row) readwrite, leaving the separate
+      // CURSOR-store tx alone — mirrors a quota abort on a row write.
+      const db = persistence.connection!;
+      const realTx = db.transaction.bind(db);
+      let armed = true;
+      (db as unknown as { transaction: typeof db.transaction }).transaction = ((
+        ...args: Parameters<typeof db.transaction>
+      ) => {
+        const tx = realTx(...args);
+        const stores = args[0];
+        const touchesEntities = Array.isArray(stores)
+          ? stores.includes("entities")
+          : stores === "entities";
+        const touchesCursors = Array.isArray(stores)
+          ? stores.includes("cursors")
+          : stores === "cursors";
+        if (
+          armed &&
+          String(args[1]) === "readwrite" &&
+          touchesEntities &&
+          !touchesCursors
+        ) {
+          armed = false;
+          queueMicrotask(() => {
+            try {
+              tx.abort();
+            } catch {
+              /* already settled */
+            }
+          });
+        }
+        return tx;
+      }) as typeof db.transaction;
+
+      // Apply a change with a target cursor far ahead. The row write
+      // aborts; the on-disk cursor must stay where it was.
+      await internal.enqueueApply(
+        [
+          {
+            seq: 50,
+            entity: "Note",
+            row_id: "n1",
+            kind: "insert",
+            data: { id: "n1", title: "x" },
+            timestamp: "",
+          },
+        ],
+        { last_seq: 50 },
+      );
+
+      // In-memory cursor advanced (live sync correct); degrade flag latched.
+      expect(internal.cursor.last_seq).toBe(50);
+      expect(internal.persistDegraded).toBe(true);
+      // The on-disk cursor did NOT advance past the un-persisted row.
+      const onDiskAfter = (await persistence.loadCursor())?.last_seq ?? 0;
+      expect(onDiskAfter).toBe(onDiskBefore);
+      expect(onDiskAfter).toBeLessThan(50);
+
+      engine.stop();
+    } finally {
+      console.warn = origWarn;
+    }
+  });
 });

@@ -233,6 +233,20 @@ export class SyncEngine {
    */
   private _hadCachedReplica = false;
 
+  /**
+   * Sticky flag: a persisted row/cursor write degraded (IDB quota /
+   * abort), so the on-disk replica is known to be behind the in-memory
+   * cursor. Once set, `enqueueApply` STOPS advancing the persisted
+   * cursor — persisting a cursor ahead of the durable rows would make
+   * the next cold start skip them forever (cursor-ahead-of-replica). The
+   * in-memory replica stays authoritative for the live session; on
+   * restart the lagging on-disk cursor simply re-pulls the gap. Resets to
+   * false only on `resetReplicaInner` (full wipe + resync, disk is clean
+   * again). A storage-pressured tab thus degrades to "re-pull on restart"
+   * — like a memory-only client — instead of silently losing rows.
+   */
+  private persistDegraded = false;
+
   readonly store: LocalStore;
   readonly mutations: MutationQueue;
 
@@ -556,13 +570,16 @@ export class SyncEngine {
           this.cursor = cachedCursor;
         }
 
-        // Auto-save changes to IndexedDB. Returns a Promise so the async
-        // apply path (applyChangesAsync) can await the write before the
-        // cursor advances — the fix for "cursor ahead of replica" on crash.
+        // Auto-save changes to IndexedDB. Returns a Promise<boolean>
+        // (true = durable) so the async apply path (applyChangesAsync)
+        // can both await the write before the cursor advances AND hold
+        // the persisted cursor back when a write degraded — the fix for
+        // "cursor ahead of replica" on crash AND on quota/abort.
         const persistence = this.persistence;
         this.store._persistFn = async (change: ChangeEvent) => {
           const { persistChange } = await import("./persistence");
-          if (persistence) await persistChange(persistence, change);
+          if (!persistence) return true;
+          return persistChange(persistence, change);
         };
 
         // Hydrate the mutation queue from disk. Any offline writes
@@ -663,7 +680,7 @@ export class SyncEngine {
     // runs; the apply path's idempotent op_id-keyed merge handles the
     // worst case (one re-applied batch on next cold pull if the tab
     // crashes between this line and the saveCursor task completing).
-    if (this.persistence) {
+    if (this.persistence && !this.persistDegraded) {
       void this.persistence.saveCursor(this.cursor);
     }
 
@@ -756,8 +773,8 @@ export class SyncEngine {
           fromBroadcast: true,
         });
       },
-      onResetReceived: () => {
-        void this.resetReplicaInner();
+      onResetReceived: (wipeMutations: boolean) => {
+        void this.resetReplicaInner({ wipeMutations });
       },
       onSessionReceived: (resolved: ResolvedSession) => {
         // Funnel through the shared session chain so concurrent triggers
@@ -768,7 +785,15 @@ export class SyncEngine {
       },
       onMutationsForwarded: (ops: PendingMutation[]) => {
         for (const op of ops) {
-          this.mutations.add(op.change);
+          // Thread the follower's captured `prevRow` so a server
+          // rejection of this forwarded update/delete restores the
+          // canonical value rather than deleting it. Without it the
+          // leader's queue entry has prevRow === undefined, and
+          // failPushedMutation's restoreRow(undefined ?? null) would
+          // DELETE the leader's still-valid row. The follower's prevRow
+          // (its pre-edit value) equals the leader's canonical row, so
+          // restoring it is correct on both tabs.
+          this.mutations.add(op.change, op.prevRow);
         }
         void this.push();
       },
@@ -777,8 +802,19 @@ export class SyncEngine {
         this.mutations.clear();
       },
       onMutationsFailed: (ops: { opId: string; error: string }[]) => {
+        // The leader pushed this follower's forwarded mutation and the
+        // server rejected it. Roll back the follower's OWN optimistic
+        // ghost (the leader already rolled back its copy) — calling
+        // markFailed alone left the ghost row stuck in the very tab the
+        // user is looking at. failPushedMutation restores prevRow for
+        // update/delete and removes the insert ghost, then marks failed.
         for (const op of ops) {
-          this.mutations.markFailed(op.opId, op.error);
+          const m = this.mutations.get(op.opId);
+          if (m) {
+            this.failPushedMutation(m, op.error);
+          } else {
+            this.mutations.markFailed(op.opId, op.error);
+          }
         }
       },
       onBinaryReceived: (bytes: Uint8Array) => {
@@ -880,6 +916,28 @@ export class SyncEngine {
             type: "room-sub-register",
             room: roomId,
           });
+        }
+      },
+      onEntityObserve: (entity: string) => {
+        // Leader path: a follower's useQuery observed this entity. Add
+        // it to our reconcile sweep and fetch it now if we have no local
+        // rows — the resulting `reconciled` batch is broadcast to every
+        // tab, so the follower's view populates. Same shape as the
+        // leader half of observeEntity; the `has` guard dedupes against
+        // our own interest.
+        if (!this.isMultiTabLeader) return;
+        if (this.observedEntities.has(entity)) return;
+        this.observedEntities.add(entity);
+        if (this.isHydrated() && this.store.list(entity).length === 0) {
+          void this.reconcile([entity]);
+        }
+      },
+      onReplayObservedEntities: () => {
+        // Follower path: re-declare every observed entity to the new
+        // leader so its reconcile sweep covers them after a leader flip.
+        if (this.isMultiTabLeader) return;
+        for (const entity of this.observedEntities) {
+          this.broadcastToTabs({ type: "entity-observe", entity });
         }
       },
     };
@@ -1008,7 +1066,11 @@ export class SyncEngine {
         (c) => typeof c.seq === "number" && c.seq > this.cursor.last_seq,
       );
       if (filtered.length > 0) {
-        await this.store.applyChangesAsync(filtered);
+        const durable = await this.store.applyChangesAsync(filtered);
+        // A row in this batch didn't reach disk (quota / abort). Latch
+        // the degraded flag so we never persist a cursor ahead of the
+        // durable replica — the next cold start must re-pull this gap.
+        if (!durable) this.persistDegraded = true;
       }
       // Pick the cursor target. Explicit `targetCursor` (from pull) wins
       // — pull's response carries the server's authoritative current_seq
@@ -1020,8 +1082,12 @@ export class SyncEngine {
           ? { last_seq: filtered[filtered.length - 1].seq }
           : null);
       if (candidate && candidate.last_seq > this.cursor.last_seq) {
+        // In-memory cursor ALWAYS advances — live sync stays correct.
         this.cursor = candidate;
-        if (this.persistence) {
+        // The on-disk cursor only advances while persistence is healthy.
+        // Once degraded, freezing it keeps disk self-consistent (cursor
+        // never exceeds the rows actually written) so restart re-pulls.
+        if (this.persistence && !this.persistDegraded) {
           await this.persistence.saveCursor(this.cursor);
         }
       }
@@ -1126,16 +1192,41 @@ export class SyncEngine {
    * rehydrated on the next page load — phantom rows that no purge of
    * in-memory state could fix.
    */
-  async resetReplica(): Promise<void> {
+  async resetReplica(opts: { wipeMutations?: boolean } = {}): Promise<void> {
     // Public callers go through the queue so a reset can't race with
     // an in-flight pull / push / reconcile. Internal callers that
     // already hold the queue slot use `resetReplicaInner` directly.
-    return this.opQueue.enqueue("reset", () => this.resetReplicaInner());
+    return this.opQueue.enqueue("reset", () => this.resetReplicaInner(opts));
   }
 
-  private async resetReplicaInner(): Promise<void> {
+  /**
+   * Drop the local replica and pull fresh. `wipeMutations` decides the
+   * fate of the durable offline write queue:
+   * - `false` (default, 410 RESYNC, SAME user): KEEP pending writes —
+   *   they survive the snapshot refresh and re-push under the same
+   *   session.
+   * - `true` (token/tenant flip, DIFFERENT identity): DROP them — the
+   *   queued writes belong to the outgoing identity and must never be
+   *   replayed as the incoming one (cross-identity write leak).
+   */
+  private async resetReplicaInner(
+    opts: { wipeMutations?: boolean } = {},
+  ): Promise<void> {
+    const wipeMutations = opts.wipeMutations === true;
     this.cursor = { last_seq: 0 };
     this.store.clearAll();
+    // Disk is about to be wiped + re-pulled from 0, so any prior
+    // persist degradation is moot — start the durability invariant
+    // fresh. (If the fresh snapshot also fails to persist, enqueueApply
+    // re-latches the flag.)
+    this.persistDegraded = false;
+    if (wipeMutations) {
+      // Identity flip: discard the outgoing identity's pending offline
+      // writes (and persist the empty queue to disk via the mutation
+      // backend). persistence.clear() deliberately leaves MUTATIONS_STORE
+      // alone for the 410 path, so this is the only site that drops them.
+      this.mutations.clearAll();
+    }
     // The cache is now empty. The next pull will start from 0 and
     // return a full snapshot — that's a true cold start, so the
     // onConnected fast-path may skip the post-pull reconcile. Without
@@ -1154,9 +1245,11 @@ export class SyncEngine {
     }
     // Leader broadcasts the reset so follower replicas wipe their
     // own copies in lockstep — otherwise a follower keeps stale
-    // rows under the old identity until its own pull catches up.
+    // rows under the old identity until its own pull catches up. The
+    // `wipeMutations` flag rides along so followers make the same
+    // keep-vs-drop decision for THEIR forwarded offline writes.
     if (this.isMultiTabLeader) {
-      this.broadcastToTabs({ type: "reset" });
+      this.broadcastToTabs({ type: "reset", wipeMutations });
     }
   }
 
@@ -1264,8 +1357,9 @@ export class SyncEngine {
     const { tokenChanged } = this.session.observeToken(this.currentToken());
     if (tokenChanged) {
       // We're holding the "pull" slot in the op queue — bypass the
-      // queue's reset path to avoid self-deadlock.
-      await this.resetReplicaInner();
+      // queue's reset path to avoid self-deadlock. Identity flipped, so
+      // wipe the old identity's pending offline writes.
+      await this.resetReplicaInner({ wipeMutations: true });
       // Token flipped → the cached tenant is for the previous user. Pull
       // the fresh session in parallel with the cursor catch-up below.
       void this.refreshResolvedSession();
@@ -1301,12 +1395,18 @@ export class SyncEngine {
         // Continue paginating in the same loop iteration so we don't
         // leave a fresh client with a partial replica.
         snapshotAfter = resp.snapshot_after ?? undefined;
-        // The change-log tail also paginates via `has_more` — handle
-        // that one recursively after the snapshot loop completes so
-        // backpressure on the change-log path uses the existing
-        // tail-pull semantics.
+        // The change-log tail also paginates via `has_more` — drain it
+        // by recursing into `pullInner` directly. We are INSIDE the
+        // `pull` op-queue slot right now; calling the public `pull()`
+        // would re-enqueue under the same "pull" key, which coalesces
+        // to the promise we're currently running inside (op-queue.ts
+        // deletes the key only after `fn` resolves) and `await` it →
+        // permanent self-deadlock that bricks the entire pull path for
+        // the session. This is the exact hazard the 410 handler avoids;
+        // `pullInner` re-reads `this.cursor.last_seq` (already advanced
+        // by enqueueApply) so the recursion resumes at the right cursor.
         if (!snapshotAfter && resp.has_more) {
-          await this.pull();
+          await this.pullInner();
           break;
         }
       }
@@ -1397,6 +1497,12 @@ export class SyncEngine {
    *  that doesn't throw a 410. */
   private consecutive_410s = 0;
 
+  /** Consecutive TRANSIENT push failures (offline / 5xx / 429 / 401)
+   *  since the last server response. Drives the exponential backoff on
+   *  the retry of a transient-failed push so an offline tab doesn't
+   *  hot-loop. Reset to 0 the moment the server returns any response. */
+  private pushFailureCount = 0;
+
   /** Set by pullInner whenever the just-completed pull started with
    *  `cursor.last_seq === 0` (cold load OR post-reset). The WS
    *  onConnected hook reads this to skip the reconcile() that would
@@ -1480,9 +1586,17 @@ export class SyncEngine {
   observeEntity(entity: string): void {
     if (this.observedEntities.has(entity)) return;
     this.observedEntities.add(entity);
-    // Only the leader talks to the network; follower tabs converge via
-    // the multi-tab channel once the leader reconciles.
-    if (!this.isMultiTabLeader) return;
+    if (!this.isMultiTabLeader) {
+      // Follower: only the leader talks to the network. Forward the
+      // interest so the LEADER adds this entity to its reconcile sweep
+      // and fetches any server row we never cached — then converge via
+      // the `reconciled` broadcast. Without the forward, a follower's
+      // useQuery on a never-cached entity renders empty forever (the
+      // leader never sweeps an entity it has no local rows for and was
+      // never told a peer cares about).
+      this.broadcastToTabs({ type: "entity-observe", entity });
+      return;
+    }
     if (this.isHydrated() && this.store.list(entity).length === 0) {
       // Scoped reconcile bypasses the no-arg debounce and reuses the
       // session-flip / cursor-drift guards in reconcileInner.
@@ -1777,8 +1891,9 @@ export class SyncEngine {
           // transitions but NOT the apply queue — without queuing
           // the reset, a concurrent applyChangesAsync could write
           // rows AFTER we clear the store, leaving stale data under
-          // the new identity.
-          await this.resetReplica();
+          // the new identity. Identity flipped → wipe the outgoing
+          // identity's pending offline writes too.
+          await this.resetReplica({ wipeMutations: true });
         }
         if (this.isMultiTabLeader) {
           // Only the leader pulls — followers receive subsequent
@@ -2007,6 +2122,10 @@ export class SyncEngine {
         changes: pending.map((m) => m.change),
         client_id: this.clientId,
       });
+      // The request reached the server and returned a response — clear
+      // the transient-failure backoff counter (success or per-op
+      // rejections both mean "we're online and the server answered").
+      this.pushFailureCount = 0;
 
       // Per-op `results` mapping: match by op_id when present, fall
       // back to positional. Invariant: a partial-failure batch lands
@@ -2120,33 +2239,55 @@ export class SyncEngine {
         }, 250);
       }
     } catch (err) {
-      // Transport-level failure (network down, CORS, 5xx without a
-      // typed body, parse error). Pre-0.3.224 swallowed silently:
-      // the mutation stayed `pending` forever and the optimistic
-      // ghost survived even though the server never accepted the
-      // write. That's the "I sent it, it's there, then it's gone"
-      // pattern users see after a reload.
+      // Whole-request failure. CRITICAL distinction:
       //
-      // Now: fail every pending mutation in this batch, roll back
-      // any optimistic ghost, surface via mutations-failed so the
-      // UI can prompt + retry. op_id keeps a retry idempotent on
-      // the server if the failure was a transient transport error
-      // — the next push() will re-include the user's intent.
+      //  - TRANSIENT (offline / network drop / 5xx / 429 / 401 / 408):
+      //    the server never durably rejected the write. We MUST keep
+      //    the mutations `pending` and the optimistic ghost intact, and
+      //    retry with backoff. Marking them failed + rolling back here
+      //    is what broke offline support — an offline insert vanished
+      //    from the UI and was never re-sent (it became `failed`, and
+      //    pushInner only ships `pending`). A network `fetch` throw has
+      //    NO `.status`, so it lands here as transient. op_id makes the
+      //    eventual retry idempotent even if the server HAD committed.
+      //
+      //  - PERMANENT (400/403/404/409/422): a client error that won't
+      //    change on retry (malformed batch, forbidden, gone). Fail +
+      //    roll back the optimistic ghost + surface mutations-failed.
       const msg = err instanceof Error ? err.message : String(err);
-      const failedOps: { opId: string; error: string }[] = [];
-      for (const m of pending) {
-        this.failPushedMutation(m, msg);
-        const opId = m.change.op_id;
-        if (typeof opId === "string") {
-          failedOps.push({ opId, error: msg });
+      const status = (err as { status?: number })?.status;
+      if (isPermanentPushError(status)) {
+        const failedOps: { opId: string; error: string }[] = [];
+        for (const m of pending) {
+          this.failPushedMutation(m, msg);
+          const opId = m.change.op_id;
+          if (typeof opId === "string") {
+            failedOps.push({ opId, error: msg });
+          }
         }
+        if (failedOps.length > 0) {
+          this.broadcastToTabs({ type: "mutations-failed", ops: failedOps });
+        }
+        this.mutations.clear();
+        // eslint-disable-next-line no-console
+        console.warn(`[sync] /api/sync/push rejected (status ${status}):`, msg);
+      } else {
+        // Transient: leave the queue + ghosts alone, retry with bounded
+        // exponential backoff. Resets on the next response (success or
+        // per-op rejection). A 429 also pushes the WS reconnect out so a
+        // rate-limited push doesn't drive a tight loop.
+        if (status === 429) this.transport?.bumpReconnect(3);
+        const attempt = this.pushFailureCount;
+        this.pushFailureCount += 1;
+        const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[sync] /api/sync/push transient failure (status ${status ?? "offline"}); keeping ${pending.length} mutation(s) pending, retrying in ${delayMs}ms`,
+        );
+        setTimeout(() => {
+          void this.push();
+        }, delayMs);
       }
-      if (failedOps.length > 0) {
-        this.broadcastToTabs({ type: "mutations-failed", ops: failedOps });
-      }
-      this.mutations.clear();
-      // eslint-disable-next-line no-console
-      console.warn("[sync] /api/sync/push failed:", msg);
     }
   }
 
@@ -2169,8 +2310,23 @@ export class SyncEngine {
    * channel) so insert-only rollback is the right shape to ship now.
    */
   private failPushedMutation(m: PendingMutation, error: string): void {
-    if (m.change.kind === "insert") {
-      this.store.rollbackOptimisticInsert(m.change.entity, m.change.row_id);
+    const { entity, row_id, kind } = m.change;
+    if (kind === "insert") {
+      // No tombstone — a future legitimate insert of this id must work.
+      this.store.rollbackOptimisticInsert(entity, row_id);
+    } else if (kind === "update" || kind === "delete") {
+      // Restore the captured pre-mutation row (update: prior field
+      // values; delete: bring it back AND clear the optimistic tombstone
+      // fence). `prevRow === null` means the row didn't exist pre-mutation
+      // → remove + un-fence. `prevRow === undefined` means THIS engine
+      // never captured a snapshot — i.e. the optimistic change wasn't
+      // applied to this store (a forwarded op whose prevRow didn't
+      // thread). Touching the store then would delete a canonical row we
+      // still hold, so leave it untouched and let pull/reconcile
+      // reconverge. The `!== undefined` guard distinguishes the two.
+      if (m.prevRow !== undefined) {
+        this.store.restoreRow(entity, row_id, m.prevRow);
+      }
     }
     this.mutations.markFailed(m.id, error);
   }
@@ -2198,24 +2354,39 @@ export class SyncEngine {
 
   /** Update a row with optimistic local update. */
   async update(entity: string, id: string, data: Partial<Row>): Promise<void> {
+    // Snapshot the pre-update row BEFORE applying the optimistic merge so
+    // a rejected push can restore the exact prior value (see
+    // failPushedMutation). Clone — the live row is mutated in place.
+    const before = this.store.get(entity, id);
+    const prev = before ? { ...before } : null;
     this.store.optimisticUpdate(entity, id, data);
-    this.mutations.add({
-      entity,
-      row_id: id,
-      kind: "update",
-      data: data as Row,
-    });
+    this.mutations.add(
+      {
+        entity,
+        row_id: id,
+        kind: "update",
+        data: data as Row,
+      },
+      prev,
+    );
     await this.push();
   }
 
   /** Delete a row with optimistic local update. */
   async delete(entity: string, id: string): Promise<void> {
+    // Snapshot the row before removing it so a rejected delete can bring
+    // it back (and clear the optimistic tombstone).
+    const before = this.store.get(entity, id);
+    const prev = before ? { ...before } : null;
     this.store.optimisticDelete(entity, id);
-    this.mutations.add({
-      entity,
-      row_id: id,
-      kind: "delete",
-    });
+    this.mutations.add(
+      {
+        entity,
+        row_id: id,
+        kind: "delete",
+      },
+      prev,
+    );
     await this.push();
   }
 
@@ -2913,6 +3084,32 @@ export async function getServerData(
  */
 function rowsDiffer(a: Row, b: Row): boolean {
   return stableStringify(a) !== stableStringify(b);
+}
+
+/**
+ * Is a whole-request push failure PERMANENT (the write was durably
+ * rejected and won't succeed on retry) vs TRANSIENT (offline / server
+ * hiccup / rate limit — retry will eventually land)?
+ *
+ *  - `undefined` status = a `fetch` network throw (offline, DNS, CORS,
+ *    connection reset) → transient.
+ *  - 400/403/404/409/422 = client errors that are stable across retries
+ *    (malformed batch, forbidden, gone, conflict, unprocessable) →
+ *    permanent.
+ *  - everything else (5xx, 429 rate-limit, 408 timeout, 401 needs
+ *    re-auth, 502/503/504) → transient: keep the mutation queued and
+ *    retry. Per-op policy rejections do NOT come through here — they
+ *    arrive as a 200 with per-op `results`, handled on the success path.
+ */
+function isPermanentPushError(status?: number): boolean {
+  if (status === undefined) return false;
+  return (
+    status === 400 ||
+    status === 403 ||
+    status === 404 ||
+    status === 409 ||
+    status === 422
+  );
 }
 
 function stableStringify(value: unknown): string {

@@ -10,13 +10,19 @@
 // instead of re-applying.
 // ---------------------------------------------------------------------------
 
-import type { ClientChange } from "./types";
+import type { ClientChange, Row } from "./types";
 
 export interface PendingMutation {
   id: string;
   change: ClientChange;
   status: "pending" | "applied" | "failed";
   error?: string;
+  /** Pre-mutation snapshot of the affected row, captured at optimistic-
+   *  apply time for `update`/`delete`. On a server rejection,
+   *  `failPushedMutation` restores this so the local replica reverts to
+   *  the value the server actually holds. `null` = the row didn't exist
+   *  before the mutation; `undefined` = not captured (inserts). */
+  prevRow?: Row | null;
 }
 
 /**
@@ -80,20 +86,27 @@ export class MutationQueue {
    *  entry with the same op_id is already queued — a follower
    *  retrying its forward of the same op shouldn't double-queue on
    *  the leader. */
-  add(change: ClientChange): string {
+  add(change: ClientChange, prevRow?: Row | null): string {
     const id =
       typeof change.op_id === "string" && change.op_id.length > 0
         ? change.op_id
         : `mut_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     if (this.queue.some((m) => m.id === id)) return id;
     const changeWithOp: ClientChange = { ...change, op_id: id };
-    this.queue.push({ id, change: changeWithOp, status: "pending" });
+    this.queue.push({ id, change: changeWithOp, status: "pending", prevRow });
     this.flush();
     return id;
   }
 
   pending(): PendingMutation[] {
     return this.queue.filter((m) => m.status === "pending");
+  }
+
+  /** Look up a queued mutation by op id (any status). Used by the
+   *  follower's mutations-failed handler to reach the captured
+   *  `prevRow` for rollback. */
+  get(id: string): PendingMutation | undefined {
+    return this.queue.find((m) => m.id === id);
   }
 
   /**
@@ -149,6 +162,22 @@ export class MutationQueue {
    *  ack of failures. */
   remove(id: string): void {
     this.queue = this.queue.filter((m) => m.id !== id);
+    this.flush();
+  }
+
+  /**
+   * Drop EVERY mutation — pending, failed, and applied — then flush the
+   * empty queue to disk. Used by the engine's identity-flip reset
+   * (`resetReplica({ wipeMutations: true })`): the queued offline writes
+   * belong to the OUTGOING identity, and replaying them under the new
+   * session would attribute one user's writes to another (or get
+   * policy-rejected on the server). Distinct from `clear()`, which only
+   * prunes already-applied entries and deliberately PRESERVES pending +
+   * failed writes — the 410-RESYNC same-user path relies on that so
+   * offline writes survive a snapshot refresh.
+   */
+  clearAll(): void {
+    this.queue = [];
     this.flush();
   }
 

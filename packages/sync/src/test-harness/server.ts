@@ -196,6 +196,42 @@ export class TestServer {
     return s;
   }
 
+  /** Inject a one-shot outcome for the NEXT push: a `network` failure
+   *  (the fetch rejects with no status — simulating offline / connection
+   *  reset) or an HTTP `status` (e.g. 403 permanent rejection, 503
+   *  transient). Lets tests exercise the transient-vs-permanent
+   *  classification in pushInner. */
+  private nextPushOutcome:
+    | { kind: "network" }
+    | { kind: "status"; status: number }
+    | null = null;
+  primeNextPushOutcome(
+    o: { kind: "network" } | { kind: "status"; status: number },
+  ): void {
+    this.nextPushOutcome = o;
+  }
+  consumeNextPushOutcome():
+    | { kind: "network" }
+    | { kind: "status"; status: number }
+    | null {
+    const o = this.nextPushOutcome;
+    this.nextPushOutcome = null;
+    return o;
+  }
+
+  /** Make the NEXT delta pull report `has_more: true` once, exercising
+   *  the change-log tail-pull recursion in pullInner (the path that
+   *  self-deadlocked before the pullInner() fix). */
+  private nextPullHasMore = false;
+  primeNextPullHasMore(): void {
+    this.nextPullHasMore = true;
+  }
+  consumeNextPullHasMore(): boolean {
+    const v = this.nextPullHasMore;
+    this.nextPullHasMore = false;
+    return v;
+  }
+
   // ---- Entity data --------------------------------------------------------
 
   /** Bulk-seed rows for an entity AND emit insert events into the

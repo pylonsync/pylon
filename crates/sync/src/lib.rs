@@ -239,7 +239,19 @@ pub trait ChangeLogStore: Send + Sync + std::fmt::Debug {
     /// longer covers the cursor — typically because the client was
     /// disconnected long enough for the ring to roll past their
     /// cursor.
-    fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent>;
+    ///
+    /// Returns `None` when the read FAILED (lock poisoned, query error,
+    /// backend unavailable) — strictly distinct from `Some(vec![])`,
+    /// which means the store was read successfully and genuinely holds
+    /// no matching events (pruned past retention). [`ChangeLog::pull`]
+    /// depends on this split: a confirmed-empty gap forces a full
+    /// resync (the events are unrecoverable), but a read FAILURE must
+    /// NOT — otherwise a transient store blip turns every reconnecting
+    /// client into a simultaneous full-snapshot resync, the exact
+    /// thundering-herd that ran up a 280GB egress bill. On `None` the
+    /// caller returns a no-progress page so the client retries the same
+    /// cursor once the store recovers.
+    fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>>;
 
     /// Block until every event handed to `append` before this call has
     /// durably landed, or `timeout` elapses. Returns `true` on success.
@@ -687,31 +699,70 @@ impl ChangeLog {
         if cursor.last_seq > 0 {
             if let Some(front) = events.front() {
                 if cursor.last_seq + 1 < front.seq {
+                    // Genuine gap: the in-memory ring's oldest retained
+                    // event is more than one seq ahead of the cursor, so
+                    // the events in (cursor, front) were evicted from the
+                    // ring. Captured before the `drop` below.
+                    let front_seq = front.seq;
                     if let Some(store) = self.store.as_ref() {
                         drop(events);
-                        let changes = store.pull_range(cursor.last_seq, limit);
-                        if !changes.is_empty() {
-                            let last_seq = changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
-                            let has_more = changes.len() >= limit;
-                            return Ok(PullResponse {
-                                changes,
-                                cursor: SyncCursor { last_seq },
-                                has_more,
-                            });
+                        match store.pull_range(cursor.last_seq, limit) {
+                            Some(changes) if !changes.is_empty() => {
+                                let last_seq =
+                                    changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
+                                let has_more = changes.len() >= limit;
+                                return Ok(PullResponse {
+                                    changes,
+                                    cursor: SyncCursor { last_seq },
+                                    has_more,
+                                });
+                            }
+                            Some(_) => {
+                                // CONFIRMED empty: the store read succeeded
+                                // and the events in (cursor, front) are gone
+                                // from BOTH the ring and the persisted log
+                                // (pruned past retention, or lost in a
+                                // persist race). They cannot be replayed as
+                                // a delta, so force a full resync. Returning
+                                // an empty "caught up" page here (the
+                                // original behavior) SILENTLY SKIPPED those
+                                // events — the client advanced nothing and
+                                // believed it was synced, permanently
+                                // missing the evicted changes. A tip client
+                                // never reaches this branch (its cursor+1 >=
+                                // front), so this only fires on a real,
+                                // unrecoverable gap.
+                                return Err(PullError::ResyncRequired {
+                                    oldest_seq: front_seq,
+                                    cursor: cursor.clone(),
+                                });
+                            }
+                            None => {
+                                // Store read FAILED (lock poisoned / query
+                                // error / backend momentarily down). We can't
+                                // tell whether the gap is genuinely pruned or
+                                // just transiently unreadable. Forcing a
+                                // resync here would convert one struggling-DB
+                                // blip into a fleet-wide full-snapshot storm
+                                // against that same DB (the 280GB-egress
+                                // failure mode). Instead return a no-progress
+                                // page: the client's cursor stays put and it
+                                // retries the same delta on its next pull,
+                                // succeeding once the store recovers.
+                                // `has_more: false` so we don't spin a tight
+                                // retry loop on a persistent error — the next
+                                // poll / reconnect / change event re-drives
+                                // the pull.
+                                return Ok(PullResponse {
+                                    changes: Vec::new(),
+                                    cursor: cursor.clone(),
+                                    has_more: false,
+                                });
+                            }
                         }
-                        // Store returned nothing — the cursor is
-                        // ahead of disk too. Return an empty page
-                        // rather than 410 — avoids the resync loop
-                        // for clients that just happened to be at
-                        // the tip.
-                        return Ok(PullResponse {
-                            changes: Vec::new(),
-                            cursor: cursor.clone(),
-                            has_more: false,
-                        });
                     }
                     return Err(PullError::ResyncRequired {
-                        oldest_seq: front.seq,
+                        oldest_seq: front_seq,
                         cursor: cursor.clone(),
                     });
                 }
@@ -1222,15 +1273,17 @@ mod tests {
             let start = v.len().saturating_sub(limit);
             v[start..].to_vec()
         }
-        fn pull_range(&self, since: u64, limit: usize) -> Vec<ChangeEvent> {
-            self.events
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|e| e.seq > since)
-                .take(limit)
-                .cloned()
-                .collect()
+        fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
+            Some(
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.seq > since)
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+            )
         }
     }
 
@@ -1306,5 +1359,93 @@ mod tests {
         assert_eq!(resp.changes.len(), 4);
         assert_eq!(resp.changes[0].seq, 2);
         assert_eq!(resp.changes[3].seq, 5);
+    }
+
+    /// A "pruned" store that holds nothing — models the persisted log
+    /// after the pruner deleted events past retention. Reads SUCCEED and
+    /// return empty (`Some(vec![])`), which is the signal for a genuine
+    /// unrecoverable gap → resync.
+    #[derive(Debug, Default)]
+    struct PrunedStore;
+    impl ChangeLogStore for PrunedStore {
+        fn append(&self, _event: &ChangeEvent) {}
+        fn load_recent(&self, _limit: usize) -> Vec<ChangeEvent> {
+            Vec::new()
+        }
+        fn pull_range(&self, _since: u64, _limit: usize) -> Option<Vec<ChangeEvent>> {
+            Some(Vec::new())
+        }
+    }
+
+    /// A store whose reads always FAIL — models a momentarily-unavailable
+    /// backend (poisoned lock, SQLITE_BUSY, PG client error). Distinct
+    /// from `PrunedStore`: a failed read must NOT force a resync.
+    #[derive(Debug, Default)]
+    struct FailingStore;
+    impl ChangeLogStore for FailingStore {
+        fn append(&self, _event: &ChangeEvent) {}
+        fn load_recent(&self, _limit: usize) -> Vec<ChangeEvent> {
+            Vec::new()
+        }
+        fn pull_range(&self, _since: u64, _limit: usize) -> Option<Vec<ChangeEvent>> {
+            None
+        }
+    }
+
+    /// When the cursor is behind the ring front AND the store can't fill
+    /// the gap (pruned past retention), pull MUST force a resync — not
+    /// return an empty "caught up" page. The empty-page behavior silently
+    /// skipped the evicted events and left the client believing it was
+    /// synced. Regression for the store-fallback gap.
+    #[test]
+    fn pull_with_evicted_cursor_and_pruned_store_requires_resync() {
+        let log = ChangeLog::with_capacity(2).with_store(std::sync::Arc::new(PrunedStore));
+        for i in 1..=5 {
+            log.append("A", &format!("a{}", i), ChangeKind::Insert, None);
+        }
+        // Ring holds [4, 5]; the store is pruned (returns nothing). A
+        // cursor of 1 is a genuine gap: events 2,3 are gone from BOTH the
+        // ring and the store.
+        let err = log
+            .pull(&SyncCursor { last_seq: 1 }, 10)
+            .expect_err("an unfillable gap must force resync, not an empty page");
+        match err {
+            PullError::ResyncRequired { oldest_seq, cursor } => {
+                assert_eq!(oldest_seq, 4, "oldest retained ring seq");
+                assert_eq!(cursor.last_seq, 1);
+            }
+        }
+    }
+
+    /// When the cursor is behind the ring front AND the store READ FAILS
+    /// (transient backend blip, not pruning), pull must NOT force a
+    /// resync — that would turn one struggling-DB blip into a fleet-wide
+    /// full-snapshot storm (the 280GB-egress failure mode). It returns a
+    /// no-progress page so the client retries the same cursor once the
+    /// store recovers. Regression for the store-read-error → resync storm.
+    #[test]
+    fn pull_with_evicted_cursor_and_failing_store_returns_no_progress() {
+        let log = ChangeLog::with_capacity(2).with_store(std::sync::Arc::new(FailingStore));
+        for i in 1..=5 {
+            log.append("A", &format!("a{}", i), ChangeKind::Insert, None);
+        }
+        // Ring holds [4, 5]; the store read FAILS (returns None). A cursor
+        // of 1 is behind the front — the gap can't be confirmed pruned, so
+        // we must not 410.
+        let resp = log
+            .pull(&SyncCursor { last_seq: 1 }, 10)
+            .expect("a transient store read failure must NOT force resync");
+        assert!(
+            resp.changes.is_empty(),
+            "no-progress page carries no changes"
+        );
+        assert_eq!(
+            resp.cursor.last_seq, 1,
+            "cursor must stay put so the client retries the same delta"
+        );
+        assert!(
+            !resp.has_more,
+            "has_more=false so the client doesn't spin a tight retry loop"
+        );
     }
 }
