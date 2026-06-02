@@ -2246,7 +2246,7 @@ export function LandingPage({
 								<PylonMark size={20} style={{ color: "var(--ink)" }} />
 								Pylon
 							</a>
-							<p>The realtime backend for TypeScript apps. Schema, server functions, live queries, auth, jobs, files, and search — in one binary.</p>
+							<p>The full-stack realtime framework for TypeScript apps. Server-rendered React, schema, server functions, live queries, auth, jobs, files, and search — frontend and backend in one server.</p>
 						</div>
 						<div>
 							<h6>Product</h6>
