@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://pylonsync.com"),
   title: "Pylon — The modern Rails for realtime apps",
   description:
-    "An integrated framework for realtime apps: schema, auth, server functions, live queries, jobs, workflows, files, search, and deploy-anywhere optionality.",
+    "A full-stack framework for realtime apps: server-rendered React, routing, and image optimization alongside schema, auth, server functions, live queries, jobs, workflows, files, and search. Deploy anywhere.",
   // Explicit canonical — without this Next emits no <link
   // rel="canonical"> and the canonical host signal is left entirely
   // to og:url, which Googlebot weighs less. Relative URLs resolve
@@ -32,7 +32,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Pylon — The modern Rails for realtime apps",
     description:
-      "Schema, auth, server functions, live queries, jobs, workflows, files, and search in one framework.",
+      "Frontend and backend in one framework: server-rendered React next to schema, auth, live queries, jobs, workflows, and search.",
     url: "https://pylonsync.com",
     siteName: "Pylon",
     type: "website",
@@ -41,7 +41,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Pylon — The modern Rails for realtime apps",
     description:
-      "One integrated framework for the backend, realtime UI, jobs, workflows, files, and search.",
+      "One framework for the frontend and the backend — server-rendered React, realtime data, auth, jobs, and search.",
   },
 };
 

@@ -780,6 +780,7 @@ html, body { background: #0a0a0c; color: #ededee; }
 }
 .pylon-landing .prim .tag { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 10.5px; color: var(--text-3); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; background: var(--bg-alt); }
 .pylon-landing .prim .tag.game { color: var(--accent); background: var(--accent-soft); }
+.pylon-landing .prim .tag.web { color: var(--text-2); background: var(--bg-card); box-shadow: inset 0 0 0 1px var(--line); }
 .pylon-landing .prim h4 { font-size: 18px; letter-spacing: -.015em; font-weight: 600; margin: 0 0 6px; }
 .pylon-landing .prim p { font-size: 13.5px; color: var(--text-2); line-height: 1.5; margin: 0; }
 .pylon-landing .prim p code { font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 12px; background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; color: var(--text); border: 1px solid var(--line); }
@@ -1387,7 +1388,10 @@ const EVENT_TPL: Array<[string, string]> = [
 
 const EVENT_TIMES = ["now", "3s", "12s", "24s", "48s"];
 
-const PRIMITIVES: Array<{ icon: string; tag: "app" | "game"; title: string; body: React.ReactNode }> = [
+const PRIMITIVES: Array<{ icon: string; tag: "web" | "app" | "game"; title: string; body: React.ReactNode }> = [
+	{ icon: "⧉", tag: "web", title: "Server-rendered React", body: <>Streaming SSR with hydration and per-route code splitting. Pages render on the server and ship only the JS the route needs.</> },
+	{ icon: "↳", tag: "web", title: "<Link> & <Image>", body: <>Client-side navigation with prefetch, and image optimization in Rust — resize, WebP, content-addressed cache. No <code>next/image</code>.</> },
+	{ icon: "~", tag: "web", title: "Tailwind, wired", body: <>Tailwind compiles on save and ships with the page. No second build step, no PostCSS config to babysit.</> },
 	{ icon: "{ }", tag: "app", title: "Typed schema", body: <>Entities with composite indexes and relations. Migrations apply on save, generates a typed client.</> },
 	{ icon: "⇄", tag: "app", title: "Live queries", body: <><code>db.useQuery</code> is a WebSocket subscription. Diffs over the wire on every relevant write.</> },
 	{ icon: "fn", tag: "app", title: "Server functions", body: <>Queries, mutations, actions in TypeScript with <code>v.*</code> validators. Filename is the RPC name.</> },
@@ -1586,7 +1590,7 @@ export function LandingPage({
 								</a>
 							)}
 							<h1 className="h1">
-								The realtime backend for{" "}
+								The full-stack framework for{" "}
 								<span
 									className="lang-rotator"
 									style={{
@@ -1621,8 +1625,9 @@ export function LandingPage({
 								apps.
 							</h1>
 							<p className="lede">
-								Schema, server functions, live queries, auth, jobs, files, and search — <b>in one binary.</b>{" "}
-								SQLite or Postgres, your choice. Deploy to your VPS or Pylon Cloud. Built to sit behind Next.js on Vercel.
+								Render your React frontend and run your backend from <b>one server.</b>{" "}
+								Server-rendered React, routing, and image optimization next to schema, live queries, auth, jobs, and search.{" "}
+								SQLite or Postgres. Deploy to your VPS or Pylon Cloud. <b>No separate Next.js.</b>
 							</p>
 							{/* Primary CTA: actually start building. The fastest
 							    path from "landed on the site" to "running app on
@@ -1918,9 +1923,9 @@ export function LandingPage({
 				{/* PRIMITIVES */}
 				<section className="block" id="primitives" style={{ background: "var(--bg-alt)" }}>
 					<div className="shell">
-						<div className="eyebrow">Twelve primitives</div>
-						<h2 className="h2">Twelve primitives. No glue.</h2>
-						<p className="section-lede">The pieces you usually stitch together ship as one system. Use the app side alone, or layer on realtime, workflows, search, and game-shaped primitives when the product needs them.</p>
+						<div className="eyebrow">Fifteen primitives</div>
+						<h2 className="h2">Fifteen primitives. No glue.</h2>
+						<p className="section-lede">The pieces you usually stitch together ship as one system — frontend and backend. Render the React side, or use the data side alone, then layer on realtime, workflows, search, and game-shaped primitives when the product needs them.</p>
 
 						<div className="prims">
 							{PRIMITIVES.map((p) => (
