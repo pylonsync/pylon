@@ -1590,7 +1590,7 @@ export function LandingPage({
 								</a>
 							)}
 							<h1 className="h1">
-								The full-stack framework for{" "}
+								The full-stack realtime framework for{" "}
 								<span
 									className="lang-rotator"
 									style={{
