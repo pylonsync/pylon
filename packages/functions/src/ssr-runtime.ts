@@ -60,6 +60,115 @@ export interface RenderRouteMessage {
 type Send = (msg: Record<string, unknown>) => void;
 
 /**
+ * Control-flow signal a page or layout throws to short-circuit the
+ * render: `response.redirect(url)` / `response.notFound()`. The adapter
+ * catches it and turns it into a 3xx + Location or a 404 instead of a
+ * normal 200 body. Extends Error so React's stream rejects cleanly when
+ * it's thrown during the shell render. (Throw it OUTSIDE an error
+ * boundary — an enclosing boundary would swallow the signal.)
+ */
+class PylonRouteControl extends Error {
+  kind: "redirect" | "notFound";
+  url?: string;
+  redirectStatus?: number;
+  constructor(kind: "redirect" | "notFound") {
+    super(`__pylon_route_${kind}`);
+    this.kind = kind;
+  }
+}
+
+export interface SsrCookieOptions {
+  path?: string;
+  domain?: string;
+  maxAge?: number;
+  expires?: Date | string;
+  /** Defaults to true (secure default). Pass false for a client-readable cookie. */
+  httpOnly?: boolean;
+  secure?: boolean;
+  /** Defaults to "lax". */
+  sameSite?: "strict" | "lax" | "none";
+}
+
+function serializeCookie(
+  name: string,
+  value: string,
+  opts: SsrCookieOptions = {},
+): string {
+  let c = `${name}=${encodeURIComponent(value)}`;
+  if (opts.maxAge != null) c += `; Max-Age=${Math.floor(opts.maxAge)}`;
+  if (opts.expires) {
+    c += `; Expires=${typeof opts.expires === "string" ? opts.expires : opts.expires.toUTCString()}`;
+  }
+  c += `; Path=${opts.path ?? "/"}`;
+  if (opts.domain) c += `; Domain=${opts.domain}`;
+  if (opts.httpOnly !== false) c += `; HttpOnly`;
+  if (opts.secure) c += `; Secure`;
+  const ss = opts.sameSite ?? "lax";
+  c += `; SameSite=${ss[0].toUpperCase()}${ss.slice(1)}`;
+  return c;
+}
+
+interface ResponseState {
+  status: number;
+  headers: Record<string, string>;
+  cookies: string[];
+}
+
+/**
+ * The per-render `response` controller handed to every page + layout in
+ * props. Pylon already has a backend for data/mutations, so SSR's job is
+ * just the response envelope: status, redirects, 404, and the occasional
+ * Set-Cookie. Status/headers/cookies are read AFTER the shell renders, so
+ * set them synchronously in the component body (before suspending).
+ */
+export interface SsrResponse {
+  setStatus(code: number): void;
+  setHeader(name: string, value: string): void;
+  setCookie(name: string, value: string, opts?: SsrCookieOptions): void;
+  redirect(url: string, status?: number): never;
+  notFound(): never;
+}
+
+function makeResponseController(state: ResponseState): SsrResponse {
+  return {
+    setStatus(code) {
+      state.status = code;
+    },
+    setHeader(name, value) {
+      state.headers[name.toLowerCase()] = value;
+    },
+    setCookie(name, value, opts) {
+      state.cookies.push(serializeCookie(name, value, opts));
+    },
+    redirect(url, status = 307): never {
+      const e = new PylonRouteControl("redirect");
+      e.url = url;
+      e.redirectStatus = status;
+      throw e;
+    },
+    notFound(): never {
+      throw new PylonRouteControl("notFound");
+    },
+  };
+}
+
+/**
+ * Merge page-set headers + cookies into the response_start header map.
+ * Cookies are newline-joined under `set-cookie`; the host splits them
+ * into one `Set-Cookie` header each (newline is forbidden inside a
+ * cookie, so it can't be turned into header injection).
+ */
+function finalizeHeaders(
+  state: ResponseState,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const h: Record<string, string> = { ...state.headers, ...(extra ?? {}) };
+  if (!h["content-type"]) h["content-type"] = "text/html; charset=utf-8";
+  if (state.cookies.length > 0) h["set-cookie"] = state.cookies.join("\n");
+  return h;
+}
+
+/**
  * Phase 1 SSR handler. Resolves the component, renders it via
  * react-dom/server.renderToReadableStream, pumps chunks back to the
  * host as base64-encoded NDJSON.
@@ -73,6 +182,10 @@ export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
 ): Promise<void> {
+  // Declared OUTSIDE the try so the catch can read page-set status/
+  // cookies when turning a redirect()/notFound() throw into a response.
+  const responseState: ResponseState = { status: 200, headers: {}, cookies: [] };
+  const response = makeResponseController(responseState);
   try {
     // react + react-dom are USER deps. ssr-runtime.ts lives in
     // packages/functions/src/, but the user's react install is under
@@ -148,6 +261,9 @@ export async function handleRenderRoute(
       headers: msg.headers,
       cookies: msg.cookies,
       auth: msg.auth,
+      // Response controller — a page/layout calls response.setStatus /
+      // setHeader / setCookie / redirect / notFound to shape the reply.
+      response,
     };
 
     // Resolve the layout chain. Each layout module exports a default
@@ -211,11 +327,14 @@ export async function handleRenderRoute(
 
     // Headers go out before the first chunk so the host can write the
     // response head.
+    // The shell rendered without a redirect()/notFound() throw, so the
+    // page's chosen status (default 200) + headers + cookies go out now,
+    // before the first body byte.
     send({
       type: "response_start",
       call_id: msg.call_id,
-      status: 200,
-      headers: { "content-type": "text/html; charset=utf-8" },
+      status: responseState.status,
+      headers: finalizeHeaders(responseState),
     });
 
     // Pre-load the manifest BEFORE the React stream starts emitting
@@ -358,7 +477,38 @@ export async function handleRenderRoute(
 
     send({ type: "render_done", call_id: msg.call_id });
   } catch (err: any) {
-    // Pre-first-chunk error → host returns 500.
+    // A page/layout called response.redirect() or response.notFound()
+    // during render → short-circuit to a 3xx + Location or a 404 instead
+    // of a body. Page-set cookies/headers still ride along.
+    if (err instanceof PylonRouteControl) {
+      if (err.kind === "redirect") {
+        send({
+          type: "response_start",
+          call_id: msg.call_id,
+          status: err.redirectStatus ?? 307,
+          headers: finalizeHeaders(responseState, { location: err.url ?? "/" }),
+        });
+        send({ type: "render_done", call_id: msg.call_id });
+        return;
+      }
+      // notFound() → 404 with a minimal body (until not-found.tsx wiring).
+      const body404 =
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — Not Found</title></head><body><h1>404</h1><p>This page could not be found.</p></body></html>';
+      send({
+        type: "response_start",
+        call_id: msg.call_id,
+        status: 404,
+        headers: finalizeHeaders(responseState),
+      });
+      send({
+        type: "render_chunk",
+        call_id: msg.call_id,
+        data: Buffer.from(body404, "utf8").toString("base64"),
+      });
+      send({ type: "render_done", call_id: msg.call_id });
+      return;
+    }
+    // Real pre-first-chunk error → host returns 500.
     send({
       type: "error",
       call_id: msg.call_id,

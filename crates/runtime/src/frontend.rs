@@ -874,37 +874,50 @@ fn serve_via_ssr_rpc(
     let auth = resolve_request_auth(cfg, &cookies_map);
 
     // Stream render output via tiny_http chunked transfer encoding.
-    // The render thread writes each base64-decoded chunk into `tx`;
-    // the response writer thread reads from `rx` through
-    // `StreamingBody`. Dropping `tx` (render completion or error)
-    // closes the stream cleanly.
+    // The render thread writes each base64-decoded chunk into `body_tx`;
+    // the response writer reads from `body_rx` through `StreamingBody`.
     //
-    // Phase 1.5c: response status + headers are NOT yet plumbed from
-    // the Bun handler's response_start. Always 200 + text/html. A
-    // future revision threads response_start through a oneshot so
-    // the handler can set status before the body is committed; for
-    // Phase 1 + 1.5 use cases (marketing / SEO / app pages) the
-    // defaults are right.
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
-    let streaming_body = crate::server::StreamingBody::new(rx);
+    // Two channels coordinate the response head with the body:
+    //   - `rs_tx`   carries the ONE `response_start` (status + headers)
+    //               the page emits BEFORE the first body byte. The main
+    //               thread blocks on `rs_rx` so the HTTP head is built
+    //               from the page's chosen status/headers/cookies (a
+    //               page that calls `response.setStatus`/`redirect`/
+    //               `notFound`/`setCookie`), not a hardcoded 200.
+    //   - `body_tx` carries decoded body chunks (bounded for backpressure).
+    // `sync_channel` buffers, so even a tiny page that finishes the whole
+    // render before the main thread reads still delivers both the head
+    // and the body. If the render fails BEFORE emitting response_start
+    // (e.g. a bad import), `rs_tx` drops without a send → `rs_rx.recv()`
+    // returns Err → we serve a structured 500 instead of a dropped
+    // connection.
+    let (rs_tx, rs_rx) =
+        std::sync::mpsc::sync_channel::<(u16, std::collections::HashMap<String, String>)>(1);
+    let (body_tx, body_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+    let streaming_body = crate::server::StreamingBody::new(body_rx);
 
     let fn_ops_for_render = std::sync::Arc::clone(&fn_ops);
     let component_owned = component.clone();
     let layouts = matched.route.layouts.clone();
     let route_path_owned = matched.route.path.clone();
     let path_only_owned = path_only.clone();
-    let tx_for_render = tx.clone();
     let render_thread = std::thread::Builder::new()
         .name("pylon-ssr-render".into())
         .stack_size(512 * 1024)
         .spawn(move || {
+            let on_response_start: pylon_functions::runner::ResponseStartCallback = Box::new(
+                move |status: u16, headers: std::collections::HashMap<String, String>| {
+                    // Capacity-1, fires at most once — never blocks.
+                    let _ = rs_tx.send((status, headers));
+                },
+            );
             let on_chunk: pylon_functions::runner::ByteStreamCallback =
                 Box::new(move |bytes: &[u8]| {
-                    // sync_channel(64) bounds memory; full channel
-                    // blocks the render thread (= backpressure from
-                    // the slow client). Send failures (rx dropped)
-                    // means the client disconnected — drop quietly.
-                    let _ = tx_for_render.send(bytes.to_vec());
+                    // sync_channel(64) bounds memory; a full channel
+                    // blocks the render thread (= backpressure from a
+                    // slow client). Send failure (body_rx dropped) means
+                    // the client disconnected — drop quietly.
+                    let _ = body_tx.send(bytes.to_vec());
                 });
             let render_result = fn_ops_for_render.render_route(
                 &component_owned,
@@ -916,7 +929,7 @@ fn serve_via_ssr_rpc(
                 headers_map,
                 cookies_map,
                 auth,
-                None, // response_start (Phase 1.5c+: thread via oneshot)
+                Some(on_response_start),
                 on_chunk,
             );
             if let Err(e) = render_result {
@@ -925,59 +938,132 @@ fn serve_via_ssr_rpc(
                     message = %e.message,
                     "SSR render failed"
                 );
-                // Failure AFTER the response head + (possibly some)
-                // body bytes have already been written. Best we can
-                // do is drop the connection by letting tx fall out
-                // of scope — partial HTML reaches the browser, no
-                // structured 500 page possible at this point.
-                // React's renderToReadableStream onError hook
-                // already logged to stderr for the operator.
+                // If this fired BEFORE response_start, rs_tx drops with
+                // no value → the main thread serves a 500. If AFTER (the
+                // head + some body already went out), the body channel
+                // closes → partial HTML; React's onError already logged.
             }
-            // tx drops here → rx closes → StreamingBody EOF →
-            // tiny_http finalizes the chunked transfer.
+            // Both senders drop here → channels close → StreamingBody
+            // hits EOF and tiny_http finalizes the chunked transfer.
         });
 
     if let Err(e) = render_thread {
         // Couldn't spawn the render thread. Inline 500.
         tracing::error!(error = ?e, "failed to spawn SSR render thread");
-        let body = b"<!DOCTYPE html><html><body><h1>SSR error</h1><p>internal scheduling error</p></body></html>".to_vec();
-        let response = Response::from_data(body)
-            .with_status_code(500u16)
-            .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
-            .with_header(
-                Header::from_bytes(
-                    "Access-Control-Allow-Origin",
-                    cors_origin.as_bytes().to_vec(),
-                )
-                .unwrap(),
-            );
-        let _ = request.respond(response);
+        let _ = request.respond(ssr_error_response(500, cors_origin));
         return Ok(());
     }
 
-    // Drop our own tx clone so the render thread is the sole sender.
-    drop(tx);
+    // Block until the page emits response_start (status + headers), or
+    // the render thread dies first (Err = failed before any head). The
+    // page controls the status here: setStatus(201), redirect() → 3xx +
+    // Location, notFound() → 404. Set-Cookie lines arrive newline-joined
+    // in the `set-cookie` header value and are split back out below.
+    let (status, page_headers) = match rs_rx.recv() {
+        Ok(v) => v,
+        Err(_) => {
+            // Render produced no response_start → an early failure.
+            let _ = request.respond(ssr_error_response(500, cors_origin));
+            return Ok(());
+        }
+    };
 
     let response = Response::new(
-        tiny_http::StatusCode(200),
-        vec![
-            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
-            Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-            Header::from_bytes(
-                "Access-Control-Allow-Origin",
-                cors_origin.as_bytes().to_vec(),
-            )
-            .unwrap(),
-        ],
+        tiny_http::StatusCode(status),
+        build_ssr_response_headers(&page_headers, cors_origin),
         streaming_body,
         None, // content-length unknown → tiny_http uses chunked transfer
         None,
     );
-    // request.respond drains StreamingBody chunk-by-chunk, writing
-    // each as an HTTP chunked-transfer frame. Returns when EOF
-    // (render thread drops tx).
+    // request.respond drains StreamingBody chunk-by-chunk as HTTP
+    // chunked-transfer frames; returns at EOF (render thread done).
     let _ = request.respond(response);
     Ok(())
+}
+
+/// Build the response header set for an SSR reply from the page's
+/// `response_start` headers, layering in defaults + CORS and splitting
+/// the newline-joined `set-cookie` value into one `Set-Cookie` header
+/// per cookie.
+///
+/// `Header::from_bytes` validates names/values, so a page that tries to
+/// smuggle a CRLF (`response.setHeader("x", "a\r\nevil: 1")`) gets that
+/// header dropped rather than injected — header-injection-safe by
+/// construction. `content-type` and `cache-control` defaults only apply
+/// when the page didn't set them.
+fn build_ssr_response_headers(
+    page_headers: &std::collections::HashMap<String, String>,
+    cors_origin: &str,
+) -> Vec<Header> {
+    let mut out: Vec<Header> = Vec::new();
+    let mut saw_content_type = false;
+    let mut saw_cache_control = false;
+
+    // A header value carrying CR/LF/NUL could smuggle extra headers
+    // (HTTP response splitting). Drop it rather than trust the header
+    // library to reject it.
+    fn header_value_is_safe(v: &str) -> bool {
+        !v.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+    }
+
+    for (name, value) in page_headers {
+        let lname = name.to_ascii_lowercase();
+        if lname == "set-cookie" {
+            // One Set-Cookie header per cookie. Newline is the join
+            // delimiter (forbidden inside a real cookie value), so a
+            // split piece that still contains a CR is an injection
+            // attempt and gets dropped.
+            for line in value.split('\n') {
+                let line = line.trim();
+                if line.is_empty() || !header_value_is_safe(line) {
+                    continue;
+                }
+                if let Ok(h) = Header::from_bytes("Set-Cookie", line.as_bytes()) {
+                    out.push(h);
+                }
+            }
+            continue;
+        }
+        if !header_value_is_safe(value) {
+            continue;
+        }
+        if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            if lname == "content-type" {
+                saw_content_type = true;
+            }
+            if lname == "cache-control" {
+                saw_cache_control = true;
+            }
+            out.push(h);
+        }
+    }
+
+    if !saw_content_type {
+        out.push(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    }
+    if !saw_cache_control {
+        out.push(Header::from_bytes("Cache-Control", "no-cache").unwrap());
+    }
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        out.push(h);
+    }
+    out
+}
+
+/// A minimal, structured SSR error response (used when the render can't
+/// even start, or fails before emitting `response_start`).
+fn ssr_error_response(status: u16, cors_origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status}</title></head><body><h1>{status}</h1><p>The server could not render this page.</p></body></html>"
+    )
+    .into_bytes();
+    let mut resp = Response::from_data(body)
+        .with_status_code(status)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
 }
 
 /// Memoized bundle outdir. The first request triggers `Bun.build`
@@ -1407,5 +1493,83 @@ mod tests {
         if let Some(v) = saved_proxy {
             std::env::set_var("PYLON_FRONTEND_DEV_PROXY", v);
         }
+    }
+
+    // --- SSR response_start header construction (build_ssr_response_headers) ---
+
+    fn header_pairs(hdrs: &[Header]) -> Vec<(String, String)> {
+        hdrs.iter()
+            .map(|h| {
+                (
+                    h.field.as_str().as_str().to_ascii_lowercase(),
+                    h.value.as_str().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ssr_headers_inject_defaults_and_preserve_page_headers() {
+        let mut page = std::collections::HashMap::new();
+        page.insert("x-custom".to_string(), "hi".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "https://app.example"));
+        assert!(pairs.iter().any(|(k, v)| k == "x-custom" && v == "hi"));
+        assert!(pairs.iter().any(|(k, _)| k == "content-type"));
+        assert!(pairs.iter().any(|(k, _)| k == "cache-control"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "access-control-allow-origin" && v == "https://app.example"));
+    }
+
+    #[test]
+    fn ssr_headers_page_content_type_wins_without_duplicate() {
+        let mut page = std::collections::HashMap::new();
+        page.insert(
+            "content-type".to_string(),
+            "application/rss+xml".to_string(),
+        );
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let cts: Vec<&(String, String)> =
+            pairs.iter().filter(|(k, _)| k == "content-type").collect();
+        assert_eq!(cts.len(), 1, "exactly one content-type (no default added)");
+        assert_eq!(cts[0].1, "application/rss+xml");
+    }
+
+    #[test]
+    fn ssr_headers_split_multiple_set_cookie() {
+        let mut page = std::collections::HashMap::new();
+        page.insert(
+            "set-cookie".to_string(),
+            "a=1; Path=/; HttpOnly\nb=2; Path=/; HttpOnly".to_string(),
+        );
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let cookies: Vec<&String> = pairs
+            .iter()
+            .filter(|(k, _)| k == "set-cookie")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(cookies.len(), 2, "one Set-Cookie header per cookie");
+        assert!(cookies.iter().any(|c| c.starts_with("a=1")));
+        assert!(cookies.iter().any(|c| c.starts_with("b=2")));
+    }
+
+    #[test]
+    fn ssr_headers_reject_crlf_injection() {
+        // A page that tries to smuggle a second header via CR/LF must be
+        // dropped entirely — no response splitting.
+        let mut page = std::collections::HashMap::new();
+        page.insert(
+            "x-evil".to_string(),
+            "ok\r\nset-cookie: stolen=1".to_string(),
+        );
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        assert!(
+            pairs.iter().all(|(_, v)| !v.contains("stolen")),
+            "CRLF-injected value must not appear in any header"
+        );
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "x-evil"),
+            "the unsafe header is dropped, not partially applied"
+        );
     }
 }
