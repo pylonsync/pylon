@@ -537,6 +537,7 @@ impl FnRunner {
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
         initial_status: Option<u16>,
+        store: &dyn DataStore,
         on_response_start: Option<ResponseStartCallback>,
         on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -552,6 +553,7 @@ impl FnRunner {
             cookies,
             auth,
             initial_status,
+            store,
             on_response_start,
             on_chunk,
         )
@@ -571,6 +573,7 @@ impl FnRunner {
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
         initial_status: Option<u16>,
+        store: &dyn DataStore,
         mut on_response_start: Option<ResponseStartCallback>,
         mut on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -578,6 +581,18 @@ impl FnRunner {
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
         let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+
+        // The page can reach the DB mid-render via the `serverData` handle
+        // (React 19 `use()` + Suspense). Those arrive as `{type:"db",...}`
+        // frames on this same pipe and are answered by the Db arm below.
+        // Auth is captured once (the request's auth) and re-checked per op
+        // by the policy gate — reads only, never writes (a GET render must
+        // not mutate). Snapshot the gate + strict flag once, same as the
+        // call loop (runner.rs call_inner).
+        let ssr_auth = auth.clone();
+        let policy_gate_snapshot = self.policy_gate.lock().unwrap().clone();
+        let strict_policies =
+            std::env::var("PYLON_STRICT_FN_POLICIES").ok().as_deref() == Some("1");
 
         let msg = crate::protocol::RenderRouteMessage::new(
             call_id.clone(),
@@ -601,6 +616,46 @@ impl FnRunner {
                     if let Some(ref mut cb) = on_response_start {
                         cb(rs.status.unwrap_or(200), rs.headers);
                     }
+                }
+                TsMessage::Db(db_msg) if db_msg.call_id == call_id => {
+                    // serverData read during render. READ-ONLY: a page render
+                    // is a GET; allowing inserts/updates/deletes here would be
+                    // a CSRF-shaped hole. Reject anything that isn't a pure
+                    // read op (also rejects QueryGraph/Link/Unlink/AdvisoryLock,
+                    // which the policy gate can't check). The policy gate +
+                    // tenant plugins applied to `store` give the same read
+                    // posture as a query function's `ctx.db`.
+                    let reply = if policy_op_for(db_msg.op) == Some(PolicyOp::Read) {
+                        let (result, _) = execute_db_op(
+                            store,
+                            &db_msg,
+                            policy_gate_snapshot.as_deref(),
+                            &ssr_auth,
+                            strict_policies,
+                        );
+                        match result {
+                            Ok(data) => DbResultMessage::ok_with_op(
+                                call_id.clone(),
+                                db_msg.op_id.clone(),
+                                data,
+                            ),
+                            Err(e) => DbResultMessage::err_with_op(
+                                call_id.clone(),
+                                db_msg.op_id.clone(),
+                                &e.code,
+                                &e.message,
+                            ),
+                        }
+                    } else {
+                        DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            db_msg.op_id.clone(),
+                            "SSR_WRITE_FORBIDDEN",
+                            "writes are not allowed during server-side render; \
+                             call a mutation/action from a client event handler instead",
+                        )
+                    };
+                    self.send(&reply)?;
                 }
                 TsMessage::RenderChunk(c) if c.call_id == call_id => {
                     let bytes = match base64::engine::general_purpose::STANDARD.decode(&c.data) {
@@ -1786,5 +1841,37 @@ mod tests {
         assert_eq!(policy_op_for(DbOp::Link), None);
         assert_eq!(policy_op_for(DbOp::Unlink), None);
         assert_eq!(policy_op_for(DbOp::AdvisoryLock), None);
+    }
+
+    #[test]
+    fn ssr_serverdata_gate_is_read_only() {
+        // The SSR render loop (render_route_inner) admits a `serverData` op
+        // ONLY when `policy_op_for(op) == Some(PolicyOp::Read)` — a GET
+        // render must never mutate. Every read op passes; every write op and
+        // every uncheckable op (QueryGraph/Link/Unlink/AdvisoryLock) is
+        // rejected with SSR_WRITE_FORBIDDEN. This asserts that exact gate so
+        // a future DbOp addition can't silently open a write path to pages.
+        let allowed = |op: DbOp| policy_op_for(op) == Some(PolicyOp::Read);
+        for op in [
+            DbOp::Get,
+            DbOp::List,
+            DbOp::Paginate,
+            DbOp::Lookup,
+            DbOp::Query,
+            DbOp::Search,
+        ] {
+            assert!(allowed(op), "{op:?} must be allowed during SSR");
+        }
+        for op in [
+            DbOp::Insert,
+            DbOp::Update,
+            DbOp::Delete,
+            DbOp::QueryGraph,
+            DbOp::Link,
+            DbOp::Unlink,
+            DbOp::AdvisoryLock,
+        ] {
+            assert!(!allowed(op), "{op:?} must be rejected during SSR");
+        }
     }
 }

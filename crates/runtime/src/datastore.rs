@@ -4081,9 +4081,17 @@ impl pylon_router::FnOps for FnOpsImpl {
         on_chunk: pylon_functions::runner::ByteStreamCallback,
     ) -> Result<(), FnCallError> {
         // Same pinning rationale as `call()` — pick one runner for the
-        // entire render so dynamic-import resolution + any future
-        // ctx.runQuery from the page's loader stay on a single Bun pipe.
+        // entire render so dynamic-import resolution + the page's
+        // `serverData` reads stay on a single Bun pipe.
         let runner = self.pool.pick();
+        // `serverData` reads during render hit `&*self.runtime` — the same
+        // store a query function's `ctx.db` reads forward to (reads pass
+        // straight through `HookEnforcingDataStore`). The runner's policy
+        // gate (snapshot inside `render_route_inner`) enforces read access
+        // identically, and the render loop rejects any non-read op. So an
+        // SSR `serverData.list("X")` is exactly as permissive as a
+        // `query()` function's `ctx.db.list("X")` — no new surface.
+        let store: &dyn DataStore = &*self.runtime;
         runner.render_route(
             component,
             layouts,
@@ -4095,6 +4103,7 @@ impl pylon_router::FnOps for FnOpsImpl {
             cookies,
             auth,
             initial_status,
+            store,
             on_response_start,
             on_chunk,
         )

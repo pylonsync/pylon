@@ -192,6 +192,92 @@ function buildTree(Page, Layouts, props) {
   return tree;
 }
 
+// Deterministic stringify — MUST match stableStringify in ssr-runtime.ts so
+// a serverData call's cache key is identical on server and client.
+function stableStringify(v) {
+  if (v === null || v === undefined || typeof v !== "object") {
+    return JSON.stringify(v === undefined ? null : v);
+  }
+  if (Array.isArray(v)) return "[" + v.map(stableStringify).join(",") + "]";
+  const keys = Object.keys(v).sort();
+  return (
+    "{" +
+    keys.map((k) => JSON.stringify(k) + ":" + stableStringify(v[k])).join(",") +
+    "}"
+  );
+}
+
+const SERVER_DATA_METHODS = [
+  "get",
+  "list",
+  "lookup",
+  "query",
+  "queryGraph",
+  "paginate",
+  "search",
+];
+
+// A React-recognized fulfilled thenable: use() reads .value synchronously
+// (status === "fulfilled") instead of suspending. Critical for hydration —
+// the server streamed the post-Suspense content, so the client must render
+// that content on the FIRST pass without re-suspending (no fallback flash,
+// no mismatch).
+function fulfilledThenable(value) {
+  return {
+    status: "fulfilled",
+    value,
+    then(onFulfilled) {
+      return onFulfilled ? onFulfilled(value) : value;
+    },
+  };
+}
+
+// Client stand-in for the server's serverData handle. Each method returns a
+// pre-fulfilled thenable (cached per key) sourced from the SSR'd ssrData map,
+// keyed identically to the server. Misses yield undefined — the page
+// rendered with whatever the server fetched, so a hit is expected.
+function makeClientServerData(ssrData) {
+  const cache = ssrData || {};
+  const pc = new Map();
+  const wrap = (prefix) => {
+    const out = {};
+    for (const m of SERVER_DATA_METHODS) {
+      out[m] = (...args) => {
+        const key = prefix + m + ":" + stableStringify(args);
+        if (!pc.has(key)) pc.set(key, fulfilledThenable(cache[key]));
+        return pc.get(key);
+      };
+    }
+    return out;
+  };
+  const sd = wrap("");
+  sd.unsafe = wrap("u:");
+  return sd;
+}
+
+// Server-only response controller has no meaning on the client (the status/
+// redirect/cookies already shipped). Give pages a no-op so a body that
+// touches props.response during hydration doesn't crash.
+function makeNoopResponse() {
+  const noop = () => {};
+  return {
+    setStatus: noop,
+    setHeader: noop,
+    setCookie: noop,
+    redirect: noop,
+    notFound: noop,
+  };
+}
+
+// Rehydrate the live, server-only props (serverData + response) that were
+// stripped before serialization, so the client tree matches the server's.
+function withClientProps(data) {
+  const props = { ...(data.props || {}) };
+  props.serverData = makeClientServerData(data.ssrData);
+  props.response = makeNoopResponse();
+  return props;
+}
+
 function readPylonData() {
   const dataEl = document.getElementById("__PYLON_DATA__");
   if (!dataEl) return null;
@@ -286,7 +372,7 @@ export function hydrate(component, Page, Layouts) {
       );
       return;
     }
-    const tree = buildTree(Page, Layouts, data.props);
+    const tree = buildTree(Page, Layouts, withClientProps(data));
     activeRoot = hydrateRoot(document, tree);
     installNavHandlers();
     return;
@@ -340,7 +426,7 @@ async function navigate(href, opts) {
     return;
   }
   document.title = doc.title || document.title;
-  const tree = buildTree(route.Page, route.Layouts, data.props);
+  const tree = buildTree(route.Page, route.Layouts, withClientProps(data));
   activeRoot.render(tree);
   if (push) {
     history.pushState({ component: data.component }, "", url.pathname + url.search);

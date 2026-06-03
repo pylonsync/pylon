@@ -329,7 +329,11 @@ function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
 // Context builders
 // ---------------------------------------------------------------------------
 
-function buildDbReader(callId: string, unsafeOp = false): DbReader {
+// Exported so the SSR runtime (ssr-runtime.ts) can build a page-facing
+// `serverData` read handle that reuses this module's `send` + `pendingRpcs`
+// + reader loop. The render call_id ("r_<n>") correlates DB replies back
+// through the shared pendingRpcs map.
+export function buildDbReader(callId: string, unsafeOp = false): DbReader {
   // All DB ops use rpcDb so Promise.all over ctx.db reads can run in
   // parallel without colliding on the outer call_id key.
   //

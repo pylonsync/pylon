@@ -26,6 +26,14 @@
       ]
     },
     {
+      "path": "/data",
+      "mode": "ssr",
+      "component": "app/data/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
       "path": "/gallery",
       "mode": "ssr",
       "component": "app/gallery/page",

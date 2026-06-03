@@ -560,6 +560,72 @@ async function tryRenderBoundary(
   }
 }
 
+/**
+ * Deterministic stringify (keys sorted recursively) so a `serverData` call's
+ * cache key is identical on the server (here) and on the client (the
+ * hydration shim in ssr-client-bundler's client-runtime). MUST stay in sync
+ * with `stableStringify` in that template.
+ */
+function stableStringify(v: any): string {
+  if (v === null || v === undefined || typeof v !== "object") {
+    return JSON.stringify(v ?? null);
+  }
+  if (Array.isArray(v)) return "[" + v.map(stableStringify).join(",") + "]";
+  const keys = Object.keys(v).sort();
+  return (
+    "{" +
+    keys.map((k) => JSON.stringify(k) + ":" + stableStringify(v[k])).join(",") +
+    "}"
+  );
+}
+
+// The read methods a page reaches through `serverData`. Mirrors the
+// DbReader read surface (writes are blocked server-side). Kept in sync with
+// the client-runtime shim's method list.
+const SERVER_DATA_METHODS = [
+  "get",
+  "list",
+  "lookup",
+  "query",
+  "queryGraph",
+  "paginate",
+  "search",
+] as const;
+
+/**
+ * Wrap a DbReader so each `serverData.x(...)` call returns a PROMISE CACHED
+ * by (method, args) — required for React 19 `use()`, which re-invokes the
+ * call on the post-suspense re-render and must get the same (now-resolved)
+ * promise instead of a fresh pending one (else it suspends forever). Each
+ * resolved value is also recorded into `valueCache` keyed identically, so it
+ * can be serialized into `__PYLON_DATA__.ssrData` and replayed on the client
+ * — keeping hydration free of mismatches.
+ */
+function makeServerData(reader: any, valueCache: Record<string, any>): any {
+  const promiseCache = new Map<string, Promise<any>>();
+  const wrap = (r: any, prefix: string): any => {
+    const out: any = {};
+    for (const m of SERVER_DATA_METHODS) {
+      out[m] = (...args: any[]) => {
+        const key = prefix + m + ":" + stableStringify(args);
+        let p = promiseCache.get(key);
+        if (!p) {
+          p = Promise.resolve(r[m](...args)).then((value: any) => {
+            valueCache[key] = value;
+            return value;
+          });
+          promiseCache.set(key, p);
+        }
+        return p;
+      };
+    }
+    return out;
+  };
+  const sd = wrap(reader, "");
+  if (reader.unsafe) sd.unsafe = wrap(reader.unsafe, "u:");
+  return sd;
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
@@ -578,6 +644,11 @@ export async function handleRenderRoute(
   let React: any = null;
   let renderToReadableStream: any = null;
   let props: any = null;
+  // Accumulates the resolved results of every `serverData.*` read the page
+  // made during render, keyed identically to the client shim. Serialized
+  // into `__PYLON_DATA__.ssrData` so hydration replays the same values
+  // without a second round trip — and without a server/client mismatch.
+  const ssrValueCache: Record<string, any> = {};
   try {
     // react + react-dom are USER deps. ssr-runtime.ts lives in
     // packages/functions/src/, but the user's react install is under
@@ -636,6 +707,19 @@ export async function handleRenderRoute(
       );
     }
 
+    // `serverData` — a read-only DB handle the page reaches during render
+    // via React 19 `use()` + <Suspense>. Reuses runtime.ts's RPC pipe
+    // (shared `send` + pendingRpcs) keyed by this render's call_id; the
+    // Rust render loop answers the frames against the same store + policy
+    // gate as a query function's ctx.db, and rejects any write. Promise-
+    // cached so `use()` doesn't re-suspend forever; resolved values land in
+    // `ssrValueCache` for hydration replay.
+    const { buildDbReader } = await import("./runtime");
+    const serverData = makeServerData(
+      buildDbReader(msg.call_id),
+      ssrValueCache,
+    );
+
     props = {
       url: msg.url,
       params: msg.params,
@@ -646,6 +730,8 @@ export async function handleRenderRoute(
       // Response controller — a page/layout calls response.setStatus /
       // setHeader / setCookie / redirect / notFound to shape the reply.
       response,
+      // Read-only server data handle (see above).
+      serverData,
     };
 
     // SEO metadata: static `export const metadata` or dynamic
@@ -688,6 +774,19 @@ export async function handleRenderRoute(
         },
       },
     );
+
+    // Wait for ALL Suspense boundaries to resolve before emitting the body,
+    // so the HTML is fully formed — no `<!--$?-->` pending markers, no
+    // hidden fallback segments, no `$RC` reveal scripts. This is what makes
+    // `serverData` + `use()` + <Suspense> hydrate cleanly: the client
+    // hydrates a RESOLVED boundary against the SSR'd content (resolved from
+    // `ssrData`), instead of fighting React's streaming-reveal scripts +
+    // whole-document hydration (which leaves the boundary stuck on its
+    // fallback). Pages with no async data have no boundaries, so `allReady`
+    // resolves immediately — zero cost for the common case.
+    if ((stream as any).allReady) {
+      await (stream as any).allReady;
+    }
 
     // Headers go out before the first chunk so the host can write the
     // response head.
@@ -783,10 +882,16 @@ export async function handleRenderRoute(
     // to a no-hydration warning if the manifest can't be loaded
     // (rare — usually means the bundler crashed).
     if (!isBoundaryComponent) {
+      // Strip live, non-serializable handles from the props that seed
+      // hydration: `serverData` (an RPC handle — the client rebuilds its
+      // own from `ssrData`) and `response` (a server-only controller — the
+      // client gets a no-op). Their resolved data rides along in `ssrData`.
+      const { serverData: _sd, response: _resp, ...serializableProps } = props;
       const hydrationPayload = {
         component: msg.component,
         layouts: msg.layouts ?? [],
-        props,
+        props: serializableProps,
+        ssrData: ssrValueCache,
       };
       const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
 
