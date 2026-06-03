@@ -162,6 +162,29 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 continue;
             }
         }
+        // Entity-level read short-circuit. If NO policy could permit any
+        // row for this caller — a static `allowRead: "false"`, or an auth
+        // gate the caller fails — skip the ENTIRE entity without reading a
+        // single page. Without this, a deny-all entity is still walked
+        // top-to-bottom every snapshot only to drop every row at the
+        // per-row fence below (`check_entity_read`); for a large
+        // append-only table (e.g. an audit log) that wasted read either
+        // dominates DB egress or cannot finish inside the request window,
+        // so the client never sees `has_more: false` and re-snapshots
+        // `since=0` forever (the 2026-06-03 pylon-cloud egress storm).
+        // `check_entity_scan` returns Allowed for data-dependent policies
+        // (tenant `exists(...)`, `data.X == auth.Y`), so those entities are
+        // still scanned and per-row filtered exactly as before — only
+        // statically-unreadable entities are dropped here. A client whose
+        // stale `snapshot_after` points into such an entity skips past it
+        // and converges instead of looping.
+        if !matches!(
+            ctx.policy_engine
+                .check_entity_scan(&entity.name, ctx.auth_ctx),
+            pylon_policy::PolicyResult::Allowed
+        ) {
+            continue;
+        }
         let initial_after = if Some(&entity.name) == resume_entity.as_ref() {
             resume_after_id.clone()
         } else {

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestPolicy};
 use pylon_runtime::Runtime;
 use serde_json::Value;
 
@@ -22,46 +22,91 @@ fn test_manifest() -> AppManifest {
         manifest_version: 1,
         name: "sync-proto".into(),
         version: "0.1.0".into(),
-        entities: vec![ManifestEntity {
-            name: "Note".into(),
-            fields: vec![
-                ManifestField {
-                    name: "title".into(),
-                    field_type: "string".into(),
-                    optional: false,
-                    unique: false,
-                    crdt: None,
-                    server_only: false,
-                    readonly: false,
-                    default: None,
-                    enum_values: None,
-                    encrypted: false,
-                },
-                ManifestField {
-                    name: "body".into(),
-                    field_type: "string".into(),
-                    optional: true,
-                    unique: false,
-                    crdt: None,
-                    server_only: false,
-                    readonly: false,
-                    default: None,
-                    enum_values: None,
-                    encrypted: false,
-                },
-            ],
-            indexes: vec![],
-            relations: vec![],
-            search: None,
-            crdt: true,
-        }],
+        entities: vec![
+            ManifestEntity {
+                name: "Note".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "title".into(),
+                        field_type: "string".into(),
+                        optional: false,
+                        unique: false,
+                        crdt: None,
+                        server_only: false,
+                        readonly: false,
+                        default: None,
+                        enum_values: None,
+                        encrypted: false,
+                    },
+                    ManifestField {
+                        name: "body".into(),
+                        field_type: "string".into(),
+                        optional: true,
+                        unique: false,
+                        crdt: None,
+                        server_only: false,
+                        readonly: false,
+                        default: None,
+                        enum_values: None,
+                        encrypted: false,
+                    },
+                ],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            },
+            secret_entity(),
+        ],
         routes: vec![],
         queries: vec![],
         actions: vec![],
-        policies: vec![],
+        // `Note` is intentionally public (these tests exercise the sync
+        // pipeline, not auth — without a policy the secure default-deny
+        // 403s the insert). `Secret` is statically deny-all: it stands in
+        // for a large append-only server-only table (an audit log) that
+        // must NEVER enter a client snapshot.
+        policies: vec![
+            ManifestPolicy {
+                name: "note_public".into(),
+                entity: Some("Note".into()),
+                allow: "true".into(),
+                ..Default::default()
+            },
+            ManifestPolicy {
+                name: "secret_deny".into(),
+                entity: Some("Secret".into()),
+                allow_read: Some("false".into()),
+                ..Default::default()
+            },
+        ],
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
+    }
+}
+
+// A statically deny-all entity: one plain string field, `allowRead:"false"`
+// via the `secret_deny` policy. Stands in for a large server-only table.
+fn secret_entity() -> ManifestEntity {
+    ManifestEntity {
+        name: "Secret".into(),
+        fields: vec![ManifestField {
+            name: "data".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
     }
 }
 
@@ -364,4 +409,55 @@ fn cursor_advances_even_when_response_is_empty() {
     assert_eq!(resp2["changes"].as_array().unwrap().len(), 0);
     assert_eq!(resp2["cursor"]["last_seq"].as_u64().unwrap(), cur);
     assert_eq!(resp2["has_more"].as_bool().unwrap(), false);
+}
+
+// ---------------------------------------------------------------------------
+// A statically deny-all entity (allowRead:"false") is EXCLUDED from the
+// snapshot — not merely per-row filtered. Regression for the 2026-06-03
+// pylon-cloud egress storm: AuditEvent was member-readable + ever-growing,
+// the snapshot walked the whole table on every connect (per-page live reads,
+// no id ceiling) and never converged, so the client re-snapshotted since=0
+// forever and never reached the WS phase. The snapshot now skips any entity
+// `check_entity_scan` denies, so a deny-all table is never read or paginated.
+// ---------------------------------------------------------------------------
+#[test]
+fn deny_all_entity_excluded_from_snapshot() {
+    let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
+    let port = start_server(Arc::clone(&rt));
+    let token = mint_guest(port);
+
+    // Readable Note via HTTP (policy-allowed; advances the change-log seq).
+    insert_note(port, &token, "visible");
+    // Seed the deny-all Secret entity directly — the inherent insert bypasses
+    // the HTTP policy gate, like a server-side write. 1500 rows: more than
+    // SNAPSHOT_BATCH_LIMIT, so a pre-fix snapshot paged through all of them
+    // only to drop every one at the per-row fence.
+    for i in 0..1500 {
+        rt.insert("Secret", &serde_json::json!({ "data": format!("s{i}") }))
+            .expect("seed secret");
+    }
+
+    let (status, resp) = pull(port, &token, 0);
+    assert_eq!(status, 200, "snapshot pull must succeed: {resp}");
+    let changes = resp["changes"].as_array().unwrap();
+    assert!(
+        changes.iter().any(|c| c["entity"] == "Note"),
+        "readable Note must be in the snapshot: {resp}"
+    );
+    assert!(
+        changes.iter().all(|c| c["entity"] != "Secret"),
+        "deny-all Secret must be entirely absent — not one of 1500 rows leaks: {resp}"
+    );
+    // Snapshot CONVERGES: has_more=false on the same page (Secret never
+    // paginated), cursor advances off 0 → the client graduates to the WS
+    // live phase instead of re-snapshotting since=0.
+    assert_eq!(
+        resp["has_more"].as_bool().unwrap_or(false),
+        false,
+        "snapshot must converge in one page: {resp}"
+    );
+    assert!(
+        resp["cursor"]["last_seq"].as_u64().unwrap() > 0,
+        "cursor must advance off 0: {resp}"
+    );
 }
