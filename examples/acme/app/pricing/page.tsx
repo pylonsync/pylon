@@ -13,8 +13,8 @@ const TIERS = [
     blurb: "For solo founders and small teams trying Acme on for size.",
     features: [
       "Up to 3 seats",
-      "Up to 3 active projects",
-      "Boards, docs & timelines",
+      "Unlimited projects",
+      "Docs, boards & timelines",
       "Email support",
     ],
     cta: { label: "Start free", href: "/sign-up" },
@@ -27,7 +27,7 @@ const TIERS = [
     blurb: "When the team starts pulling in different directions.",
     features: [
       "Unlimited seats",
-      "Unlimited projects & automations",
+      "Unlimited automations",
       "SSO, audit log, RBAC",
       "Priority support, 4-hour SLA",
       "All integrations",

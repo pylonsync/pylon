@@ -1,15 +1,14 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, Image } from "@pylonsync/react";
 
 const POSTS = [
   {
     slug: "our-series-a",
-    title: "Acme raises $24M to keep teams' work in one place.",
+    title: "Acme raises $24M to make the work tools your team won't quit.",
     excerpt:
-      "We've raised a Series A from Index, with participation from our existing investors. Here's exactly what we're going to do with it.",
-    grad: "from-[var(--color-accent-soft)] to-[var(--color-cream-deep)]",
+      "We're thrilled to share that we've raised a Series A from Index, with participation from existing investors. Here's what we're going to do with it.",
+    cover: "/blog-1.jpg",
     author: "Mara Chen",
-    initials: "MC",
     date: "May 2026",
     tag: "Company",
   },
@@ -17,10 +16,9 @@ const POSTS = [
     slug: "scaling-fast",
     title: "What we learned scaling Acme from 100 to 50,000 teams.",
     excerpt:
-      "We refused to hire ahead of revenue. We deleted features. We deprecated integrations our biggest customers didn't use. Here's what changed, what didn't, and the calls we'd defend.",
-    grad: "from-[#dfe9ff] to-[var(--color-cream-deep)]",
+      "We refused to hire ahead of revenue. We deleted features. We deprecated integrations our biggest customers didn't use. Here's what changed, what didn't, and the decisions we'd defend at gunpoint.",
+    cover: "/blog-2.jpg",
     author: "James Patel",
-    initials: "JP",
     date: "April 2026",
     tag: "Engineering",
   },
@@ -28,10 +26,9 @@ const POSTS = [
     slug: "changelog",
     title: "April changelog: 23 things we shipped while you were busy.",
     excerpt:
-      "New: a command palette across every surface. Faster: search is 4× quicker. Removed: the duplicate-tab problem on macOS.",
-    grad: "from-[#ffe7d6] to-[var(--color-cream-deep)]",
+      "New: command palette across every surface. Faster: search is 4x quicker. Removed: the duplicate-tab problem on macOS.",
+    cover: "/blog-3.jpg",
     author: "Eira Nilsson",
-    initials: "EN",
     date: "April 2026",
     tag: "Changelog",
   },
@@ -52,11 +49,13 @@ export default function BlogPage() {
         href={`/blog/${feature.slug}`}
         className="group mt-16 block overflow-hidden rounded-3xl border border-[var(--color-line)] bg-white transition hover:-translate-y-0.5 hover:shadow-md md:grid md:grid-cols-2"
       >
-        <div
-          className={
-            "aspect-[16/9] w-full bg-gradient-to-br md:aspect-auto md:h-full " +
-            feature.grad
-          }
+        <Image
+          src={feature.cover}
+          alt=""
+          width={1600}
+          height={900}
+          sizes="(max-width: 768px) 100vw, 600px"
+          className="aspect-[16/9] w-full object-cover md:aspect-auto md:h-full"
         />
         <div className="flex flex-col justify-between p-8 md:p-10">
           <div>
@@ -86,7 +85,14 @@ export default function BlogPage() {
             href={`/blog/${p.slug}`}
             className="group block overflow-hidden rounded-2xl border border-[var(--color-line)] bg-white transition hover:-translate-y-0.5 hover:shadow-md"
           >
-            <div className={"aspect-[16/9] w-full bg-gradient-to-br " + p.grad} />
+            <Image
+              src={p.cover}
+              alt=""
+              width={1600}
+              height={900}
+              sizes="(max-width: 768px) 100vw, 500px"
+              className="aspect-[16/9] w-full object-cover"
+            />
             <div className="p-6">
               <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
                 {p.tag} · {p.date}

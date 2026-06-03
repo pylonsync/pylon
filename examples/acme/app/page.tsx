@@ -1,18 +1,15 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, Image } from "@pylonsync/react";
 
-// Acme — an original landing page rendered entirely with CSS (no product
-// screenshots). It exists to show off Pylon's server-side rendering, file-
-// based routes, and instant <Link> navigation, not to resemble any real
-// product.
 export default function HomePage() {
   return (
     <main className="mx-auto max-w-6xl px-6">
       <Hero />
-      <FeatureTrio />
-      <Metrics />
-      <Workflow />
+      <ProductShowcase />
+      <FeatureExplorer />
       <Testimonial />
+      <SectionWithHighlight />
+      <ProductGrid />
       <Cta />
     </main>
   );
@@ -20,201 +17,98 @@ export default function HomePage() {
 
 function Hero() {
   return (
-    <section className="pt-24 pb-16 text-center md:pt-32">
-      <span className="inline-flex items-center gap-2 rounded-full border border-[var(--color-line)] bg-white px-3 py-1 text-xs font-medium text-[var(--color-stone)]">
-        <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)]" />
-        New — automations are here
-      </span>
-      <h1 className="display mx-auto mt-7 max-w-4xl text-[52px] text-[var(--color-ink)] sm:text-[72px] md:text-[84px]">
-        Your team's work,
-        <br />
-        finally in <span className="hl">one place</span>.
+    <section className="pt-24 pb-20 text-center md:pt-32 md:pb-28">
+      <h1 className="display mx-auto max-w-5xl text-[56px] text-[var(--color-ink)] sm:text-[80px] md:text-[96px]">
+        Where the work comes together.
       </h1>
       <p className="mx-auto mt-8 max-w-xl text-lg text-[var(--color-muted)]">
-        Projects, docs, and updates live together in Acme — so nothing slips
-        between six different tabs, and everyone can see where things stand.
+        Acme keeps your team's projects, docs, and updates in one place — so
+        work stops slipping between tools and everyone sees where things stand.
       </p>
-      <div className="mt-10 flex items-center justify-center gap-3">
+      <div className="mt-10">
         <Link
           href="/sign-up"
           className="inline-flex items-center justify-center rounded-lg bg-[var(--color-ink)] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[var(--color-ink-soft)]"
         >
-          Get started free
+          Get Started
         </Link>
-        <Link
-          href="/pricing"
-          className="inline-flex items-center justify-center rounded-lg border border-[var(--color-line)] bg-white px-5 py-2.5 text-sm font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-cream-deep)]"
-        >
-          See pricing
-        </Link>
-      </div>
-
-      {/* CSS-rendered product mockup — a fake app window, no screenshot. */}
-      <div className="mt-16">
-        <AppMock />
       </div>
     </section>
   );
 }
 
-/** A faux application window drawn entirely in CSS: title bar, a sidebar
- *  of "projects", and a small board of task cards. Original, self-
- *  contained, and never a real screenshot. */
-function AppMock() {
-  const projects = ["Website", "Mobile app", "Q3 launch", "Design system"];
-  const columns = [
-    { name: "Up next", cards: ["Audit onboarding", "Draft changelog"] },
-    { name: "In progress", cards: ["Billing v2", "Search filters", "Dark mode"] },
-    { name: "Done", cards: ["Import API"] },
-  ];
+function ProductShowcase() {
+  // Soft gradient background card framing the product mockup.
   return (
-    <div className="mock mx-auto max-w-4xl overflow-hidden text-left">
-      <div className="flex items-center gap-2 border-b border-[var(--color-line)] px-4 py-3">
-        <span className="h-3 w-3 rounded-full bg-[var(--color-line)]" />
-        <span className="h-3 w-3 rounded-full bg-[var(--color-line)]" />
-        <span className="h-3 w-3 rounded-full bg-[var(--color-line)]" />
-        <span className="ml-3 rounded-md bg-[var(--color-cream-deep)] px-2 py-0.5 text-xs text-[var(--color-stone)]">
-          acme.app / board
-        </span>
-      </div>
-      <div className="grid grid-cols-[150px_1fr]">
-        <aside className="hidden border-r border-[var(--color-line)] p-4 sm:block">
-          <div className="mb-4 flex items-center gap-2 text-xs font-semibold text-[var(--color-ink)]">
-            <span className="h-4 w-4 rounded bg-[var(--color-accent)]" />
-            Acme
-          </div>
-          {projects.map((p, i) => (
-            <div
-              key={p}
-              className={
-                "mb-1 flex items-center gap-2 rounded-md px-2 py-1.5 text-xs " +
-                (i === 1
-                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent-deep)]"
-                  : "text-[var(--color-stone)]")
-              }
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" />
-              {p}
-            </div>
-          ))}
-        </aside>
-        <div className="grid grid-cols-3 gap-3 bg-[var(--color-cream)] p-4">
-          {columns.map((col) => (
-            <div key={col.name}>
-              <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-[var(--color-stone)]">
-                <span>{col.name}</span>
-                <span>{col.cards.length}</span>
-              </div>
-              <div className="space-y-2">
-                {col.cards.map((c) => (
-                  <div
-                    key={c}
-                    className="rounded-lg border border-[var(--color-line)] bg-white p-2.5 shadow-sm"
-                  >
-                    <div className="text-xs font-medium text-[var(--color-ink)]">
-                      {c}
-                    </div>
-                    <div className="mt-2 flex items-center gap-1.5">
-                      <span className="h-2 w-8 rounded-full bg-[var(--color-cream-deep)]" />
-                      <span className="ml-auto h-4 w-4 rounded-full bg-[var(--color-accent-soft)]" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
+    <section className="pb-24">
+      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#a5c3ff] via-[#dabffb] to-[#ffc09f] p-6 sm:p-10">
+        <div className="mock overflow-hidden">
+          <Image
+            src="/product-shot.jpg"
+            alt="Acme product"
+            width={2000}
+            height={1300}
+            priority
+            sizes="(max-width: 768px) 100vw, 1100px"
+            className="w-full"
+          />
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-function FeatureTrio() {
-  const items = [
+function FeatureExplorer() {
+  // Bold title + accordion feature list on the left, large product mockup
+  // on the right.
+  const features = [
     {
+      icon: "✺",
       title: "Projects",
-      body: "Boards, lists, and timelines that stay in sync for everyone, the moment anything changes.",
+      desc: "Boards, lists, and timelines that stay in sync for everyone the moment anything changes.",
+      expanded: true,
     },
-    {
-      title: "Docs",
-      body: "Write specs and notes right next to the work they describe — linked, searchable, never lost.",
-    },
-    {
-      title: "Automations",
-      body: "Move a card, notify a channel, open a follow-up. Wire up the routine so the team doesn't have to.",
-    },
+    { icon: "✱", title: "Docs in context" },
+    { icon: "▤", title: "Automations" },
+    { icon: "⟨/⟩", title: "Search across everything" },
   ];
   return (
-    <section className="grid grid-cols-1 gap-10 py-24 md:grid-cols-3">
-      {items.map((it) => (
-        <div key={it.title}>
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-accent-soft)]">
-            <span className="h-3.5 w-3.5 rounded-md bg-[var(--color-accent)]" />
-          </div>
-          <h3 className="mt-5 text-lg font-semibold text-[var(--color-ink)]">
-            {it.title}
-          </h3>
-          <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
-            {it.body}
-          </p>
-        </div>
-      ))}
-    </section>
-  );
-}
-
-function Metrics() {
-  const stats = [
-    { value: "4,000+", label: "teams run on Acme" },
-    { value: "1.2M", label: "tasks shipped weekly" },
-    { value: "99.99%", label: "uptime, last 12 months" },
-    { value: "12 min", label: "median setup time" },
-  ];
-  return (
-    <section className="rounded-3xl bg-[var(--color-card)] px-6 py-14 sm:px-12">
-      <div className="grid grid-cols-2 gap-8 md:grid-cols-4">
-        {stats.map((s) => (
-          <div key={s.label}>
-            <div className="display text-4xl text-[var(--color-ink)] sm:text-5xl">
-              {s.value}
-            </div>
-            <div className="mt-2 text-sm text-[var(--color-muted)]">
-              {s.label}
-            </div>
-          </div>
-        ))}
+    <section className="grid grid-cols-1 gap-12 pb-32 md:grid-cols-[1fr_1.2fr] md:gap-20">
+      <div className="md:pt-12">
+        <h2 className="display text-[44px] text-[var(--color-ink)] sm:text-[56px]">
+          Everything,
+          <br />
+          in one place.
+        </h2>
+        <ul className="mt-12 divide-y divide-[var(--color-line)] border-y border-[var(--color-line)]">
+          {features.map((f, i) => (
+            <li key={i} className="py-5">
+              <div className="flex items-start gap-3">
+                <span className="text-[var(--color-blue)]">{f.icon}</span>
+                <div className="flex-1">
+                  <h3 className="text-base font-semibold text-[var(--color-ink)]">
+                    {f.title}
+                  </h3>
+                  {f.expanded && f.desc && (
+                    <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
+                      {f.desc}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
       </div>
-    </section>
-  );
-}
-
-function Workflow() {
-  const steps = [
-    { n: "01", title: "Bring it together", body: "Import from wherever your work lives today. Acme keeps the structure you already have." },
-    { n: "02", title: "Make it move", body: "Add a couple of automations and the busy parts run themselves — assignments, reminders, handoffs." },
-    { n: "03", title: "See the whole picture", body: "One view across every project, so status meetings turn into a glance." },
-  ];
-  return (
-    <section className="py-24">
-      <h2 className="display max-w-2xl text-[40px] text-[var(--color-ink)] sm:text-[52px]">
-        Set it up once.
-        <br />
-        Then get out of the way.
-      </h2>
-      <div className="mt-14 grid grid-cols-1 gap-8 md:grid-cols-3">
-        {steps.map((s) => (
-          <div key={s.n} className="border-t border-[var(--color-line)] pt-6">
-            <span className="text-sm font-semibold text-[var(--color-accent-deep)]">
-              {s.n}
-            </span>
-            <h3 className="mt-3 text-lg font-semibold text-[var(--color-ink)]">
-              {s.title}
-            </h3>
-            <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
-              {s.body}
-            </p>
-          </div>
-        ))}
+      <div className="mock overflow-hidden">
+        <Image
+          src="/feat-ai.jpg"
+          alt="AI draft preview"
+          width={1200}
+          height={800}
+          sizes="(max-width: 768px) 100vw, 600px"
+          className="w-full"
+        />
       </div>
     </section>
   );
@@ -222,27 +116,119 @@ function Workflow() {
 
 function Testimonial() {
   return (
-    <section className="pb-24">
-      <div className="rounded-3xl bg-[var(--color-card)] p-8 sm:p-12">
-        <div className="flex items-center gap-4">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-accent)] text-sm font-semibold text-white">
-            RM
-          </span>
+    <section className="pb-32">
+      <h2 className="display text-[44px] text-[var(--color-ink)] sm:text-[56px]">
+        Loved by teams that ship.
+      </h2>
+      <div className="mt-12 rounded-3xl bg-[var(--color-card)] p-8 sm:p-12">
+        <div className="grid grid-cols-1 items-center gap-8 md:grid-cols-[1fr_auto]">
           <div>
             <p className="text-sm font-medium text-[var(--color-ink)]">
-              Riya Mehta
+              Priscilla
             </p>
-            <p className="text-xs text-[var(--color-muted)]">
-              Head of Operations, Northwind Studio
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Head of Operations, Northwind
             </p>
+            <blockquote className="mt-6 text-2xl leading-snug text-[var(--color-ink)] sm:text-3xl">
+              "We replaced four tools with Acme and stopped losing track of
+              work between them. The whole team finally sees the same thing."
+            </blockquote>
+            <Link
+              href="/"
+              className="mt-8 inline-flex items-center gap-1 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-soft)] shadow-sm transition hover:bg-[var(--color-page)]"
+            >
+              View case study
+              <span aria-hidden>›</span>
+            </Link>
           </div>
+          <Image
+            src="/avatar-1.jpg"
+            alt=""
+            width={400}
+            height={400}
+            sizes="(max-width: 768px) 80vw, 220px"
+            className="aspect-square w-full max-w-[220px] rounded-2xl object-cover"
+          />
         </div>
-        <blockquote className="mt-8 text-2xl leading-snug text-[var(--color-ink)] sm:text-3xl">
-          "We replaced four tools with Acme and stopped losing track of work
-          between them. The whole team can finally see the same thing."
-        </blockquote>
+        <div className="mt-8 flex justify-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
+          <span className="h-1.5 w-4 rounded-full bg-[var(--color-ink)]" />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
+        </div>
       </div>
     </section>
+  );
+}
+
+function SectionWithHighlight() {
+  return (
+    <section className="pb-16 text-center">
+      <h2 className="display mx-auto max-w-3xl text-[44px] text-[var(--color-ink)] sm:text-[64px]">
+        One source of truth, not <span className="hl">twelve tabs</span>.
+      </h2>
+    </section>
+  );
+}
+
+function ProductGrid() {
+  // 2-up product showcase below the inline-highlight title.
+  return (
+    <section className="pb-32">
+      <div className="mock overflow-hidden">
+        <Image
+          src="/hero.jpg"
+          alt="Acme overview"
+          width={2400}
+          height={1500}
+          sizes="(max-width: 768px) 100vw, 1100px"
+          className="w-full"
+        />
+      </div>
+      <div className="mt-8 grid grid-cols-1 gap-8 md:grid-cols-2">
+        <ProductCard
+          src="/feat-collab.jpg"
+          title="Unified view"
+          body="Every project, doc, and update in one place. Jump between them without losing your spot."
+        />
+        <ProductCard
+          src="/feat-speed.jpg"
+          title="See what changed"
+          body="A live activity feed shows who did what, and when. Catch up in a glance instead of a standup."
+        />
+      </div>
+    </section>
+  );
+}
+
+function ProductCard({
+  src,
+  title,
+  body,
+}: {
+  src: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div>
+      <div className="mock overflow-hidden">
+        <Image
+          src={src}
+          alt=""
+          width={1200}
+          height={800}
+          sizes="(max-width: 768px) 100vw, 500px"
+          className="w-full"
+        />
+      </div>
+      <h3 className="mt-6 text-base font-semibold text-[var(--color-ink)]">
+        {title}
+      </h3>
+      <p className="mt-2 max-w-sm text-sm leading-relaxed text-[var(--color-muted)]">
+        {body}
+      </p>
+    </div>
   );
 }
 
@@ -263,7 +249,7 @@ function Cta() {
           href="/sign-up"
           className="inline-flex items-center justify-center rounded-lg bg-[var(--color-ink)] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[var(--color-ink-soft)]"
         >
-          Get started free
+          Get Started
         </Link>
       </div>
     </section>

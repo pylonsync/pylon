@@ -1,5 +1,5 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, Image } from "@pylonsync/react";
 
 export default function SeriesAPost() {
   return (
@@ -18,9 +18,13 @@ export default function SeriesAPost() {
           Acme raises $24M to make the work tools your team won't quit.
         </h1>
         <div className="mt-8 flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-accent)] text-xs font-semibold text-white">
-            MC
-          </span>
+          <Image
+            src="/avatar-1.jpg"
+            alt=""
+            width={64}
+            height={64}
+            className="h-10 w-10 rounded-full object-cover"
+          />
           <div>
             <p className="text-sm font-medium text-[var(--color-ink)]">
               Mara Chen
@@ -32,7 +36,15 @@ export default function SeriesAPost() {
         </div>
       </div>
 
-      <div className="mt-12 aspect-[16/9] w-full rounded-2xl bg-gradient-to-br from-[var(--color-accent-soft)] to-[var(--color-cream-deep)]" />
+      <Image
+        src="/blog-1.jpg"
+        alt=""
+        width={1600}
+        height={900}
+        sizes="(max-width: 768px) 100vw, 720px"
+        className="mt-12 aspect-[16/9] w-full rounded-2xl object-cover"
+        priority
+      />
 
       <article className="prose mt-12 max-w-none">
         <p className="text-lg leading-relaxed text-[var(--color-ink-soft)]">

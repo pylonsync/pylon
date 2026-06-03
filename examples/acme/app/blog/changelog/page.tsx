@@ -1,5 +1,5 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, Image } from "@pylonsync/react";
 
 interface PageProps {
   url: string;
@@ -55,9 +55,13 @@ export default function ChangelogPost({ url }: PageProps) {
           April changelog: 23 things we shipped while you were busy.
         </h1>
         <div className="mt-8 flex items-center gap-3">
-          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-accent)] text-xs font-semibold text-white">
-            EN
-          </span>
+          <Image
+            src="/avatar-3.jpg"
+            alt=""
+            width={64}
+            height={64}
+            className="h-10 w-10 rounded-full object-cover"
+          />
           <div>
             <p className="text-sm font-medium text-[var(--color-ink)]">
               Eira Nilsson
@@ -69,7 +73,15 @@ export default function ChangelogPost({ url }: PageProps) {
         </div>
       </div>
 
-      <div className="mt-12 aspect-[16/9] w-full rounded-2xl bg-gradient-to-br from-[#ffe7d6] to-[var(--color-cream-deep)]" />
+      <Image
+        src="/blog-3.jpg"
+        alt=""
+        width={1600}
+        height={900}
+        sizes="(max-width: 768px) 100vw, 720px"
+        className="mt-12 aspect-[16/9] w-full rounded-2xl object-cover"
+        priority
+      />
 
       <ul className="mt-12 divide-y divide-[var(--color-line)] border-y border-[var(--color-line)]">
         {ITEMS.map((item, i) => (

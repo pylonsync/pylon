@@ -23,7 +23,7 @@ export default function RootLayout({ children, url }: LayoutProps) {
         <title>Acme</title>
         <meta
           name="description"
-          content="Acme keeps your team's projects, docs, and updates together in one place — so work stops slipping between tools."
+          content="Acme keeps your team's projects, docs, and updates together in one place."
         />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
@@ -96,24 +96,24 @@ function Nav({ url }: { url: string }) {
 }
 
 function BrandMark() {
-  // Original Acme mark: a solid emerald tile with a single rounded
-  // diamond cut into it. Geometric, abstract, and unrelated to anything.
+  // Minimal mark: two overlapping rounded squares — an outline and a
+  // filled one offset behind it. Flat, soft-blue, original.
   return (
     <svg
       aria-hidden
-      viewBox="0 0 28 28"
-      className="h-6 w-6 text-[var(--color-accent)]"
+      viewBox="0 0 24 24"
+      className="h-5 w-5 text-[var(--color-blue)]"
       fill="none"
     >
-      <rect width="28" height="28" rx="8" fill="currentColor" />
+      <rect x="8" y="8" width="13" height="13" rx="3.5" fill="currentColor" />
       <rect
-        x="9.5"
-        y="9.5"
-        width="9"
-        height="9"
-        rx="2.5"
-        transform="rotate(45 14 14)"
-        fill="white"
+        x="3"
+        y="3"
+        width="13"
+        height="13"
+        rx="3.5"
+        stroke="currentColor"
+        strokeWidth="2.25"
       />
     </svg>
   );
