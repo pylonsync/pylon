@@ -999,11 +999,21 @@ fn build_ssr_response_headers(
     let mut saw_content_type = false;
     let mut saw_cache_control = false;
 
-    // A header value carrying CR/LF/NUL could smuggle extra headers
-    // (HTTP response splitting). Drop it rather than trust the header
-    // library to reject it.
+    // A header VALUE carrying CR/LF/NUL could smuggle extra headers (HTTP
+    // response splitting). Drop it rather than trust the header library.
     fn header_value_is_safe(v: &str) -> bool {
         !v.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0))
+    }
+    // A header NAME must be a separator-free token. `tiny_http`'s
+    // `Header::from_bytes` does NOT reject CR/LF/NUL in the name, so
+    // without this a page calling `response.setHeader("x\r\nevil: 1", v)`
+    // could inject a header. Reject control chars + the separators that
+    // would terminate the name (`:`, space, tab).
+    fn header_name_is_safe(n: &str) -> bool {
+        !n.is_empty()
+            && !n
+                .bytes()
+                .any(|b| matches!(b, b'\r' | b'\n' | 0 | b' ' | b'\t' | b':'))
     }
 
     for (name, value) in page_headers {
@@ -1024,7 +1034,7 @@ fn build_ssr_response_headers(
             }
             continue;
         }
-        if !header_value_is_safe(value) {
+        if !header_value_is_safe(value) || !header_name_is_safe(name) {
             continue;
         }
         if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
@@ -1570,6 +1580,24 @@ mod tests {
         assert!(
             !pairs.iter().any(|(k, _)| k == "x-evil"),
             "the unsafe header is dropped, not partially applied"
+        );
+    }
+
+    #[test]
+    fn ssr_headers_reject_unsafe_header_name() {
+        // A page-set header NAME carrying CR/LF (tiny_http does NOT reject
+        // these) or a separator (`:`) is dropped entirely — no injected
+        // header survives.
+        let mut page = std::collections::HashMap::new();
+        page.insert("x-evil\r\nset-cookie".to_string(), "stolen=1".to_string());
+        page.insert("x:colon".to_string(), "v".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        assert!(pairs
+            .iter()
+            .all(|(k, _)| !k.contains('\r') && !k.contains('\n') && !k.contains(':')));
+        assert!(
+            !pairs.iter().any(|(_, v)| v == "stolen=1" || v == "v"),
+            "values of unsafe-named headers must not leak"
         );
     }
 }

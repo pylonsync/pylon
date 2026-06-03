@@ -89,18 +89,48 @@ export interface SsrCookieOptions {
   sameSite?: "strict" | "lax" | "none";
 }
 
+/**
+ * Reject CR / LF / NUL — the characters that turn a header or cookie
+ * value into HTTP response splitting. The host re-checks at the wire
+ * edge, but failing here gives the developer a clear error instead of a
+ * silently-dropped header.
+ */
+function assertNoControlChars(s: string, label: string): void {
+  if (/[\r\n\0]/.test(s)) {
+    throw new Error(`pylon ssr: ${label} must not contain CR, LF, or NUL`);
+  }
+}
+
+// RFC 6265 / RFC 7230 token — used for cookie + header NAMES.
+const TOKEN_RE = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
 function serializeCookie(
   name: string,
   value: string,
   opts: SsrCookieOptions = {},
 ): string {
+  // Cookie name must be a token — reject anything that could smuggle an
+  // attribute or a newline through the name (the value is encoded below).
+  if (!TOKEN_RE.test(name)) {
+    throw new Error(`pylon ssr: invalid cookie name ${JSON.stringify(name)}`);
+  }
   let c = `${name}=${encodeURIComponent(value)}`;
   if (opts.maxAge != null) c += `; Max-Age=${Math.floor(opts.maxAge)}`;
   if (opts.expires) {
-    c += `; Expires=${typeof opts.expires === "string" ? opts.expires : opts.expires.toUTCString()}`;
+    const exp =
+      typeof opts.expires === "string"
+        ? opts.expires
+        : opts.expires.toUTCString();
+    assertNoControlChars(exp, "cookie expires");
+    c += `; Expires=${exp}`;
   }
-  c += `; Path=${opts.path ?? "/"}`;
-  if (opts.domain) c += `; Domain=${opts.domain}`;
+  const path = opts.path ?? "/";
+  assertNoControlChars(path, "cookie path");
+  c += `; Path=${path}`;
+  if (opts.domain) {
+    assertNoControlChars(opts.domain, "cookie domain");
+    c += `; Domain=${opts.domain}`;
+  }
   if (opts.httpOnly !== false) c += `; HttpOnly`;
   if (opts.secure) c += `; Secure`;
   const ss = opts.sameSite ?? "lax";
@@ -118,29 +148,54 @@ interface ResponseState {
  * The per-render `response` controller handed to every page + layout in
  * props. Pylon already has a backend for data/mutations, so SSR's job is
  * just the response envelope: status, redirects, 404, and the occasional
- * Set-Cookie. Status/headers/cookies are read AFTER the shell renders, so
- * set them synchronously in the component body (before suspending).
+ * Set-Cookie.
+ *
+ * IMPORTANT — call these during the SYNCHRONOUS shell render (the
+ * component body, before any `await` / Suspense boundary). The HTTP head
+ * is committed when the shell is ready; status/headers/cookies set from a
+ * suspended subtree that streams in later are lost, and a redirect()/
+ * notFound() thrown below a Suspense boundary is caught by React's error
+ * handling rather than turned into a 3xx/404 (same constraint as Next's
+ * streaming SSR). Per render, not shared across requests.
  */
 export interface SsrResponse {
+  /** Set the HTTP status (100–599). Default 200. */
   setStatus(code: number): void;
+  /** Set a response header (name must be a token; value CR/LF/NUL-free). */
   setHeader(name: string, value: string): void;
+  /** Append a Set-Cookie. Defaults: HttpOnly + SameSite=Lax. */
   setCookie(name: string, value: string, opts?: SsrCookieOptions): void;
+  /** Throw to send a 3xx (default 307) + Location, no body. Shell-render only. */
   redirect(url: string, status?: number): never;
+  /** Throw to send a 404. Currently a fixed framework body (not-found.tsx not yet honored). Shell-render only. */
   notFound(): never;
 }
 
 function makeResponseController(state: ResponseState): SsrResponse {
   return {
     setStatus(code) {
+      if (!Number.isInteger(code) || code < 100 || code > 599) {
+        throw new Error(
+          `pylon ssr: setStatus() expects an HTTP status 100–599, got ${code}`,
+        );
+      }
       state.status = code;
     },
     setHeader(name, value) {
+      if (!TOKEN_RE.test(name)) {
+        throw new Error(`pylon ssr: invalid header name ${JSON.stringify(name)}`);
+      }
+      assertNoControlChars(value, "header value");
       state.headers[name.toLowerCase()] = value;
     },
     setCookie(name, value, opts) {
       state.cookies.push(serializeCookie(name, value, opts));
     },
     redirect(url, status = 307): never {
+      assertNoControlChars(url, "redirect url");
+      if (!Number.isInteger(status) || status < 300 || status > 399) {
+        throw new Error(`pylon ssr: redirect() status must be 3xx, got ${status}`);
+      }
       const e = new PylonRouteControl("redirect");
       e.url = url;
       e.redirectStatus = status;
@@ -164,7 +219,14 @@ function finalizeHeaders(
 ): Record<string, string> {
   const h: Record<string, string> = { ...state.headers, ...(extra ?? {}) };
   if (!h["content-type"]) h["content-type"] = "text/html; charset=utf-8";
-  if (state.cookies.length > 0) h["set-cookie"] = state.cookies.join("\n");
+  if (state.cookies.length > 0) {
+    // Preserve a set-cookie value set via setHeader() (rare) and join it
+    // with setCookie() entries rather than clobbering it. The host splits
+    // the newline-joined value into one Set-Cookie header each.
+    const existing = h["set-cookie"];
+    const all = existing ? [existing, ...state.cookies] : state.cookies;
+    h["set-cookie"] = all.join("\n");
+  }
   return h;
 }
 
