@@ -31,7 +31,7 @@ const DEFAULT_PORT: u16 = 4321;
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let port: u16 = args
         .windows(2)
-        .find(|w| w[0] == "--port")
+        .find(|w| w[0] == "--port" || w[0] == "-p")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(DEFAULT_PORT);
 

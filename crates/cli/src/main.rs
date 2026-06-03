@@ -72,6 +72,9 @@ fn run() -> ExitCode {
         // themselves. Everyone else falls back to the top-level usage.
         match positional.first().copied() {
             Some("logs") => return commands::cloud_logs::run(&args, json_mode),
+            // Commands with focused, flag-level help print it here. Help
+            // must never cause a side effect, so this only ever prints.
+            Some(cmd) if print_command_help(cmd) => return ExitCode::Ok,
             _ => {
                 print_usage();
                 return ExitCode::Ok;
@@ -209,6 +212,119 @@ const SCHEMA_SUBCOMMANDS: [&str; 5] = ["check", "diff", "push", "inspect", "hist
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
+
+/// Focused, flag-level `--help` for the commands that take flags worth
+/// documenting. Returns true if it printed help for `cmd`, false to let
+/// the caller fall back to the top-level usage. Prints only — no side
+/// effects — so `pylon <cmd> --help` never runs the command.
+fn print_command_help(cmd: &str) -> bool {
+    match cmd {
+        "dev" => {
+            println!("pylon dev — start the dev server with hot reload");
+            println!();
+            println!("Usage:");
+            println!("  pylon dev [app.ts] [--port <n>] [--json]");
+            println!();
+            println!("Serves your SSR frontend and API from one port. Regenerates the manifest");
+            println!("and typed client on every save and reloads on change. Loads .env and");
+            println!(".env.local automatically (walking up to the workspace root).");
+            println!();
+            println!("Arguments:");
+            println!("  app.ts            Manifest entry file (default: ./app.ts)");
+            println!();
+            println!("Options:");
+            println!("  -p, --port <n>    Port to listen on (default: 4321)");
+            println!("  --once            Build once and exit, no watcher (handy in CI)");
+            println!("  --json            Emit machine-readable JSON build/watch events");
+            println!("  -h, --help        Show this help");
+            println!();
+            println!("Environment:");
+            println!("  PYLON_DB_PATH              SQLite dev database (default: .pylon/dev.db)");
+            println!("  PYLON_FILES_DIR            Local file-storage directory");
+            println!("  PYLON_CORS_ORIGIN          Allowed CORS origin for the API");
+            println!("  PYLON_FRONTEND_DEV_PROXY   Proxy non-API GETs to an external frontend dev server");
+            println!("  PYLON_RATE_LIMIT_MAX       Per-IP request budget");
+            println!("  PYLON_FN_RATE_LIMIT_MAX    Per-IP function-call budget");
+            println!();
+            println!("Examples:");
+            println!("  pylon dev");
+            println!("  pylon dev --port 3000");
+            println!("  pylon dev app.ts --json");
+            true
+        }
+        "start" => {
+            println!("pylon start — run the production server (no watcher)");
+            println!();
+            println!("Usage:");
+            println!("  pylon start [app.ts] [--port <n>]");
+            println!();
+            println!("The same server as `dev`, without the file watcher or codegen. Expects an");
+            println!("already-built manifest + client — run `pylon build` first.");
+            println!();
+            println!("Options:");
+            println!("  -p, --port <n>    Port to listen on (default: 4321)");
+            println!("  -h, --help        Show this help");
+            println!();
+            println!("Environment:");
+            println!("  PYLON_DB_PATH     SQLite database file");
+            println!("  PYLON_FILES_DIR   Local file-storage directory");
+            println!("  PYLON_CORS_ORIGIN Allowed CORS origin for the API");
+            true
+        }
+        "build" => {
+            println!("pylon build — build for production");
+            println!();
+            println!("Usage:");
+            println!("  pylon build [app.ts] [--out <dir>] [--json]");
+            println!();
+            println!("Compiles the manifest, generates the typed client, and builds the SSR");
+            println!("frontend bundle. Run before `pylon start` or `pylon deploy`.");
+            println!();
+            println!("Options:");
+            println!("  --out <dir>          Output directory (default: .pylon)");
+            println!("  --manifest-out <f>   Manifest JSON output path");
+            println!("  --client-out <f>     Generated client output path");
+            println!("  --no-client          Skip typed-client codegen");
+            println!("  --no-static          Skip the frontend bundle");
+            println!("  --json               Machine-readable output");
+            println!("  -h, --help           Show this help");
+            true
+        }
+        "init" => {
+            println!("pylon init — scaffold a new project");
+            println!();
+            println!("Usage:");
+            println!("  pylon init [--frontend <f>] [--template <t>] [--yes]");
+            println!();
+            println!("Options:");
+            println!("  --frontend <f>       nextjs | react | tanstack | none");
+            println!("  --template <t>       Starter template");
+            println!("  --bun                Use bun as the package manager");
+            println!("  --yes, --no-prompt   Accept defaults, skip interactive prompts");
+            println!("  --overwrite          Allow writing into a non-empty directory");
+            println!("  -h, --help           Show this help");
+            true
+        }
+        "deploy" => {
+            println!("pylon deploy — deploy your app");
+            println!();
+            println!("Usage:");
+            println!("  pylon deploy [--target <target>] [--project <slug>]");
+            println!();
+            println!("Targets:");
+            println!("  cloud (default)      Pylon Cloud");
+            println!("  docker | fly | compose | workers | systemd | manifest");
+            println!();
+            println!("Options:");
+            println!("  --target <t>         Deploy target (default: cloud)");
+            println!("  --project <slug>     Cloud project to deploy to");
+            println!("  --out <dir>          Output directory (file-emitting targets)");
+            println!("  -h, --help           Show this help");
+            true
+        }
+        _ => false,
+    }
+}
 
 fn print_usage() {
     println!("pylon -- AI-native framework for web/mobile apps");

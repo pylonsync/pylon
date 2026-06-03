@@ -29,6 +29,11 @@ const VALUE_FLAGS: &[&str] = &[
     "--cwd",
 ];
 
+/// Short flags that consume the next arg as their value. `-p` is the
+/// short form of `--port` (dev/start) and `--project` (cloud commands);
+/// either way the following token is its value, not a positional.
+const VALUE_SHORT_FLAGS: &[&str] = &["-p"];
+
 /// Collect positional args (entry file path, etc.) from an argv slice,
 /// skipping the leading subcommand name + any `--flag value` pairs.
 pub fn collect_positional<'a>(args: &'a [String], subcommand: &str) -> Vec<&'a str> {
@@ -51,8 +56,13 @@ pub fn collect_positional<'a>(args: &'a [String], subcommand: &str) -> Vec<&'a s
             continue;
         }
         if a.starts_with('-') {
-            // Short flags. Pylon's CLI doesn't use value-bearing
-            // short flags today; if it ever does, extend this branch.
+            // Short flags. Value-bearing ones (e.g. `-p 3000`) consume the
+            // next token as their value, so it isn't mistaken for a
+            // positional. `-p=3000` is self-contained.
+            if !a.contains('=') && VALUE_SHORT_FLAGS.contains(&a) && i + 1 < args.len() {
+                i += 2;
+                continue;
+            }
             i += 1;
             continue;
         }
@@ -99,6 +109,20 @@ mod tests {
     fn skips_port_value_with_entry_before() {
         let args = s(&["dev", "schema.ts", "--port", "3001"]);
         assert_eq!(collect_positional(&args, "dev"), vec!["schema.ts"]);
+    }
+
+    /// `-p 3000` (short --port) must not leave 3000 as a positional —
+    /// otherwise dev treats it as the entry file ("not found: 3000").
+    #[test]
+    fn skips_short_port_value() {
+        let args = s(&["dev", "-p", "3000"]);
+        assert_eq!(collect_positional(&args, "dev"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn skips_short_port_value_with_entry() {
+        let args = s(&["dev", "-p", "3000", "app.ts"]);
+        assert_eq!(collect_positional(&args, "dev"), vec!["app.ts"]);
     }
 
     #[test]
