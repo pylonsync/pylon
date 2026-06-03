@@ -3927,48 +3927,23 @@ impl pylon_router::FnOps for FnOpsImpl {
                 // is the worst possible outcome: the caller sees success but
                 // the data isn't durable. A swallowed ROLLBACK failure leaves
                 // the connection in an unknown txn state for the next caller.
-                let result = match result {
+                // Phase 1 (write_conn HELD): COMMIT or ROLLBACK, and drain
+                // the buffered change events into an owned Vec. Do NOT append
+                // to the change log, broadcast, or flush schedules yet — every
+                // one of those re-acquires write_conn (crdt_snapshot inside
+                // broadcast_change_with_crdt for CRDT entities; the schedule-
+                // row insert inside flush_pending_schedules). std::sync::Mutex
+                // is NOT reentrant, so doing them while conn_guard is still
+                // held is a same-thread deadlock — the v0.3.219-class bug, this
+                // time via the CRDT-broadcast path (sendMessage / createChannel
+                // write CRDT entities, so every chat mutation hung). Capture
+                // the events, release the lock, THEN run side effects.
+                let committed: Result<
+                    ((serde_json::Value, FnTrace), Vec<pylon_sync::ChangeEvent>),
+                    FnCallError,
+                > = match result {
                     Ok(value) => match conn_guard.execute("COMMIT", []) {
-                        Ok(_) => {
-                            // Flush buffered change events NOW — after the
-                            // commit durably lands but before we return
-                            // success. Ordering matters: append to the log
-                            // first (so /api/sync/pull callers that race
-                            // with this broadcast see the row in the tail),
-                            // then notify WS/SSE subscribers. `seq` on each
-                            // pending event starts at 0; append assigns
-                            // the real seq.
-                            for ev in tx_store.take_pending() {
-                                let stored = self.change_log.append_with_prev(
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.clone(),
-                                    ev.prev_data.clone(),
-                                );
-                                // Route through `broadcast_change_with_crdt`
-                                // so CRDT subscribers get binary Loro frames
-                                // for function-driven writes, matching the
-                                // router pipeline's invariant.
-                                pylon_router::broadcast_change_with_crdt(
-                                    self.notifier.as_ref(),
-                                    self.runtime.as_ref(),
-                                    stored.seq,
-                                    &ev.entity,
-                                    &ev.row_id,
-                                    ev.kind.clone(),
-                                    ev.data.as_ref(),
-                                    ev.prev_data.as_ref(),
-                                );
-                            }
-                            // Same flush as the PG path — durable commit,
-                            // then flush schedules. Drop the guard
-                            // explicitly so the thread-local clears
-                            // before the result returns.
-                            self.flush_pending_schedules(sched_guard.take());
-                            drop(sched_guard);
-                            Ok(value)
-                        }
+                        Ok(_) => Ok((value, tx_store.take_pending())),
                         Err(commit_err) => {
                             // Best-effort cleanup. If ROLLBACK also fails the
                             // connection is in a bad state — at minimum the
@@ -3997,8 +3972,51 @@ impl pylon_router::FnOps for FnOpsImpl {
                         Err(handler_err)
                     }
                 };
-                // conn_guard drops here, releasing the lock.
-                result
+                // Release write_conn BEFORE any side effect that re-locks it.
+                // `tx_store` borrows `conn_guard`, so end the borrow first,
+                // then drop the guard.
+                drop(tx_store);
+                drop(conn_guard);
+
+                // Phase 2 (write_conn RELEASED): append to the change log,
+                // then broadcast (crdt_snapshot now re-locks write_conn
+                // freely), then flush deferred schedules. Ordering matters:
+                // append first so /api/sync/pull callers that race the
+                // broadcast see the row in the tail; `seq` starts at 0 and
+                // append assigns the real seq.
+                match committed {
+                    Ok((value, pending)) => {
+                        for ev in pending {
+                            let stored = self.change_log.append_with_prev(
+                                &ev.entity,
+                                &ev.row_id,
+                                ev.kind.clone(),
+                                ev.data.clone(),
+                                ev.prev_data.clone(),
+                            );
+                            pylon_router::broadcast_change_with_crdt(
+                                self.notifier.as_ref(),
+                                self.runtime.as_ref(),
+                                stored.seq,
+                                &ev.entity,
+                                &ev.row_id,
+                                ev.kind.clone(),
+                                ev.data.as_ref(),
+                                ev.prev_data.as_ref(),
+                            );
+                        }
+                        // Durable commit landed — flush deferred runAfter jobs.
+                        // Their schedule-row inserts need write_conn, now free.
+                        self.flush_pending_schedules(sched_guard.take());
+                        drop(sched_guard);
+                        Ok(value)
+                    }
+                    Err(e) => {
+                        // Rollback path: discard the buffered schedules.
+                        drop(sched_guard);
+                        Err(e)
+                    }
+                }
             }
             // Query + Action: no transaction wrap, but action handlers
             // CAN write via `ctx.db.X`. Without a broadcasting wrapper
@@ -5072,19 +5090,42 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         None,
                         None,
                     );
-                    match result {
-                        Ok((value, _trace)) => {
-                            if let Err(e) = conn_guard.execute("COMMIT", []) {
+                    // Phase 1 (write_conn HELD): COMMIT or ROLLBACK and drain
+                    // the buffered events. Defer append/broadcast/flush until
+                    // after the lock drops — broadcast_change_with_crdt's
+                    // crdt_snapshot re-locks write_conn (non-reentrant), so
+                    // running it here deadlocks the nested-mutation path
+                    // exactly like the top-level path did. Same class of bug.
+                    let committed: Result<
+                        (serde_json::Value, Vec<pylon_sync::ChangeEvent>),
+                        (String, String),
+                    > = match result {
+                        Ok((value, _trace)) => match conn_guard.execute("COMMIT", []) {
+                            Ok(_) => Ok((value, tx_store.take_pending())),
+                            Err(e) => {
                                 let _ = conn_guard.execute("ROLLBACK", []);
-                                return Err(("COMMIT_FAILED".into(), e.to_string()));
+                                Err(("COMMIT_FAILED".into(), e.to_string()))
                             }
-                            // Flush change events after COMMIT so nested
-                            // mutations (action → runMutation(...)) broadcast
-                            // the same way top-level mutations do. Without
-                            // this, every write an action emits is invisible
-                            // to sync subscribers until the NEXT top-level
-                            // mutation lands — streaming UIs stay empty.
-                            for ev in tx_store.take_pending() {
+                        },
+                        Err(e) => {
+                            let _ = conn_guard.execute("ROLLBACK", []);
+                            Err((e.code, e.message))
+                        }
+                    };
+                    // Release write_conn before any side effect that re-locks
+                    // it. End the tx_store borrow first, then drop the guard.
+                    drop(tx_store);
+                    drop(conn_guard);
+
+                    // Phase 2 (write_conn RELEASED): append + broadcast +
+                    // flush so nested mutations (action → runMutation(...))
+                    // propagate to subscribers the same way top-level
+                    // mutations do — without holding the write lock across
+                    // crdt_snapshot. Without the broadcast, nested writes
+                    // stay invisible until the next top-level mutation lands.
+                    match committed {
+                        Ok((value, pending)) => {
+                            for ev in pending {
                                 let stored = ops.change_log.append_with_prev(
                                     &ev.entity,
                                     &ev.row_id,
@@ -5092,10 +5133,6 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                     ev.data.clone(),
                                     ev.prev_data.clone(),
                                 );
-                                // Match the top-level flush: route
-                                // through `broadcast_change_with_crdt`
-                                // so CRDT subscribers get binary Loro
-                                // frames for nested-mutation writes.
                                 pylon_router::broadcast_change_with_crdt(
                                     ops.notifier.as_ref(),
                                     ops.runtime.as_ref(),
@@ -5112,9 +5149,8 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                             Ok(value)
                         }
                         Err(e) => {
-                            let _ = conn_guard.execute("ROLLBACK", []);
                             drop(sched_guard);
-                            Err((e.code, e.message))
+                            Err(e)
                         }
                     }
                 }
