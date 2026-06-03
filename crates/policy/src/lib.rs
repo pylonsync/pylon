@@ -350,6 +350,39 @@ impl PolicyEngine {
         PolicyResult::Allowed
     }
 
+    /// True if the entity's READ policy can NEVER permit any row for ANY
+    /// caller — an explicit deny (`allowRead: "false"` on every read rule).
+    ///
+    /// Unlike [`Self::check_entity_scan`], this does NOT bypass for admin.
+    /// It answers a narrower question — "should this entity ever be BULK-
+    /// replicated into a client snapshot?" — and the answer for an
+    /// explicitly deny-all table is NO, even for an admin. Admins still read
+    /// such a table via `/api/entities` or a server function (where the
+    /// admin bypass applies); they just don't get the whole table streamed
+    /// into their browser replica on every connect. This is what keeps a
+    /// large append-only deny-all table (e.g. an audit log) out of the sync
+    /// snapshot regardless of caller — without it, an admin session pulls
+    /// the entire ever-growing table every snapshot, which (with the
+    /// no-id-ceiling pager) never converges → a since=0 resync storm.
+    pub fn is_read_statically_denied(&self, entity_name: &str) -> bool {
+        let read_exprs: Vec<&str> = self
+            .entity_policies
+            .iter()
+            .filter(|p| p.entity.as_deref() == Some(entity_name))
+            .map(|p| Self::expr_for(p, EntityAction::Read))
+            .filter(|e| !e.is_empty())
+            .collect();
+        // No read rule at all → default-deny, which is per-caller and admin
+        // bypasses; that's not a deliberate "never sync" marker, so don't
+        // exclude it here.
+        if read_exprs.is_empty() {
+            return false;
+        }
+        // Every read rule is a literal `false` → no caller, admin included,
+        // can ever read a row, so it must never be bulk-snapshotted.
+        read_exprs.iter().all(|e| e.trim() == "false")
+    }
+
     /// Check if an entity write (insert/update/delete) is allowed.
     ///
     /// `data` is the incoming payload (for insert/update) or the existing row

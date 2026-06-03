@@ -162,22 +162,27 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 continue;
             }
         }
-        // Entity-level read short-circuit. If NO policy could permit any
-        // row for this caller — a static `allowRead: "false"`, or an auth
-        // gate the caller fails — skip the ENTIRE entity without reading a
-        // single page. Without this, a deny-all entity is still walked
-        // top-to-bottom every snapshot only to drop every row at the
-        // per-row fence below (`check_entity_read`); for a large
-        // append-only table (e.g. an audit log) that wasted read either
-        // dominates DB egress or cannot finish inside the request window,
-        // so the client never sees `has_more: false` and re-snapshots
-        // `since=0` forever (the 2026-06-03 pylon-cloud egress storm).
-        // `check_entity_scan` returns Allowed for data-dependent policies
-        // (tenant `exists(...)`, `data.X == auth.Y`), so those entities are
-        // still scanned and per-row filtered exactly as before — only
-        // statically-unreadable entities are dropped here. A client whose
-        // stale `snapshot_after` points into such an entity skips past it
-        // and converges instead of looping.
+        // Entity-level read short-circuits — skip the ENTIRE entity without
+        // reading a page, so a deny-all table never gets walked top-to-bottom
+        // only to drop every row at the per-row fence below. For a large
+        // append-only table (an audit log) that wasted read either dominates
+        // DB egress or can't finish inside the request window, so the client
+        // never sees `has_more: false` and re-snapshots `since=0` forever
+        // (the 2026-06-03 pylon-cloud egress storm).
+        //
+        // (1) `is_read_statically_denied` — a literal `allowRead: "false"`
+        // entity is never bulk-snapshotted to ANY caller, ADMIN INCLUDED.
+        // The admin bypass that `check_entity_scan` honors does NOT apply to
+        // bulk replication: an admin still reads the table via /api/entities
+        // or a function, but the whole ever-growing table is not streamed
+        // into their browser on every connect.
+        if ctx.policy_engine.is_read_statically_denied(&entity.name) {
+            continue;
+        }
+        // (2) Per-caller scan short-circuit (admin-bypassed): skip entities a
+        // non-admin caller can't read at all (a failing data-independent auth
+        // gate). Data-dependent tenant policies (`exists(...)`, `data.X ==
+        // auth.Y`) return Allowed and are still scanned + per-row filtered.
         if !matches!(
             ctx.policy_engine
                 .check_entity_scan(&entity.name, ctx.auth_ctx),

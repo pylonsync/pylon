@@ -422,6 +422,16 @@ fn cursor_advances_even_when_response_is_empty() {
 // ---------------------------------------------------------------------------
 #[test]
 fn deny_all_entity_excluded_from_snapshot() {
+    // Enable admin-token auth so we can prove the deny-all entity is
+    // excluded even for an ADMIN (the pylon-cloud case — the dashboard owner
+    // is an admin, so the policy deny was bypassed and AuditEvent looped).
+    // Inert for other tests; they never present this token. SAFETY: same
+    // single-threaded-setup rationale as start_server's PYLON_DEV_MODE.
+    const ADMIN_TOKEN: &str = "sync-proto-admin-token";
+    unsafe {
+        std::env::set_var("PYLON_ADMIN_TOKEN", ADMIN_TOKEN);
+    }
+
     let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
     let port = start_server(Arc::clone(&rt));
     let token = mint_guest(port);
@@ -459,5 +469,24 @@ fn deny_all_entity_excluded_from_snapshot() {
     assert!(
         resp["cursor"]["last_seq"].as_u64().unwrap() > 0,
         "cursor must advance off 0: {resp}"
+    );
+
+    // The case that actually bit pylon-cloud: an ADMIN. Admin bypasses the
+    // per-row read fence, but a snapshot is BULK replication — a deny-all
+    // table must never stream wholesale into ANY replica, admin included.
+    // Pre-fix the admin saw all 1500 Secret rows (policy bypassed) and the
+    // ever-growing table looped. `is_read_statically_denied` has no admin
+    // bypass, so it stays excluded.
+    let (admin_status, admin_resp) = pull(port, ADMIN_TOKEN, 0);
+    assert_eq!(admin_status, 200, "admin pull must succeed: {admin_resp}");
+    let admin_changes = admin_resp["changes"].as_array().unwrap();
+    assert!(
+        admin_changes.iter().all(|c| c["entity"] != "Secret"),
+        "deny-all Secret must be excluded even for ADMIN: {admin_resp}"
+    );
+    assert_eq!(
+        admin_resp["has_more"].as_bool().unwrap_or(false),
+        false,
+        "admin snapshot must converge too: {admin_resp}"
     );
 }
