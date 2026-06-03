@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pylon_kernel::{AppManifest, ManifestEntity, ManifestField};
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestPolicy};
 use pylon_runtime::Runtime;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{client, Message};
@@ -60,7 +60,18 @@ fn test_manifest() -> AppManifest {
         routes: vec![],
         queries: vec![],
         actions: vec![],
-        policies: vec![],
+        // `Todo` is intentionally public here: this test exercises the
+        // router → change-log → sync-pull seam, not auth. Without an
+        // explicit policy the secure `_default_deny` (added with the
+        // caller-aware policy work) correctly 403s an anonymous insert,
+        // which had silently rotted this test red. `allow: "true"` is the
+        // documented opt-in for a genuinely public entity.
+        policies: vec![ManifestPolicy {
+            name: "public_todo".into(),
+            entity: Some("Todo".into()),
+            allow: "true".into(),
+            ..Default::default()
+        }],
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
