@@ -410,8 +410,18 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
             })
             .collect();
 
+    // Uniqueness is scoped per kind-class: a navigable page, a `not-found`
+    // boundary, and an `error` boundary may all legitimately live at the
+    // same path (e.g. the root `/` has `app/page`, `app/not-found`, and
+    // `app/error`). Two pages — or two not-founds — at one path is still a
+    // duplicate. Key the seen-set by (kind, path).
     let mut seen_paths = std::collections::HashSet::new();
     for route in &schema.routes {
+        let kind_class = match route.kind.as_deref() {
+            Some("not-found") => "not-found",
+            Some("error") => "error",
+            _ => "page",
+        };
         if route.path.is_empty() {
             diagnostics.push(Diagnostic {
                 severity: Severity::Error,
@@ -430,7 +440,7 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
             });
         }
 
-        if !route.path.is_empty() && !seen_paths.insert(route.path.as_str()) {
+        if !route.path.is_empty() && !seen_paths.insert((kind_class, route.path.as_str())) {
             diagnostics.push(Diagnostic {
                 severity: Severity::Error,
                 code: "ROUTE_PATH_DUPLICATE".into(),
@@ -1157,6 +1167,50 @@ mod tests {
     fn route_duplicate_path() {
         let mut s = base_schema();
         s.routes = vec![make_route("/x", None, None), make_route("/x", None, None)];
+        let diags = validate(&s);
+        assert!(diags.iter().any(|d| d.code == "ROUTE_PATH_DUPLICATE"));
+    }
+
+    fn make_boundary(path: &str, kind: &str) -> ManifestRoute {
+        ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(format!("app{path}/{kind}").replace("//", "/")),
+            kind: Some(kind.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn route_boundary_shares_path_with_page() {
+        // A page, a not-found boundary, and an error boundary may all live
+        // at the same path — uniqueness is scoped per kind-class.
+        let mut s = base_schema();
+        s.routes = vec![
+            ManifestRoute {
+                path: "/".into(),
+                mode: "ssr".into(),
+                component: Some("app/page".into()),
+                ..Default::default()
+            },
+            make_boundary("/", "not-found"),
+            make_boundary("/", "error"),
+        ];
+        let diags = validate(&s);
+        assert!(
+            !diags.iter().any(|d| d.code == "ROUTE_PATH_DUPLICATE"),
+            "page + not-found + error at / should not be a duplicate: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn route_duplicate_boundary_same_kind() {
+        // Two not-found boundaries at the same path IS a duplicate.
+        let mut s = base_schema();
+        s.routes = vec![
+            make_boundary("/", "not-found"),
+            make_boundary("/", "not-found"),
+        ];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "ROUTE_PATH_DUPLICATE"));
     }

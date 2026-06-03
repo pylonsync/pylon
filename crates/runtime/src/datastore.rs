@@ -4076,6 +4076,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: FnAuth,
+        initial_status: Option<u16>,
         on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
         on_chunk: pylon_functions::runner::ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -4093,6 +4094,7 @@ impl pylon_router::FnOps for FnOpsImpl {
             headers,
             cookies,
             auth,
+            initial_status,
             on_response_start,
             on_chunk,
         )

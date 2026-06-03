@@ -40,6 +40,24 @@
       "layouts": [
         "app/layout"
       ]
+    },
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/not-found",
+      "layouts": [
+        "app/layout"
+      ],
+      "kind": "not-found"
+    },
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/error",
+      "layouts": [
+        "app/layout"
+      ],
+      "kind": "error"
     }
   ],
   "queries": [],

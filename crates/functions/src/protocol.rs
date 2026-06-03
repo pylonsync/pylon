@@ -107,6 +107,13 @@ pub struct RenderRouteMessage {
     pub headers: std::collections::HashMap<String, String>,
     pub cookies: std::collections::HashMap<String, String>,
     pub auth: AuthInfo,
+    /// Initial HTTP status the Bun-side response controller starts at.
+    /// `None` (default 200) for normal page renders; `Some(404)` when the
+    /// host dispatches a `not-found.tsx` render for an unmatched URL so the
+    /// boundary streams at 404 without the component calling `setStatus`.
+    /// Skipped on serialize when `None` so existing renders are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_status: Option<u16>,
 }
 
 impl RenderRouteMessage {
@@ -122,6 +129,7 @@ impl RenderRouteMessage {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: AuthInfo,
+        initial_status: Option<u16>,
     ) -> Self {
         Self {
             msg_type: "render_route",
@@ -135,6 +143,7 @@ impl RenderRouteMessage {
             headers,
             cookies,
             auth,
+            initial_status,
         }
     }
 }

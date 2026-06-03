@@ -671,6 +671,16 @@ pub struct ManifestRoute {
     /// when no layouts apply. Skipped on serialize when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layouts: Vec<String>,
+    /// Route kind. `None` (or `"page"`) is a normal navigable page.
+    /// `"not-found"` / `"error"` are SSR boundary modules discovered
+    /// from `app/**/not-found.tsx` and `app/**/error.tsx`. Boundary
+    /// routes are NOT matched as navigable URLs — the SSR host consults
+    /// them for unmatched-URL 404s (`not-found`) and render-failure 500s
+    /// (`error`); the `path` records the segment prefix the boundary
+    /// covers (`/` for root). Skipped on serialize when `None` so
+    /// page-only manifests stay byte-for-byte identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

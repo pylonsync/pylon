@@ -383,7 +383,22 @@ pub fn try_handle(
                 route = %matched.route.path,
                 "SSR match"
             );
-            return serve_via_ssr_rpc(cfg, matched, request, cors_origin);
+            return serve_via_ssr_rpc(cfg, matched, request, cors_origin, None);
+        }
+        // No page matched. If the app defines a `not-found.tsx` boundary
+        // and this looks like a document navigation (not a static asset),
+        // render the boundary at HTTP 404 instead of silently SPA-falling-
+        // back to the home shell at 200. Asset 404s and apps without a
+        // not-found boundary keep the existing fallthrough (proxy / disk).
+        if looks_like_document_nav(&url) {
+            if let Some(nf) = find_not_found_route(&url, &cfg.ssr_routes) {
+                tracing::debug!(url = %url, boundary = %nf.path, "SSR not-found");
+                let matched = SsrMatch {
+                    route: nf.clone(),
+                    params: std::collections::HashMap::new(),
+                };
+                return serve_via_ssr_rpc(cfg, matched, request, cors_origin, Some(404));
+            }
         }
     }
 
@@ -772,6 +787,12 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
         if r.mode != "ssr" {
             continue;
         }
+        // Boundary routes (not-found / error) are never navigable — they're
+        // consulted by the host for unmatched-URL 404s + render-failure
+        // 500s, not matched as page URLs.
+        if matches!(r.kind.as_deref(), Some("not-found") | Some("error")) {
+            continue;
+        }
         let route_segs: Vec<&str> = r.path.split('/').filter(|s| !s.is_empty()).collect();
         if route_segs.len() != url_segs.len() {
             continue;
@@ -800,6 +821,56 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
     None
 }
 
+/// Find the nearest `not-found.tsx` boundary covering an unmatched URL.
+///
+/// Among `kind == "not-found"` routes, pick the one whose segment path is
+/// the longest prefix of the request path — so `app/blog/not-found.tsx`
+/// (path `/blog`) covers `/blog/anything` and the root `app/not-found.tsx`
+/// (path `/`) covers everything else. Returns `None` when the app defines
+/// no not-found boundary, in which case the host keeps its default
+/// behaviour (SPA fallback / API 404).
+pub fn find_not_found_route<'a>(
+    url: &str,
+    routes: &'a [pylon_kernel::ManifestRoute],
+) -> Option<&'a pylon_kernel::ManifestRoute> {
+    let path = url.split('?').next().unwrap_or(url);
+    let url_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut best: Option<(&pylon_kernel::ManifestRoute, usize)> = None;
+    for r in routes {
+        if r.mode != "ssr" || r.kind.as_deref() != Some("not-found") {
+            continue;
+        }
+        let route_segs: Vec<&str> = r.path.split('/').filter(|s| !s.is_empty()).collect();
+        // A boundary at `/a/b` covers `/a/b/...`; its segments must be a
+        // prefix of the URL's. The root boundary (no segments) covers all.
+        if route_segs.len() > url_segs.len() {
+            continue;
+        }
+        let is_prefix = route_segs
+            .iter()
+            .zip(url_segs.iter())
+            .all(|(rs, us)| rs == us);
+        if is_prefix {
+            let depth = route_segs.len();
+            if best.map_or(true, |(_, d)| depth > d) {
+                best = Some((r, depth));
+            }
+        }
+    }
+    best.map(|(r, _)| r)
+}
+
+/// True when `url`'s last path segment carries no file extension, i.e. it
+/// looks like a document navigation (`/blog/missing`) rather than a static
+/// asset request (`/favicon.ico`, `/assets/app.css`). Used to gate the
+/// not-found render so a 404'd asset still falls through to disk instead of
+/// being answered with an HTML boundary.
+fn looks_like_document_nav(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    let last = path.rsplit('/').next().unwrap_or("");
+    !last.contains('.')
+}
+
 /// Dispatch a matched SSR request to the Bun-side renderer via the
 /// `render_route` RPC and serve the response.
 ///
@@ -816,6 +887,7 @@ fn serve_via_ssr_rpc(
     matched: SsrMatch,
     request: Request,
     cors_origin: &str,
+    initial_status: Option<u16>,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
         Some(f) => f.clone(),
@@ -929,6 +1001,7 @@ fn serve_via_ssr_rpc(
                 headers_map,
                 cookies_map,
                 auth,
+                initial_status,
                 Some(on_response_start),
                 on_chunk,
             );
@@ -1503,6 +1576,69 @@ mod tests {
         if let Some(v) = saved_proxy {
             std::env::set_var("PYLON_FRONTEND_DEV_PROXY", v);
         }
+    }
+
+    // --- SSR boundary routing (match_ssr_route / find_not_found_route) ---
+
+    fn route(path: &str, kind: Option<&str>) -> pylon_kernel::ManifestRoute {
+        pylon_kernel::ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(format!("app{path}").replace("//", "/")),
+            kind: kind.map(|k| k.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn match_ssr_route_skips_boundary_kinds() {
+        let routes = vec![
+            route("/", None),
+            route("/", Some("not-found")),
+            route("/", Some("error")),
+        ];
+        // A navigable URL matches the page, never a boundary.
+        let m = match_ssr_route("/", &routes).expect("page / should match");
+        assert_eq!(m.route.kind, None, "matched the page, not a boundary");
+    }
+
+    #[test]
+    fn find_not_found_root_covers_unmatched() {
+        let routes = vec![route("/", None), route("/", Some("not-found"))];
+        let nf = find_not_found_route("/anything/here", &routes)
+            .expect("root not-found covers any unmatched URL");
+        assert_eq!(nf.kind.as_deref(), Some("not-found"));
+        assert_eq!(nf.path, "/");
+    }
+
+    #[test]
+    fn find_not_found_prefers_longest_prefix() {
+        let routes = vec![
+            route("/", Some("not-found")),
+            route("/blog", Some("not-found")),
+        ];
+        // A /blog/* miss is covered by the /blog boundary, not the root.
+        let nf = find_not_found_route("/blog/missing-post", &routes).unwrap();
+        assert_eq!(nf.path, "/blog");
+        // A /other miss falls back to the root boundary.
+        let nf2 = find_not_found_route("/other", &routes).unwrap();
+        assert_eq!(nf2.path, "/");
+    }
+
+    #[test]
+    fn find_not_found_none_when_no_boundary() {
+        let routes = vec![route("/", None), route("/blog", None)];
+        assert!(find_not_found_route("/missing", &routes).is_none());
+    }
+
+    #[test]
+    fn document_nav_excludes_assets() {
+        assert!(looks_like_document_nav("/blog/missing"));
+        assert!(looks_like_document_nav("/"));
+        assert!(looks_like_document_nav("/deep/path?q=1"));
+        assert!(!looks_like_document_nav("/favicon.ico"));
+        assert!(!looks_like_document_nav("/assets/app.css"));
+        assert!(!looks_like_document_nav("/img/logo.png?v=2"));
     }
 
     // --- SSR response_start header construction (build_ssr_response_headers) ---

@@ -324,6 +324,15 @@ export interface RouteDefinition {
    * as `children`. Only relevant for `mode === "ssr"`.
    */
   layouts?: string[];
+  /**
+   * Route kind. Omitted (or `"page"`) is a normal navigable page.
+   * `"not-found"` / `"error"` are SSR boundary modules discovered from
+   * `app/.../not-found.tsx` and `app/.../error.tsx`. Boundary routes are
+   * NOT matched as navigable URLs — the host renders `not-found` for
+   * unmatched URLs (HTTP 404) and `error` on render failure (HTTP 500).
+   * `path` records the segment prefix the boundary covers (`/` for root).
+   */
+  kind?: "page" | "not-found" | "error";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -497,6 +506,8 @@ export interface ManifestRoute {
   auth?: string;
   component?: string;
   layouts?: string[];
+  /** "not-found" / "error" boundary modules; omitted for normal pages. */
+  kind?: "page" | "not-found" | "error";
 }
 
 export interface ManifestInputField {
@@ -637,6 +648,7 @@ export function routesToManifest(routes: RouteDefinition[]): ManifestRoute[] {
     if (r.auth) result.auth = r.auth;
     if (r.component) result.component = r.component;
     if (r.layouts && r.layouts.length > 0) result.layouts = r.layouts;
+    if (r.kind && r.kind !== "page") result.kind = r.kind;
     return result;
   });
 }
@@ -701,7 +713,23 @@ export async function discoverAppRoutes(opts?: {
     component: string;
     layouts: string[];
   };
+  type BoundaryHit = {
+    segments: string[];
+    component: string;
+    layouts: string[];
+    kind: "not-found" | "error";
+  };
   const pages: PageHit[] = [];
+  const boundaries: BoundaryHit[] = [];
+
+  // Resolve the first existing `<base>.{tsx,ts,jsx,js}` in `dir` and
+  // return it as a cwd-relative, extension-less module path (or null).
+  const findModule = (dir: string, base: string): string | null => {
+    const hit = [`${base}.tsx`, `${base}.ts`, `${base}.jsx`, `${base}.js`]
+      .map((n: string) => path.join(dir, n))
+      .find((p: string) => fs.existsSync(p));
+    return hit ? path.relative(cwd, hit).replace(/\.(tsx?|jsx?)$/, "") : null;
+  };
 
   function walk(dir: string, segments: string[], layouts: string[]): void {
     let entries: Array<{ name: string; isDirectory(): boolean }>;
@@ -710,30 +738,36 @@ export async function discoverAppRoutes(opts?: {
     } catch {
       return;
     }
-    const layoutHere = [
-      "layout.tsx",
-      "layout.ts",
-      "layout.jsx",
-      "layout.js",
-    ]
-      .map((n) => path.join(dir, n))
-      .find((p) => fs.existsSync(p));
-    const nextLayouts = layoutHere
-      ? [
-          ...layouts,
-          path.relative(cwd, layoutHere).replace(/\.(tsx?|jsx?)$/, ""),
-        ]
-      : layouts;
-    const pageHere = ["page.tsx", "page.ts", "page.jsx", "page.js"]
-      .map((n) => path.join(dir, n))
-      .find((p) => fs.existsSync(p));
+    const layoutHere = findModule(dir, "layout");
+    const nextLayouts = layoutHere ? [...layouts, layoutHere] : layouts;
+    const pageHere = findModule(dir, "page");
     if (pageHere) {
       pages.push({
         segments: [...segments],
-        component: path
-          .relative(cwd, pageHere)
-          .replace(/\.(tsx?|jsx?)$/, ""),
+        component: pageHere,
         layouts: nextLayouts,
+      });
+    }
+    // Boundary modules (not-found.tsx / error.tsx) co-located with a
+    // segment. They wrap in the layouts ABOVE them (nextLayouts) so the
+    // root not-found renders inside the root shell. The host consults
+    // these for unmatched-URL 404s + render-failure 500s.
+    const notFoundHere = findModule(dir, "not-found");
+    if (notFoundHere) {
+      boundaries.push({
+        segments: [...segments],
+        component: notFoundHere,
+        layouts: nextLayouts,
+        kind: "not-found",
+      });
+    }
+    const errorHere = findModule(dir, "error");
+    if (errorHere) {
+      boundaries.push({
+        segments: [...segments],
+        component: errorHere,
+        layouts: nextLayouts,
+        kind: "error",
       });
     }
     for (const e of entries) {
@@ -762,16 +796,32 @@ export async function discoverAppRoutes(opts?: {
     return a.segments.length - b.segments.length;
   });
 
-  return pages.map((p) => ({
-    path:
-      "/" +
-      p.segments
-        .map((s) => (isParam(s) ? `:${s.slice(1, -1)}` : s))
-        .join("/"),
+  const segmentsToPath = (segments: string[]): string =>
+    "/" +
+    segments.map((s) => (isParam(s) ? `:${s.slice(1, -1)}` : s)).join("/");
+
+  const pageRoutes: RouteDefinition[] = pages.map((p) => ({
+    path: segmentsToPath(p.segments),
     mode: "ssr" as const,
     component: p.component,
     layouts: p.layouts,
   }));
+
+  // Boundary routes carry `kind` and the segment-prefix path. The host
+  // never matches them as navigable URLs; it picks the longest-prefix
+  // not-found for an unmatched URL. Sorted deepest-first so prefix
+  // selection is stable.
+  const boundaryRoutes: RouteDefinition[] = boundaries
+    .sort((a, b) => b.segments.length - a.segments.length)
+    .map((b) => ({
+      path: segmentsToPath(b.segments),
+      mode: "ssr" as const,
+      component: b.component,
+      layouts: b.layouts,
+      kind: b.kind,
+    }));
+
+  return [...pageRoutes, ...boundaryRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {

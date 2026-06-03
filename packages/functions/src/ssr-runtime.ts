@@ -55,6 +55,14 @@ export interface RenderRouteMessage {
     tenant_id: string | null;
     roles: string[];
   };
+  /**
+   * Initial HTTP status the response controller starts at (default 200).
+   * The host sets this to 404 when dispatching a `not-found.tsx` render
+   * for an unmatched URL, so the boundary streams at 404 without the
+   * component having to call `response.setStatus`. A page can still
+   * override it via `response.setStatus`.
+   */
+  initial_status?: number;
 }
 
 type Send = (msg: Record<string, unknown>) => void;
@@ -167,7 +175,12 @@ export interface SsrResponse {
   setCookie(name: string, value: string, opts?: SsrCookieOptions): void;
   /** Throw to send a 3xx (default 307) + Location, no body. Shell-render only. */
   redirect(url: string, status?: number): never;
-  /** Throw to send a 404. Currently a fixed framework body (not-found.tsx not yet honored). Shell-render only. */
+  /**
+   * Throw to send a 404. Renders the nearest `not-found.tsx` (walking up
+   * from the page's directory, wrapped in the route's layout chain), or a
+   * minimal framework body if none is defined. Shell-render only — a throw
+   * below a Suspense boundary is swallowed by React.
+   */
   notFound(): never;
 }
 
@@ -364,14 +377,207 @@ async function buildLayoutTree(
   return tree;
 }
 
+/**
+ * Walk up from a page's directory to the nearest boundary file
+ * (not-found / error) — the same render-time, filesystem-resolved model
+ * the page + layouts already use, so no build-time manifest threading.
+ * Returns the project-relative path (no extension) or null.
+ */
+function findBoundary(componentPath: string, fileName: string): string | null {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const cwd = process.cwd();
+  // Component paths use "/" — walk up directory by directory.
+  let dir = componentPath.replace(/\\/g, "/");
+  dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+  while (dir && dir !== "." && dir !== "/") {
+    for (const ext of MODULE_EXTS) {
+      if (fs.existsSync(path.join(cwd, dir, `${fileName}${ext}`))) {
+        return `${dir}/${fileName}`;
+      }
+    }
+    const slash = dir.lastIndexOf("/");
+    dir = slash >= 0 ? dir.slice(0, slash) : "";
+  }
+  return null;
+}
+
+/**
+ * Drain a `renderToReadableStream` reader, injecting `headBlob` immediately
+ * before the first `</head>` (or, if the document has none, the blob is
+ * never emitted — fragment renders have no head). `</head>` can straddle a
+ * chunk boundary, so a small carry buffer (len("</head>") − 1 bytes) is
+ * withheld at each chunk's tail until the next read confirms the match.
+ * Each emitted slice is handed to `sendChunk` as utf-8 text.
+ *
+ * Shared by the page render and the boundary render so head injection has
+ * exactly one implementation.
+ */
+async function streamWithHeadInjection(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  headBlob: string,
+  sendChunk: (text: string) => void,
+): Promise<void> {
+  let headInjected = headBlob.length === 0;
+  let carry = "";
+  const HEAD_CLOSE = "</head>";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (!value || value.byteLength === 0) continue;
+    const text = Buffer.from(value).toString("utf8");
+    if (!headInjected) {
+      const combined = carry + text;
+      const idx = combined.indexOf(HEAD_CLOSE);
+      if (idx >= 0) {
+        sendChunk(combined.slice(0, idx));
+        sendChunk(headBlob);
+        sendChunk(HEAD_CLOSE);
+        const after = combined.slice(idx + HEAD_CLOSE.length);
+        if (after) sendChunk(after);
+        headInjected = true;
+        carry = "";
+      } else {
+        const keep = HEAD_CLOSE.length - 1;
+        if (combined.length > keep) {
+          sendChunk(combined.slice(0, combined.length - keep));
+          carry = combined.slice(combined.length - keep);
+        } else {
+          carry = combined;
+        }
+      }
+    } else {
+      sendChunk(text);
+    }
+  }
+  if (carry) sendChunk(carry);
+}
+
+/**
+ * Build the <head> blob for a boundary render: the union of every route's
+ * stylesheet links from the client build manifest. Boundary modules aren't
+ * bundled as their own client entry, but they render inside the same
+ * layout/shell as pages, so without the app's global CSS a 404/500 page
+ * would look broken. Returns "" if the manifest can't be loaded — the
+ * boundary still renders (unstyled); CSS must never block the error path.
+ */
+async function collectBoundaryHeadBlob(): Promise<string> {
+  try {
+    const { getManifest } = await import("./ssr-client-bundler");
+    const manifest = await getManifest();
+    const prefix = manifest.public_prefix || "/_pylon/build/";
+    const seen = new Set<string>();
+    let blob = "";
+    for (const route of Object.values(manifest.routes || {}) as any[]) {
+      for (const css of (route.css || []) as string[]) {
+        if (seen.has(css)) continue;
+        seen.add(css);
+        blob += `<link rel="stylesheet" href="${prefix}${css}">`;
+      }
+    }
+    return blob;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Render a boundary (not-found/error) tree and stream it as the response
+ * body at `status`. Boundaries render server-side only (no hydration
+ * payload) — they're informational pages, consistent with the keystone's
+ * fixed 404 body that this replaces — but they DO get the app's global
+ * stylesheet injected so they match the rest of the site.
+ */
+async function renderBoundaryToClient(
+  React: any,
+  renderToReadableStream: any,
+  tree: any,
+  send: Send,
+  callId: string,
+  status: number,
+  headers: Record<string, string>,
+): Promise<void> {
+  const stream: ReadableStream<Uint8Array> = await renderToReadableStream(tree, {
+    onError(e: unknown) {
+      // eslint-disable-next-line no-console
+      console.error("[ssr] boundary render error:", e);
+    },
+  });
+  const headBlob = await collectBoundaryHeadBlob();
+  // renderToReadableStream resolved without throwing → safe to commit the
+  // head now, then drain the (already-rendered) shell, injecting CSS.
+  send({ type: "response_start", call_id: callId, status, headers });
+  const sendChunk = (text: string) => {
+    if (!text) return;
+    send({
+      type: "render_chunk",
+      call_id: callId,
+      data: Buffer.from(text, "utf8").toString("base64"),
+    });
+  };
+  await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+  send({ type: "render_done", call_id: callId });
+}
+
+/**
+ * Resolve + render a boundary component wrapped in the route's layout
+ * chain. Returns true if it rendered (caller returns), false to fall back.
+ */
+async function tryRenderBoundary(
+  opts: {
+    React: any;
+    renderToReadableStream: any;
+    cwd: string;
+    componentPath: string;
+    fileName: "not-found" | "error";
+    layouts: string[] | undefined;
+    props: any;
+    send: Send;
+    callId: string;
+    status: number;
+    headers: Record<string, string>;
+  },
+): Promise<boolean> {
+  const { React, renderToReadableStream, cwd, componentPath, fileName, layouts, props, send, callId, status, headers } =
+    opts;
+  if (!React || !renderToReadableStream || !props) return false;
+  const rel = findBoundary(componentPath, fileName);
+  if (!rel) return false;
+  try {
+    const mod = await importModule(cwd, rel);
+    const Comp = mod.default ?? mod.Component ?? mod.NotFound ?? mod.Error;
+    if (typeof Comp !== "function") return false;
+    let tree = React.createElement(Comp, props);
+    tree = await buildLayoutTree(cwd, tree, layouts, props, React);
+    await renderBoundaryToClient(React, renderToReadableStream, tree, send, callId, status, headers);
+    return true;
+  } catch (e) {
+    // Boundary render itself failed — no tertiary fallback; let the caller
+    // emit its default (fixed 404 body / type:"error" → 500).
+    // eslint-disable-next-line no-console
+    console.error(`[ssr] ${fileName}.tsx boundary failed to render:`, e);
+    return false;
+  }
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
 ): Promise<void> {
   // Declared OUTSIDE the try so the catch can read page-set status/
   // cookies when turning a redirect()/notFound() throw into a response.
-  const responseState: ResponseState = { status: 200, headers: {}, cookies: [] };
+  const responseState: ResponseState = {
+    status: msg.initial_status ?? 200,
+    headers: {},
+    cookies: [],
+  };
   const response = makeResponseController(responseState);
+  // Hoisted out of the try so the catch can render not-found.tsx /
+  // error.tsx boundaries (which need React + the renderer + cwd + props).
+  const cwd = process.cwd();
+  let React: any = null;
+  let renderToReadableStream: any = null;
+  let props: any = null;
   try {
     // react + react-dom are USER deps. ssr-runtime.ts lives in
     // packages/functions/src/, but the user's react install is under
@@ -379,7 +585,6 @@ export async function handleRenderRoute(
     // would resolve against pylon's own node_modules (which doesn't
     // declare react), so we route through a Bun-resolveSync against
     // the user's cwd.
-    const cwd = process.cwd();
     const resolveFromUser = (spec: string): string =>
       (Bun as any).resolveSync
         ? (Bun as any).resolveSync(spec, cwd)
@@ -405,8 +610,8 @@ export async function handleRenderRoute(
     const reactImport = await import(
       /* @vite-ignore */ resolveFromUser("react")
     );
-    const React = reactImport.default ?? reactImport;
-    const renderToReadableStream =
+    React = reactImport.default ?? reactImport;
+    renderToReadableStream =
       reactDomServerImport.renderToReadableStream ??
       reactDomServerImport.default?.renderToReadableStream;
     if (typeof renderToReadableStream !== "function") {
@@ -431,7 +636,7 @@ export async function handleRenderRoute(
       );
     }
 
-    const props = {
+    props = {
       url: msg.url,
       params: msg.params,
       searchParams: msg.search_params,
@@ -530,16 +735,25 @@ export async function handleRenderRoute(
       for (const chunk of preloadManifestRoute.imports) {
         headBlob += `<link rel="modulepreload" href="${preloadPublicPrefix}${chunk}">`;
       }
+    } else {
+      // No per-route client entry. This is the unmatched-URL not-found
+      // dispatch (the host renders `app/not-found` by name at 404) or any
+      // other component without a hydration bundle. It still renders inside
+      // the app shell, so inject the global stylesheet(s) — otherwise the
+      // 404 page is unstyled. Hydration stays disabled (handled below).
+      headBlob += await collectBoundaryHeadBlob();
     }
 
-    // Stream-rewrite: watch for `</head>` and inject `headBlob`
-    // before it. `</head>` may straddle chunk boundaries so we
-    // keep a small carry buffer (7 bytes — len("</head>")) at the
-    // tail of each chunk.
-    const reader = stream.getReader();
-    let headInjected = headBlob.length === 0;
-    let carry = ""; // utf8 tail from previous chunk for boundary detection
-    const HEAD_CLOSE = "</head>";
+    // The host can dispatch a boundary module (`app/not-found` / `app/error`)
+    // by name for an unmatched-URL 404. Boundaries render server-only — no
+    // hydration payload, and no "hydration disabled" warning (that warning is
+    // for a real page whose client bundle is missing).
+    const isBoundaryComponent = /(^|\/)(not-found|error)$/.test(msg.component);
+
+    // Stream-rewrite: watch for `</head>` and inject `headBlob` before it.
+    // `</head>` may straddle chunk boundaries; the shared helper keeps a
+    // small carry buffer to catch a split tag. base64 of each utf-8 slice
+    // happens in `sendChunk` (Buffer ships with Bun).
     const sendChunk = (text: string) => {
       if (!text) return;
       send({
@@ -548,50 +762,7 @@ export async function handleRenderRoute(
         data: Buffer.from(text, "utf8").toString("base64"),
       });
     };
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      let text = Buffer.from(value).toString("utf8");
-      if (!headInjected) {
-        const combined = carry + text;
-        const idx = combined.indexOf(HEAD_CLOSE);
-        if (idx >= 0) {
-          // Send everything up to the </head> position, then the
-          // headBlob, then </head>, then the remainder.
-          const before = combined.slice(0, idx);
-          const after = combined.slice(idx + HEAD_CLOSE.length);
-          // Drop the carry portion from `before` that we already
-          // emitted as part of the previous chunk's send. But since
-          // we DIDN'T emit `carry` previously (it was withheld), we
-          // can send the full `before` here.
-          sendChunk(before);
-          sendChunk(headBlob);
-          sendChunk(HEAD_CLOSE);
-          if (after) sendChunk(after);
-          headInjected = true;
-          carry = "";
-        } else {
-          // No </head> yet — emit everything except the last
-          // (HEAD_CLOSE.length - 1) bytes so a tag split across
-          // chunk boundaries still gets caught next pass.
-          const keep = HEAD_CLOSE.length - 1;
-          if (combined.length > keep) {
-            sendChunk(combined.slice(0, combined.length - keep));
-            carry = combined.slice(combined.length - keep);
-          } else {
-            carry = combined;
-          }
-        }
-      } else {
-        // base64 in pure JS via Buffer (Bun ships it). For large
-        // pages this is O(n) per chunk; fine for Phase 1.
-        sendChunk(text);
-      }
-    }
-    // Flush any residual carry (head close never seen — page
-    // didn't have a </head>, which is fine for fragment renders).
-    if (carry) sendChunk(carry);
+    await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
 
     // Hydration tail. After React's stream EOFs we append the
     // hydration markers so the browser can hydrate:
@@ -611,28 +782,30 @@ export async function handleRenderRoute(
     // and `getManifest` parses with mtime-keyed caching. Falls back
     // to a no-hydration warning if the manifest can't be loaded
     // (rare — usually means the bundler crashed).
-    const hydrationPayload = {
-      component: msg.component,
-      layouts: msg.layouts ?? [],
-      props,
-    };
-    const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
+    if (!isBoundaryComponent) {
+      const hydrationPayload = {
+        component: msg.component,
+        layouts: msg.layouts ?? [],
+        props,
+      };
+      const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
 
-    let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
-    if (preloadManifestRoute) {
-      // Per-route entry script comes last — it needs the inline
-      // `__PYLON_DATA__` above to have been parsed before it runs.
-      // CSS + modulepreload links were already injected into `<head>`
-      // above so they could start fetching as early as possible.
-      tail += `<script type="module" src="${preloadPublicPrefix}${preloadManifestRoute.file}"></script>`;
-    } else {
-      tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${preloadManifestErr}`)})</script>`;
+      let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
+      if (preloadManifestRoute) {
+        // Per-route entry script comes last — it needs the inline
+        // `__PYLON_DATA__` above to have been parsed before it runs.
+        // CSS + modulepreload links were already injected into `<head>`
+        // above so they could start fetching as early as possible.
+        tail += `<script type="module" src="${preloadPublicPrefix}${preloadManifestRoute.file}"></script>`;
+      } else {
+        tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${preloadManifestErr}`)})</script>`;
+      }
+      send({
+        type: "render_chunk",
+        call_id: msg.call_id,
+        data: Buffer.from(tail, "utf8").toString("base64"),
+      });
     }
-    send({
-      type: "render_chunk",
-      call_id: msg.call_id,
-      data: Buffer.from(tail, "utf8").toString("base64"),
-    });
 
     send({ type: "render_done", call_id: msg.call_id });
   } catch (err: any) {
@@ -650,7 +823,26 @@ export async function handleRenderRoute(
         send({ type: "render_done", call_id: msg.call_id });
         return;
       }
-      // notFound() → 404 with a minimal body (until not-found.tsx wiring).
+      // notFound() → look for the nearest not-found.tsx walking up from the
+      // page's directory; render it (wrapped in the route's layouts) at 404.
+      // Falls back to a minimal framework body if none is defined.
+      if (
+        await tryRenderBoundary({
+          React,
+          renderToReadableStream,
+          cwd,
+          componentPath: msg.component,
+          fileName: "not-found",
+          layouts: msg.layouts,
+          props,
+          send,
+          callId: msg.call_id,
+          status: 404,
+          headers: finalizeHeaders(responseState),
+        })
+      ) {
+        return;
+      }
       const body404 =
         '<!DOCTYPE html><html><head><meta charset="utf-8"><title>404 — Not Found</title></head><body><h1>404</h1><p>This page could not be found.</p></body></html>';
       send({
@@ -667,7 +859,27 @@ export async function handleRenderRoute(
       send({ type: "render_done", call_id: msg.call_id });
       return;
     }
-    // Real pre-first-chunk error → host returns 500.
+    // Real pre-first-chunk error → look for the nearest error.tsx walking up
+    // from the page's directory; render it (wrapped in the route's layouts)
+    // at 500 with the thrown error passed in props. Falls back to a host-level
+    // 500 (type:"error") if none is defined or the boundary itself throws.
+    if (
+      await tryRenderBoundary({
+        React,
+        renderToReadableStream,
+        cwd,
+        componentPath: msg.component,
+        fileName: "error",
+        layouts: msg.layouts,
+        props: props ? { ...props, error: err } : null,
+        send,
+        callId: msg.call_id,
+        status: 500,
+        headers: finalizeHeaders(responseState),
+      })
+    ) {
+      return;
+    }
     send({
       type: "error",
       call_id: msg.call_id,

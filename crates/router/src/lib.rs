@@ -522,6 +522,7 @@ pub trait FnOps: Send + Sync {
         _headers: std::collections::HashMap<String, String>,
         _cookies: std::collections::HashMap<String, String>,
         _auth: pylon_functions::protocol::AuthInfo,
+        _initial_status: Option<u16>,
         _on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
         _on_chunk: pylon_functions::runner::ByteStreamCallback,
     ) -> Result<(), pylon_functions::runner::FnCallError> {

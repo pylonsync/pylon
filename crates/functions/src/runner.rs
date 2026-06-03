@@ -536,6 +536,7 @@ impl FnRunner {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
+        initial_status: Option<u16>,
         on_response_start: Option<ResponseStartCallback>,
         on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -550,6 +551,7 @@ impl FnRunner {
             headers,
             cookies,
             auth,
+            initial_status,
             on_response_start,
             on_chunk,
         )
@@ -568,6 +570,7 @@ impl FnRunner {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
+        initial_status: Option<u16>,
         mut on_response_start: Option<ResponseStartCallback>,
         mut on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -587,6 +590,7 @@ impl FnRunner {
             headers,
             cookies,
             auth,
+            initial_status,
         );
         self.send(&msg)?;
 
