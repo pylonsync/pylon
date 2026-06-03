@@ -310,6 +310,60 @@ function renderMetadata(React: any, m: SsrMetadata | undefined): any {
   return kids.length > 0 ? el(React.Fragment, null, ...kids) : null;
 }
 
+const MODULE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
+
+/** Import a project-relative module, trying each common extension. */
+async function importModule(cwd: string, relPath: string): Promise<any> {
+  const base = `${cwd}/${relPath}`;
+  let lastErr: unknown = null;
+  for (const ext of MODULE_EXTS) {
+    try {
+      return await import(`${base}${ext}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr ?? new Error(`could not import module "${relPath}"`);
+}
+
+/**
+ * Wrap a leaf element in its layout chain (leaf → root). Resolves ALL
+ * layouts first so a missing one fails before any chunk is emitted. Reused
+ * by the page render and by the not-found / error boundary render.
+ */
+async function buildLayoutTree(
+  cwd: string,
+  leaf: any,
+  layouts: string[] | undefined,
+  props: any,
+  React: any,
+): Promise<any> {
+  if (!layouts || layouts.length === 0) return leaf;
+  const layoutComps: any[] = [];
+  for (const layoutPath of layouts) {
+    let lMod: any;
+    try {
+      lMod = await importModule(cwd, layoutPath);
+    } catch {
+      throw new Error(
+        `could not import layout "${layoutPath}" — checked .tsx / .ts / .jsx / .js`,
+      );
+    }
+    const LayoutComp = lMod.default ?? lMod.Layout ?? lMod.layout;
+    if (typeof LayoutComp !== "function") {
+      throw new Error(
+        `layout "${layoutPath}" has no default export (or named export "Layout")`,
+      );
+    }
+    layoutComps.push(LayoutComp);
+  }
+  let tree = leaf;
+  for (let i = layoutComps.length - 1; i >= 0; i--) {
+    tree = React.createElement(layoutComps[i], props, tree);
+  }
+  return tree;
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
@@ -361,23 +415,14 @@ export async function handleRenderRoute(
       );
     }
 
-    // Resolve the page module. The component string is project-
-    // relative without extension; try .tsx → .ts → .jsx → .js so
-    // any of the common page-file shapes work. cwd was captured
-    // above for the react resolver.
-    const baseName = `${cwd}/${msg.component}`;
-    let mod: any = null;
-    let lastErr: unknown = null;
-    for (const ext of [".tsx", ".ts", ".jsx", ".js"]) {
-      try {
-        mod = await import(`${baseName}${ext}`);
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    if (!mod) {
-      throw lastErr ?? new Error(`could not import component "${msg.component}"`);
+    // Resolve the page module (project-relative, extension-agnostic).
+    let mod: any;
+    try {
+      mod = await importModule(cwd, msg.component);
+    } catch (e) {
+      throw e instanceof Error
+        ? e
+        : new Error(`could not import component "${msg.component}"`);
     }
     const Component = mod.default ?? mod.Page ?? mod.page;
     if (typeof Component !== "function") {
@@ -423,43 +468,7 @@ export async function handleRenderRoute(
           React.createElement(Component, props),
         )
       : React.createElement(Component, props);
-    const layouts = msg.layouts ?? [];
-    if (layouts.length > 0) {
-      // Resolve all layouts first so we fail fast on a missing one
-      // BEFORE we start emitting headers / chunks.
-      const layoutMods: any[] = [];
-      for (const layoutPath of layouts) {
-        const lBase = `${cwd}/${layoutPath}`;
-        let lMod: any = null;
-        for (const ext of [".tsx", ".ts", ".jsx", ".js"]) {
-          try {
-            lMod = await import(`${lBase}${ext}`);
-            break;
-          } catch {
-            // try next extension
-          }
-        }
-        if (!lMod) {
-          throw new Error(
-            `could not import layout "${layoutPath}" — checked .tsx / .ts / .jsx / .js`,
-          );
-        }
-        const LayoutComp =
-          lMod.default ?? lMod.Layout ?? lMod.layout;
-        if (typeof LayoutComp !== "function") {
-          throw new Error(
-            `layout "${layoutPath}" has no default export (or named export "Layout")`,
-          );
-        }
-        layoutMods.push(LayoutComp);
-      }
-      // Walk LEAF → ROOT (reverse iteration on the layouts array).
-      // The innermost layout wraps the page first; each outer layout
-      // wraps the result.
-      for (let i = layoutMods.length - 1; i >= 0; i--) {
-        tree = React.createElement(layoutMods[i], props, tree);
-      }
-    }
+    tree = await buildLayoutTree(cwd, tree, msg.layouts, props, React);
     const element = tree;
     const stream: ReadableStream<Uint8Array> = await renderToReadableStream(
       element,
