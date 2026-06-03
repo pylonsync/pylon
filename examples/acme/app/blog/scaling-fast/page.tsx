@@ -1,5 +1,5 @@
 import React from "react";
-import { Link, Image } from "@pylonsync/react";
+import { Link } from "@pylonsync/react";
 
 export default function ScalingPost() {
   return (
@@ -18,13 +18,9 @@ export default function ScalingPost() {
           What we learned scaling Acme from 100 to 50,000 teams.
         </h1>
         <div className="mt-8 flex items-center gap-3">
-          <Image
-            src="/avatar-2.jpg"
-            alt=""
-            width={64}
-            height={64}
-            className="h-10 w-10 rounded-full object-cover"
-          />
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-accent)] text-xs font-semibold text-white">
+            JP
+          </span>
           <div>
             <p className="text-sm font-medium text-[var(--color-ink)]">
               James Patel
@@ -36,15 +32,7 @@ export default function ScalingPost() {
         </div>
       </div>
 
-      <Image
-        src="/blog-2.jpg"
-        alt=""
-        width={1600}
-        height={900}
-        sizes="(max-width: 768px) 100vw, 720px"
-        className="mt-12 aspect-[16/9] w-full rounded-2xl object-cover"
-        priority
-      />
+      <div className="mt-12 aspect-[16/9] w-full rounded-2xl bg-gradient-to-br from-[#dfe9ff] to-[var(--color-cream-deep)]" />
 
       <article className="prose mt-12 max-w-none">
         <p className="text-lg leading-relaxed text-[var(--color-ink-soft)]">

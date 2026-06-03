@@ -3,25 +3,40 @@
 @source "../app/**/*.{tsx,ts,jsx,js}";
 
 @theme {
-  /* Acme-inspired palette: near-white surfaces, warm near-black ink,
-     soft neutral cards. Color shows up only as an inline highlight. */
-  --color-page: #fbfaf7;
+  /* Acme — an original, self-contained Pylon SSR demo. Warm-neutral
+     surfaces, near-black ink, a single confident emerald accent. Every
+     visual on the site is rendered in CSS — no product screenshots. */
+
+  /* Surfaces + ink. Both the homepage's "page/card" names and the
+     sub-pages' "cream/stone" names map here so every route resolves
+     against one palette. */
+  --color-paper: #ffffff;
+  --color-page: #faf9f6;
+  --color-cream: #faf9f6;
+  --color-cream-deep: #f1efe9;
   --color-card: #f3f1ec;
   --color-card-soft: #f7f5f1;
-  --color-ink: #1a1a19;
-  --color-ink-soft: #2c2c2b;
-  --color-muted: #696460;
-  --color-muted-soft: #a8a39c;
-  --color-line: #e6e1d6;
 
-  /* Highlight accent — used only behind a single word in a section
-     title. Subdued coral, not vivid orange. */
-  --color-highlight: #ffdacc;
-  --color-highlight-ink: #c44a1f;
+  --color-ink: #18170f;
+  --color-ink-soft: #34322a;
+  --color-stone: #6b6760;
+  --color-stone-soft: #a7a299;
+  --color-muted: #6b6760;
+  --color-muted-soft: #a7a299;
+  --color-line: #e8e4da;
 
-  /* Subtle blue accent used inline (Acme uses a soft blue for the
-     mark / icon). Used sparingly. */
-  --color-blue: #5b8cf5;
+  /* Single accent — emerald. Mark, links, one inline highlight. The old
+     "blue" + "brand" var names map here too. */
+  --color-accent: #0f9d63;
+  --color-accent-deep: #0a7a4c;
+  --color-accent-soft: #d8f2e6;
+  --color-blue: #0f9d63;
+  --color-brand: #0f9d63;
+  --color-brand-deep: #0a7a4c;
+
+  /* Inline word-highlight: a calm accent wash, not a loud callout. */
+  --color-highlight: #d8f2e6;
+  --color-highlight-ink: #0a7a4c;
 
   --font-sans: "Inter", "Inter Placeholder", ui-sans-serif, -apple-system,
     "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
@@ -34,7 +49,7 @@ body {
   font-feature-settings: "ss01", "cv11";
 }
 
-/* Acme uses very tight, very bold display headlines. */
+/* Tight, bold display headlines. */
 .display {
   font-family: var(--font-display);
   font-weight: 700;
@@ -42,8 +57,7 @@ body {
   line-height: 0.98;
 }
 
-/* Inline word-highlight. Drop into a headline:
-   <span class="hl">GPT slop</span>  */
+/* Inline word-highlight: <span class="hl">word</span> */
 .hl {
   background: var(--color-highlight);
   color: var(--color-highlight-ink);
@@ -51,12 +65,12 @@ body {
   border-radius: 0.2em;
 }
 
-/* Product mockup chrome — soft rounded card with subtle inner border. */
+/* Soft rounded card that frames the CSS-rendered product mockups. */
 .mock {
   background: white;
   border: 1px solid var(--color-line);
   border-radius: 1.25rem;
   box-shadow:
     0 1px 0 0 rgb(0 0 0 / 0.02),
-    0 24px 60px -28px rgb(28 27 25 / 0.18);
+    0 24px 60px -28px rgb(24 23 15 / 0.18);
 }

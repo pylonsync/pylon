@@ -1,5 +1,5 @@
 import React from "react";
-import { Link, Image } from "@pylonsync/react";
+import { Link } from "@pylonsync/react";
 
 export default function SeriesAPost() {
   return (
@@ -18,13 +18,9 @@ export default function SeriesAPost() {
           Acme raises $24M to make the work tools your team won't quit.
         </h1>
         <div className="mt-8 flex items-center gap-3">
-          <Image
-            src="/avatar-1.jpg"
-            alt=""
-            width={64}
-            height={64}
-            className="h-10 w-10 rounded-full object-cover"
-          />
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-accent)] text-xs font-semibold text-white">
+            MC
+          </span>
           <div>
             <p className="text-sm font-medium text-[var(--color-ink)]">
               Mara Chen
@@ -36,15 +32,7 @@ export default function SeriesAPost() {
         </div>
       </div>
 
-      <Image
-        src="/blog-1.jpg"
-        alt=""
-        width={1600}
-        height={900}
-        sizes="(max-width: 768px) 100vw, 720px"
-        className="mt-12 aspect-[16/9] w-full rounded-2xl object-cover"
-        priority
-      />
+      <div className="mt-12 aspect-[16/9] w-full rounded-2xl bg-gradient-to-br from-[var(--color-accent-soft)] to-[var(--color-cream-deep)]" />
 
       <article className="prose mt-12 max-w-none">
         <p className="text-lg leading-relaxed text-[var(--color-ink-soft)]">
@@ -80,8 +68,8 @@ export default function SeriesAPost() {
         </h2>
         <p className="mt-4 leading-relaxed text-[var(--color-stone)]">
           We're hiring twelve people across engineering and design. We're
-          extending Acme AI to handle more of the busywork — drafts,
-          summaries, decisions logged. We're opening a London office because
+          deepening automations so more of the routine runs itself — handoffs,
+          reminders, status rollups. We're opening a London office because
           half our customers are over there and time zones aren't a feature.
         </p>
         <p className="mt-4 leading-relaxed text-[var(--color-stone)]">

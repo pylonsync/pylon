@@ -23,7 +23,7 @@ export default function RootLayout({ children, url }: LayoutProps) {
         <title>Acme</title>
         <meta
           name="description"
-          content="Acme learns how you work, drafts the busywork, and hands you back the day."
+          content="Acme keeps your team's projects, docs, and updates together in one place — so work stops slipping between tools."
         />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
@@ -96,17 +96,25 @@ function Nav({ url }: { url: string }) {
 }
 
 function BrandMark() {
-  // Acme-style minimal logo mark — three stacked lines, soft blue.
+  // Original Acme mark: a solid emerald tile with a single rounded
+  // diamond cut into it. Geometric, abstract, and unrelated to anything.
   return (
     <svg
       aria-hidden
-      viewBox="0 0 24 18"
-      className="h-4 w-6 text-[var(--color-blue)]"
+      viewBox="0 0 28 28"
+      className="h-6 w-6 text-[var(--color-accent)]"
       fill="none"
     >
-      <rect x="0" y="0" width="20" height="3" rx="1.5" fill="currentColor" />
-      <rect x="2" y="6" width="18" height="3" rx="1.5" fill="currentColor" opacity="0.85" />
-      <rect x="4" y="12" width="14" height="3" rx="1.5" fill="currentColor" opacity="0.65" />
+      <rect width="28" height="28" rx="8" fill="currentColor" />
+      <rect
+        x="9.5"
+        y="9.5"
+        width="9"
+        height="9"
+        rx="2.5"
+        transform="rotate(45 14 14)"
+        fill="white"
+      />
     </svg>
   );
 }
@@ -162,7 +170,7 @@ function Footer() {
               </span>
             </div>
             <p className="mt-4 max-w-xs text-sm text-[var(--color-muted)]">
-              The intelligent workspace.
+              One home for your team's work.
             </p>
           </div>
           {cols.map((c) => (

@@ -1,5 +1,5 @@
 import React from "react";
-import { Link, Image } from "@pylonsync/react";
+import { Link } from "@pylonsync/react";
 
 export default function AboutPage() {
   return (
@@ -58,14 +58,13 @@ export default function AboutPage() {
           <div className="mt-12 grid grid-cols-2 gap-8 sm:grid-cols-3 md:grid-cols-4">
             {TEAM.map((p) => (
               <div key={p.name}>
-                <Image
-                  src={p.src}
-                  alt=""
-                  width={400}
-                  height={400}
-                  sizes="(max-width: 768px) 50vw, 240px"
-                  className="aspect-square w-full rounded-2xl object-cover"
-                />
+                <div className="flex aspect-square w-full items-center justify-center rounded-2xl bg-[var(--color-cream-deep)] text-2xl font-semibold text-[var(--color-accent-deep)]">
+                  {p.name
+                    .split(" ")
+                    .map((w) => w[0])
+                    .join("")
+                    .slice(0, 2)}
+                </div>
                 <p className="mt-4 text-sm font-medium text-[var(--color-ink)]">
                   {p.name}
                 </p>
