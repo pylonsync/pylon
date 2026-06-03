@@ -240,6 +240,76 @@ function finalizeHeaders(
  * has flushed) are uncatchable here — React's `onError` would have
  * to feed into a separate signal, deferred to Phase 1.5.
  */
+/**
+ * Page SEO metadata. A page exports `export const metadata = {...}`
+ * (static) or `export async function generateMetadata(props)` (dynamic,
+ * e.g. param-derived titles). Kept flat — no deep nesting beyond og/twitter.
+ *
+ * React 19 hoists the resulting <title>/<meta>/<link> into <head>. A page
+ * `title` overrides a layout's static `<title>` (both render; the browser
+ * uses the last, which is the page's). React does NOT dedupe arbitrary
+ * `<meta>`, so set `description`/OG in EITHER the layout OR page metadata,
+ * not both, to avoid duplicate tags.
+ */
+export interface SsrMetadata {
+  title?: string;
+  description?: string;
+  keywords?: string | string[];
+  canonical?: string;
+  robots?: string;
+  openGraph?: {
+    title?: string;
+    description?: string;
+    image?: string;
+    url?: string;
+    type?: string;
+  };
+  twitter?: {
+    card?: string;
+    title?: string;
+    description?: string;
+    image?: string;
+  };
+}
+
+/**
+ * Build a React fragment of <title>/<meta>/<link> from a page's metadata.
+ * React 19 auto-hoists these into <head> wherever they render, and the
+ * host's </head> splice preserves them. React escapes all text/attrs, so
+ * there's no manual XSS handling. Returns null when there's nothing to emit.
+ */
+function renderMetadata(React: any, m: SsrMetadata | undefined): any {
+  if (!m) return null;
+  const el = React.createElement;
+  const kids: any[] = [];
+  if (m.title != null) kids.push(el("title", { key: "t" }, m.title));
+  if (m.description != null) {
+    kids.push(el("meta", { key: "d", name: "description", content: m.description }));
+  }
+  const kw = Array.isArray(m.keywords) ? m.keywords.join(", ") : m.keywords;
+  if (kw) kids.push(el("meta", { key: "kw", name: "keywords", content: kw }));
+  if (m.robots) kids.push(el("meta", { key: "r", name: "robots", content: m.robots }));
+  if (m.canonical) {
+    kids.push(el("link", { key: "c", rel: "canonical", href: m.canonical }));
+  }
+  const og = m.openGraph;
+  if (og) {
+    if (og.title != null) kids.push(el("meta", { key: "ogt", property: "og:title", content: og.title }));
+    if (og.description != null) kids.push(el("meta", { key: "ogd", property: "og:description", content: og.description }));
+    if (og.image) kids.push(el("meta", { key: "ogi", property: "og:image", content: og.image }));
+    if (og.url) kids.push(el("meta", { key: "ogu", property: "og:url", content: og.url }));
+    if (og.type) kids.push(el("meta", { key: "ogy", property: "og:type", content: og.type }));
+  }
+  const tw = m.twitter;
+  if (tw) {
+    if (tw.card) kids.push(el("meta", { key: "twc", name: "twitter:card", content: tw.card }));
+    if (tw.title != null) kids.push(el("meta", { key: "twt", name: "twitter:title", content: tw.title }));
+    if (tw.description != null) kids.push(el("meta", { key: "twd", name: "twitter:description", content: tw.description }));
+    if (tw.image) kids.push(el("meta", { key: "twi", name: "twitter:image", content: tw.image }));
+  }
+  return kids.length > 0 ? el(React.Fragment, null, ...kids) : null;
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
@@ -328,13 +398,31 @@ export async function handleRenderRoute(
       response,
     };
 
+    // SEO metadata: static `export const metadata` or dynamic
+    // `export async function generateMetadata(props)`. Awaited before the
+    // first byte, so keep it to cheap derivations (params → title); heavy
+    // data belongs in the page body behind <Suspense>.
+    let metadata: SsrMetadata | undefined = mod.metadata;
+    if (typeof mod.generateMetadata === "function") {
+      metadata = await mod.generateMetadata(props);
+    }
+    const metaFragment = renderMetadata(React, metadata);
+
     // Resolve the layout chain. Each layout module exports a default
     // function that accepts the same props + `children`. Walk leaf →
     // root: start with the page component as `tree`, then for each
     // layout (innermost first) wrap it as the new tree. Result is
     // the outermost layout containing all nested layouts down to
-    // the page.
-    let tree: any = React.createElement(Component, props);
+    // the page. The metadata fragment is the FIRST child so React hoists
+    // its <title>/<meta> into the <head> a layout renders.
+    let tree: any = metaFragment
+      ? React.createElement(
+          React.Fragment,
+          null,
+          metaFragment,
+          React.createElement(Component, props),
+        )
+      : React.createElement(Component, props);
     const layouts = msg.layouts ?? [];
     if (layouts.length > 0) {
       // Resolve all layouts first so we fail fast on a missing one
