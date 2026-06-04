@@ -453,8 +453,22 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 continue;
             }
 
-            // Non-functions change — incremental rebuild only.
-            run_rebuild(entry_file, json_mode, &mut rebuild_count);
+            // Non-functions change (app.ts / schema helpers / lib). The
+            // manifest — entities, policies, auth config, routes — lives in
+            // the running server's memory, so re-running codegen alone left
+            // the server enforcing the OLD schema until the next manual
+            // restart (edit a policy, see no effect). Rebuild first; if
+            // codegen + validation succeed, restart so the new schema takes
+            // effect. On error, keep the running server alive (the user is
+            // mid-edit) and just surface the diagnostics.
+            if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
+                if !json_mode {
+                    println!();
+                    println!("  ✓ schema changed — restarting");
+                    println!();
+                }
+                exec_restart(json_mode);
+            }
         }
     }
 }
@@ -557,87 +571,6 @@ fn run_rebuild_and_get_manifest(
     }
 }
 
-fn run_rebuild(entry_file: &str, json_mode: bool, count: &mut u32) {
-    *count += 1;
-    let n = *count;
-
-    let manifest_json = match run_bun_codegen(entry_file) {
-        Ok(json) => json,
-        Err(diag) => {
-            if json_mode {
-                print_json(&WatchEvent {
-                    code: "DEV_ERROR",
-                    rebuild: n,
-                    name: None,
-                    version: None,
-                    error: Some(diag.message.clone()),
-                    diagnostics: vec![diag],
-                });
-            } else {
-                eprintln!("[{n}] Error: {}", diag.message);
-            }
-            return;
-        }
-    };
-
-    let manifest = match parse_manifest(&manifest_json, entry_file) {
-        Ok(m) => m,
-        Err(diags) => {
-            if json_mode {
-                print_json(&WatchEvent {
-                    code: "DEV_ERROR",
-                    rebuild: n,
-                    name: None,
-                    version: None,
-                    error: Some(diags.first().map(|d| d.message.clone()).unwrap_or_default()),
-                    diagnostics: diags,
-                });
-            } else {
-                for d in &diags {
-                    eprintln!("[{n}] {d}");
-                }
-            }
-            return;
-        }
-    };
-
-    let diagnostics = validate_all(&manifest);
-    let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
-
-    // Write generated files on success.
-    if !has_errors {
-        write_generated_files(entry_file, &manifest_json, &manifest);
-        build_studio_artefacts(entry_file, json_mode);
-    }
-
-    if json_mode {
-        print_json(&WatchEvent {
-            code: if has_errors { "DEV_ERROR" } else { "DEV_OK" },
-            rebuild: n,
-            name: Some(manifest.name.clone()),
-            version: Some(manifest.version.clone()),
-            error: None,
-            diagnostics: diagnostics.clone(),
-        });
-    } else if has_errors {
-        for d in &diagnostics {
-            eprintln!("[{n}] {d}");
-        }
-    } else {
-        println!(
-            "[{n}] OK: {} v{} — {} entities, {} queries, {} actions, {} policies, {} routes",
-            manifest.name,
-            manifest.version,
-            manifest.entities.len(),
-            manifest.queries.len(),
-            manifest.actions.len(),
-            manifest.policies.len(),
-            manifest.routes.len(),
-        );
-    }
-}
-
-/// Collect mtime of all `.ts` files in a directory (non-recursive).
 /// Write generated manifest and client bindings alongside the entry file.
 fn write_generated_files(
     entry_file: &str,
@@ -885,24 +818,58 @@ fn package_json_has_dev_script(path: &Path) -> bool {
 /// `studio.config.ts`.
 fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
     let mut mtimes = HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ext = path.extension().and_then(|e| e.to_str());
-            if ext == Some("ts") || ext == Some("tsx") {
-                // Skip generated files to avoid infinite rebuild loops.
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("pylon.") {
-                        continue;
-                    }
+    collect_ts_mtimes_into(dir, &mut mtimes);
+    mtimes
+}
+
+/// Recursively walk `dir` collecting mtimes of every `*.ts` / `*.tsx`
+/// source file. Recursion matters: app source lives in subdirectories
+/// (`functions/`, `lib/`, `emails/`, …), and the watcher's restart-on-
+/// change logic keys off these paths — a flat top-level scan silently
+/// missed every edit under `functions/`, so handler changes never hot-
+/// reloaded (you had to Ctrl-C and restart by hand). Heavy / generated
+/// trees are skipped so the 500ms poll doesn't crawl node_modules.
+fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Vendored / generated / VCS trees can't hold app source
+                // and would make the poll loop walk thousands of files.
+                if matches!(
+                    name,
+                    "node_modules"
+                        | ".pylon"
+                        | ".git"
+                        | "dist"
+                        | ".next"
+                        | "target"
+                        | "build"
+                        | ".turbo"
+                        | "coverage"
+                ) {
+                    continue;
                 }
-                if let Ok(meta) = std::fs::metadata(&path) {
-                    if let Ok(mtime) = meta.modified() {
-                        mtimes.insert(path.to_string_lossy().to_string(), mtime);
-                    }
+            }
+            collect_ts_mtimes_into(&path, mtimes);
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext == Some("ts") || ext == Some("tsx") {
+            // Skip generated files to avoid infinite rebuild loops.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("pylon.") {
+                    continue;
+                }
+            }
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    mtimes.insert(path.to_string_lossy().to_string(), mtime);
                 }
             }
         }
     }
-    mtimes
 }
