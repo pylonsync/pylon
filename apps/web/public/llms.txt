@@ -1,59 +1,63 @@
 # Pylon
 
-> Pylon is a Rails-like framework for realtime apps. You define entities, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, row-level security, jobs, workflows, files, search, and a portable runtime that can run locally, managed, or on your infrastructure.
+> Pylon is a Rails-like framework for realtime apps. You define entities, policies, and server functions in TypeScript; Pylon gives you a typed client, live queries, auth, row-level security, scheduled jobs, file uploads, full-text search, an LLM client, per-user OAuth connections, native React 19 SSR, and a single portable Rust binary that runs locally, managed (Pylon Cloud), or on your own infrastructure. One process serves the API, auth, sync, WebSocket, SSE, and the server-rendered frontend — same port.
 
-Pylon is best for apps where two browsers need to see the same thing instantly: dashboards, CRMs, collaborative editors, multiplayer games, chat. Storage is pluggable: SQLite by default, Postgres via `DATABASE_URL`. Schema, policies, functions, and client APIs are identical across both adapters.
+Get started: `npm create @pylonsync/pylon@latest` (templates: `ssr`, `barebones`, `todo`, `b2b`, `consumer`, `chat`). Then `cd <app> && npm run dev` and open <http://localhost:4321>.
 
-Pylon Cloud is the managed path at <https://cloud.pylonsync.com>. It runs the same Pylon app model without requiring teams to operate the infrastructure themselves.
+Pylon is best for apps where two browsers must see the same thing instantly: dashboards, CRMs, collaborative editors, multiplayer games, chat. Storage is pluggable — SQLite by default, Postgres via `DATABASE_URL`. The schema, policies, functions, and client APIs are identical across both adapters. The core primitives: **entities** (typed tables), **policies** (row-level access rules evaluated as CEL-like expressions, deny-by-default), **functions** (queries/mutations/actions in TypeScript, RPC-called by the client), and **live queries** (subscriptions that restream when dependent rows change). Server functions bypass policies; HTTP entity CRUD is policy-checked.
 
-The system has four primitives: entities (typed tables), policies (row-level access rules evaluated as expressions), functions (queries/mutations/actions authored in TypeScript and RPC-called by the client), and live queries (subscriptions that restream results when dependent rows change). All four live in one process.
+Pylon Cloud is the managed path at <https://cloud.pylonsync.com> — the same app model with no infrastructure to operate.
+
+**Reading this as an agent?** The full inline operational manual — every API name, signature, env var, and CLI flag, with copy-paste-correct snippets — is at [/llms-full.txt](https://docs.pylonsync.com/llms-full.txt). Read that to build a Pylon app without leaving the file.
 
 ## Docs
 
 - [Introduction](https://docs.pylonsync.com): What Pylon is, who it's for, how to read the docs.
-- [Quickstart](https://docs.pylonsync.com/quickstart): Ship a live-syncing app in five minutes — schema, policy, function, live query.
-- [Installation](https://docs.pylonsync.com/installation): CLI install, requirements (Bun, Rust for source builds), directory conventions, env vars.
+- [Quickstart](https://docs.pylonsync.com/quickstart): Ship a live-syncing app in minutes — scaffold, schema, policy, function, live query.
+- [Installation](https://docs.pylonsync.com/installation): Scaffold command, package managers, directory conventions, env vars.
+- [llms-full.txt](https://docs.pylonsync.com/llms-full.txt): The comprehensive inline manual (entities, functions, ctx primitives, client hooks, SSR, runtime, CLI, deploy).
 
 ## Core concepts
 
-- [Entities](https://docs.pylonsync.com/concepts/entities): Declaring typed tables — `field.string()`, `field.int()`, `field.float()` / `field.number()`, `field.bool()` / `field.boolean()`, `field.datetime()`, `field.richtext()`, `field.id(target)`, plus `.optional()` / `.unique()` modifiers, `.crdt("text")` for collaborative text, and composite indexes.
-- [Policies](https://docs.pylonsync.com/concepts/policies): Row-level access rules with expressions referencing `auth.*`, `data.*`, `existing.*`. Omitted actions are denied by default. Server functions bypass policies.
-- [Functions](https://docs.pylonsync.com/concepts/functions): Server TypeScript in `functions/*.ts`. `mutation`, `query`, `action`. Validators from `@pylonsync/functions`: `v.string()`, `v.int()`, `v.number()` / `v.float()`, `v.boolean()` / `v.bool()`, `v.id(entity)`, `v.optional(...)`, `v.array(...)`, `v.literal(...)`, `v.object({...})`, `v.union(...)`, `v.any()`. Datetimes are plain `v.datetime()` or `v.string()` holding ISO-8601.
-- [Live queries](https://docs.pylonsync.com/concepts/live-queries): How `db.useQuery` subscribes and fan-outs update on writes. Subscriptions respect policies. Use indexed filter columns for fast fan-out.
+- [Entities](https://docs.pylonsync.com/concepts/entities): Typed tables via `entity()` + `field.*` — `string`, `int`, `float`/`number`, `bool`/`boolean`, `datetime`, `richtext` (LoroText), `id(target)`, `enum(values)`. Modifiers: `.optional()`, `.unique()`, `.crdt("text"|"counter"|…)`, `.serverOnly()`, `.readonly()`, `.encrypted()`, `.default(v)`, `.defaultNow()`. Composite + partial indexes.
+- [Policies](https://docs.pylonsync.com/concepts/policies): Row-level rules with `allowRead`/`allowInsert`/`allowUpdate`/`allowDelete`/`allowWrite`/`allow`, expressions over `auth.*` / `data.*`. Omitted actions deny by default. Server functions bypass policies.
+- [Functions](https://docs.pylonsync.com/concepts/functions): Server TypeScript — `query()`, `mutation()`, `action()` from `@pylonsync/functions`, with `v.*` validators and a typed `ctx`. `auth` defaults to `"user"` (secure-by-default).
+- [Live queries](https://docs.pylonsync.com/concepts/live-queries): `db.useQuery` subscribes; results restream on any insert/update/delete. Subscriptions respect policies. Index filter columns for fast fan-out.
+- [Native SSR](https://docs.pylonsync.com/concepts/ssr): React 19 server-rendered pages from the same binary/port — file-based `app/` routing, nested layouts, `error.tsx`/`not-found.tsx` boundaries, `metadata`/`generateMetadata`, read-only `serverData` via `use()`+`<Suspense>`, and a `response` controller (`setStatus`/`redirect`/`notFound`/`setCookie`). No Next.js.
 
 ## Packages
 
-- `@pylonsync/sdk` — schema DSL: `entity()`, `field.*`, `policy()`, `buildManifest()`.
-- `@pylonsync/functions` — server function DSL: `query()`, `mutation()`, `action()`, validators (`v.*`).
-- `@pylonsync/react` — client hooks: `db.useQuery`, `db.useOne`, `callFn`, `init`, `configureClient`, `storageKey`, `useSession`.
-- `@pylonsync/loro` — CRDT row hooks: `useLoroDoc`, `useCollabText`, Loro binary-frame decoding.
+- `@pylonsync/sdk` — schema DSL: `entity()`, `field.*`, `policy()`, `defineRoute()`, `discoverAppRoutes()`, `defineConnection()`, `llm()`, `buildManifest()`. Fluent `e.*` namespace too.
+- `@pylonsync/functions` — server function DSL: `query()`, `mutation()`, `action()`, validators (`v.*`), and the `ctx` surface (`ctx.db`, `ctx.auth`, `ctx.llm`, `ctx.connections`, `ctx.scheduler`, `ctx.stream`, `ctx.email`, `ctx.runQuery`/`runMutation`).
+- `@pylonsync/react` — client hooks + helpers: `init()`, `db.useQuery`, `db.useQueryOne`, `db.useMutation`, `useSession`, `useSyncStatus`, `useRoom`, `useShard`, `callFn`/`streamFn`, `<Link>`, `<Image>`, `createTypedDb`. (`db.useQueryOne`, not `useOne`.)
+- `@pylonsync/client` — Clerk-style drop-in components: `<SignIn>`/`<SignUp>`/`<UserButton>`/`<UserProfile>`, gates (`<SignedIn>`/`<Protect>`/`<HasRole>`), orgs (`<OrganizationSwitcher>`/`<InviteMembers>`), `<ConnectAccount>`, `<FileUpload>`, `<ChatBot>`, `<EntityList>`/`<EntityForm>`, SPA `<Router>`, `useAuth()`.
 
-## Runtime
+## Runtime / CLI
 
-- Single Rust binary `pylon`. Dev: `pylon dev app.ts` watches schema + functions, runs SQLite on `.pylon/dev.db` by default (or Postgres if `DATABASE_URL` is set), serves HTTP on `:4321`. Production: `pylon start app.ts` — same server, no file watcher, blocks on the server thread so process supervisors restart cleanly on fatal errors.
-- WebSocket for live queries; HTTP POST `/api/fn/<name>` for function RPC; `/api/entities/<Entity>` for direct CRUD (policy-checked).
-- Env vars: `PYLON_DB_PATH`, `PYLON_FILES_DIR`, `PYLON_CORS_ORIGIN`, `PYLON_PORT`, `PYLON_DEV_MODE`, `PYLON_RATE_LIMIT_MAX`, `PYLON_FN_RATE_LIMIT_MAX`.
+- Single Rust binary `pylon`. `pylon dev [app.ts]` — hot reload, serves SSR + API on one port (`:4321`), SQLite at `.pylon/dev.db` (or Postgres via `DATABASE_URL`). `pylon start` — production, no watcher. `pylon build` — manifest + typed client + SSR bundle.
+- Port cluster: `4321` HTTP (API/auth/SSR + multiplexed WS at `/api/sync/ws`), `4322` dedicated WS, `4323` SSE, `4324` shard WS.
+- Key commands: `pylon codegen` (manifest + client; `--target swift`), `pylon logs --json`, `pylon db`, `pylon data`, `pylon fn <name>`, `pylon secrets`, `pylon migrate`, `pylon schema`, `pylon lint`, `pylon test`, `pylon test:security`, `pylon deploy`. `--json` is global. Full reference: [/llms-full.txt](https://docs.pylonsync.com/llms-full.txt).
+- Env vars: `DATABASE_URL`, `PYLON_DEV_MODE`, `PYLON_CORS_ORIGIN`, `PYLON_ENCRYPTION_KEY`, `PYLON_JWT_SECRET`/`PYLON_JWT_ISSUER`, `PYLON_LLM_PROVIDER` + `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, `PYLON_EMAIL_PROVIDER`, `PYLON_FILES_PROVIDER`, `PYLON_RATE_LIMIT_MAX`. Port defaults to `--port`/`-p` (`4321`); the `PYLON_PORT` env var also exists.
 
 ## Deploy
 
-- **Fly.io** — recommended for the architecture. Single binary + SQLite volume + WebSockets is Fly's happy path. LiteFS for multi-region SQLite replication. `fly deploy . --config examples/<app>/fly.toml`. Autostop machines → idle cost near zero.
-- **Cloudflare Workers** — true edge/$0 idle. WASM adapter + D1 + Durable Objects. Experimental; see `crates/workers/`.
-- **Docker / Compose / systemd / SST** — `pylon deploy --target docker|compose|systemd|sst` scaffolds config. Any host that runs Docker works.
+- **Pylon Cloud** *(default)* — `pylon deploy` (or `--target cloud`). Auth via `pylon login`; `pylon link` wires GitHub auto-deploy.
+- **Fly.io** — `pylon deploy --target fly` scaffolds `Dockerfile` + `fly.toml`. HTTP on `4321` + TCP WS on `4322` + a `/data` volume. Single-binary + SQLite is Fly's happy path.
+- **Docker / Compose / systemd** — `pylon deploy --target docker|compose|systemd` scaffolds config for any Docker/VPS host.
+- **Cloudflare Workers** — `--target workers` (experimental; `/api/auth/*` returns `501` — no native crypto on wasm32; use bearer-token auth or Fly for full auth).
 
 ## Examples (under `examples/`)
 
-- [Todo](https://github.com/pylonsync/pylon/tree/main/examples/todo-app): Minimal reference app — schema, policy, function, live query.
-- [Swift Todo](https://github.com/pylonsync/pylon/tree/main/examples/swift-todo): SwiftUI iOS/macOS app on the Swift SDK.
+- [Todo](https://github.com/pylonsync/pylon/tree/main/examples/todo-app): Minimal reference — schema, policy, function, live query.
+- [SSR Hello](https://github.com/pylonsync/pylon/tree/main/examples/ssr-hello): Native SSR — pages, layouts, `serverData`, `error.tsx`/`not-found.tsx`, Tailwind.
 - [Chat](https://github.com/pylonsync/pylon/tree/main/examples/chat): Slack-style messaging with presence, typing, tenant isolation.
-- [Linear](https://github.com/pylonsync/pylon/tree/main/examples/linear): Issue tracker with teams, cycles, projects, monotonic IDs.
+- [Linear](https://github.com/pylonsync/pylon/tree/main/examples/linear): Issue tracker with teams, cycles, projects.
 - [Auction House](https://github.com/pylonsync/pylon/tree/main/examples/auction-house): Transactional bids + scheduled settlement.
 - [Store](https://github.com/pylonsync/pylon/tree/main/examples/store): 10k-SKU faceted search with live counts.
-- [ERP](https://github.com/pylonsync/pylon/tree/main/examples/erp): Multi-tenant B2B fabrication ERP — orgs, roles, inventory.
-- [Forge](https://github.com/pylonsync/pylon/tree/main/examples/forge): Collaborative 3D scene editor — Figma-for-3D.
+- [ERP](https://github.com/pylonsync/pylon/tree/main/examples/erp): Multi-tenant B2B ERP — orgs, roles, inventory; ships a `fly.toml`.
+- [Forge](https://github.com/pylonsync/pylon/tree/main/examples/forge): Collaborative 3D scene editor.
 - [World3D](https://github.com/pylonsync/pylon/tree/main/examples/world3d): Three.js multiplayer avatar world.
-- [Arena](https://github.com/pylonsync/pylon/tree/main/examples/arena): Mass-multiplayer 2D dot world — scale test.
-- [Trade](https://github.com/pylonsync/pylon/tree/main/examples/trade): Market dashboard with live tick fan-out.
-- [Bench](https://github.com/pylonsync/pylon/tree/main/examples/bench): In-browser load test with p50/p95/p99 percentiles.
+- [Arena](https://github.com/pylonsync/pylon/tree/main/examples/arena): Mass-multiplayer 2D world — shard scale test.
 
 ## Optional
 
