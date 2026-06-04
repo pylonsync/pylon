@@ -167,12 +167,31 @@ impl PolicyEngine {
         auth: &AuthContext,
         data: Option<&serde_json::Value>,
     ) -> PolicyResult {
-        // Admin bypasses all policies. PYLON_ADMIN_TOKEN sessions, the
-        // user-row admin field (`auth.user.adminField` config), and the
-        // Studio admin cookie all set is_admin — they all skip the
-        // allowlist below so migrations / Studio / ops scripts work
-        // without writing a wildcard policy.
-        if auth.is_admin {
+        // Admin bypasses all policies — EXCEPT a READ by an admin who has
+        // selected a tenant. PYLON_ADMIN_TOKEN sessions, the user-row admin
+        // field (`auth.user.adminField`), the PYLON_ADMIN_EMAILS allowlist,
+        // and the Studio admin cookie all set is_admin so migrations /
+        // Studio / ops scripts work without a wildcard policy.
+        //
+        // But an admin signed into the product UI with an org selected
+        // (tenant_id set on the session) is operating *as* that tenant. If
+        // the bypass also fired for their reads, every OTHER tenant's rows
+        // would be served into their entity-API responses and streamed into
+        // their browser sync replica — a cross-tenant data leak (an admin
+        // of org A sees org B's recordings, invoices, viewers, …). The
+        // row-level `auth.tenantId == data.orgId` predicate the app already
+        // wrote is exactly the fence that should scope them, so for reads
+        // with an active tenant we DON'T bypass — we evaluate the policy
+        // like any tenant member. Admins with NO active tenant (operator
+        // CLI, Studio's cross-tenant view) keep the full read bypass.
+        //
+        // Writes keep the unconditional bypass: they're tenant-stamped by
+        // TenantScopePlugin and operator write tooling relies on it. The
+        // cross-tenant *read* exposure is the boundary fixed here
+        // (2026-06-04: admin-with-tenant sync/entity-API leak).
+        let admin_read_scoped_to_tenant =
+            matches!(action, EntityAction::Read) && auth.tenant_id().is_some();
+        if auth.is_admin && !admin_read_scoped_to_tenant {
             return PolicyResult::Allowed;
         }
 
@@ -286,9 +305,15 @@ impl PolicyEngine {
     ///     just lets us short-circuit when no policy could possibly
     ///     permit a row regardless of its contents.
     ///
-    /// Admin bypasses everything (same as `check_entity_read`).
+    /// Admin bypasses the scan pre-check — EXCEPT an admin with an active
+    /// tenant, who is scoped to that tenant on bulk reads (same boundary as
+    /// `check_entity_read`). When scoped, a data-dependent tenant predicate
+    /// (`auth.tenantId == data.orgId`) still defers to per-row filtering
+    /// below, so the entity is scanned and the per-row read fence drops the
+    /// foreign rows. Admins with no active tenant (operator / Studio) keep
+    /// the bypass.
     pub fn check_entity_scan(&self, entity_name: &str, auth: &AuthContext) -> PolicyResult {
-        if auth.is_admin {
+        if auth.is_admin && auth.tenant_id().is_none() {
             return PolicyResult::Allowed;
         }
 
@@ -1691,6 +1716,109 @@ mod tests {
         assert!(
             result.is_allowed(),
             "admin must bypass the default-deny gate"
+        );
+    }
+
+    #[test]
+    fn admin_with_active_tenant_is_scoped_on_reads() {
+        // 2026-06-04 regression: an admin (PYLON_ADMIN_EMAILS / adminField)
+        // who has selected a tenant in the product UI must NOT have other
+        // tenants' rows served to them. Before the fix the blanket
+        // `if is_admin { Allowed }` bypass leaked every tenant's rows into
+        // the admin's entity-API responses AND their browser sync replica
+        // (an owner of org A saw org B's recordings / renders / viewers).
+        let recording_policy = ManifestPolicy {
+            name: "recordingOrg".into(),
+            entity: Some("Recording".into()),
+            allow_read: Some("auth.tenantId == data.orgId".into()),
+            ..Default::default()
+        };
+        let manifest = AppManifest {
+            manifest_version: 1,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![recording_policy],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let engine = PolicyEngine::from_manifest(&manifest);
+
+        let own = serde_json::json!({ "id": "r1", "orgId": "acme" });
+        let foreign = serde_json::json!({ "id": "r2", "orgId": "other" });
+
+        // Admin WITH an active tenant: scoped exactly like a member — its
+        // own org's row is allowed, a foreign org's row is DENIED. This is
+        // the leak being closed.
+        let admin_scoped = AuthContext::admin().with_tenant("acme".into());
+        assert!(
+            engine
+                .check_entity_read("Recording", &admin_scoped, Some(&own))
+                .is_allowed(),
+            "admin-with-tenant reads its OWN tenant's row"
+        );
+        assert!(
+            !engine
+                .check_entity_read("Recording", &admin_scoped, Some(&foreign))
+                .is_allowed(),
+            "admin-with-tenant must NOT read a FOREIGN tenant's row (cross-tenant leak)"
+        );
+
+        // Admin with NO active tenant (operator CLI / Studio's cross-tenant
+        // view): full read bypass preserved — both rows visible.
+        let admin_global = AuthContext::admin();
+        assert!(engine
+            .check_entity_read("Recording", &admin_global, Some(&own))
+            .is_allowed());
+        assert!(
+            engine
+                .check_entity_read("Recording", &admin_global, Some(&foreign))
+                .is_allowed(),
+            "admin with no selected tenant keeps the cross-tenant read bypass"
+        );
+
+        // Non-admin member: unchanged — own allowed, foreign denied.
+        let member = AuthContext::authenticated("u1".into()).with_tenant("acme".into());
+        assert!(engine
+            .check_entity_read("Recording", &member, Some(&own))
+            .is_allowed());
+        assert!(!engine
+            .check_entity_read("Recording", &member, Some(&foreign))
+            .is_allowed());
+
+        // Scan pre-check: admin-with-tenant must NOT short-circuit-allow
+        // (which would skip the per-row fence). The data-dependent tenant
+        // predicate defers to per-row filtering, so the scan still
+        // proceeds (Allowed) and the per-row read fence above drops foreign
+        // rows. Admin-global short-circuits as before.
+        assert!(
+            engine
+                .check_entity_scan("Recording", &admin_scoped)
+                .is_allowed(),
+            "tenant predicate defers to per-row filtering, so the scan proceeds"
+        );
+        assert!(engine
+            .check_entity_scan("Recording", &admin_global)
+            .is_allowed());
+
+        // Writes keep the unconditional admin bypass (writes are
+        // tenant-stamped by TenantScopePlugin and operator tooling relies
+        // on it). Only the cross-tenant READ exposure is the boundary fixed
+        // here — assert the write bypass is intentionally preserved.
+        assert!(
+            engine
+                .check_entity(
+                    "Recording",
+                    EntityAction::Update,
+                    &admin_scoped,
+                    Some(&foreign)
+                )
+                .is_allowed(),
+            "admin write bypass is intentionally preserved (not the read-leak boundary)"
         );
     }
 
