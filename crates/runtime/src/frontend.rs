@@ -290,6 +290,125 @@ fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
+/// Minimal percent-decoder for a query-string value. `encodeURIComponent`
+/// (the og `src` encoder) escapes `/` to `%2F` and never emits `+`, so we
+/// only need `%XX` handling — no `+`→space.
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// True iff `rel` is a colocated social-card image: `app/.../<base>.<ext>`
+/// where `base` ∈ {opengraph-image, twitter-image} and `ext` is an image
+/// type. Rejects absolute paths, `..`/`.` segments, backslashes, and any
+/// other basename — so `/_pylon/og` can only ever serve those two
+/// conventional files and never an arbitrary source file.
+fn is_valid_social_image_rel(rel: &str) -> bool {
+    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
+        return false;
+    }
+    let segs: Vec<&str> = rel.split('/').collect();
+    if segs.first() != Some(&"app") {
+        return false;
+    }
+    for s in &segs {
+        if s.is_empty() || *s == "." || *s == ".." || s.contains('\\') {
+            return false;
+        }
+    }
+    let file = match segs.last() {
+        Some(f) => *f,
+        None => return false,
+    };
+    let (base, ext) = match file.rsplit_once('.') {
+        Some(x) => x,
+        None => return false,
+    };
+    let base_ok = base == "opengraph-image" || base == "twitter-image";
+    let ext_ok = matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif"
+    );
+    base_ok && ext_ok
+}
+
+/// Serve a colocated `opengraph-image.*` / `twitter-image.*` file for the
+/// SSR file convention. Returns a clean 404 (not an SPA fallthrough) on a
+/// missing / invalid `src` so a broken `<img>` fails cleanly.
+fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), Request> {
+    let four_oh_four = |req: Request| -> Result<(), Request> {
+        let resp = Response::from_data(Vec::new())
+            .with_status_code(404)
+            .with_header(
+                Header::from_bytes(
+                    "Access-Control-Allow-Origin",
+                    cors_origin.as_bytes().to_vec(),
+                )
+                .unwrap(),
+            );
+        let _ = req.respond(resp);
+        Ok(())
+    };
+
+    let rel = url
+        .split("src=")
+        .nth(1)
+        .and_then(|s| s.split('&').next())
+        .map(pct_decode)
+        .unwrap_or_default();
+    if !is_valid_social_image_rel(&rel) {
+        return four_oh_four(request);
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Canonicalize both the app root and the candidate, then prefix-check.
+    // The rel is already traversal-free, but a symlink under app/ could
+    // still escape — this closes that.
+    let (app_root, canon) = match (
+        cwd.join("app").canonicalize(),
+        cwd.join(&rel).canonicalize(),
+    ) {
+        (Ok(a), Ok(c)) => (a, c),
+        _ => return four_oh_four(request),
+    };
+    if !canon.starts_with(&app_root) || !canon.is_file() {
+        return four_oh_four(request);
+    }
+    let bytes = match std::fs::read(&canon) {
+        Ok(b) => b,
+        Err(_) => return four_oh_four(request),
+    };
+    let response = Response::from_data(bytes)
+        .with_status_code(200)
+        .with_header(Header::from_bytes("Content-Type", content_type_for(&canon)).unwrap())
+        .with_header(
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        )
+        // The og URL carries a `&v=<mtime>` cache-buster, so a 1h public
+        // cache is safe — a changed image gets a new `v` and re-fetches.
+        .with_header(Header::from_bytes("Cache-Control", "public, max-age=3600").unwrap());
+    let _ = request.respond(response);
+    Ok(())
+}
+
 /// Resolve a request path to a file inside `root`, defending against
 /// path traversal.
 ///
@@ -370,6 +489,18 @@ pub fn try_handle(
         let _ = std::fs::create_dir_all(&pylon_dir);
         crate::image_optim::serve(request, &pylon_dir, cfg.dir.as_deref(), cors_origin);
         return Ok(());
+    }
+
+    // Social-card image file convention (Next-style `opengraph-image.png`
+    // / `twitter-image.png` colocated with a `page.tsx`). SSR pages
+    // auto-emit `<meta property="og:image" content="<origin>/_pylon/og?
+    // src=app/.../opengraph-image.png">` (see ssr-runtime.ts
+    // `applyAutoSocialImages`); this serves the colocated file off disk.
+    // Strict allowlist — only `opengraph-image` / `twitter-image`
+    // basenames with an image extension, under `app/`, canonicalized so
+    // the endpoint can't be turned into an arbitrary-file read.
+    if path_only == "/_pylon/og" {
+        return serve_og_image(request, &url, cors_origin);
     }
 
     // SSR branch sits ABOVE dev_proxy so file-based pages take
@@ -1462,6 +1593,47 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn social_image_rel_allowlist() {
+        // Valid colocated social-card images.
+        assert!(is_valid_social_image_rel("app/opengraph-image.png"));
+        assert!(is_valid_social_image_rel("app/blog/opengraph-image.jpg"));
+        assert!(is_valid_social_image_rel(
+            "app/(marketing)/twitter-image.webp"
+        ));
+        assert!(is_valid_social_image_rel(
+            "app/x/[slug]/opengraph-image.PNG"
+        ));
+        // Wrong basename — must never serve arbitrary source files.
+        assert!(!is_valid_social_image_rel("app/page.tsx"));
+        assert!(!is_valid_social_image_rel("app/secret.png"));
+        assert!(!is_valid_social_image_rel("app/blog/cover.png"));
+        // Wrong root / extension.
+        assert!(!is_valid_social_image_rel("public/opengraph-image.png"));
+        assert!(!is_valid_social_image_rel("app/opengraph-image.svg"));
+        assert!(!is_valid_social_image_rel("app/opengraph-image.ts"));
+        // Traversal / absolute / malformed.
+        assert!(!is_valid_social_image_rel(
+            "app/../secret/opengraph-image.png"
+        ));
+        assert!(!is_valid_social_image_rel("/app/opengraph-image.png"));
+        assert!(!is_valid_social_image_rel("../app/opengraph-image.png"));
+        assert!(!is_valid_social_image_rel("app/./opengraph-image.png"));
+        assert!(!is_valid_social_image_rel(""));
+        assert!(!is_valid_social_image_rel("opengraph-image.png"));
+    }
+
+    #[test]
+    fn pct_decode_handles_encoded_slashes() {
+        assert_eq!(
+            pct_decode("app%2Fblog%2Fopengraph-image.png"),
+            "app/blog/opengraph-image.png"
+        );
+        assert_eq!(pct_decode("app/no-encoding.png"), "app/no-encoding.png");
+        // Malformed escape is left literal rather than panicking.
+        assert_eq!(pct_decode("a%zz"), "a%zz");
+    }
 
     #[test]
     fn api_paths_are_ineligible() {

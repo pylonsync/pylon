@@ -274,6 +274,14 @@ export interface SsrMetadata {
     title?: string;
     description?: string;
     image?: string;
+    /** `og:image:secure_url` — set automatically to the https image URL. */
+    imageSecureUrl?: string;
+    /** `og:image:type` (e.g. "image/png"). */
+    imageType?: string;
+    /** `og:image:width` / `og:image:height` in pixels. */
+    imageWidth?: number;
+    imageHeight?: number;
+    imageAlt?: string;
     url?: string;
     type?: string;
   };
@@ -309,7 +317,14 @@ function renderMetadata(React: any, m: SsrMetadata | undefined): any {
   if (og) {
     if (og.title != null) kids.push(el("meta", { key: "ogt", property: "og:title", content: og.title }));
     if (og.description != null) kids.push(el("meta", { key: "ogd", property: "og:description", content: og.description }));
-    if (og.image) kids.push(el("meta", { key: "ogi", property: "og:image", content: og.image }));
+    if (og.image) {
+      kids.push(el("meta", { key: "ogi", property: "og:image", content: og.image }));
+      if (og.imageSecureUrl) kids.push(el("meta", { key: "ogis", property: "og:image:secure_url", content: og.imageSecureUrl }));
+      if (og.imageType) kids.push(el("meta", { key: "ogit", property: "og:image:type", content: og.imageType }));
+      if (og.imageWidth != null) kids.push(el("meta", { key: "ogiw", property: "og:image:width", content: String(og.imageWidth) }));
+      if (og.imageHeight != null) kids.push(el("meta", { key: "ogih", property: "og:image:height", content: String(og.imageHeight) }));
+      if (og.imageAlt) kids.push(el("meta", { key: "ogia", property: "og:image:alt", content: og.imageAlt }));
+    }
     if (og.url) kids.push(el("meta", { key: "ogu", property: "og:url", content: og.url }));
     if (og.type) kids.push(el("meta", { key: "ogy", property: "og:type", content: og.type }));
   }
@@ -400,6 +415,188 @@ function findBoundary(componentPath: string, fileName: string): string | null {
     dir = slash >= 0 ? dir.slice(0, slash) : "";
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Social-card image file convention (Next-style `opengraph-image.png` /
+// `twitter-image.png` colocated with a `page.tsx`). Drop the file in a
+// route folder and Pylon auto-emits the `<meta og:image>` (absolute URL,
+// dimensions, type) pointing at the `/_pylon/og` asset endpoint — no
+// metadata wiring required. An explicit `metadata.openGraph.image` always
+// wins. Resolved fresh per render off the filesystem (same model as
+// layouts / boundaries) so dropping a new image is picked up without a
+// restart.
+// ---------------------------------------------------------------------------
+
+const SOCIAL_IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"];
+
+/** Walk up from a page's directory to the nearest colocated
+ *  `<base>.<imgext>` (Next inheritance: a closer file overrides an
+ *  ancestor's). Returns the cwd-relative path WITH extension, or null. */
+function findColocatedImage(componentPath: string, base: string): string | null {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const cwd = process.cwd();
+  let dir = componentPath.replace(/\\/g, "/");
+  dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+  while (dir && dir !== "." && dir !== "/") {
+    for (const ext of SOCIAL_IMAGE_EXTS) {
+      if (fs.existsSync(path.join(cwd, dir, `${base}${ext}`))) {
+        return `${dir}/${base}${ext}`;
+      }
+    }
+    const slash = dir.lastIndexOf("/");
+    dir = slash >= 0 ? dir.slice(0, slash) : "";
+  }
+  return null;
+}
+
+/** Best-effort JPEG dimensions: scan SOF markers in the first 128KB. */
+function readJpegSize(fs: any, fd: number): { w: number; h: number } | null {
+  const CAP = 128 * 1024;
+  const buf = Buffer.alloc(CAP);
+  const n = fs.readSync(fd, buf, 0, CAP, 0);
+  if (n < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < n) {
+    if (buf[i] !== 0xff) {
+      i++;
+      continue;
+    }
+    let marker = buf[i + 1];
+    while (marker === 0xff && i + 1 < n) {
+      i++;
+      marker = buf[i + 1];
+    }
+    const seg = i + 2;
+    if (seg + 2 > n) break;
+    const len = buf.readUInt16BE(seg);
+    const isSOF =
+      marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSOF) {
+      if (seg + 7 <= n) {
+        return { h: buf.readUInt16BE(seg + 3), w: buf.readUInt16BE(seg + 5) };
+      }
+      return null;
+    }
+    if (marker === 0xd9 || marker === 0xda) break; // EOI / SOS
+    i = seg + len;
+  }
+  return null;
+}
+
+/** Content-type + pixel dimensions + mtime for a colocated image. Dims
+ *  are best-effort (PNG/GIF from the header, JPEG via SOF scan). */
+function readSocialImageMeta(relPath: string): {
+  type: string;
+  width?: number;
+  height?: number;
+  v: number;
+} {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const ext = relPath.slice(relPath.lastIndexOf(".")).toLowerCase();
+  const type =
+    ext === ".png" ? "image/png"
+    : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
+    : ext === ".webp" ? "image/webp"
+    : ext === ".gif" ? "image/gif"
+    : ext === ".avif" ? "image/avif"
+    : "application/octet-stream";
+  let width: number | undefined;
+  let height: number | undefined;
+  let v = 0;
+  try {
+    const abs = path.join(process.cwd(), relPath);
+    v = Math.floor(fs.statSync(abs).mtimeMs);
+    const fd = fs.openSync(abs, "r");
+    try {
+      const head = Buffer.alloc(32);
+      fs.readSync(fd, head, 0, 32, 0);
+      if (ext === ".png" && head.toString("latin1", 1, 4) === "PNG") {
+        width = head.readUInt32BE(16); // IHDR: 8 sig + 4 len + 4 "IHDR"
+        height = head.readUInt32BE(20);
+      } else if (ext === ".gif" && head.toString("latin1", 0, 3) === "GIF") {
+        width = head.readUInt16LE(6);
+        height = head.readUInt16LE(8);
+      } else if (ext === ".jpg" || ext === ".jpeg") {
+        const d = readJpegSize(fs, fd);
+        if (d) {
+          width = d.w;
+          height = d.h;
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    /* dims/mtime are best-effort */
+  }
+  return { type, width, height, v };
+}
+
+/** Absolute origin for OG URLs (crawlers require absolute). Prefers the
+ *  request Host (works for any custom domain the app serves), falling
+ *  back to PYLON_PUBLIC_URL. Empty string → relative (dev last resort). */
+function resolveRequestOrigin(headers: Record<string, string> | undefined): string {
+  const host = headers?.["host"];
+  if (host) {
+    const proto =
+      headers?.["x-forwarded-proto"] ||
+      (/^(localhost|127\.|\[?::1|0\.0\.0\.0)/.test(host) ? "http" : "https");
+    return `${proto}://${host}`;
+  }
+  const env = ((globalThis as any).process?.env?.PYLON_PUBLIC_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+  return env;
+}
+
+/** Merge auto-discovered social-card images into a page's metadata. An
+ *  explicit `openGraph.image` / `twitter.image` always wins; otherwise a
+ *  colocated `opengraph-image.*` (and `twitter-image.*`, falling back to
+ *  the og file) is wired in with absolute URL + dimensions. */
+export function applyAutoSocialImages(
+  component: string,
+  headers: Record<string, string> | undefined,
+  metadata: SsrMetadata | undefined,
+): SsrMetadata | undefined {
+  const hasOg = !!metadata?.openGraph?.image;
+  const hasTw = !!metadata?.twitter?.image;
+  if (hasOg && hasTw) return metadata;
+
+  const ogFile = hasOg ? null : findColocatedImage(component, "opengraph-image");
+  const twFile = hasTw
+    ? null
+    : findColocatedImage(component, "twitter-image") ?? ogFile;
+  if (!ogFile && !twFile) return metadata;
+
+  const origin = resolveRequestOrigin(headers);
+  const urlFor = (rel: string, v: number): string =>
+    `${origin}/_pylon/og?src=${encodeURIComponent(rel)}${v ? `&v=${v}` : ""}`;
+  const out: SsrMetadata = { ...(metadata ?? {}) };
+
+  if (ogFile && !hasOg) {
+    const m = readSocialImageMeta(ogFile);
+    const url = urlFor(ogFile, m.v);
+    out.openGraph = {
+      ...(out.openGraph ?? {}),
+      image: url,
+      imageType: m.type,
+      ...(m.width ? { imageWidth: m.width } : {}),
+      ...(m.height ? { imageHeight: m.height } : {}),
+      ...(url.startsWith("https:") ? { imageSecureUrl: url } : {}),
+    };
+  }
+  if (twFile && !hasTw) {
+    const m = readSocialImageMeta(twFile);
+    out.twitter = {
+      card: "summary_large_image",
+      ...(out.twitter ?? {}),
+      image: urlFor(twFile, m.v),
+    };
+  }
+  return out;
 }
 
 /**
@@ -742,6 +939,9 @@ export async function handleRenderRoute(
     if (typeof mod.generateMetadata === "function") {
       metadata = await mod.generateMetadata(props);
     }
+    // File convention: auto-wire <meta og:image>/<twitter:image> from a
+    // colocated opengraph-image.* / twitter-image.* unless the page set one.
+    metadata = applyAutoSocialImages(msg.component, msg.headers, metadata);
     const metaFragment = renderMetadata(React, metadata);
 
     // Resolve the layout chain. Each layout module exports a default

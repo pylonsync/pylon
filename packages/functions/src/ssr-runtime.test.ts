@@ -1,0 +1,133 @@
+// Tests for the Next-style `opengraph-image.png` / `twitter-image.png`
+// file convention wired up in `applyAutoSocialImages`.
+import { afterEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { applyAutoSocialImages } from "./ssr-runtime";
+
+// A minimal PNG: 8-byte signature + an IHDR chunk carrying width/height.
+// `readSocialImageMeta` only reads the first 32 bytes, so a full valid
+// PNG isn't required to exercise the dimension reader.
+function pngHeader(w: number, h: number): Buffer {
+  const b = Buffer.alloc(24);
+  b.write("\x89PNG\r\n\x1a\n", 0, "latin1");
+  b.writeUInt32BE(13, 8); // IHDR length
+  b.write("IHDR", 12, "latin1");
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  return b;
+}
+
+let prevCwd: string | null = null;
+const tmpDirs: string[] = [];
+
+function makeApp(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pylon-og-"));
+  tmpDirs.push(dir);
+  prevCwd = process.cwd();
+  process.chdir(dir);
+  return dir;
+}
+
+afterEach(() => {
+  if (prevCwd) {
+    process.chdir(prevCwd);
+    prevCwd = null;
+  }
+  for (const d of tmpDirs.splice(0)) {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+describe("opengraph-image file convention", () => {
+  test("auto-injects og:image + twitter:image with dims from a colocated png", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app", "blog"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "app", "blog", "opengraph-image.png"),
+      pngHeader(1200, 630),
+    );
+
+    const md = applyAutoSocialImages(
+      "app/blog/page",
+      { host: "example.com" },
+      undefined,
+    );
+
+    expect(md?.openGraph?.image).toContain(
+      "https://example.com/_pylon/og?src=app%2Fblog%2Fopengraph-image.png",
+    );
+    expect(md?.openGraph?.imageType).toBe("image/png");
+    expect(md?.openGraph?.imageWidth).toBe(1200);
+    expect(md?.openGraph?.imageHeight).toBe(630);
+    expect(md?.openGraph?.imageSecureUrl).toBe(md?.openGraph?.image);
+    // Twitter falls back to the og image + a large-summary card.
+    expect(md?.twitter?.card).toBe("summary_large_image");
+    expect(md?.twitter?.image).toContain(
+      "/_pylon/og?src=app%2Fblog%2Fopengraph-image.png",
+    );
+  });
+
+  test("inherits the nearest ancestor image (root app/opengraph-image.png)", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app", "deep", "nested"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "app", "opengraph-image.png"),
+      pngHeader(800, 418),
+    );
+
+    const md = applyAutoSocialImages(
+      "app/deep/nested/page",
+      { host: "x.test" },
+      undefined,
+    );
+    expect(md?.openGraph?.image).toContain(
+      "/_pylon/og?src=app%2Fopengraph-image.png",
+    );
+    expect(md?.openGraph?.imageWidth).toBe(800);
+  });
+
+  test("a closer image overrides an ancestor", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app", "blog"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "opengraph-image.png"), pngHeader(1, 1));
+    fs.writeFileSync(
+      path.join(dir, "app", "blog", "opengraph-image.png"),
+      pngHeader(1200, 630),
+    );
+    const md = applyAutoSocialImages("app/blog/page", { host: "x.test" }, undefined);
+    expect(md?.openGraph?.image).toContain(
+      "/_pylon/og?src=app%2Fblog%2Fopengraph-image.png",
+    );
+    expect(md?.openGraph?.imageWidth).toBe(1200);
+  });
+
+  test("explicit metadata.openGraph.image always wins", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "opengraph-image.png"), pngHeader(1, 1));
+    const md = applyAutoSocialImages(
+      "app/page",
+      { host: "x.test" },
+      { openGraph: { image: "https://cdn.example/custom.png" } },
+    );
+    expect(md?.openGraph?.image).toBe("https://cdn.example/custom.png");
+  });
+
+  test("no colocated image leaves metadata untouched", () => {
+    makeApp(); // empty cwd, no app/ image
+    const input = { title: "Hello" };
+    const md = applyAutoSocialImages("app/page", { host: "x.test" }, input);
+    expect(md).toEqual(input);
+  });
+
+  test("localhost host yields an http (non-secure) absolute URL", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "opengraph-image.png"), pngHeader(10, 10));
+    const md = applyAutoSocialImages("app/page", { host: "localhost:4321" }, undefined);
+    expect(md?.openGraph?.image).toContain("http://localhost:4321/_pylon/og?src=");
+    expect(md?.openGraph?.imageSecureUrl).toBeUndefined();
+  });
+});
