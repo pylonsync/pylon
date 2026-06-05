@@ -291,6 +291,13 @@ export interface SsrMetadata {
     description?: string;
     image?: string;
   };
+  /** `<link rel="icon">` / `<link rel="apple-touch-icon">`. Auto-wired
+   *  from the app/icon.* + app/apple-icon.* + app/favicon.ico file
+   *  conventions, or set explicitly. */
+  icons?: {
+    icon?: { url: string; type?: string; sizes?: string };
+    apple?: { url: string; type?: string; sizes?: string };
+  };
 }
 
 /**
@@ -334,6 +341,21 @@ function renderMetadata(React: any, m: SsrMetadata | undefined): any {
     if (tw.title != null) kids.push(el("meta", { key: "twt", name: "twitter:title", content: tw.title }));
     if (tw.description != null) kids.push(el("meta", { key: "twd", name: "twitter:description", content: tw.description }));
     if (tw.image) kids.push(el("meta", { key: "twi", name: "twitter:image", content: tw.image }));
+  }
+  const ic = m.icons;
+  if (ic) {
+    if (ic.icon) {
+      const a: Record<string, string> = { key: "icn", rel: "icon", href: ic.icon.url };
+      if (ic.icon.type) a.type = ic.icon.type;
+      if (ic.icon.sizes) a.sizes = ic.icon.sizes;
+      kids.push(el("link", a));
+    }
+    if (ic.apple) {
+      const a: Record<string, string> = { key: "aicn", rel: "apple-touch-icon", href: ic.apple.url };
+      if (ic.apple.type) a.type = ic.apple.type;
+      if (ic.apple.sizes) a.sizes = ic.apple.sizes;
+      kids.push(el("link", a));
+    }
   }
   return kids.length > 0 ? el(React.Fragment, null, ...kids) : null;
 }
@@ -433,14 +455,18 @@ const SOCIAL_IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"];
 /** Walk up from a page's directory to the nearest colocated
  *  `<base>.<imgext>` (Next inheritance: a closer file overrides an
  *  ancestor's). Returns the cwd-relative path WITH extension, or null. */
-function findColocatedImage(componentPath: string, base: string): string | null {
+function findColocatedImage(
+  componentPath: string,
+  base: string,
+  exts: string[] = SOCIAL_IMAGE_EXTS,
+): string | null {
   const fs = require("node:fs");
   const path = require("node:path");
   const cwd = process.cwd();
   let dir = componentPath.replace(/\\/g, "/");
   dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
   while (dir && dir !== "." && dir !== "/") {
-    for (const ext of SOCIAL_IMAGE_EXTS) {
+    for (const ext of exts) {
       if (fs.existsSync(path.join(cwd, dir, `${base}${ext}`))) {
         return `${dir}/${base}${ext}`;
       }
@@ -502,6 +528,8 @@ function readSocialImageMeta(relPath: string): {
     : ext === ".webp" ? "image/webp"
     : ext === ".gif" ? "image/gif"
     : ext === ".avif" ? "image/avif"
+    : ext === ".svg" ? "image/svg+xml"
+    : ext === ".ico" ? "image/x-icon"
     : "application/octet-stream";
   let width: number | undefined;
   let height: number | undefined;
@@ -556,6 +584,65 @@ function resolveRequestOrigin(headers: Record<string, string> | undefined): stri
  *  explicit `openGraph.image` / `twitter.image` always wins; otherwise a
  *  colocated `opengraph-image.*` (and `twitter-image.*`, falling back to
  *  the og file) is wired in with absolute URL + dimensions. */
+// Icon file conventions. `icon.*` → <link rel="icon">; `apple-icon.*` →
+// <link rel="apple-touch-icon">; `favicon.ico` is the legacy fallback for
+// the icon link. Unlike og:image, icon links use a RELATIVE URL (resolved
+// same-origin by the browser) so no request origin is needed.
+const ICON_EXTS = [".png", ".svg", ".ico", ".jpg", ".jpeg"];
+const APPLE_ICON_EXTS = [".png", ".jpg", ".jpeg"];
+
+/** `sizes` attribute for an icon link: "any" for vector SVG, "WxH" for a
+ *  raster with known dimensions, omitted for .ico (multi-size). */
+function iconSizes(rel: string, m: { width?: number; height?: number }): string | undefined {
+  if (rel.toLowerCase().endsWith(".svg")) return "any";
+  if (m.width && m.height) return `${m.width}x${m.height}`;
+  return undefined;
+}
+
+/** Merge auto-discovered favicons (icon.* / apple-icon.* / favicon.ico)
+ *  into a page's metadata. Explicit `metadata.icons.*` wins. */
+export function applyAutoIcons(
+  component: string,
+  metadata: SsrMetadata | undefined,
+): SsrMetadata | undefined {
+  const hasIcon = !!metadata?.icons?.icon;
+  const hasApple = !!metadata?.icons?.apple;
+  if (hasIcon && hasApple) return metadata;
+
+  const iconFile = hasIcon
+    ? null
+    : findColocatedImage(component, "icon", ICON_EXTS) ??
+      findColocatedImage(component, "favicon", [".ico"]);
+  const appleFile = hasApple
+    ? null
+    : findColocatedImage(component, "apple-icon", APPLE_ICON_EXTS);
+  if (!iconFile && !appleFile) return metadata;
+
+  const linkFor = (rel: string, v: number): string =>
+    `/_pylon/og?src=${encodeURIComponent(rel)}${v ? `&v=${v}` : ""}`;
+  const out: SsrMetadata = { ...(metadata ?? {}) };
+  out.icons = { ...(out.icons ?? {}) };
+
+  if (iconFile && !hasIcon) {
+    const m = readSocialImageMeta(iconFile);
+    const sizes = iconSizes(iconFile, m);
+    out.icons.icon = {
+      url: linkFor(iconFile, m.v),
+      type: m.type,
+      ...(sizes ? { sizes } : {}),
+    };
+  }
+  if (appleFile && !hasApple) {
+    const m = readSocialImageMeta(appleFile);
+    out.icons.apple = {
+      url: linkFor(appleFile, m.v),
+      type: m.type,
+      ...(m.width && m.height ? { sizes: `${m.width}x${m.height}` } : {}),
+    };
+  }
+  return out;
+}
+
 export function applyAutoSocialImages(
   component: string,
   headers: Record<string, string> | undefined,
@@ -939,9 +1026,11 @@ export async function handleRenderRoute(
     if (typeof mod.generateMetadata === "function") {
       metadata = await mod.generateMetadata(props);
     }
-    // File convention: auto-wire <meta og:image>/<twitter:image> from a
-    // colocated opengraph-image.* / twitter-image.* unless the page set one.
+    // File conventions: auto-wire <meta og:image>/<twitter:image> from a
+    // colocated opengraph-image.* / twitter-image.*, and <link rel="icon">
+    // from icon.* / apple-icon.* / favicon.ico — unless the page set them.
     metadata = applyAutoSocialImages(msg.component, msg.headers, metadata);
+    metadata = applyAutoIcons(msg.component, metadata);
     const metaFragment = renderMetadata(React, metadata);
 
     // Resolve the layout chain. Each layout module exports a default

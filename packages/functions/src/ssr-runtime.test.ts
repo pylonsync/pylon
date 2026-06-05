@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyAutoSocialImages } from "./ssr-runtime";
+import { applyAutoIcons, applyAutoSocialImages } from "./ssr-runtime";
 
 // A minimal PNG: 8-byte signature + an IHDR chunk carrying width/height.
 // `readSocialImageMeta` only reads the first 32 bytes, so a full valid
@@ -129,5 +129,54 @@ describe("opengraph-image file convention", () => {
     const md = applyAutoSocialImages("app/page", { host: "localhost:4321" }, undefined);
     expect(md?.openGraph?.image).toContain("http://localhost:4321/_pylon/og?src=");
     expect(md?.openGraph?.imageSecureUrl).toBeUndefined();
+  });
+});
+
+describe("icon / apple-icon / favicon file convention", () => {
+  test("auto-wires <link rel=icon> + apple-touch-icon (relative URL + sizes)", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "icon.png"), pngHeader(512, 512));
+    fs.writeFileSync(path.join(dir, "app", "apple-icon.png"), pngHeader(180, 180));
+
+    const md = applyAutoIcons("app/page", undefined);
+    expect(md?.icons?.icon?.url).toContain("/_pylon/og?src=app%2Ficon.png");
+    expect(md?.icons?.icon?.url.startsWith("/")).toBe(true); // relative
+    expect(md?.icons?.icon?.type).toBe("image/png");
+    expect(md?.icons?.icon?.sizes).toBe("512x512");
+    expect(md?.icons?.apple?.url).toContain("/_pylon/og?src=app%2Fapple-icon.png");
+    expect(md?.icons?.apple?.sizes).toBe("180x180");
+  });
+
+  test("svg icon gets sizes=any; inherits from a parent folder", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app", "blog"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "icon.svg"), "<svg/>");
+    const md = applyAutoIcons("app/blog/page", undefined);
+    expect(md?.icons?.icon?.url).toContain("/_pylon/og?src=app%2Ficon.svg");
+    expect(md?.icons?.icon?.type).toBe("image/svg+xml");
+    expect(md?.icons?.icon?.sizes).toBe("any");
+  });
+
+  test("favicon.ico is the icon fallback", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "favicon.ico"), Buffer.alloc(8));
+    const md = applyAutoIcons("app/page", undefined);
+    expect(md?.icons?.icon?.url).toContain("/_pylon/og?src=app%2Ffavicon.ico");
+    expect(md?.icons?.icon?.type).toBe("image/x-icon");
+    expect(md?.icons?.icon?.sizes).toBeUndefined(); // .ico is multi-size
+  });
+
+  test("explicit metadata.icons wins; no file → untouched", () => {
+    const dir = makeApp();
+    fs.mkdirSync(path.join(dir, "app"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "app", "icon.png"), pngHeader(1, 1));
+    const explicit = { icons: { icon: { url: "/custom.ico" } } };
+    expect(applyAutoIcons("app/page", explicit)?.icons?.icon?.url).toBe("/custom.ico");
+
+    makeApp(); // fresh empty cwd
+    const input = { title: "T" };
+    expect(applyAutoIcons("app/page", input)).toEqual(input);
   });
 });

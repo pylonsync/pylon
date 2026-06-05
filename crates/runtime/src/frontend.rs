@@ -313,12 +313,19 @@ fn pct_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// True iff `rel` is a colocated social-card image: `app/.../<base>.<ext>`
-/// where `base` ∈ {opengraph-image, twitter-image} and `ext` is an image
-/// type. Rejects absolute paths, `..`/`.` segments, backslashes, and any
-/// other basename — so `/_pylon/og` can only ever serve those two
-/// conventional files and never an arbitrary source file.
-fn is_valid_social_image_rel(rel: &str) -> bool {
+/// True iff `rel` is a colocated metadata asset: `app/.../<base>.<ext>`
+/// where `base` is one of the Next-style file conventions
+/// {opengraph-image, twitter-image, icon, apple-icon, favicon} and `ext`
+/// is an image type. Rejects absolute paths, `..`/`.` segments,
+/// backslashes, and any other basename — so `/_pylon/og` can only ever
+/// serve those conventional files and never an arbitrary source file.
+///
+/// `svg`/`ico` are allowed (favicons are commonly SVG/ICO). Unlike the
+/// `<Image>` optimizer — which rejects SVG because it proxies remote /
+/// user-supplied images — this endpoint only serves the developer's OWN
+/// colocated convention files (first-party app source), so an inline-
+/// script SVG is no more dangerous than the app's own JS.
+fn is_valid_colocated_asset_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
         return false;
     }
@@ -339,10 +346,13 @@ fn is_valid_social_image_rel(rel: &str) -> bool {
         Some(x) => x,
         None => return false,
     };
-    let base_ok = base == "opengraph-image" || base == "twitter-image";
+    let base_ok = matches!(
+        base,
+        "opengraph-image" | "twitter-image" | "icon" | "apple-icon" | "favicon"
+    );
     let ext_ok = matches!(
         ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif"
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif" | "svg" | "ico"
     );
     base_ok && ext_ok
 }
@@ -371,7 +381,7 @@ fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), 
         .and_then(|s| s.split('&').next())
         .map(pct_decode)
         .unwrap_or_default();
-    if !is_valid_social_image_rel(&rel) {
+    if !is_valid_colocated_asset_rel(&rel) {
         return four_oh_four(request);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1597,31 +1607,37 @@ mod tests {
     #[test]
     fn social_image_rel_allowlist() {
         // Valid colocated social-card images.
-        assert!(is_valid_social_image_rel("app/opengraph-image.png"));
-        assert!(is_valid_social_image_rel("app/blog/opengraph-image.jpg"));
-        assert!(is_valid_social_image_rel(
+        assert!(is_valid_colocated_asset_rel("app/opengraph-image.png"));
+        assert!(is_valid_colocated_asset_rel("app/blog/opengraph-image.jpg"));
+        assert!(is_valid_colocated_asset_rel(
             "app/(marketing)/twitter-image.webp"
         ));
-        assert!(is_valid_social_image_rel(
+        assert!(is_valid_colocated_asset_rel(
             "app/x/[slug]/opengraph-image.PNG"
         ));
         // Wrong basename — must never serve arbitrary source files.
-        assert!(!is_valid_social_image_rel("app/page.tsx"));
-        assert!(!is_valid_social_image_rel("app/secret.png"));
-        assert!(!is_valid_social_image_rel("app/blog/cover.png"));
+        assert!(!is_valid_colocated_asset_rel("app/page.tsx"));
+        assert!(!is_valid_colocated_asset_rel("app/secret.png"));
+        assert!(!is_valid_colocated_asset_rel("app/blog/cover.png"));
+        // Icon conventions (svg/ico allowed here).
+        assert!(is_valid_colocated_asset_rel("app/icon.png"));
+        assert!(is_valid_colocated_asset_rel("app/icon.svg"));
+        assert!(is_valid_colocated_asset_rel("app/favicon.ico"));
+        assert!(is_valid_colocated_asset_rel("app/apple-icon.png"));
         // Wrong root / extension.
-        assert!(!is_valid_social_image_rel("public/opengraph-image.png"));
-        assert!(!is_valid_social_image_rel("app/opengraph-image.svg"));
-        assert!(!is_valid_social_image_rel("app/opengraph-image.ts"));
+        assert!(!is_valid_colocated_asset_rel("public/opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel("app/opengraph-image.ts"));
+        assert!(!is_valid_colocated_asset_rel("app/icon.tsx"));
+        assert!(!is_valid_colocated_asset_rel("app/logo.svg"));
         // Traversal / absolute / malformed.
-        assert!(!is_valid_social_image_rel(
+        assert!(!is_valid_colocated_asset_rel(
             "app/../secret/opengraph-image.png"
         ));
-        assert!(!is_valid_social_image_rel("/app/opengraph-image.png"));
-        assert!(!is_valid_social_image_rel("../app/opengraph-image.png"));
-        assert!(!is_valid_social_image_rel("app/./opengraph-image.png"));
-        assert!(!is_valid_social_image_rel(""));
-        assert!(!is_valid_social_image_rel("opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel("/app/opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel("../app/opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel("app/./opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel(""));
+        assert!(!is_valid_colocated_asset_rel("opengraph-image.png"));
     }
 
     #[test]
