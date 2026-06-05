@@ -4380,12 +4380,30 @@ pub fn try_spawn_functions(
     // when the manifest declares connections — the auto-injected
     // `_Connection` entity is already present at this point.
     let connection_mgr = build_connection_manager(&runtime);
+    // Optional per-call timeout override (PYLON_FN_CALL_TIMEOUT, in SECONDS).
+    // The default (DEFAULT_CALL_TIMEOUT = 30s) is tuned for request handlers;
+    // apps that legitimately run long actions — e.g. a control plane whose
+    // deploy actions orchestrate slow infra calls (machine restarts) — raise
+    // it. Applies to every runner, so it covers scheduled jobs (which run on
+    // the same pool) as well as HTTP calls. Absent / non-numeric / zero →
+    // keep the default.
+    let call_timeout_override = std::env::var("PYLON_FN_CALL_TIMEOUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs);
+    if let Some(t) = call_timeout_override {
+        tracing::info!("[functions] PYLON_FN_CALL_TIMEOUT override active: {t:?}");
+    }
     for runner in &runners {
         install_schedule_hook(runner, &registry, Arc::clone(&job_queue));
         install_email_hook(runner, Arc::clone(&email_adapter));
         install_llm_hook(runner, llm_client.clone());
         install_connection_hook(runner, connection_mgr.clone(), Arc::clone(&runtime));
         runner.set_policy_gate(Arc::clone(&policy_gate));
+        if let Some(t) = call_timeout_override {
+            runner.set_call_timeout(t);
+        }
     }
 
     let pool = Arc::new(pylon_functions::pool::FnRunnerPool::new(runners));
