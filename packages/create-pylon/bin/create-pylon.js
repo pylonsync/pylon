@@ -173,12 +173,12 @@ if (!flags.template) {
 	process.stdout.write(`\n${lines}\n`);
 	const ans = (
 		await rl.question(
-			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [todo]: `,
+			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [ssr]: `,
 		)
 	)
 		.trim()
 		.toLowerCase();
-	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "todo";
+	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "ssr";
 }
 // `unified` templates (ssr) are a single app, not a monorepo — they take
 // no platforms. Skip the platform prompt + validation for them entirely.

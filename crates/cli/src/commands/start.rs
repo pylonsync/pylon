@@ -29,6 +29,51 @@ use crate::studio_config;
 const DEFAULT_PORT: u16 = 4321;
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
+    // Prebuilt-artifact boot (Pylon Cloud build pipeline). When the control
+    // plane ships a prebuilt bundle instead of inlining source, fetch + verify
+    // + extract it and chdir into it BEFORE anything reads app.ts — on a fresh
+    // machine the app root doesn't exist until this runs. No-op (returns None)
+    // unless PYLON_ARTIFACT_ID is set, so the legacy inline-files boot is
+    // unchanged. See crate::artifact.
+    let artifact_active = match crate::artifact::prepare() {
+        Ok(Some(app_root)) => {
+            if let Err(e) = std::env::set_current_dir(&app_root) {
+                print_diagnostics(
+                    &[Diagnostic {
+                        severity: Severity::Error,
+                        code: "START_ARTIFACT_CHDIR".into(),
+                        message: format!(
+                            "could not enter extracted artifact dir {}: {e}",
+                            app_root.display()
+                        ),
+                        span: None,
+                        hint: None,
+                    }],
+                    json_mode,
+                );
+                return ExitCode::Error;
+            }
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            print_diagnostics(
+                &[Diagnostic {
+                    severity: Severity::Error,
+                    code: "START_ARTIFACT_FETCH".into(),
+                    message: format!("prebuilt artifact bootstrap failed: {e}"),
+                    span: None,
+                    hint: Some(
+                        "the deploy's bundle could not be fetched and no cached bundle exists"
+                            .into(),
+                    ),
+                }],
+                json_mode,
+            );
+            return ExitCode::Error;
+        }
+    };
+
     let port: u16 = args
         .windows(2)
         .find(|w| w[0] == "--port" || w[0] == "-p")
@@ -192,6 +237,28 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .or_else(|| std::env::var("PYLON_DB_PATH").ok())
         .unwrap_or_else(|| ".pylon/dev.db".to_string());
     let is_pg = db_target.starts_with("postgres://") || db_target.starts_with("postgresql://");
+
+    // When booting from a prebuilt artifact the cwd is an ephemeral, PRUNABLE
+    // per-deploy dir on /data. A cwd-relative SQLite default (`.pylon/dev.db`)
+    // would land inside it and be deleted on the 4th deploy → silent data
+    // loss. Require an absolute SQLite path (or Postgres) instead.
+    if artifact_active && !is_pg && Path::new(&db_target).is_relative() {
+        print_diagnostics(
+            &[Diagnostic {
+                severity: Severity::Error,
+                code: "START_ARTIFACT_DB_RELATIVE".into(),
+                message: format!(
+                    "artifact boot requires an absolute DATABASE_URL or PYLON_DB_PATH; \
+                     got relative SQLite path {db_target:?} which would be pruned with the \
+                     deploy"
+                ),
+                span: None,
+                hint: Some("set PYLON_DB_PATH=/data/pylon.db (or DATABASE_URL)".into()),
+            }],
+            json_mode,
+        );
+        return ExitCode::Error;
+    }
 
     if !is_pg {
         // SQLite path: ensure parent dir exists.

@@ -709,6 +709,16 @@ async function _doBuildInner(fs: any, path: any, cwd: string): Promise<BuildOutp
     const result = await Bun.build({
       entrypoints: entryPaths,
       outdir,
+      // Pin the build root to the project dir, NOT the inferred common
+      // parent of the entrypoints (which is `.pylon/`). Bun discovers
+      // `tsconfig.json` from `root`, and the entries we stage under
+      // `.pylon/client-entry-*.tsx` would otherwise resolve tsconfig from
+      // `.pylon/` and never see the project's `compilerOptions.paths` — so
+      // `@/` path-alias imports (e.g. shadcn's `@/lib/utils`) compile fine
+      // server-side but fail in the client bundle. `[name]-[hash]` naming
+      // has no `[dir]`, so pinning root doesn't move outputs. Keeps client
+      // and server alias resolution identical.
+      root: cwd,
       target: "browser",
       format: "esm",
       minify: true,

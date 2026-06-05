@@ -822,13 +822,16 @@ fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
     mtimes
 }
 
-/// Recursively walk `dir` collecting mtimes of every `*.ts` / `*.tsx`
-/// source file. Recursion matters: app source lives in subdirectories
-/// (`functions/`, `lib/`, `emails/`, …), and the watcher's restart-on-
-/// change logic keys off these paths — a flat top-level scan silently
-/// missed every edit under `functions/`, so handler changes never hot-
-/// reloaded (you had to Ctrl-C and restart by hand). Heavy / generated
-/// trees are skipped so the 500ms poll doesn't crawl node_modules.
+/// Recursively walk `dir` collecting mtimes of every `*.ts` / `*.tsx` /
+/// `*.css` source file. Recursion matters: app source lives in
+/// subdirectories (`functions/`, `lib/`, `emails/`, …), and the watcher's
+/// restart-on-change logic keys off these paths — a flat top-level scan
+/// silently missed every edit under `functions/`, so handler changes never
+/// hot-reloaded (you had to Ctrl-C and restart by hand). `.css` is watched
+/// too so editing `app/globals.css` (Tailwind / shadcn tokens) re-runs the
+/// SSR build and recompiles the stylesheet instead of serving stale CSS.
+/// Heavy / generated trees are skipped so the 500ms poll doesn't crawl
+/// node_modules.
 fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -858,7 +861,7 @@ fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) 
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str());
-        if ext == Some("ts") || ext == Some("tsx") {
+        if ext == Some("ts") || ext == Some("tsx") || ext == Some("css") {
             // Skip generated files to avoid infinite rebuild loops.
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("pylon.") {

@@ -36,6 +36,10 @@ ureq = { version = "2.10", features = ["json", "tls"] }
 tar = "0.4"
 flate2 = "1.0"
 base64 = { workspace = true }
+# Artifact-bundle integrity: the boot-time fetch verifies the downloaded
+# bundle's SHA-256 against the hash the control plane injected via env
+# before extracting (see commands/artifact.rs).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

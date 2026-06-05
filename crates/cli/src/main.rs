@@ -1,3 +1,4 @@
+mod artifact;
 mod bun;
 mod client_codegen;
 mod cloud_client;

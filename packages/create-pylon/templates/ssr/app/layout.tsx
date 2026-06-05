@@ -21,8 +21,11 @@ interface LayoutProps {
 // SSR runtime on every render — server-side, before the HTML is sent.
 export default function RootLayout({ children, url, auth }: LayoutProps) {
   const signedIn = Boolean(auth?.user_id);
+  // Add `className="dark"` to this <html> to flip every shadcn token to its
+  // dark value. The classes below use semantic tokens (bg-background,
+  // text-foreground, …) so the whole UI re-themes from app/globals.css.
   return (
-    <html lang="en" className="bg-zinc-50">
+    <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -31,24 +34,24 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
             stylesheet link is injected here automatically — nothing to
             wire up. */}
       </head>
-      <body className="min-h-screen text-zinc-900 antialiased">
-        <header className="sticky top-0 z-10 border-b border-zinc-200 bg-white/80 backdrop-blur">
+      <body className="min-h-screen bg-background text-foreground antialiased">
+        <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
           <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
             <Link
               href="/"
-              className="text-sm font-semibold tracking-tight hover:text-zinc-600"
+              className="text-sm font-semibold tracking-tight hover:text-muted-foreground"
             >
               __APP_NAME__
             </Link>
-            <nav className="flex items-center gap-4 text-sm text-zinc-600">
-              <Link href="/" className="hover:text-zinc-900">
+            <nav className="flex items-center gap-4 text-sm text-muted-foreground">
+              <Link href="/" className="hover:text-foreground">
                 Home
               </Link>
-              <Link href="/counter" className="hover:text-zinc-900">
+              <Link href="/counter" className="hover:text-foreground">
                 Counter
               </Link>
               <span
-                className={signedIn ? "text-emerald-600" : "text-zinc-400"}
+                className={signedIn ? "text-emerald-600" : "text-muted-foreground/60"}
                 title={url}
               >
                 {signedIn ? `· ${auth.user_id}` : "· anon"}
@@ -57,7 +60,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
           </div>
         </header>
         <main className="mx-auto max-w-3xl px-4 py-10">{children}</main>
-        <footer className="border-t border-zinc-200 py-6 text-center text-xs text-zinc-500">
+        <footer className="border-t py-6 text-center text-xs text-muted-foreground">
           Rendered by Pylon · one server, one port
         </footer>
       </body>

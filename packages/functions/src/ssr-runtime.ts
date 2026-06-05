@@ -738,6 +738,22 @@ async function streamWithHeadInjection(
 }
 
 /**
+ * Dev-only browser live-reload client, injected at the end of every SSR
+ * page when PYLON_DEV_MODE is set. Subscribes to the runtime's
+ * `/_pylon/dev/live` Server-Sent-Events endpoint (see frontend.rs
+ * `serve_dev_live_reload`), which streams this process's boot id in a
+ * `hello` event. EventSource auto-reconnects when `pylon dev` restarts; the
+ * fresh process advertises a new boot id, so a changed id ⇒ the tab reloads.
+ * No-ops in browsers without EventSource (none in practice).
+ */
+const DEV_LIVE_RELOAD_SNIPPET =
+  "<script>(function(){if(typeof EventSource===\"undefined\")return;" +
+  "var b=null;try{var s=new EventSource(\"/_pylon/dev/live\");" +
+  "s.addEventListener(\"hello\",function(e){" +
+  "if(b!==null&&e.data!==b){s.close();location.reload();return;}b=e.data;});" +
+  "}catch(_){}})();</script>";
+
+/**
  * Build the <head> blob for a boundary render: the union of every route's
  * stylesheet links from the client build manifest. Boundary modules aren't
  * bundled as their own client entry, but they render inside the same
@@ -1193,6 +1209,15 @@ export async function handleRenderRoute(
         tail += `<script type="module" src="${preloadPublicPrefix}${preloadManifestRoute.file}"></script>`;
       } else {
         tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${preloadManifestErr}`)})</script>`;
+      }
+      // Dev-only browser live-reload. `pylon dev` (PYLON_DEV_MODE=1) re-execs
+      // the whole process on every file edit; each process serves a fresh
+      // boot id from /_pylon/dev/live. This client subscribes via
+      // EventSource and reloads the tab when the boot id changes — so saving
+      // a page, a component, or app/globals.css refreshes the browser with
+      // no manual F5. Stripped entirely in production builds.
+      if (process.env.PYLON_DEV_MODE) {
+        tail += DEV_LIVE_RELOAD_SNIPPET;
       }
       send({
         type: "render_chunk",

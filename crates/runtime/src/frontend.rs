@@ -419,6 +419,81 @@ fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), 
     Ok(())
 }
 
+/// True when this runtime was launched by `pylon dev` (which exports
+/// `PYLON_DEV_MODE=1`). Gates dev-only surfaces — currently the
+/// live-reload SSE endpoint — so they can never exist in production.
+fn is_dev_mode() -> bool {
+    std::env::var("PYLON_DEV_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Per-process boot id: stable for the life of this process, distinct on
+/// the next one. `pylon dev` re-execs a fresh process on every file edit,
+/// so a changed id is exactly the "the server just restarted" signal the
+/// live-reload client watches for.
+fn dev_boot_id() -> &'static str {
+    static BOOT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BOOT_ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{}", std::process::id(), nanos)
+    })
+}
+
+/// Dev-only Server-Sent-Events endpoint backing browser live-reload. Holds
+/// the connection open with a 1s heartbeat and emits one `hello` event
+/// carrying this process's boot id. On the next `pylon dev` restart the
+/// process dies, the page's EventSource reconnects to the fresh process,
+/// reads a different boot id, and reloads the tab. The matching client
+/// script is injected into every SSR page in dev (see ssr-runtime.ts).
+fn serve_dev_live_reload(request: Request, cors_origin: &str) -> Result<(), Request> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let streaming_body = crate::server::StreamingBody::new(rx);
+
+    // `retry:` sets the client's reconnect delay; `hello` carries the id.
+    let hello = format!("retry: 500\nevent: hello\ndata: {}\n\n", dev_boot_id());
+    if tx.send(hello.into_bytes()).is_err() {
+        return Ok(());
+    }
+
+    // Heartbeat keeps proxies/connections alive and lets us notice when the
+    // client has gone (send fails → StreamingBody's rx was dropped) so the
+    // thread exits instead of leaking.
+    std::thread::Builder::new()
+        .name("pylon-dev-live-reload".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if tx.send(b": ping\n\n".to_vec()).is_err() {
+                return;
+            }
+        })
+        .ok();
+
+    let response = Response::new(
+        tiny_http::StatusCode(200),
+        vec![
+            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+            Header::from_bytes("Cache-Control", "no-cache").unwrap(),
+            Header::from_bytes("Connection", "keep-alive").unwrap(),
+            // Disable proxy buffering so events flush immediately.
+            Header::from_bytes("X-Accel-Buffering", "no").unwrap(),
+            Header::from_bytes(
+                "Access-Control-Allow-Origin",
+                cors_origin.as_bytes().to_vec(),
+            )
+            .unwrap(),
+        ],
+        streaming_body,
+        None,
+        None,
+    );
+    let _ = request.respond(response);
+    Ok(())
+}
+
 /// Resolve a request path to a file inside `root`, defending against
 /// path traversal.
 ///
@@ -511,6 +586,19 @@ pub fn try_handle(
     // the endpoint can't be turned into an arbitrary-file read.
     if path_only == "/_pylon/og" {
         return serve_og_image(request, &url, cors_origin);
+    }
+
+    // Dev-only browser live-reload signal. `pylon dev` injects a tiny
+    // EventSource client into every SSR page; it subscribes here and
+    // reloads the tab when this process's boot id changes — which happens
+    // on every restart (edit a page / component / globals.css → the dev
+    // server re-execs a fresh process). 404 outside dev so prod never
+    // exposes the endpoint.
+    if path_only == "/_pylon/dev/live" {
+        if is_dev_mode() {
+            return serve_dev_live_reload(request, cors_origin);
+        }
+        return Err(request);
     }
 
     // SSR branch sits ABOVE dev_proxy so file-based pages take
