@@ -27,13 +27,13 @@ workers = [
 ]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.239" }
-pylon-http = { path = "../http", version = "0.3.239" }
-pylon-router = { path = "../router", version = "0.3.239" }
-pylon-auth = { path = "../auth", version = "0.3.239" }
-pylon-policy = { path = "../policy", version = "0.3.239" }
-pylon-sync = { path = "../sync", version = "0.3.239" }
-pylon-realtime = { path = "../realtime", version = "0.3.239" }
+pylon-kernel = { path = "../core", version = "0.3.240" }
+pylon-http = { path = "../http", version = "0.3.240" }
+pylon-router = { path = "../router", version = "0.3.240" }
+pylon-auth = { path = "../auth", version = "0.3.240" }
+pylon-policy = { path = "../policy", version = "0.3.240" }
+pylon-sync = { path = "../sync", version = "0.3.240" }
+pylon-realtime = { path = "../realtime", version = "0.3.240" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
