@@ -715,3 +715,25 @@ jobs:
           # the rust-builder stage's deps cache too.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # pylon-builder: the ephemeral image the Cloud build-artifact pipeline
+      # runs on a throwaway Fly machine (builder/Dockerfile). Tiny + fast to
+      # build (Bun base + one script), so it rides the same release.
+      - uses: docker/metadata-action@v5
+        id: meta-builder
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/pylon-builder
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: builder/Dockerfile
+          push: true
+          tags: ${{ steps.meta-builder.outputs.tags }}
+          labels: ${{ steps.meta-builder.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
