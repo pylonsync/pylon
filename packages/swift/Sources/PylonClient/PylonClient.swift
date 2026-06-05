@@ -304,8 +304,12 @@ public actor PylonClient {
 
     // MARK: - Sync (low-level — most callers should use SyncEngine)
 
-    public func syncPull(since: Int64) async throws -> PullResponse {
-        try await request(.get, "/api/sync/pull?since=\(since)")
+    public func syncPull(since: Int64, snapshotAfter: String? = nil) async throws -> PullResponse {
+        var path = "/api/sync/pull?since=\(since)"
+        if let snapshotAfter, !snapshotAfter.isEmpty {
+            path += "&snapshot_after=\(percentEncode(snapshotAfter))"
+        }
+        return try await request(.get, path)
     }
 
     public func syncPush(_ request: PushRequest) async throws -> PushResponse {

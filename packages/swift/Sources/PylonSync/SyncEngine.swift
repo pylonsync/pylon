@@ -87,6 +87,20 @@ public actor SyncEngine {
     private var sseTask: Task<Void, Never>?
     private var wsConnected = false
 
+    // Reconcile state (TS parity). `observedEntities` are entities the UI has
+    // queried (even if empty locally) so reconcile sweeps server rows in a
+    // never-cached entity. `hydrated` flips true after the first pull, so a
+    // scoped reconcile only fires once data has loaded. `lastReconcileAt`
+    // debounces no-arg reconciles; `reconcileInFlight` coalesces concurrent
+    // ones. `lastPullStartedFromZero` records whether the last pull was a
+    // cold snapshot (skip the post-pull reconcile then — the snapshot IS
+    // authoritative).
+    private var observedEntities: Set<String> = []
+    private var hydrated = false
+    private var lastReconcileAt: Date = .distantPast
+    private var reconcileInFlight = false
+    private var lastPullStartedFromZero = false
+
     /// Optional WebSocket factory. Default is `URLSessionWebSocket`.
     private let webSocketFactory: @Sendable (URL, String?) -> PylonWebSocket
 
@@ -159,6 +173,7 @@ public actor SyncEngine {
 
         await refreshResolvedSession()
         await pull()
+        hydrated = true
         if let persistence {
             try? await persistence.saveCursor(cursor)
         }
@@ -210,21 +225,42 @@ public actor SyncEngine {
         lastSeenToken = tokenNow
         lastSeenTokenObserved = true
 
+        // A cold pull (cursor == 0) drains a full snapshot — paginated by the
+        // server via `snapshot_after` (NOT `has_more`), which the engine
+        // previously ignored, rendering only the first page. Drain BOTH so a
+        // fresh client gets a consistent snapshot. `since` stays fixed at the
+        // entry cursor during snapshot pages; for the delta tail it advances.
+        let startedFromZero = cursor.last_seq == 0
+        let sinceParam = cursor.last_seq
         do {
-            let resp = try await client.syncPull(since: cursor.last_seq)
-            consecutive410s = 0
-            if !resp.changes.isEmpty {
-                await store.applyChangesAsync(resp.changes)
-            }
-            if resp.cursor.last_seq > cursor.last_seq {
-                cursor = resp.cursor
-                if let persistence {
-                    try? await persistence.saveCursor(cursor)
+            var snapshotAfter: String? = nil
+            var pages = 0
+            while pages < 10_000 {
+                pages += 1
+                let since = snapshotAfter != nil ? sinceParam : cursor.last_seq
+                let resp = try await client.syncPull(since: since, snapshotAfter: snapshotAfter)
+                // Reset the 410 circuit breaker ONLY on a successful DELTA
+                // pull — a snapshot success leaving the counter intact means
+                // repeated resyncs escalate backoff instead of melting egress.
+                if !startedFromZero { consecutive410s = 0 }
+                if !resp.changes.isEmpty {
+                    await store.applyChangesAsync(resp.changes)
+                }
+                if resp.cursor.last_seq > cursor.last_seq {
+                    cursor = resp.cursor
+                    if let persistence {
+                        try? await persistence.saveCursor(cursor)
+                    }
+                }
+                if let sa = resp.snapshot_after {
+                    snapshotAfter = sa // more snapshot pages — keep `since` fixed
+                } else if resp.has_more {
+                    snapshotAfter = nil // delta tail — `since` advances with cursor
+                } else {
+                    break
                 }
             }
-            if resp.has_more {
-                await pull()
-            }
+            lastPullStartedFromZero = startedFromZero
         } catch let error as PylonError {
             switch error.httpStatus {
             case 429:
@@ -250,6 +286,126 @@ public actor SyncEngine {
         }
     }
 
+    // MARK: - Reconcile (phantom-row sweep)
+
+    /// Stable signature of the resolved session. A reconcile whose fetch
+    /// raced a tenant/user flip must NOT apply its result — rows fetched
+    /// under the old tenant would tombstone rows visible under the new one
+    /// (the "flashes data away on first load" bug).
+    private func sessionSignature() -> String {
+        let roles = resolvedSession.roles.sorted().joined(separator: ",")
+        return "\(resolvedSession.userId ?? "")|\(resolvedSession.tenantId ?? "")|\(resolvedSession.isAdmin ? "1" : "0")|\(roles)"
+    }
+
+    /// Register an entity the UI is observing (via a query) so reconcile
+    /// sweeps it even when it has no local rows yet. Fires a one-shot scoped
+    /// reconcile when the entity is empty post-hydration — covers a query on
+    /// a never-cached entity that should surface a server row.
+    public func observeEntity(_ entity: String) async {
+        if observedEntities.contains(entity) { return }
+        observedEntities.insert(entity)
+        if hydrated && store.list(entity).isEmpty {
+            await reconcile([entity])
+        }
+    }
+
+    /// Sweep phantom rows: fetch each entity's authoritative server set and
+    /// remove any local row the server no longer returns (plus upsert any
+    /// drifted row). `nil` sweeps all known + observed entities (debounced);
+    /// an explicit list bypasses the debounce. Rows with pending/failed
+    /// mutations are protected. Mirrors TS `reconcile()` — this is the
+    /// behavior that clears recordings deleted on another surface / server-
+    /// side, which the Swift engine previously never did.
+    public func reconcile(_ entities: [String]? = nil) async {
+        let minIntervalMs = 2000.0
+        if entities == nil,
+           Date().timeIntervalSince(lastReconcileAt) * 1000 < minIntervalMs {
+            return
+        }
+        if reconcileInFlight { return }
+        reconcileInFlight = true
+        defer {
+            reconcileInFlight = false
+            lastReconcileAt = Date()
+        }
+        await reconcileInner(entities)
+    }
+
+    private func reconcileInner(_ entities: [String]?) async {
+        let names = entities ?? Array(Set(store.entityNames()).union(observedEntities))
+        if names.isEmpty { return }
+        // Tombstone any local row the server omits at the current cursor, so
+        // a future re-creation (higher seq) still flows through.
+        let tombstoneSeq = cursor.last_seq
+        let pendingKeys = await mutations.pendingRowKeys()
+        for entity in names {
+            let cursorBefore = cursor.last_seq
+            let sessionBefore = sessionSignature()
+            let serverRows: [Row]
+            do {
+                serverRows = try await fetchEntityRows(entity)
+            } catch let err as PylonError {
+                if err.httpStatus == 403 || err.httpStatus == 404 {
+                    await dropEntity(entity, tombstoneSeq: tombstoneSeq, pendingKeys: pendingKeys)
+                }
+                continue
+            } catch {
+                continue // transient — next trigger retries
+            }
+            // Drift guards: a WS event advanced the cursor, or the session
+            // flipped, during the fetch. Applying a now-stale snapshot would
+            // clobber fresher state / tombstone newly-visible rows. Skip.
+            if cursor.last_seq != cursorBefore { continue }
+            if sessionSignature() != sessionBefore { continue }
+
+            var serverIds = Set<String>()
+            var upserts: [Row] = []
+            for row in serverRows {
+                guard case let .string(id)? = row["id"], !id.isEmpty else { continue }
+                serverIds.insert(id)
+                if pendingKeys.contains("\(entity)/\(id)") { continue }
+                let local = store.get(entity, id: id)
+                if local == nil || local! != row { upserts.append(row) }
+            }
+            var removalIds: [String] = []
+            for local in store.list(entity) {
+                guard case let .string(id)? = local["id"] else { continue }
+                if pendingKeys.contains("\(entity)/\(id)") { continue }
+                if !serverIds.contains(id) { removalIds.append(id) }
+            }
+            if upserts.isEmpty && removalIds.isEmpty { continue }
+            store.applyReconcileBatch(entity, upserts: upserts, removalIds: removalIds, tombstoneSeq: tombstoneSeq)
+        }
+    }
+
+    /// Fetch every row for an entity via cursor pagination (cap 200 pages =
+    /// 20k rows; larger tables shouldn't be fully mirrored client-side).
+    private func fetchEntityRows(_ entity: String) async throws -> [Row] {
+        var out: [Row] = []
+        var after: String? = nil
+        for _ in 0..<200 {
+            let page = try await client.listCursor(entity, after: after, limit: 100, as: Row.self)
+            out.append(contentsOf: page.data)
+            guard page.has_more, let next = page.next_cursor else { break }
+            after = next
+        }
+        return out
+    }
+
+    /// Drop every (unprotected) local row for an entity that became
+    /// unreadable (403, policy revoked) or removed (404) — keeping them
+    /// around just leaks invisible state.
+    private func dropEntity(_ entity: String, tombstoneSeq: Int64, pendingKeys: Set<String>) async {
+        var removalIds: [String] = []
+        for local in store.list(entity) {
+            guard case let .string(id)? = local["id"] else { continue }
+            if pendingKeys.contains("\(entity)/\(id)") { continue }
+            removalIds.append(id)
+        }
+        if removalIds.isEmpty { return }
+        store.applyReconcileBatch(entity, upserts: [], removalIds: removalIds, tombstoneSeq: tombstoneSeq)
+    }
+
     /// Push pending mutations. Coalesces concurrent callers to a single
     /// in-flight push.
     public func push() async {
@@ -269,20 +425,78 @@ public actor SyncEngine {
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
             let resp = try await client.syncPush(req)
-            for (i, m) in pending.enumerated() {
-                if i < resp.applied {
-                    await mutations.markApplied(m.id)
-                } else {
-                    let idx = i - resp.applied
-                    if idx < resp.errors.count {
-                        await mutations.markFailed(m.id, error: resp.errors[idx])
+            if let results = resp.results, !results.isEmpty {
+                // Per-op mapping by op_id — correct on a partial batch failure
+                // (e.g. op 1 applied, op 2 rejected, op 3 applied). Positional
+                // mapping misaligns those.
+                var byOpId: [String: PushOpResult] = [:]
+                for r in results { if let op = r.op_id { byOpId[op] = r } }
+                for m in pending {
+                    guard let r = byOpId[m.id] else { continue }
+                    switch r.status {
+                    case "applied", "replayed", "deduped":
+                        await mutations.markApplied(m.id)
+                    case "error":
+                        await failPushedMutation(m, error: r.error ?? "rejected")
+                    default:
+                        break // "pending" → leave queued, retry next push
+                    }
+                }
+            } else {
+                // Legacy positional format (servers < 0.3.188).
+                for (i, m) in pending.enumerated() {
+                    if i < resp.applied {
+                        await mutations.markApplied(m.id)
+                    } else {
+                        let idx = i - resp.applied
+                        let msg = idx < resp.errors.count ? resp.errors[idx] : "rejected"
+                        await failPushedMutation(m, error: msg)
                     }
                 }
             }
             await mutations.clear()
+            // Catch-up pull: if the server applied past our cursor (server-
+            // side defaults, linked-row side effects), pull NOW instead of
+            // waiting for the WS rebroadcast (which may be slow or dropped).
+            let maxApplied = resp.max_applied_seq ?? resp.cursor.last_seq
+            if maxApplied > cursor.last_seq {
+                Task { await self.pull() }
+            }
+        } catch let err as PylonError {
+            // Permanent rejection (4xx) → roll back the optimistic ghosts and
+            // stop retrying. Transient (5xx/429/offline/no-status) → leave
+            // pending; the poll loop / next push retries.
+            if isPermanentPushError(err.httpStatus) {
+                let msg: String
+                if case let .http(_, code, m) = err { msg = m ?? code ?? "rejected" } else { msg = "rejected" }
+                for m in pending { await failPushedMutation(m, error: msg) }
+                await mutations.clear()
+            }
         } catch {
-            // Server retries are idempotent via op_id — leave pending and try again.
+            // Network throw (no status) — transient. Leave pending.
         }
+    }
+
+    /// Roll back an optimistic mutation the server permanently rejected:
+    /// remove the ghost (insert) or restore the captured pre-mutation row
+    /// (update/delete), then mark the mutation failed so the UI can surface
+    /// it. Without this a rejected edit leaves a ghost row forever.
+    private func failPushedMutation(_ m: PendingMutation, error: String) async {
+        switch m.change.kind {
+        case .insert:
+            store.rollbackOptimisticInsert(m.change.entity, id: m.change.row_id)
+        case .update, .delete:
+            store.restoreRow(m.change.entity, id: m.change.row_id, prev: m.prevRow)
+        }
+        await mutations.markFailed(m.id, error: error)
+    }
+
+    /// Permanent push errors must NOT retry: 400/403/404/409/422. A missing
+    /// status (network throw) and 5xx/429/401/408 are transient → keep
+    /// retrying with backoff.
+    private func isPermanentPushError(_ status: Int?) -> Bool {
+        guard let status else { return false }
+        return [400, 403, 404, 409, 422].contains(status)
     }
 
     // MARK: - Optimistic mutations
@@ -296,14 +510,18 @@ public actor SyncEngine {
     }
 
     public func update(_ entity: String, id: String, _ data: Row) async {
+        // Snapshot the row BEFORE the optimistic apply so a permanent
+        // rejection can restore it.
+        let prev = store.get(entity, id: id)
         store.optimisticUpdate(entity, id: id, data)
-        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .update, data: data))
+        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .update, data: data), prevRow: prev)
         await push()
     }
 
     public func delete(_ entity: String, id: String) async {
+        let prev = store.get(entity, id: id)
         store.optimisticDelete(entity, id: id)
-        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .delete))
+        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .delete), prevRow: prev)
         await push()
     }
 
@@ -324,6 +542,11 @@ public actor SyncEngine {
 
     private func connectWs() async {
         guard running else { return }
+        // Re-auth before (re)opening the socket: detect a tenant/token change
+        // that happened while it was closed (sign-out→in, org switch) so we
+        // open with fresh credentials + a reset replica instead of streaming
+        // the old identity's rows.
+        await refreshResolvedSession()
         let url = deriveWsURL()
         let token = await client.currentToken()
         let socket = webSocketFactory(url, token)
@@ -335,6 +558,13 @@ public actor SyncEngine {
             wsConnected = false
             scheduleReconnect()
             return
+        }
+        // Sweep rows that changed while disconnected — the WS only delivers
+        // LIVE events, so a delete/update that landed during the outage is
+        // otherwise missed. Skip right after a cold snapshot (already
+        // authoritative). Debounced, so cheap on rapid reconnects.
+        if !lastPullStartedFromZero {
+            Task { [weak self] in await self?.reconcile() }
         }
         // Stable-window timer: only reset reconnectAttempts after the
         // socket has been alive for 5s. Mirrors the TS engine's logic to
@@ -405,11 +635,15 @@ public actor SyncEngine {
 
     private func connectSse() async {
         guard running else { return }
+        await refreshResolvedSession()
         let url = deriveSseURL()
         let token = await client.currentToken()
         let stream = SSEStream(url: url, token: token)
         sseStream = stream
         stream.connect()
+        if !lastPullStartedFromZero {
+            Task { [weak self] in await self?.reconcile() }
+        }
         sseTask = Task { [weak self] in
             guard let self else { return }
             await self.consumeSse(stream: stream)
@@ -475,6 +709,9 @@ public actor SyncEngine {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 await self.push()
                 await self.pull()
+                // Periodic phantom-row sweep (debounced) so a delete/update
+                // the poll's delta missed still converges.
+                await self.reconcile()
             }
         }
     }

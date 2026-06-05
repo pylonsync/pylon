@@ -55,6 +55,12 @@ public struct PullResponse: Sendable, Codable {
     public var changes: [ChangeEvent]
     public var cursor: SyncCursor
     public var has_more: Bool
+    /// Opaque continuation token for a cold (since=0) snapshot that the
+    /// server paginated. While present, the engine must keep fetching with
+    /// `?snapshot_after=<token>` so a fresh client gets a CONSISTENT full
+    /// snapshot rather than a partial prefix. Absent on delta pulls and on
+    /// the final snapshot page.
+    public var snapshot_after: String?
 }
 
 /// Outgoing mutation in `POST /api/sync/push`.
@@ -92,10 +98,31 @@ public struct PushRequest: Sendable, Codable {
     }
 }
 
+/// Per-op result in a push response (servers ≥ 0.3.188). The engine maps
+/// these by `op_id` so a partial batch failure (op 1 applied, op 2 rejected,
+/// op 3 applied) lands on the right mutations — positional mapping
+/// misaligns. Falls back to the legacy `applied`/`errors` shape when absent.
+public struct PushOpResult: Sendable, Codable {
+    public var op_id: String?
+    /// "applied" | "replayed" | "deduped" (success) | "pending" (retry) |
+    /// "error" (failure).
+    public var status: String?
+    public var seq: Int64?
+    public var error: String?
+}
+
 public struct PushResponse: Sendable, Codable {
     public var applied: Int
     public var errors: [String]
     public var cursor: SyncCursor
+    /// Per-op results keyed by op_id (servers ≥ 0.3.188). Optional for
+    /// backward compatibility with the legacy positional format.
+    public var results: [PushOpResult]?
+    /// Highest seq the server applied for this push. When it's ahead of the
+    /// local cursor, the engine fires a catch-up pull to fetch server-side
+    /// defaults / linked-row side effects without waiting for the WS
+    /// rebroadcast.
+    public var max_applied_seq: Int64?
 }
 
 // ---------------------------------------------------------------------------

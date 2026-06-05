@@ -238,4 +238,99 @@ public final class LocalStore: @unchecked Sendable {
         lock.unlock()
         for l in listeners { l() }
     }
+
+    // MARK: - Reconcile + rollback (TS parity)
+    //
+    // These mirror `packages/sync/src/local-store.ts`. The SyncEngine uses
+    // them to sweep phantom rows (rows the server no longer returns) and to
+    // undo optimistic mutations the server permanently rejected — the two
+    // behaviors the Swift engine was missing, which surfaced as the Mac app
+    // showing stale/ghost recordings that never cleared.
+
+    /// Entity names that currently have a local table. Reconcile unions this
+    /// with the engine's observed-entity set so a server row in a
+    /// never-cached entity is still swept in.
+    public func entityNames() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(tables.keys)
+    }
+
+    /// Reconcile a freshly-fetched server snapshot for one entity: upsert the
+    /// `upserts`, and remove+tombstone every id in `removalIds`. The engine
+    /// has already excluded rows with pending/failed mutations from both
+    /// lists. `tombstoneSeq` is the engine's cursor at fetch time, so a later
+    /// re-creation (higher seq) bypasses the tombstone and re-adds still flow.
+    public func applyReconcileBatch(
+        _ entity: String,
+        upserts: [Row],
+        removalIds: [String],
+        tombstoneSeq: Int64
+    ) {
+        let (snapshot, listeners, persist) = withLock {
+            () -> ([ChangeEvent], [@Sendable () -> Void], (@Sendable (ChangeEvent) async -> Void)?) in
+            if tables[entity] == nil { tables[entity] = [:] }
+            var snaps: [ChangeEvent] = []
+            for row in upserts {
+                guard case let .string(id)? = row["id"], !id.isEmpty else { continue }
+                // A row tombstoned at a HIGHER seq is fresher — the upsert is
+                // a stale pre-delete view; skip it.
+                if isTombstonedLocked(entity: entity, id: id, atSeq: tombstoneSeq + 1) { continue }
+                var merged = row
+                merged["id"] = .string(id)
+                tables[entity]?[id] = merged
+                snaps.append(ChangeEvent(seq: tombstoneSeq, entity: entity, row_id: id, kind: .insert, data: merged, timestamp: ""))
+            }
+            for id in removalIds {
+                if tables[entity]?.removeValue(forKey: id) != nil {
+                    recordTombstoneLocked(entity: entity, id: id, seq: tombstoneSeq)
+                    snaps.append(ChangeEvent(seq: tombstoneSeq, entity: entity, row_id: id, kind: .delete, data: nil, timestamp: ""))
+                }
+            }
+            return (snaps, Array(self.listeners.values), persistFn)
+        }
+        guard !snapshot.isEmpty else { return }
+        for l in listeners { l() }
+        if let persist {
+            for change in snapshot { Task.detached { await persist(change) } }
+        }
+    }
+
+    /// Remove an optimistic insert ghost whose push was permanently rejected.
+    /// No tombstone — the temp id was never real server state.
+    public func rollbackOptimisticInsert(_ entity: String, id: String) {
+        lock.lock()
+        let removed = tables[entity]?.removeValue(forKey: id) != nil
+        let listeners = removed ? Array(self.listeners.values) : []
+        lock.unlock()
+        for l in listeners { l() }
+    }
+
+    /// Restore a row to its captured pre-mutation value after a PERMANENTLY-
+    /// rejected update/delete, clearing the optimistic-delete fence so the
+    /// row (and future server events for it) aren't blocked. Only called when
+    /// the server rejected the op (4xx) — so the row is unchanged server-side
+    /// and the restore is authoritative. `prev == nil` removes the row (the
+    /// pre-mutation state was "absent"). Persists the restored value so it
+    /// survives the optimistic delete's on-disk tombstone.
+    public func restoreRow(_ entity: String, id: String, prev: Row?) {
+        let (snapshot, listeners, persist) = withLock {
+            () -> (ChangeEvent, [@Sendable () -> Void], (@Sendable (ChangeEvent) async -> Void)?) in
+            // Clear the optimistic-delete fence (recorded at Int64.max).
+            if tombstones[entity]?[id] == .max { tombstones[entity]?.removeValue(forKey: id) }
+            let snap: ChangeEvent
+            if let prev {
+                if tables[entity] == nil { tables[entity] = [:] }
+                var row = prev
+                row["id"] = .string(id)
+                tables[entity]?[id] = row
+                snap = ChangeEvent(seq: 0, entity: entity, row_id: id, kind: .insert, data: row, timestamp: "")
+            } else {
+                tables[entity]?.removeValue(forKey: id)
+                snap = ChangeEvent(seq: .max, entity: entity, row_id: id, kind: .delete, data: nil, timestamp: "")
+            }
+            return (snap, Array(self.listeners.values), persistFn)
+        }
+        for l in listeners { l() }
+        if let persist { Task.detached { await persist(snapshot) } }
+    }
 }

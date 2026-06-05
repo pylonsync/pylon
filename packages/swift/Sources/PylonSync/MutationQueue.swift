@@ -6,6 +6,11 @@ public struct PendingMutation: Sendable, Codable, Hashable {
     public var change: ClientChange
     public var status: Status
     public var error: String?
+    /// Pre-mutation snapshot of the row, captured at queue time for
+    /// update/delete. Used to restore the row if the push is permanently
+    /// rejected (see `SyncEngine.failPushedMutation`). `nil` for inserts and
+    /// for updates whose target was itself an un-acked insert.
+    public var prevRow: Row?
 
     public enum Status: String, Sendable, Codable, Hashable {
         case pending
@@ -13,11 +18,18 @@ public struct PendingMutation: Sendable, Codable, Hashable {
         case failed
     }
 
-    public init(id: String, change: ClientChange, status: Status = .pending, error: String? = nil) {
+    public init(
+        id: String,
+        change: ClientChange,
+        status: Status = .pending,
+        error: String? = nil,
+        prevRow: Row? = nil
+    ) {
         self.id = id
         self.change = change
         self.status = status
         self.error = error
+        self.prevRow = prevRow
     }
 }
 
@@ -67,12 +79,14 @@ public actor MutationQueue {
     }
 
     /// Append a mutation. Returns the `op_id` for caller bookkeeping.
+    /// `prevRow` is the pre-mutation row snapshot (update/delete) used to
+    /// roll back on a permanent push rejection.
     @discardableResult
-    public func add(_ change: ClientChange) async -> String {
+    public func add(_ change: ClientChange, prevRow: Row? = nil) async -> String {
         let id = "mut_\(Int(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8))"
         var changeWithOp = change
         changeWithOp.op_id = id
-        queue.append(PendingMutation(id: id, change: changeWithOp))
+        queue.append(PendingMutation(id: id, change: changeWithOp, prevRow: prevRow))
         await flush()
         return id
     }
@@ -82,6 +96,18 @@ public actor MutationQueue {
     }
 
     public func all() -> [PendingMutation] { queue }
+
+    /// `"{entity}/{row_id}"` keys for every pending OR failed mutation.
+    /// Reconcile must NOT sweep or overwrite these rows — an offline insert
+    /// that hasn't pushed yet would otherwise look like a phantom local row
+    /// and get tombstoned before it ships. Mirrors TS `pendingRowKeys()`.
+    public func pendingRowKeys() -> Set<String> {
+        var keys = Set<String>()
+        for m in queue where m.status == .pending || m.status == .failed {
+            keys.insert("\(m.change.entity)/\(m.change.row_id)")
+        }
+        return keys
+    }
 
     public func markApplied(_ id: String) async {
         if let idx = queue.firstIndex(where: { $0.id == id }) {

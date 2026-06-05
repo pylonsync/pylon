@@ -45,6 +45,10 @@ public final class PylonQuery<T: Decodable>: ObservableObject {
     }
 
     private func start() async {
+        // Register this entity for reconcile sweeping so a server row in a
+        // never-cached entity (and deletes the WS missed) converge into the
+        // view, not just whatever happens to be in the local replica.
+        await engine.observeEntity(entity)
         let store = await engine.store
         let cancel = store.subscribe { [weak self] in
             Task { @MainActor in
