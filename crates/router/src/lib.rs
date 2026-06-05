@@ -1368,14 +1368,24 @@ fn route_inner(
     // Fallback
     // -----------------------------------------------------------------------
 
-    (
-        404,
-        json_error_with_hint(
-            "NOT_FOUND",
-            &format!("No API route matches {url}"),
-            "Available endpoints: /api/entities/<entity>, /api/actions/<name>, /api/query, /api/auth/*, /api/sync/*, /api/files/*, /api/cache, /api/pubsub/*, /api/jobs, /api/scheduler, /api/workflows, /api/ai/*, /studio",
-        ),
-    )
+    // Enumerating the whole API surface is a helpful dev hint but needless
+    // fingerprinting surface in prod (an anonymous GET /.env.production should
+    // not learn every route the app exposes). Only emit the route map in dev.
+    let dev_mode = std::env::var("PYLON_DEV_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if dev_mode {
+        (
+            404,
+            json_error_with_hint(
+                "NOT_FOUND",
+                &format!("No API route matches {url}"),
+                "Available endpoints: /api/entities/<entity>, /api/actions/<name>, /api/query, /api/auth/*, /api/sync/*, /api/files/*, /api/cache, /api/pubsub/*, /api/jobs, /api/scheduler, /api/workflows, /api/ai/*, /studio",
+            ),
+        )
+    } else {
+        (404, json_error("NOT_FOUND", "Not found"))
+    }
 }
 
 // ---------------------------------------------------------------------------
