@@ -1300,6 +1300,7 @@ fn build_ssr_response_headers(
     let mut out: Vec<Header> = Vec::new();
     let mut saw_content_type = false;
     let mut saw_cache_control = false;
+    let mut saw_set_cookie = false;
 
     // A header VALUE carrying CR/LF/NUL could smuggle extra headers (HTTP
     // response splitting). Drop it rather than trust the header library.
@@ -1332,6 +1333,7 @@ fn build_ssr_response_headers(
                 }
                 if let Ok(h) = Header::from_bytes("Set-Cookie", line.as_bytes()) {
                     out.push(h);
+                    saw_set_cookie = true;
                 }
             }
             continue;
@@ -1354,7 +1356,12 @@ fn build_ssr_response_headers(
         out.push(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
     }
     if !saw_cache_control {
-        out.push(Header::from_bytes("Cache-Control", "no-cache").unwrap());
+        // A cookie-setting SSR response is personalized — a shared cache (e.g.
+        // Cloudflare) must NEVER store it and replay it to another user, so it
+        // gets `no-store`. Otherwise `no-cache` (don't serve stale without
+        // revalidation; anonymous pages opt into edge caching explicitly).
+        let cc = if saw_set_cookie { "no-store" } else { "no-cache" };
+        out.push(Header::from_bytes("Cache-Control", cc).unwrap());
     }
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         out.push(h);
@@ -1973,6 +1980,29 @@ mod tests {
         assert_eq!(cookies.len(), 2, "one Set-Cookie header per cookie");
         assert!(cookies.iter().any(|c| c.starts_with("a=1")));
         assert!(cookies.iter().any(|c| c.starts_with("b=2")));
+    }
+
+    #[test]
+    fn ssr_cookie_response_is_no_store_else_no_cache() {
+        let cc = |page: &std::collections::HashMap<String, String>| {
+            header_pairs(&build_ssr_response_headers(page, "*"))
+                .into_iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v)
+        };
+        // Anonymous page → no-cache (it can opt into edge caching explicitly).
+        let anon = std::collections::HashMap::new();
+        assert_eq!(cc(&anon).as_deref(), Some("no-cache"));
+        // A cookie-setting (personalized) page → no-store, so a shared cache
+        // can never store it and replay it to another user.
+        let mut authed = std::collections::HashMap::new();
+        authed.insert("set-cookie".to_string(), "sid=abc; HttpOnly".to_string());
+        assert_eq!(cc(&authed).as_deref(), Some("no-store"));
+        // A page that sets its OWN Cache-Control is never overridden.
+        let mut custom = std::collections::HashMap::new();
+        custom.insert("set-cookie".to_string(), "sid=abc".to_string());
+        custom.insert("cache-control".to_string(), "private, max-age=0".to_string());
+        assert_eq!(cc(&custom).as_deref(), Some("private, max-age=0"));
     }
 
     #[test]

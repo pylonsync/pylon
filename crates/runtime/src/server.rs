@@ -325,11 +325,47 @@ static SERVER_HANDLE: std::sync::OnceLock<Arc<Server>> = std::sync::OnceLock::ne
 /// observed. Honoring the leftmost (or just trusting the whole
 /// header) lets any caller spoof their source IP by sending an
 /// `X-Forwarded-For: 1.2.3.4` header themselves.
+/// Optional explicit client-IP header (`PYLON_CLIENT_IP_HEADER`), e.g.
+/// `cf-connecting-ip` / `true-client-ip`. When a trusted edge (Cloudflare) is
+/// in front, this header carries the real client IP regardless of how many
+/// proxy hops X-Forwarded-For accumulates — more robust than counting hops.
+/// SECURITY: only honored because the operator opted in; only set it when the
+/// origin is unreachable EXCEPT through that edge (Authenticated Origin Pulls /
+/// CF-IP allowlist), otherwise a request hitting the origin directly could
+/// spoof the header. Unset → the X-Forwarded-For + trust-hops logic below
+/// (default; self-hosted unaffected).
+fn client_ip_header() -> Option<&'static str> {
+    static H: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        std::env::var("PYLON_CLIENT_IP_HEADER")
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+    })
+    .as_deref()
+}
+
 fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> String {
     let socket_ip = request
         .remote_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
+    // Explicit edge client-IP header takes precedence when configured (e.g.
+    // Cloudflare's CF-Connecting-IP). If it's configured but absent/invalid on
+    // this request (a direct origin hit that bypassed the edge), fall through
+    // to the X-Forwarded-For logic rather than trusting a missing value.
+    if let Some(hdr) = client_ip_header() {
+        if let Some(v) = request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(hdr))
+            .map(|h| h.value.as_str().trim().to_string())
+        {
+            if v.parse::<std::net::IpAddr>().is_ok() {
+                return v;
+            }
+        }
+    }
     if trust_proxy_hops == 0 {
         return socket_ip;
     }
@@ -5612,10 +5648,28 @@ fn start_server(
         // bytes here would be a programming bug, not request-driven, so a
         // failed Header::from_bytes is silently dropped rather than
         // poisoning the response.
+        //
+        // CDN safety: a shared cache (e.g. Cloudflare in front) must NEVER
+        // store a personalized or dynamic response — caching one user's
+        // session/personalized body and replaying it to another is a
+        // cross-user leak. A `Set-Cookie` response is inherently per-user, and
+        // every `/api/*` response is dynamic, so default those to `no-store`
+        // UNLESS the handler set its own Cache-Control. (Frontend static assets
+        // + SSR HTML go through `try_handle`, which sets its own caching.)
+        let sets_cookie = extra_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("set-cookie"));
+        let handler_set_cache = extra_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("cache-control"));
         for (name, value) in extra_headers {
             if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes().to_vec()) {
                 response = response.with_header(h);
             }
+        }
+        if !handler_set_cache && (sets_cookie || url.starts_with("/api/")) {
+            response = response
+                .with_header(Header::from_bytes("Cache-Control", b"no-store".to_vec()).unwrap());
         }
 
         // Add Content-Security-Policy for Studio HTML responses.
