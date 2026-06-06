@@ -407,6 +407,134 @@ fn with_security_headers<R: std::io::Read>(response: Response<R>) -> Response<R>
     resp
 }
 
+/// The opt-in canonical host (`PYLON_CANONICAL_HOST`), read + normalized once.
+/// When set, a request arriving on the apex↔www counterpart of this host is
+/// 308-redirected to it (Vercel-style "redirect non-primary domain to the
+/// primary"). Pylon Cloud sets this from the project's canonical custom domain;
+/// self-hosted apps that don't set it get no redirect. Lowercased, port
+/// stripped; empty/unset → `None`.
+fn canonical_host() -> Option<&'static str> {
+    static CANONICAL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CANONICAL
+        .get_or_init(|| {
+            std::env::var("PYLON_CANONICAL_HOST")
+                .ok()
+                .map(|s| {
+                    s.trim()
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .split(':')
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                })
+                .filter(|s| !s.is_empty() && s.contains('.'))
+        })
+        .as_deref()
+}
+
+/// True when `host` is the apex↔www counterpart of `canonical` (they differ
+/// only by a leading `www.`), so it should redirect to `canonical`. Both must
+/// already be lowercased + port-stripped. Returns false when `host` already IS
+/// the canonical host, or is any unrelated host (so `<app>.fly.dev`,
+/// `<slug>.pyln.dev`, the Fly health-check host, localhost, and other custom
+/// domains are never redirected — only the exact www/apex sibling is).
+fn is_apex_www_counterpart(canonical: &str, host: &str) -> bool {
+    if host.is_empty() || host == canonical {
+        return false;
+    }
+    match canonical.strip_prefix("www.") {
+        // canonical is the www host → redirect its bare apex.
+        Some(apex) => host == apex,
+        // canonical is the apex → redirect its www sibling.
+        None => host.strip_prefix("www.") == Some(canonical),
+    }
+}
+
+/// Compute the absolute `Location` for an apex↔www redirect, or `None` when no
+/// redirect applies (`host` is already canonical or not the sibling). Pure +
+/// testable. CRITICAL: `request.url()` is taken verbatim by tiny_http with no
+/// leading-`/` guarantee, so a crafted path like `@evil.com/` would make
+/// `https://{canonical}{url}` resolve to a FOREIGN host (CWE-601 open
+/// redirect). We reuse the in-tree same-origin guard and fall back to the
+/// canonical root for any path that isn't a safe relative path.
+fn canonical_redirect_target(canonical: &str, host: &str, url: &str) -> Option<String> {
+    if !is_apex_www_counterpart(canonical, host) {
+        return None;
+    }
+    let path = if crate::connections::is_safe_relative_redirect(url) {
+        url
+    } else {
+        "/"
+    };
+    Some(format!("https://{canonical}{path}"))
+}
+
+#[cfg(test)]
+mod canonical_redirect_tests {
+    use super::{canonical_redirect_target, is_apex_www_counterpart};
+
+    #[test]
+    fn apex_canonical_redirects_www_only() {
+        let c = "notbehind.com";
+        assert!(is_apex_www_counterpart(c, "www.notbehind.com"));
+        assert!(!is_apex_www_counterpart(c, "notbehind.com")); // already canonical
+        assert!(!is_apex_www_counterpart(c, "app.notbehind.com")); // other subdomain
+        assert!(!is_apex_www_counterpart(c, "pylon-notbehind.fly.dev"));
+        assert!(!is_apex_www_counterpart(c, "notbehind.pyln.dev"));
+        assert!(!is_apex_www_counterpart(c, "evil.com"));
+        assert!(!is_apex_www_counterpart(c, ""));
+    }
+
+    #[test]
+    fn www_canonical_redirects_apex_only() {
+        let c = "www.notbehind.com";
+        assert!(is_apex_www_counterpart(c, "notbehind.com"));
+        assert!(!is_apex_www_counterpart(c, "www.notbehind.com")); // already canonical
+        assert!(!is_apex_www_counterpart(c, "app.notbehind.com"));
+        assert!(!is_apex_www_counterpart(c, "www.evil.com"));
+    }
+
+    #[test]
+    fn target_preserves_safe_path_and_query() {
+        assert_eq!(
+            canonical_redirect_target("notbehind.com", "www.notbehind.com", "/m/1?x=2"),
+            Some("https://notbehind.com/m/1?x=2".to_string()),
+        );
+        assert_eq!(
+            canonical_redirect_target("www.notbehind.com", "notbehind.com", "/"),
+            Some("https://www.notbehind.com/".to_string()),
+        );
+    }
+
+    #[test]
+    fn target_none_when_not_sibling_or_already_canonical() {
+        assert_eq!(
+            canonical_redirect_target("notbehind.com", "notbehind.com", "/a"),
+            None,
+        );
+        assert_eq!(
+            canonical_redirect_target("notbehind.com", "app.notbehind.com", "/a"),
+            None,
+        );
+    }
+
+    #[test]
+    fn target_blocks_open_redirect_paths_falling_back_to_root() {
+        // CWE-601: a crafted path must NOT escape the canonical host.
+        for evil in ["@evil.com/", "//evil.com", "/\\evil.com", "", "evil.com/"] {
+            assert_eq!(
+                canonical_redirect_target("notbehind.com", "www.notbehind.com", evil),
+                Some("https://notbehind.com/".to_string()),
+                "path {evil:?} must fall back to canonical root, not escape origin",
+            );
+        }
+    }
+}
+
 /// Start the dev server on the given port. Blocks until shutdown.
 pub fn start(runtime: Arc<Runtime>, port: u16) -> Result<(), String> {
     start_with_plugins(runtime, port, None)
@@ -1724,6 +1852,50 @@ fn start_server(
             // thread-local to emit method/url/status/duration in one
             // line, like Next.js's `GET /login 200 in 27ms`).
             crate::metrics::set_current_request(&url, request_started_at);
+        }
+
+        // --- Canonical apex↔www redirect (opt-in: PYLON_CANONICAL_HOST) ---
+        // When a project picks a canonical custom domain (Vercel-style), the
+        // OTHER sibling (apex↔www) 308-redirects to it. Scoped to EXACTLY that
+        // sibling — `<app>.fly.dev`, `<slug>.pyln.dev`, the Fly health-check
+        // host, localhost, and unrelated domains are never touched. WS upgrades
+        // and the /health + /metrics probes are skipped so infra paths keep
+        // answering on any host. 308 preserves method + body + path + query.
+        if let Some(canonical) = canonical_host() {
+            let is_probe = url == "/health" || url == "/health/deep" || url == "/metrics";
+            let is_ws_upgrade = request.headers().iter().any(|h| {
+                h.field.equiv("Upgrade")
+                    && h.value.as_str().eq_ignore_ascii_case("websocket")
+            });
+            if !is_probe && !is_ws_upgrade {
+                // Public host: prefer X-Forwarded-Host (Fly's edge sets it).
+                let mut fwd_host: Option<String> = None;
+                let mut raw_host: Option<String> = None;
+                for h in request.headers().iter() {
+                    if h.field.equiv("X-Forwarded-Host") {
+                        fwd_host = Some(h.value.as_str().to_string());
+                    } else if h.field.equiv("Host") {
+                        raw_host = Some(h.value.as_str().to_string());
+                    }
+                }
+                let host = fwd_host
+                    .or(raw_host)
+                    .map(|h| h.split(':').next().unwrap_or("").to_ascii_lowercase())
+                    .unwrap_or_default();
+                if let Some(target) = canonical_redirect_target(canonical, &host, &url) {
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(308u16)
+                            .with_header(
+                                Header::from_bytes("Location", target.as_bytes().to_vec())
+                                    .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request(method.as_str(), 308);
+                    return;
+                }
+            }
         }
 
         // --- WebSocket multiplex on the main HTTP port ---
