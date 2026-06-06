@@ -635,7 +635,14 @@ async function buildTailwind(
   // Mix in the discovered routes so adding/removing pages changes
   // the hash (Tailwind v4 auto-discovers `@source` paths; we still
   // want the cache to bust on layout changes).
-  const stylesName = `styles-${hash.toString(36)}.css`;
+  //
+  // Pad the base36 hash to 8 chars: the runtime's `is_hashed_name`
+  // (frontend.rs) only sends `Cache-Control: immutable` for hashes ≥8
+  // chars (Bun's JS chunk convention). A 32-bit base36 hash is ≤7 chars,
+  // so WITHOUT the pad the content-hashed CSS was served `no-cache` —
+  // browsers + any CDN refetched it on every page load (defeats the cache
+  // and, behind Cloudflare, needlessly wakes an autostopped origin).
+  const stylesName = `styles-${hash.toString(36).padStart(8, "0")}.css`;
   const outPath = path.join(outdir, stylesName);
 
   // Spawn the CLI. Bun is already running; reuse it as the
