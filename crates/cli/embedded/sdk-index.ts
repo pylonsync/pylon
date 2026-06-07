@@ -50,6 +50,75 @@ export interface FieldDefinition {
   /** CRDT container override. Omitted entirely for the default
    *  (LWW for scalars, LoroText for richtext). */
   crdt?: CrdtAnnotation;
+  /**
+   * When true, the field is **never serialized in HTTP responses**.
+   * Use for secrets / billing-side identity / hashes that the server
+   * needs to read internally but should never leak to clients.
+   *
+   * Stripped at every public read boundary:
+   * - `GET /api/entities/<entity>` (list)
+   * - `GET /api/entities/<entity>/<id>` (single row)
+   * - `GET /api/auth/session` (User row projection)
+   * - Sync push deltas
+   *
+   * Still readable from inside server functions via `ctx.db.*` —
+   * the framework trusts your handler logic to decide what to
+   * return. If you pass the row through unmodified to the client,
+   * the field IS still stripped at the function-response boundary,
+   * provided the value is a plain row from `ctx.db.get` (which
+   * tags it with the entity name so the boundary knows what to
+   * filter).
+   *
+   * `passwordHash` on every User entity is implicitly serverOnly
+   * even without this annotation, by the framework's hardcoded
+   * convention. New apps should still mark it explicitly so the
+   * intent shows up in the schema.
+   */
+  serverOnly?: boolean;
+  /**
+   * When true, the field is **set on insert but cannot be changed
+   * by client updates**. The framework rejects any `PATCH`/`PUT`
+   * payload that mentions the field with a `READONLY_FIELD` error,
+   * before policy evaluation. Admin contexts bypass this check (as
+   * with all other framework gates), so migrations + ops scripts
+   * can still rewrite owner-shaped fields.
+   *
+   * Use for identity-shaped columns that need to be settable at
+   * creation but immutable after — `authorId`, `orgId`,
+   * `createdBy`, `stripeCustomerId`. Closes the canonical IDOR
+   * shape where a policy gates on `data.authorId == auth.userId`
+   * but the attacker passes a different `authorId` in the update
+   * payload to flip the row's ownership.
+   *
+   * Server-side writes (via `ctx.db.update` inside a function)
+   * still go through — readonly only blocks the HTTP entity
+   * routes (`PATCH /api/entities/<entity>/<id>`) and `/api/transact`.
+   * Server code is trusted to enforce its own invariants.
+   */
+  readonly?: boolean;
+  /**
+   * When true, the field is AEAD-encrypted at rest. The framework
+   * encrypts the value before writing to SQLite/Postgres and
+   * decrypts on read. Cipher: ChaCha20-Poly1305. Key:
+   * `PYLON_ENCRYPTION_KEY` env (32 bytes, hex or base64).
+   *
+   * Use for PII / secrets that must survive a DB-file leak: API
+   * keys stored on rows, social security numbers, OAuth tokens.
+   * Plaintext only exists inside the Pylon process.
+   *
+   * Restrictions:
+   * - Encrypted fields are NOT queryable. `ctx.db.lookup` /
+   *   `WHERE encryptedField = 'x'` always returns nothing because
+   *   each write produces fresh ciphertext.
+   * - Cannot combine with `unique: true`.
+   * - Valid only on `string`, `richtext`, and JSON-shaped fields.
+   *
+   * Decryption pre-pass means rows written BEFORE the field was
+   * annotated `encrypted: true` continue to read fine (passes
+   * through as plaintext). Next write through the mutation
+   * pipeline upgrades them to ciphertext.
+   */
+  encrypted?: boolean;
 }
 
 interface FieldBuilder {
@@ -66,6 +135,35 @@ interface FieldBuilder {
    * concurrently merge cleanly instead of last-write-wins.
    */
   crdt(annotation: CrdtAnnotation): FieldBuilder;
+  /**
+   * Mark the field as never-returned in HTTP responses. See
+   * [`FieldDefinition.serverOnly`] for the full semantics.
+   *
+   * Example: `stripeCustomerId: field.string().serverOnly()` keeps
+   * the Stripe customer id out of `/api/entities/Org/<id>` responses
+   * while staying readable from `ctx.db.get` inside the
+   * stripeWebhook action.
+   */
+  serverOnly(): FieldBuilder;
+  /**
+   * Mark the field as set-on-insert-only. See [`FieldDefinition.readonly`]
+   * for the full semantics.
+   *
+   * Example: `authorId: field.id("User").readonly()` lets the framework
+   * reject any `PATCH` payload trying to rewrite the row's author —
+   * closes the IDOR-via-update-payload class.
+   */
+  readonly(): FieldBuilder;
+  /**
+   * Mark the field as AEAD-encrypted at rest. See
+   * [`FieldDefinition.encrypted`] for the full semantics +
+   * restrictions.
+   *
+   * Example: `apiKey: field.string().serverOnly().encrypted()`
+   * keeps the key out of HTTP responses AND encrypts the bytes
+   * sitting in SQLite.
+   */
+  encrypted(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -83,6 +181,15 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     crdt(annotation) {
       return buildField({ ...def, crdt: annotation });
+    },
+    serverOnly() {
+      return buildField({ ...def, serverOnly: true });
+    },
+    readonly() {
+      return buildField({ ...def, readonly: true });
+    },
+    encrypted() {
+      return buildField({ ...def, encrypted: true });
     },
   };
 }
@@ -213,10 +320,19 @@ export interface RouteDefinition {
    */
   component?: string;
   /**
-   * Layout module path chain (root→leaf). Each layout wraps the
-   * next as `children`. Only relevant for `mode === "ssr"`.
+   * Layout module path chain (root→leaf). Each layout wraps the next
+   * as `children`. Only relevant for `mode === "ssr"`.
    */
   layouts?: string[];
+  /**
+   * Route kind. Omitted (or `"page"`) is a normal navigable page.
+   * `"not-found"` / `"error"` are SSR boundary modules discovered from
+   * `app/.../not-found.tsx` and `app/.../error.tsx`. Boundary routes are
+   * NOT matched as navigable URLs — the host renders `not-found` for
+   * unmatched URLs (HTTP 404) and `error` on render failure (HTTP 500).
+   * `path` records the segment prefix the boundary covers (`/` for root).
+   */
+  kind?: "page" | "not-found" | "error";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -266,7 +382,12 @@ export function action(
 // ---------------------------------------------------------------------------
 
 export interface PolicyDefinition {
-  name: string;
+  /** Optional — `buildManifest` auto-generates a name from the entity
+   *  + a counter when the fluent `.policies(policy({...}))` chain
+   *  omits one. Explicit names are still recommended for the
+   *  procedural API since they appear in policy-denied error
+   *  messages. */
+  name?: string;
   entity?: string;
   action?: string;
   /**
@@ -324,6 +445,26 @@ export interface ManifestField {
   /** CRDT container override; matches `pylon_kernel::CrdtAnnotation` on
    *  the Rust side. Omitted entirely when the field uses the default. */
   crdt?: CrdtAnnotation;
+  /** Set when the field is `field.X().serverOnly()` — see
+   *  [`FieldDefinition.serverOnly`]. Omitted by default so JSON
+   *  manifests stay compact for unannotated apps. */
+  serverOnly?: boolean;
+  /** Set when the field is `field.X().readonly()` — see
+   *  [`FieldDefinition.readonly`]. Omitted by default. */
+  readonly?: boolean;
+  /** Default value to fill on insert when the row omits this field.
+   *  - `"now"`     → runtime stamps the current UTC time
+   *  - any literal → runtime stamps that exact value
+   *  Maps to `field.X().defaultNow()` / `.default(value)`. */
+  default?: "now" | string | number | boolean | null;
+  /** Allowed values for `field.enum([...])` — recorded so codegen
+   *  can emit a literal-union type and runtime validation can
+   *  reject out-of-set inserts. Plain `field.string()` doesn't
+   *  carry this; only `field.enum()`. */
+  enumValues?: readonly string[];
+  /** Set when the field is `field.X().encrypted()` — AEAD-encrypted
+   *  at rest. See [`FieldDefinition.encrypted`]. */
+  encrypted?: boolean;
 }
 
 export interface ManifestIndex {
@@ -363,17 +504,10 @@ export interface ManifestRoute {
   mode: string;
   query?: string;
   auth?: string;
-  /**
-   * Project-relative module path (e.g. `app/hello/page`) for
-   * file-based SSR routes. Populated by the discoverer; absent
-   * for legacy mode:"static" / "server" / "live" routes.
-   */
   component?: string;
-  /**
-   * Layout chain walked root→leaf. Each entry is a project-
-   * relative module path. Empty when no layouts apply.
-   */
   layouts?: string[];
+  /** "not-found" / "error" boundary modules; omitted for normal pages. */
+  kind?: "page" | "not-found" | "error";
 }
 
 export interface ManifestInputField {
@@ -417,6 +551,11 @@ export interface AppManifest {
   actions: ManifestAction[];
   policies: ManifestPolicy[];
   auth?: ManifestAuthConfig;
+  /** App-level LLM provider config. Optional — env wins when set. */
+  llm?: ManifestLlmConfig;
+  /** Declared OAuth integrations. Auto-creates the `_Connection`
+   *  entity at runtime boot. */
+  connections?: ManifestConnection[];
 }
 
 export function entitiesToManifest(
@@ -432,10 +571,38 @@ export function entitiesToManifest(
           optional: fb._def.optional,
           unique: fb._def.unique,
         };
-        // Emit `crdt` only when set — keeps default-shape manifests
-        // visually identical to pre-CRDT versions in JSON diffs.
+        // Emit optional modifiers only when set — keeps default-shape
+        // manifests visually identical to pre-modifier versions in
+        // JSON diffs.
         if (fb._def.crdt !== undefined) {
           f.crdt = fb._def.crdt;
+        }
+        if (fb._def.serverOnly) {
+          f.serverOnly = true;
+        }
+        if (fb._def.readonly) {
+          f.readonly = true;
+        }
+        if (fb._def.encrypted) {
+          f.encrypted = true;
+        }
+        // `default` + `enumValues` are surfaced on the fluent
+        // FieldBuilder via the v0.4 SDK. Read off the private
+        // backing slot so both APIs serialize identically — apps
+        // using the procedural `field` exports get the same
+        // ManifestField shape as fluent apps.
+        const extra = fb._def as FieldDefinition & {
+          default?: { kind: "value"; value: unknown } | { kind: "now" };
+          enumValues?: readonly string[];
+        };
+        if (extra.default) {
+          f.default =
+            extra.default.kind === "now"
+              ? "now"
+              : (extra.default.value as ManifestField["default"]);
+        }
+        if (extra.enumValues && extra.enumValues.length > 0) {
+          f.enumValues = extra.enumValues;
         }
         return f;
       }),
@@ -481,44 +648,58 @@ export function routesToManifest(routes: RouteDefinition[]): ManifestRoute[] {
     if (r.auth) result.auth = r.auth;
     if (r.component) result.component = r.component;
     if (r.layouts && r.layouts.length > 0) result.layouts = r.layouts;
+    if (r.kind && r.kind !== "page") result.kind = r.kind;
     return result;
   });
 }
 
 /**
  * Walk the project's `app/` directory and discover file-based SSR
- * routes. Returns a list of `RouteDefinition` ready to slot into
+ * routes. Returns `RouteDefinition[]` ready to slot into
  * `buildManifest({ routes })`.
  *
- * Mapping rules (Next App Router-shaped):
+ * Mapping (Next App Router-shaped):
  *   - `app/page.tsx` → `/`
  *   - `app/about/page.tsx` → `/about`
  *   - `app/blog/[slug]/page.tsx` → `/blog/:slug`
- *   - `app/layout.tsx` wraps every page below; `app/blog/layout.tsx`
- *     wraps `/blog/*`.
+ *   - `app/layout.tsx` wraps every page below
+ *   - `app/(marketing)/about/page.tsx` → `/about` (group strip)
  *
- * All discovered routes are `mode: "ssr"`. Phase 1 doesn't yet
- * support `loading.tsx` / `error.tsx` / `not-found.tsx` — those
- * surface as warnings in `pylon lint` (Phase 2 wires them).
+ * Sorts deterministically — literal segments before parameterized
+ * ones at each depth — so the Rust matcher's first-match-wins
+ * lookup picks the right route.
  *
- * Pure Node `readdirSync` walk — no glob dep. Sorts deterministically:
- * literal segments before parameterized ones at each depth, so the
- * Rust matcher's first-match-wins lookup picks the right route.
- *
- * `appDir` defaults to `<cwd>/app`. Pass an absolute path to scan a
- * different layout (monorepo subprojects, etc.).
+ * Phase 1 only: no `loading.tsx` / `error.tsx` / `not-found.tsx`
+ * support yet.
  */
-export function discoverAppRoutes(opts?: {
+export async function discoverAppRoutes(opts?: {
   appDir?: string;
-}): RouteDefinition[] {
-  // Pull `fs` + `path` lazily so users without an `app/` dir don't
-  // pay the import cost (and so this file stays browser-loadable
-  // for any future codegen client that imports the same module).
-  // Bun resolves these synchronously from the user-process side.
-  const fs: typeof import("node:fs") = require("node:fs");
-  const path: typeof import("node:path") = require("node:path");
+}): Promise<RouteDefinition[]> {
+  // Pull node fs/path lazily. @pylonsync/sdk has no @types/node dep
+  // (kept light so client bundles stay tiny), so we type as `any`
+  // and validate at runtime — users call this from app.ts under
+  // Bun/Node, where the requires resolve.
+  //
+  // ESM Bun/Node doesn't expose `require` on globalThis. Build one
+  // via createRequire(import.meta.url) — the standard ESM →
+  // node-builtins escape hatch. The optional-chain on `require`
+  // covers the browser case (returns undefined, we fall through to
+  // []).
+  let fs: any;
+  let path: any;
+  try {
+    const nodeReq = (globalThis as any).require ??
+      (await import("node:module")).createRequire(import.meta.url);
+    fs = nodeReq("node:fs");
+    path = nodeReq("node:path");
+  } catch {
+    // Browser bundle hit — there's no `app/` to discover. Returning
+    // [] keeps the function safe to import from client code too.
+    return [];
+  }
+  if (!fs || !path) return [];
 
-  const cwd = process.cwd();
+  const cwd = (globalThis as any).process?.cwd?.() ?? ".";
   const appDir =
     opts?.appDir && path.isAbsolute(opts.appDir)
       ? opts.appDir
@@ -528,47 +709,69 @@ export function discoverAppRoutes(opts?: {
   }
 
   type PageHit = {
-    /** Relative slugs from app root (e.g. ["blog", "[slug]"]). */
     segments: string[];
-    /** Project-relative module path WITHOUT extension. */
     component: string;
-    /** Project-relative layout chain (closest-root-first). */
     layouts: string[];
   };
-
+  type BoundaryHit = {
+    segments: string[];
+    component: string;
+    layouts: string[];
+    kind: "not-found" | "error";
+  };
   const pages: PageHit[] = [];
+  const boundaries: BoundaryHit[] = [];
+
+  // Resolve the first existing `<base>.{tsx,ts,jsx,js}` in `dir` and
+  // return it as a cwd-relative, extension-less module path (or null).
+  const findModule = (dir: string, base: string): string | null => {
+    const hit = [`${base}.tsx`, `${base}.ts`, `${base}.jsx`, `${base}.js`]
+      .map((n: string) => path.join(dir, n))
+      .find((p: string) => fs.existsSync(p));
+    return hit ? path.relative(cwd, hit).replace(/\.(tsx?|jsx?)$/, "") : null;
+  };
 
   function walk(dir: string, segments: string[], layouts: string[]): void {
-    let entries: import("node:fs").Dirent[];
+    let entries: Array<{ name: string; isDirectory(): boolean }>;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    // Layout file at THIS depth (applied to every page beneath).
-    const layoutHere = ["layout.tsx", "layout.ts", "layout.jsx", "layout.js"]
-      .map((n) => path.join(dir, n))
-      .find((p) => fs.existsSync(p));
-    const nextLayouts = layoutHere
-      ? [...layouts, path.relative(cwd, layoutHere).replace(/\.(tsx?|jsx?)$/, "")]
-      : layouts;
-    // Page file at THIS depth.
-    const pageHere = ["page.tsx", "page.ts", "page.jsx", "page.js"]
-      .map((n) => path.join(dir, n))
-      .find((p) => fs.existsSync(p));
+    const layoutHere = findModule(dir, "layout");
+    const nextLayouts = layoutHere ? [...layouts, layoutHere] : layouts;
+    const pageHere = findModule(dir, "page");
     if (pageHere) {
       pages.push({
         segments: [...segments],
-        component: path.relative(cwd, pageHere).replace(/\.(tsx?|jsx?)$/, ""),
+        component: pageHere,
         layouts: nextLayouts,
       });
     }
-    // Recurse into subdirs.
+    // Boundary modules (not-found.tsx / error.tsx) co-located with a
+    // segment. They wrap in the layouts ABOVE them (nextLayouts) so the
+    // root not-found renders inside the root shell. The host consults
+    // these for unmatched-URL 404s + render-failure 500s.
+    const notFoundHere = findModule(dir, "not-found");
+    if (notFoundHere) {
+      boundaries.push({
+        segments: [...segments],
+        component: notFoundHere,
+        layouts: nextLayouts,
+        kind: "not-found",
+      });
+    }
+    const errorHere = findModule(dir, "error");
+    if (errorHere) {
+      boundaries.push({
+        segments: [...segments],
+        component: errorHere,
+        layouts: nextLayouts,
+        kind: "error",
+      });
+    }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      // Skip dotfiles, node_modules, and Next-style private "(group)"
-      // segments don't affect the URL path — strip them out so
-      // `app/(marketing)/about/page.tsx` resolves to `/about`.
       if (e.name.startsWith(".") || e.name === "node_modules") continue;
       const sub = path.join(dir, e.name);
       const isGroup = e.name.startsWith("(") && e.name.endsWith(")");
@@ -576,20 +779,29 @@ export function discoverAppRoutes(opts?: {
       walk(sub, newSegments, nextLayouts);
     }
   }
-
   walk(appDir, [], []);
 
-  // Sort: literal segments before parameterized ones at each depth.
-  // Otherwise `/blog/:slug` could shadow `/blog/featured` depending
-  // on FS order.
+  // Segment kinds, least-to-most greedy:
+  //   static            "blog"          rank 0  (most specific)
+  //   dynamic param     "[slug]"        rank 1  → :slug
+  //   catch-all         "[...slug]"     rank 2  → *slug   (matches ≥1 segment)
+  //   optional catch-all"[[...slug]]"   rank 3  → *?slug  (matches ≥0 segments)
+  // A catch-all is only valid as the LAST segment of a route (it consumes
+  // the rest of the path); Next.js enforces the same.
+  const isOptionalCatchAll = (s: string): boolean =>
+    s.startsWith("[[...") && s.endsWith("]]");
+  const isCatchAll = (s: string): boolean =>
+    s.startsWith("[...") && s.endsWith("]") && !isOptionalCatchAll(s);
   const isParam = (s: string): boolean =>
-    s.startsWith("[") && s.endsWith("]");
+    s.startsWith("[") && s.endsWith("]") && !isCatchAll(s) && !isOptionalCatchAll(s);
+  const segRank = (s: string): number =>
+    isOptionalCatchAll(s) ? 3 : isCatchAll(s) ? 2 : isParam(s) ? 1 : 0;
   pages.sort((a, b) => {
     const minLen = Math.min(a.segments.length, b.segments.length);
     for (let i = 0; i < minLen; i++) {
-      const ap = isParam(a.segments[i]);
-      const bp = isParam(b.segments[i]);
-      if (ap !== bp) return ap ? 1 : -1;
+      const ar = segRank(a.segments[i]);
+      const br = segRank(b.segments[i]);
+      if (ar !== br) return ar - br; // more specific (lower rank) first
       if (a.segments[i] !== b.segments[i]) {
         return a.segments[i] < b.segments[i] ? -1 : 1;
       }
@@ -597,18 +809,40 @@ export function discoverAppRoutes(opts?: {
     return a.segments.length - b.segments.length;
   });
 
-  return pages.map((p) => ({
-    path:
-      "/" +
-      p.segments
-        .map((s) =>
-          isParam(s) ? `:${s.slice(1, -1)}` : s,
-        )
-        .join("/"),
+  // Convert a discovered file segment to its route-pattern token. The Rust
+  // matcher (frontend.rs `match_ssr_route`) reads these markers back:
+  //   :name   dynamic param      *name   catch-all      *?name  optional catch-all
+  const segmentToToken = (s: string): string => {
+    if (isOptionalCatchAll(s)) return `*?${s.slice(5, -2)}`; // [[...x]] → *?x
+    if (isCatchAll(s)) return `*${s.slice(4, -1)}`; //          [...x]   → *x
+    if (isParam(s)) return `:${s.slice(1, -1)}`; //             [x]      → :x
+    return s;
+  };
+  const segmentsToPath = (segments: string[]): string =>
+    "/" + segments.map(segmentToToken).join("/");
+
+  const pageRoutes: RouteDefinition[] = pages.map((p) => ({
+    path: segmentsToPath(p.segments),
     mode: "ssr" as const,
     component: p.component,
     layouts: p.layouts,
   }));
+
+  // Boundary routes carry `kind` and the segment-prefix path. The host
+  // never matches them as navigable URLs; it picks the longest-prefix
+  // not-found for an unmatched URL. Sorted deepest-first so prefix
+  // selection is stable.
+  const boundaryRoutes: RouteDefinition[] = boundaries
+    .sort((a, b) => b.segments.length - a.segments.length)
+    .map((b) => ({
+      path: segmentsToPath(b.segments),
+      mode: "ssr" as const,
+      component: b.component,
+      layouts: b.layouts,
+      kind: b.kind,
+    }));
+
+  return [...pageRoutes, ...boundaryRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
@@ -646,8 +880,18 @@ export function actionsToManifest(
 export function policiesToManifest(
   policies: PolicyDefinition[]
 ): ManifestPolicy[] {
-  return policies.map((p) => {
-    const result: ManifestPolicy = { name: p.name };
+  return policies.map((p, i) => {
+    const result: ManifestPolicy = {
+      // Final-resort name autogen. `buildManifest` upstream already
+      // names every attached-via-fluent policy, but a caller passing
+      // `policies: [policy({ allowRead: "..." })]` to a custom
+      // manifest builder would slip through with `name: undefined`.
+      // Stamp a unique fallback so the runtime never sees a blank.
+      name:
+        p.name && p.name.length > 0
+          ? p.name
+          : `${(p.entity ?? p.action ?? "unnamed").toLowerCase()}_p${i}`,
+    };
     if (p.allow) result.allow = p.allow;
     if (p.allowRead) result.allowRead = p.allowRead;
     if (p.allowInsert) result.allowInsert = p.allowInsert;
@@ -758,6 +1002,127 @@ export type AuthConfig = {
   trustedOrigins?: string[];
 };
 
+// ---------------------------------------------------------------------------
+// LLM provider configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Developer-facing camelCase config consumed by the `llm({...})`
+ * factory. All fields optional; environment variables
+ * (`PYLON_LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+ * `PYLON_LLM_MODEL`) take precedence so operators can override per
+ * deploy without redeploying the bundle.
+ */
+export type LlmConfig = {
+  /** Provider name. Default: env detection. */
+  provider?: "anthropic" | "openai";
+  /** Default model when the caller doesn't pass `model`. */
+  defaultModel?: string;
+  /**
+   * Allowlist of models callers may request via the `model` field.
+   * Empty = no extra allowance beyond what `PYLON_AI_MODELS_ALLOWED`
+   * env provides. Non-admin callers can't request models outside
+   * this list.
+   */
+  allowedModels?: string[];
+};
+
+export type ManifestLlmConfig = {
+  provider?: "anthropic" | "openai";
+  default_model?: string;
+  allowed_models?: string[];
+};
+
+// ---------------------------------------------------------------------------
+// Connection (per-user OAuth integrations)
+// ---------------------------------------------------------------------------
+
+/**
+ * Developer-facing config for `defineConnection({...})`. Each entry
+ * adds a `ctx.connections.<name>` surface to mutation + action ctx
+ * (server-side OAuth tokens, never visible to the browser).
+ *
+ * `provider` selects the OAuth client wire shape from pylon-auth's
+ * built-in list (`google`, `github`, `slack`, `microsoft`, etc.).
+ * `name` is the app-facing key — different connections can target
+ * the same provider with different scopes
+ * (e.g. `google-calendar` vs `google-drive`).
+ *
+ * Configuration: per-provider client id + secret come from env
+ * (`PYLON_OAUTH_<PROVIDER>_CLIENT_ID`, `PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET`).
+ * Callback URL is derived from `PYLON_PUBLIC_URL` +
+ * `/api/connections/<name>/callback`.
+ *
+ * Storage: the framework auto-creates a `_Connection` entity at
+ * boot when any connection is declared; token fields are AEAD-
+ * encrypted at rest (`PYLON_ENCRYPTION_KEY` is REQUIRED — boot
+ * fails without it when connections are declared).
+ */
+export type ConnectionConfig = {
+  /** App-facing key. `ctx.connections.get(name)` matches on this. */
+  name: string;
+  /** Provider identifier matching pylon-auth's OAuth client. */
+  provider: string;
+  /** Whitespace-separated scopes. Empty = provider default. */
+  scopes?: string;
+};
+
+export type ManifestConnection = {
+  name: string;
+  provider: string;
+  scopes?: string;
+};
+
+/**
+ * Declare a server-side OAuth integration. Returns the manifest
+ * entry the runtime parses. Re-exported through `app.ts`:
+ *
+ * ```ts
+ * import { defineConnection } from "@pylonsync/sdk";
+ *
+ * export const googleConn = defineConnection({
+ *   name: "google",
+ *   provider: "google",
+ *   scopes: "email profile https://www.googleapis.com/auth/calendar.readonly",
+ * });
+ * ```
+ *
+ * `buildManifest({ connections: [googleConn] })` carries this into
+ * the manifest; the runtime auto-creates the `_Connection` entity
+ * and exposes `ctx.connections.get("google")` to actions.
+ */
+export function defineConnection(cfg: ConnectionConfig): ManifestConnection {
+  return {
+    name: cfg.name,
+    provider: cfg.provider,
+    ...(cfg.scopes ? { scopes: cfg.scopes } : {}),
+  };
+}
+
+/**
+ * Build the manifest's `llm` block from the user-facing camelCase
+ * config. Returns the snake_case shape the Rust runtime parses.
+ *
+ * ```ts
+ * export default {
+ *   llm: llm({
+ *     provider: "anthropic",
+ *     defaultModel: "claude-sonnet-4-5",
+ *     allowedModels: ["claude-sonnet-4-5", "claude-haiku-4-5"],
+ *   }),
+ * }
+ * ```
+ */
+export function llm(cfg: LlmConfig = {}): ManifestLlmConfig {
+  const out: ManifestLlmConfig = {};
+  if (cfg.provider) out.provider = cfg.provider;
+  if (cfg.defaultModel) out.default_model = cfg.defaultModel;
+  if (cfg.allowedModels && cfg.allowedModels.length > 0) {
+    out.allowed_models = cfg.allowedModels;
+  }
+  return out;
+}
+
 export type ManifestAuthConfig = {
   user: {
     entity: string;
@@ -824,7 +1189,36 @@ export function buildManifest(options: {
   actions?: ActionDefinition[];
   policies?: PolicyDefinition[];
   auth?: ManifestAuthConfig;
+  llm?: ManifestLlmConfig;
+  connections?: ManifestConnection[];
 }): AppManifest {
+  // Pull policies attached via the fluent `e.entity().policies(...)`
+  // chain onto the top-level policies list. Without this, fluent
+  // apps would register entities without policies and every read
+  // would default-deny. Existing apps using the procedural API
+  // (`entity()` + separate `policy({...})` exports) are unaffected
+  // because `extractAttachedPolicies` returns an empty array for
+  // them. Concat order: top-level policies first (explicit beats
+  // attached), then anything pulled off entities.
+  //
+  // Stamp a name if the fluent caller omitted it — `name` is
+  // technically required on PolicyDefinition but the docs imply you
+  // can `.policies(policy({ allowRead: "..." }))` without one. Auto-
+  // derive from the entity + a counter so two attached policies
+  // don't collide.
+  const attached: PolicyDefinition[] = [];
+  for (const ent of options.entities) {
+    const extracted = extractAttachedPolicies(ent);
+    extracted.forEach((p, i) => {
+      attached.push({
+        ...p,
+        name: p.name && p.name.length > 0
+          ? p.name
+          : `${(p.entity ?? ent.name).toLowerCase()}_attached_${i}`,
+      });
+    });
+  }
+  const allPolicies = [...(options.policies ?? []), ...attached];
   return {
     manifest_version: MANIFEST_VERSION,
     name: options.name,
@@ -833,8 +1227,14 @@ export function buildManifest(options: {
     routes: routesToManifest(options.routes),
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),
-    policies: policiesToManifest(options.policies ?? []),
+    policies: policiesToManifest(allPolicies),
     auth: options.auth ?? auth(),
+    ...(options.llm && Object.keys(options.llm).length > 0
+      ? { llm: options.llm }
+      : {}),
+    ...(options.connections && options.connections.length > 0
+      ? { connections: options.connections }
+      : {}),
   };
 }
 
@@ -882,3 +1282,335 @@ export {
   type StudioPageProps,
   type StudioExtensions,
 } from "./studio";
+
+// ---------------------------------------------------------------------------
+// Fluent schema API (`e` namespace)
+//
+// `entity(name, fields, options)` + `field.*` + `policy({...})` are the
+// stable foundation — every dependent app uses them today. The fluent
+// API below sits on top and compiles down to the same EntityDefinition
+// + PolicyDefinition shapes the runtime already understands, so both
+// styles can coexist forever. The fluent shape just reads better in
+// docs + marketing snippets:
+//
+// ```ts
+// export const Order = e.entity("Order", {
+//   customer:  field.id("Customer"),
+//   total:     field.int(),
+//   status:    field.enum(["pending", "paid", "failed"]),
+//   createdAt: field.datetime().defaultNow(),
+// })
+//   .indexes(e.idx("customer", "createdAt"), e.idx("status"))
+//   .policies(policy({
+//     allowRead:  "auth.userId == data.customer || auth.hasRole('admin')",
+//     allowUpdate: "auth.hasRole('admin')",
+//   }))
+//   .behaviors([timestamps, softDelete]);
+// ```
+//
+// Behaviors are field-injection helpers. `timestamps` adds
+// `createdAt` + `updatedAt` to the entity fields; `softDelete` adds
+// `deletedAt`. They mutate the EntityDefinition's fields before the
+// runtime sees it, so the rest of the framework (storage, sync,
+// policy gates) treats them as ordinary columns. Auto-stamping
+// (filling `now()` on insert/update) needs runtime support — landing
+// in a follow-up patch via the `defaultExpr: "now"` marker the
+// builder records.
+// ---------------------------------------------------------------------------
+
+/**
+ * Behavior — a function that mutates the entity definition before it's
+ * registered. Implementations should be idempotent (the user can list
+ * the same behavior twice without breaking the schema).
+ */
+export interface Behavior {
+  /** Stable identifier — surfaced in the manifest for tooling, lets a
+   *  pass-through inspector see which behaviors are active. */
+  readonly id: string;
+  apply(def: EntityDefinition): EntityDefinition;
+}
+
+/**
+ * `timestamps` — auto-add `createdAt` + `updatedAt` datetime fields.
+ * The `defaultNow()` marker on each tells the runtime to fill `now()`
+ * on insert (and on update for `updatedAt`). Wiring lands with the
+ * runtime patch — until then, app code can still set the values
+ * manually and the fields exist on the row.
+ */
+export const timestamps: Behavior = {
+  id: "timestamps",
+  apply(def) {
+    const fields = { ...def.fields };
+    if (!fields.createdAt) {
+      fields.createdAt = (field.datetime() as FieldBuilder & {
+        defaultNow?: () => FieldBuilder;
+      }).defaultNow?.() ?? field.datetime();
+    }
+    if (!fields.updatedAt) {
+      fields.updatedAt = (field.datetime() as FieldBuilder & {
+        defaultNow?: () => FieldBuilder;
+        updateOnWrite?: () => FieldBuilder;
+      }).defaultNow?.() ?? field.datetime();
+    }
+    return { ...def, fields };
+  },
+};
+
+/**
+ * `softDelete` — auto-add a nullable `deletedAt` datetime field.
+ * Rows with `deletedAt != null` are filtered from default reads
+ * (TS-side filtering today; runtime filter lands in the follow-up).
+ */
+export const softDelete: Behavior = {
+  id: "softDelete",
+  apply(def) {
+    const fields = { ...def.fields };
+    if (!fields.deletedAt) {
+      fields.deletedAt = field.datetime().optional();
+    }
+    return { ...def, fields };
+  },
+};
+
+/**
+ * `audit` — marker behavior. Tags the entity for the framework's
+ * audit pipeline (writes an `AuditEvent` row per mutation, recording
+ * the actor + diff). Runtime hook lands in a follow-up patch — for
+ * now the marker is preserved on the manifest so apps can opt in
+ * early without breaking later.
+ */
+export const audit: Behavior = {
+  id: "audit",
+  apply(def) {
+    // No field injection today. The behavior flag is recorded via
+    // the EntityBuilder's `_behaviors` list (read off on serialize)
+    // so the runtime can pick it up once the audit pipeline lands.
+    return def;
+  },
+};
+
+/**
+ * Internal sentinel — apps don't construct these directly. The
+ * `field.X` builders gain `default(val)` / `defaultNow()` chainables
+ * below; this is just the shape stored on the field definition for
+ * the runtime to read.
+ */
+type DefaultMarker = { kind: "value"; value: unknown } | { kind: "now" };
+
+/**
+ * Augment FieldBuilder with the new `default()` / `defaultNow()`
+ * chainables. Runtime support for actually filling these values on
+ * insert lands as part of v0.4.1; until then the markers are
+ * recorded in the manifest for tooling + the codegen layer.
+ */
+declare module "./index" {
+  // (Empty — the `default*` methods are added at runtime via the
+  // patched buildField below. Apps see them via the FieldBuilder
+  // surface declared above.)
+}
+
+// Field builder with chainable `.default()` / `.defaultNow()`. All
+// other chainables (`optional`, `unique`, `crdt`, `serverOnly`,
+// `readonly`) are reimplemented here to return another
+// `buildFieldWithDefaults` — without this, calling `.optional()`
+// after `.default()` would drop the default markers off the chain
+// (codex Wave-3 review: the previous `{ ...base, default, defaultNow }`
+// pattern delegated optional/unique to the original buildField which
+// returned a builder lacking `.default()`). Recursion through the
+// same constructor keeps the surface stable regardless of chain
+// order.
+function buildFieldWithDefaults(
+  def: FieldDefinition & {
+    default?: DefaultMarker;
+    enumValues?: readonly string[];
+  },
+): FieldBuilder & {
+  default(value: unknown): ReturnType<typeof buildFieldWithDefaults>;
+  defaultNow(): ReturnType<typeof buildFieldWithDefaults>;
+} {
+  return {
+    _def: def,
+    optional() {
+      return buildFieldWithDefaults({ ...def, optional: true });
+    },
+    unique() {
+      return buildFieldWithDefaults({ ...def, unique: true });
+    },
+    crdt(annotation) {
+      return buildFieldWithDefaults({ ...def, crdt: annotation });
+    },
+    serverOnly() {
+      return buildFieldWithDefaults({ ...def, serverOnly: true });
+    },
+    readonly() {
+      return buildFieldWithDefaults({ ...def, readonly: true });
+    },
+    encrypted() {
+      return buildFieldWithDefaults({ ...def, encrypted: true });
+    },
+    default(value: unknown) {
+      return buildFieldWithDefaults({
+        ...def,
+        default: { kind: "value", value },
+      });
+    },
+    defaultNow() {
+      return buildFieldWithDefaults({ ...def, default: { kind: "now" } });
+    },
+  };
+}
+// Re-export `field` with the patched builder so callers picking up
+// the new SDK get the chainables transparently. The old `field`
+// surface still works — `.default()` / `.defaultNow()` are additive.
+// We intentionally re-export from the same name so existing imports
+// (`import { field } from "@pylonsync/sdk"`) keep working AND gain
+// the new methods without a code change.
+Object.assign(field, {
+  string: () => buildFieldWithDefaults({ type: "string", optional: false, unique: false }),
+  int: () => buildFieldWithDefaults({ type: "int", optional: false, unique: false }),
+  float: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
+  number: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
+  bool: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
+  boolean: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
+  datetime: () => buildFieldWithDefaults({ type: "datetime", optional: false, unique: false }),
+  richtext: () => buildFieldWithDefaults({ type: "richtext", optional: false, unique: false }),
+  id: (target: string) => buildFieldWithDefaults({ type: `id(${target})` as FieldType, optional: false, unique: false }),
+  /**
+   * `field.enum(["pending", "paid", "failed"])` — stored as a string
+   * with allowed-values metadata. Runtime enforcement (CHECK
+   * constraint or insert-time validation) lands in a follow-up
+   * patch; for now the values flow through to codegen so the
+   * generated client gets a precise `"pending" | "paid" | "failed"`
+   * literal-union type instead of a wide `string`.
+   */
+  enum(values: readonly string[]) {
+    const def: FieldDefinition & { enumValues?: readonly string[] } = {
+      type: "string",
+      optional: false,
+      unique: false,
+      enumValues: values,
+    };
+    return buildFieldWithDefaults(def);
+  },
+});
+
+/** Variadic index helper — `e.idx("customer", "createdAt")` reads
+ *  better than the options-object form for the common case. */
+function idx(...fields: string[]): IndexDefinition {
+  return {
+    name: `by_${fields.join("_")}`,
+    fields,
+    unique: false,
+  };
+}
+
+interface EntityBuilder {
+  readonly _def: EntityDefinition & { behaviors?: string[] };
+  indexes(...idxs: IndexDefinition[]): EntityBuilder;
+  policies(...policies: PolicyDefinition[]): EntityBuilder;
+  behaviors(list: readonly Behavior[]): EntityBuilder;
+  relations(...rels: RelationDefinition[]): EntityBuilder;
+  search(cfg: SearchConfig): EntityBuilder;
+}
+
+/**
+ * Internal — `e.entity()` is the public surface. Wraps an
+ * EntityDefinition with chainable builders that all return another
+ * EntityBuilder so the fluent calls compose freely. The terminal
+ * call is implicit: any place the framework expects an
+ * EntityDefinition (e.g. `entities: [...]` on the manifest), the
+ * builder unwraps via the `_def` getter on access.
+ */
+function buildEntity(def: EntityDefinition & { behaviors?: string[] }): EntityBuilder {
+  const self: EntityBuilder = {
+    get _def() {
+      return def;
+    },
+    indexes(...idxs) {
+      return buildEntity({
+        ...def,
+        indexes: [...(def.indexes ?? []), ...idxs],
+      });
+    },
+    policies(..._policies) {
+      // Policies aren't carried on the EntityDefinition itself —
+      // they live in the manifest's top-level `policies` list. We
+      // store them under a non-standard key here so the manifest
+      // builder can pluck them off; the export shape stays
+      // EntityDefinition-compatible.
+      const carried = { ...(def as EntityDefinition & { _attachedPolicies?: PolicyDefinition[] }) };
+      const existing = carried._attachedPolicies ?? [];
+      const stamped = _policies.map((p) => ({
+        ...p,
+        // Auto-bind the entity if the policy didn't specify one —
+        // this is the whole point of attaching policies via the
+        // builder: don't repeat the entity name.
+        entity: p.entity ?? def.name,
+      }));
+      carried._attachedPolicies = [...existing, ...stamped];
+      return buildEntity(carried);
+    },
+    behaviors(list) {
+      let next = def;
+      for (const b of list) {
+        next = b.apply(next);
+      }
+      return buildEntity({
+        ...next,
+        behaviors: [...(def.behaviors ?? []), ...list.map((b) => b.id)],
+      });
+    },
+    relations(...rels) {
+      return buildEntity({
+        ...def,
+        relations: [...(def.relations ?? []), ...rels],
+      });
+    },
+    search(cfg) {
+      return buildEntity({
+        ...def,
+        search: cfg,
+      });
+    },
+  };
+
+  // Spread `def` keys onto the builder so anywhere the framework
+  // expects an EntityDefinition shape (name, fields, indexes, etc.)
+  // sees them directly without unwrapping. Manifest builder paths
+  // walk `.name` and `.fields` straight off the builder.
+  Object.assign(self, def);
+  return self;
+}
+
+/**
+ * The fluent `e` namespace. Equivalent to the procedural `entity()`
+ * function — both produce manifest-compatible definitions, both can
+ * be mixed in the same app.
+ */
+export const e = {
+  entity(
+    name: string,
+    fields: Record<string, FieldBuilder>,
+  ): EntityBuilder {
+    return buildEntity({ name, fields });
+  },
+  idx,
+};
+
+/**
+ * Extract attached policies from a fluent entity. The manifest
+ * builder calls this when assembling the top-level `policies` list,
+ * so apps using the fluent `.policies(...)` chain don't have to
+ * register policies separately at the manifest root.
+ *
+ * Returns an empty array for entities produced by the procedural
+ * `entity()` API — those apps register policies the old way.
+ */
+export function extractAttachedPolicies(
+  e: EntityDefinition | EntityBuilder,
+): PolicyDefinition[] {
+  const carried = (e as EntityDefinition & {
+    _attachedPolicies?: PolicyDefinition[];
+  })._attachedPolicies;
+  return carried ?? [];
+}
