@@ -5255,56 +5255,127 @@ fn spawn_runner_supervisor(
     } else {
         format!("pylon-fn-supervisor-{idx}")
     };
+    // Wedge detection knobs. A Bun runtime can be ALIVE but WEDGED — a single
+    // function call / SSR render stuck holding the runner's `io_lock`, so every
+    // subsequent call (every SSR render, every serverData read) blocks behind
+    // it. `is_alive()` can't see this (the OS process is fine); this is the
+    // failure mode that took notbehind's homepage down for minutes while static
+    // assets kept serving. `health_probe(probe)` tries to grab the io_lock
+    // within `probe` — a stuck call makes it fail. We respawn only after
+    // `strikes` CONSECUTIVE failures so a merely-busy runtime (sub-`probe`
+    // calls that briefly hold the lock) never trips a needless restart.
+    let probe_secs: u64 = std::env::var("PYLON_FN_WEDGE_PROBE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &u64| n > 0)
+        .unwrap_or(8);
+    let probe = Duration::from_secs(probe_secs);
+    let wedge_strikes: u32 = std::env::var("PYLON_FN_WEDGE_STRIKES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &u32| n > 0)
+        .unwrap_or(3);
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(30);
+            let mut strikes: u32 = 0;
             loop {
                 std::thread::sleep(Duration::from_secs(2));
-                if runner.is_alive() {
+                if !runner.is_alive() {
+                    tracing::warn!(
+                        "[functions] Bun runtime [{idx}/{pool_size}] not alive — respawning after {:?}",
+                        backoff
+                    );
+                    respawn_runner(&runner, &ops, idx, pool_size, &mut backoff, max_backoff);
+                    strikes = 0;
+                    continue;
+                }
+                // Alive — but is it WEDGED? Probe the io_lock. A free lock means
+                // the runtime is processing; a held-for->probe lock means a call
+                // is stuck.
+                if runner.health_probe(probe).is_ok() {
+                    strikes = 0;
                     backoff = Duration::from_secs(1);
                     continue;
                 }
-                tracing::warn!(
-                    "[functions] Bun runtime [{idx}/{pool_size}] not alive — respawning after {:?}",
-                    backoff
-                );
-                std::thread::sleep(backoff);
-                match runner.respawn() {
-                    Ok(defs) => {
-                        let count = defs.len();
-                        // Replace, not merge — deleted functions must stop
-                        // being callable. register_all() alone leaves stale
-                        // entries from the previous process generation.
-                        ops.registry.replace_all(defs);
-                        tracing::warn!("[functions] Respawned Bun runtime ({count} fn(s))");
-                        backoff = Duration::from_secs(1);
-                    }
-                    Err(e) => {
-                        tracing::warn!("[functions] Respawn failed: {e}");
-                        // Persistent Bun-runtime failures are the kind of
-                        // operator signal that belongs in error telemetry
-                        // too. Include enough context to triage repeated
-                        // events: current backoff (so operators can see
-                        // how long failures have been compounding) and the
-                        // component name.
-                        let backoff_str = format!("{}", backoff.as_secs());
-                        pylon_observability::report_error(&pylon_observability::ErrorEvent {
-                            level: pylon_observability::ErrorLevel::Error,
-                            code: "FN_RESPAWN_FAILED",
-                            message: &e,
-                            context: &[
-                                ("component", "bun-runtime-supervisor"),
-                                ("backoff_secs", &backoff_str),
-                            ],
-                        });
-                        backoff = (backoff * 2).min(max_backoff);
-                    }
+                strikes += 1;
+                if strikes < wedge_strikes {
+                    tracing::warn!(
+                        "[functions] Bun runtime [{idx}/{pool_size}] unresponsive \
+                         (io_lock held >{probe_secs}s) — strike {strikes}/{wedge_strikes}"
+                    );
+                    continue;
                 }
+                // Sustained wedge: a single call has held the io_lock across
+                // every probe (~{strikes * probe_secs}s) — alive but not
+                // processing. Respawn forcibly kills the stuck child (which
+                // unblocks the wedged call via EOF) and brings up a fresh
+                // runner — the same recovery a manual machine restart gives,
+                // but automatic, on one machine, in tens of seconds instead of
+                // a multi-minute outage.
+                let msg = format!(
+                    "Bun runtime [{idx}/{pool_size}] wedged — io_lock held across \
+                     {strikes} probes (~{}s); respawning",
+                    strikes as u64 * probe_secs
+                );
+                tracing::error!("[functions] {msg}");
+                pylon_observability::report_error(&pylon_observability::ErrorEvent {
+                    level: pylon_observability::ErrorLevel::Error,
+                    code: "FN_RUNTIME_WEDGED",
+                    message: &msg,
+                    context: &[("component", "bun-runtime-supervisor")],
+                });
+                respawn_runner(&runner, &ops, idx, pool_size, &mut backoff, max_backoff);
+                strikes = 0;
             }
         })
         .expect("failed to spawn function runtime supervisor");
+}
+
+/// Kill + respawn a Bun runner and refresh the registry, applying backoff.
+/// Shared by the supervisor's process-died and wedge-detected paths.
+/// `respawn()` force-kills the (possibly wedged) child first, which closes the
+/// pipe and unblocks any call stuck in `recv()`, then brings up a fresh child.
+fn respawn_runner(
+    runner: &FnRunner,
+    ops: &FnOpsImpl,
+    idx: usize,
+    pool_size: usize,
+    backoff: &mut std::time::Duration,
+    max_backoff: std::time::Duration,
+) {
+    use std::time::Duration;
+    std::thread::sleep(*backoff);
+    match runner.respawn() {
+        Ok(defs) => {
+            let count = defs.len();
+            // Replace, not merge — deleted functions must stop being callable.
+            // register_all() alone leaves stale entries from the previous
+            // process generation.
+            ops.registry.replace_all(defs);
+            tracing::warn!("[functions] Respawned Bun runtime [{idx}/{pool_size}] ({count} fn(s))");
+            *backoff = Duration::from_secs(1);
+        }
+        Err(e) => {
+            tracing::warn!("[functions] Respawn failed: {e}");
+            // Persistent Bun-runtime failures belong in error telemetry. Include
+            // the current backoff so operators can see how long failures have
+            // been compounding.
+            let backoff_str = format!("{}", backoff.as_secs());
+            pylon_observability::report_error(&pylon_observability::ErrorEvent {
+                level: pylon_observability::ErrorLevel::Error,
+                code: "FN_RESPAWN_FAILED",
+                message: &e,
+                context: &[
+                    ("component", "bun-runtime-supervisor"),
+                    ("backoff_secs", &backoff_str),
+                ],
+            });
+            *backoff = (*backoff * 2).min(max_backoff);
+        }
+    }
 }
 
 #[cfg(test)]
