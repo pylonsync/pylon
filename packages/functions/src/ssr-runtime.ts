@@ -306,9 +306,19 @@ export interface SsrMetadata {
  * host's </head> splice preserves them. React escapes all text/attrs, so
  * there's no manual XSS handling. Returns null when there's nothing to emit.
  */
-function renderMetadata(React: any, m: SsrMetadata | undefined): any {
+export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
   if (!m) return null;
-  const el = React.createElement;
+  // Mark every emitted <meta>/<link> with `data-pylon-meta` so the client
+  // runtime can swap exactly these tags on a client-side navigation — and
+  // leave the layout's charset/viewport and Pylon's injected stylesheet
+  // links untouched. <title> is excluded (the client syncs document.title
+  // directly). The metadata fragment is server-only (the client renders the
+  // page component alone), so React on the client never owns these nodes;
+  // this manual marking is what makes the nav-time swap safe.
+  const el = (type: any, props: any, ...children: any[]) =>
+    type === "meta" || type === "link"
+      ? React.createElement(type, { "data-pylon-meta": "", ...props }, ...children)
+      : React.createElement(type, props, ...children);
   const kids: any[] = [];
   if (m.title != null) kids.push(el("title", { key: "t" }, m.title));
   if (m.description != null) {

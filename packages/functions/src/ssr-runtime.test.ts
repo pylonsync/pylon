@@ -4,7 +4,21 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyAutoIcons, applyAutoSocialImages } from "./ssr-runtime";
+import { applyAutoIcons, applyAutoSocialImages, renderMetadata } from "./ssr-runtime";
+
+// `react` isn't a dependency of @pylonsync/functions — the SSR runtime
+// imports it dynamically from the host project at render time. For unit
+// tests we hand renderMetadata a fake React that records each created
+// element's shape, which is all renderMetadata touches.
+const FAKE_FRAGMENT = Symbol("Fragment");
+const fakeReact = {
+  Fragment: FAKE_FRAGMENT,
+  createElement: (type: any, props: any, ...children: any[]) => ({
+    type,
+    props: props ?? {},
+    children,
+  }),
+};
 
 // A minimal PNG: 8-byte signature + an IHDR chunk carrying width/height.
 // `readSocialImageMeta` only reads the first 32 bytes, so a full valid
@@ -178,5 +192,37 @@ describe("icon / apple-icon / favicon file convention", () => {
     makeApp(); // fresh empty cwd
     const input = { title: "T" };
     expect(applyAutoIcons("app/page", input)).toEqual(input);
+  });
+});
+
+describe("renderMetadata head-tag marking (client-nav sync)", () => {
+  test("every <meta>/<link> carries data-pylon-meta; <title> does not", () => {
+    const frag = renderMetadata(fakeReact, {
+      title: "Hello",
+      description: "A page",
+      canonical: "https://x.test/p",
+      openGraph: { title: "OG", image: "https://x.test/og.png" },
+      twitter: { card: "summary" },
+      icons: { icon: { url: "/icon.png" } },
+    });
+    expect(frag.type).toBe(FAKE_FRAGMENT);
+    const kids: any[] = frag.children;
+    const metaLink = kids.filter((k) => k.type === "meta" || k.type === "link");
+    const titles = kids.filter((k) => k.type === "title");
+    expect(metaLink.length).toBeGreaterThan(0);
+    // The marker is what the client runtime swaps on navigation — without it,
+    // SEO/social tags go stale on client-side nav. Every meta/link must carry
+    // it; <title> must NOT (the client syncs document.title separately).
+    for (const el of metaLink) {
+      expect(el.props["data-pylon-meta"]).toBe("");
+    }
+    expect(titles.length).toBe(1);
+    expect(titles[0].props["data-pylon-meta"]).toBeUndefined();
+    expect(titles[0].children).toEqual(["Hello"]);
+  });
+
+  test("returns null when there's nothing to emit", () => {
+    expect(renderMetadata(fakeReact, undefined)).toBeNull();
+    expect(renderMetadata(fakeReact, {})).toBeNull();
   });
 });

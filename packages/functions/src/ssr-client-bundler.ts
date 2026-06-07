@@ -382,6 +382,27 @@ export function hydrate(component, Page, Layouts) {
   // only need to populate the cache (already done above).
 }
 
+// Swap the page's SEO/social <head> tags on a client-side navigation.
+// The SSR runtime marks every page-metadata <meta>/<link> with
+// data-pylon-meta; we drop the current set and import the incoming page's
+// set, so description / canonical / og:* / twitter:* / icons track the new
+// route. The layout's charset/viewport and Pylon's injected stylesheet
+// links carry no marker, so they survive untouched (no FOUC). The page
+// component never renders these tags on the client, so React doesn't own
+// them — this manual swap can't fight hydration.
+function syncHeadMeta(doc) {
+  const head = document.head;
+  if (!head) return;
+  const current = head.querySelectorAll("[data-pylon-meta]");
+  for (let i = 0; i < current.length; i++) current[i].remove();
+  const incoming = doc.head
+    ? doc.head.querySelectorAll("[data-pylon-meta]")
+    : [];
+  for (let i = 0; i < incoming.length; i++) {
+    head.appendChild(document.importNode(incoming[i], true));
+  }
+}
+
 async function navigate(href, opts) {
   const push = !opts || opts.push !== false;
   const url = new URL(href, location.href);
@@ -426,6 +447,7 @@ async function navigate(href, opts) {
     return;
   }
   document.title = doc.title || document.title;
+  syncHeadMeta(doc);
   const tree = buildTree(route.Page, route.Layouts, withClientProps(data));
   activeRoot.render(tree);
   if (push) {
