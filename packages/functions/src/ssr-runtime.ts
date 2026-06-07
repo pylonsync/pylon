@@ -1332,11 +1332,17 @@ export async function handleRenderRoute(
     ) {
       return;
     }
+    // In dev, send the full stack as the message so the host can paint a
+    // useful error overlay instead of an opaque 500. In prod, send only the
+    // message (the host shows a generic page; the stack stays in logs).
+    const devMode =
+      process.env.PYLON_DEV_MODE === "1" || process.env.PYLON_DEV_MODE === "true";
     send({
       type: "error",
       call_id: msg.call_id,
       code: err?.code ?? "SSR_RENDER_FAILED",
-      message: err?.message ?? String(err),
+      message:
+        devMode && err?.stack ? String(err.stack) : err?.message ?? String(err),
     });
   }
 }

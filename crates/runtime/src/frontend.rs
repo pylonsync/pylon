@@ -1246,6 +1246,13 @@ fn serve_via_ssr_rpc(
         std::sync::mpsc::sync_channel::<(u16, std::collections::HashMap<String, String>)>(1);
     let (body_tx, body_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
     let streaming_body = crate::server::StreamingBody::new(body_rx);
+    // Carries the render error (code, message) from the render thread to the
+    // main thread for the dev error overlay. Separate from rs_tx because the
+    // failure path is exactly "rs_tx dropped without a response_start" — we
+    // can't piggyback the detail on the channel that just closed. recv() on
+    // err_rx blocks until the render thread reaches the send (error) or drops
+    // err_tx (success), so it's race-free.
+    let (err_tx, err_rx) = std::sync::mpsc::sync_channel::<(String, String)>(1);
 
     let fn_ops_for_render = std::sync::Arc::clone(&fn_ops);
     let component_owned = component.clone();
@@ -1290,10 +1297,13 @@ fn serve_via_ssr_rpc(
                     message = %e.message,
                     "SSR render failed"
                 );
-                // If this fired BEFORE response_start, rs_tx drops with
-                // no value → the main thread serves a 500. If AFTER (the
-                // head + some body already went out), the body channel
-                // closes → partial HTML; React's onError already logged.
+                // Hand the detail to the main thread for the dev overlay. If
+                // this fired BEFORE response_start, rs_tx drops with no value
+                // → the main thread reads err_rx and serves a 500 (a styled
+                // overlay in dev). If AFTER (head + some body already went
+                // out), the body channel closes → partial HTML; React's
+                // onError already logged and this send is simply unread.
+                let _ = err_tx.send((e.code.clone(), e.message.clone()));
             }
             // Both senders drop here → channels close → StreamingBody
             // hits EOF and tiny_http finalizes the chunked transfer.
@@ -1302,7 +1312,13 @@ fn serve_via_ssr_rpc(
     if let Err(e) = render_thread {
         // Couldn't spawn the render thread. Inline 500.
         tracing::error!(error = ?e, "failed to spawn SSR render thread");
-        let _ = request.respond(ssr_error_response(500, cors_origin));
+        let detail = is_dev_mode().then(|| {
+            (
+                "SSR_RENDER_THREAD_SPAWN_FAILED".to_string(),
+                format!("could not spawn the SSR render thread: {e}"),
+            )
+        });
+        let _ = request.respond(ssr_render_error_response(detail, cors_origin));
         return Ok(());
     }
 
@@ -1314,8 +1330,17 @@ fn serve_via_ssr_rpc(
     let (status, page_headers) = match rs_rx.recv() {
         Ok(v) => v,
         Err(_) => {
-            // Render produced no response_start → an early failure.
-            let _ = request.respond(ssr_error_response(500, cors_origin));
+            // Render produced no response_start → an early failure (bad
+            // import, a throw in the shell render with no error.tsx boundary).
+            // In dev, surface the error + stack in an overlay; in prod, a
+            // generic 500 (the detail stays in logs). err_rx.recv() blocks
+            // until the render thread sends the detail or finishes.
+            let detail = if is_dev_mode() {
+                err_rx.recv().ok()
+            } else {
+                None
+            };
+            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
             return Ok(());
         }
     };
@@ -1458,6 +1483,72 @@ fn ssr_error_response(status: u16, cors_origin: &str) -> Response<std::io::Curso
     let mut resp = Response::from_data(body)
         .with_status_code(status)
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
+}
+
+/// The 500 served when an SSR render fails before it can emit any response —
+/// e.g. a bad import or a throw in the shell render with no `error.tsx`
+/// boundary to catch it. In dev (`detail` is `Some((code, message))`, only
+/// populated when `is_dev_mode()`), paint a readable error overlay with the
+/// code + message/stack so the developer sees the actual failure instead of
+/// an opaque page. In prod (`detail` is `None`), fall back to the generic
+/// minimal 500 — the detail stays in the server logs, never on the wire.
+/// The dev error-overlay HTML body. Split out (pure) so it's unit-testable
+/// without constructing a tiny_http Response. `code` + `message` are both
+/// HTML-escaped here — `message` is the JS error stack in dev, so it can
+/// contain `<`, `>`, quotes, and newlines (preserved by `white-space:
+/// pre-wrap`).
+fn ssr_dev_error_overlay_html(code: &str, message: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>SSR error — {code}</title>\
+<style>\
+:root{{color-scheme:dark light}}\
+body{{margin:0;font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+background:#0b0d12;color:#e6e8eb}}\
+.wrap{{max-width:920px;margin:0 auto;padding:48px 24px}}\
+.badge{{display:inline-block;background:#7f1d1d;color:#fecaca;border-radius:6px;\
+padding:2px 10px;font-size:12px;font-weight:600;letter-spacing:.02em}}\
+h1{{font-size:20px;font-weight:600;margin:16px 0 4px}}\
+.sub{{color:#9aa3ad;margin:0 0 24px;font-size:13px}}\
+pre{{background:#11141b;border:1px solid #1f2430;border-radius:10px;\
+padding:16px 18px;overflow:auto;white-space:pre-wrap;word-break:break-word;\
+color:#f2c0c0}}\
+.hint{{margin-top:20px;color:#9aa3ad;font-size:13px}}\
+.hint code{{background:#11141b;border:1px solid #1f2430;border-radius:5px;padding:1px 6px}}\
+</style></head><body><div class=\"wrap\">\
+<span class=\"badge\">SSR render error</span>\
+<h1>{code}</h1>\
+<p class=\"sub\">This page threw while rendering on the server, and there's no \
+<code>error.tsx</code> boundary above it to catch it.</p>\
+<pre>{message}</pre>\
+<p class=\"hint\">Add an <code>error.tsx</code> in this route's folder (or an \
+ancestor) to render a friendly fallback. This overlay only appears with \
+<code>PYLON_DEV_MODE</code> set — production shows a generic 500.</p>\
+</div></body></html>",
+        code = html_escape(code),
+        message = html_escape(message),
+    )
+}
+
+fn ssr_render_error_response(
+    detail: Option<(String, String)>,
+    cors_origin: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let (code, message) = match detail {
+        Some(d) => d,
+        None => return ssr_error_response(500, cors_origin),
+    };
+    let body = ssr_dev_error_overlay_html(&code, &message).into_bytes();
+    let mut resp = Response::from_data(body)
+        .with_status_code(500u16)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        // Never let an error overlay be cached by a shared cache.
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         resp = resp.with_header(h);
     }
@@ -2047,6 +2138,24 @@ mod tests {
         let m = match_ssr_route("/users/42/posts/7", &routes).expect("param + catch-all");
         assert_eq!(m.params.get("id").map(String::as_str), Some("42"));
         assert_eq!(m.params.get("rest").map(String::as_str), Some("posts/7"));
+    }
+
+    #[test]
+    fn ssr_dev_error_overlay_escapes_and_includes_detail() {
+        // A JS stack with HTML-special chars must be escaped (no markup
+        // injection from the error text) while staying readable in the <pre>.
+        let html = ssr_dev_error_overlay_html(
+            "SSR_RENDER_FAILED",
+            "TypeError: x is not a function\n  at <Page> (app/page.tsx:3)",
+        );
+        assert!(html.contains("SSR_RENDER_FAILED"));
+        assert!(html.contains("TypeError: x is not a function"));
+        // The "<Page>" in the stack is escaped, not emitted as a tag.
+        assert!(html.contains("&lt;Page&gt;"));
+        assert!(!html.contains("<Page>"));
+        // Mentions the error.tsx remedy + the dev-only nature.
+        assert!(html.contains("error.tsx"));
+        assert!(html.contains("PYLON_DEV_MODE"));
     }
 
     #[test]

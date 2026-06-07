@@ -223,11 +223,17 @@ function dispatch(line: string): void {
         ),
       )
       .catch((err) => {
+        const devMode =
+          process.env.PYLON_DEV_MODE === "1" ||
+          process.env.PYLON_DEV_MODE === "true";
         send({
           type: "error",
           call_id: (msg as unknown as { call_id: string }).call_id,
           code: "SSR_RUNTIME_CRASH",
-          message: err?.message || String(err),
+          // Dev: full stack for the host's error overlay. Prod: message only.
+          message:
+            (devMode && err?.stack ? String(err.stack) : err?.message) ||
+            String(err),
         });
       });
   } else if (msg.type === "bundle_client") {
