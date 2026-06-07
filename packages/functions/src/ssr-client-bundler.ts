@@ -130,6 +130,22 @@ function discoverRoutes(
         layouts: nextLayouts,
       });
     }
+    // Boundary modules (not-found.tsx / error.tsx) are hydrated like pages
+    // (#279) so onClick/useState/reset() work — that means each needs its own
+    // client entry + manifest key, keyed by component path exactly like a page.
+    // They wrap in the layouts ABOVE them (nextLayouts), same as a page here.
+    for (const base of ["not-found", "error"]) {
+      const bHere = [`${base}.tsx`, `${base}.ts`, `${base}.jsx`, `${base}.js`]
+        .map((n: string) => path.join(dir, n))
+        .find((p: string) => fs.existsSync(p));
+      if (bHere) {
+        pages.push({
+          segments: [...segments],
+          component: path.relative(cwd, bHere).replace(/\.(tsx?|jsx?)$/, ""),
+          layouts: nextLayouts,
+        });
+      }
+    }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
       if (e.name.startsWith(".") || e.name === "node_modules") continue;
@@ -271,10 +287,18 @@ function makeNoopResponse() {
 
 // Rehydrate the live, server-only props (serverData + response) that were
 // stripped before serialization, so the client tree matches the server's.
+// For a hydrated error boundary (#279), synthesize the reset() the server
+// rendered as a no-op: re-fetch + re-render the current URL (a transient
+// error clears to the page; a deterministic one re-shows the boundary).
 function withClientProps(data) {
   const props = { ...(data.props || {}) };
   props.serverData = makeClientServerData(data.ssrData);
   props.response = makeNoopResponse();
+  if (data.kind === "error") {
+    props.reset = function () {
+      navigate(location.pathname + location.search, { replace: true });
+    };
+  }
   return props;
 }
 

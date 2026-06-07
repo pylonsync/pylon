@@ -792,11 +792,116 @@ async function collectBoundaryHeadBlob(): Promise<string> {
 }
 
 /**
- * Render a boundary (not-found/error) tree and stream it as the response
- * body at `status`. Boundaries render server-side only (no hydration
- * payload) — they're informational pages, consistent with the keystone's
- * fixed 404 body that this replaces — but they DO get the app's global
- * stylesheet injected so they match the rest of the site.
+ * Build the hydration tail appended after React's stream EOFs: the
+ * `__PYLON_DATA__` JSON blob (props + ssrData) + the per-route entry
+ * `<script>` that hydrates it, + (dev) the live-reload snippet. Shared by the
+ * page render AND the now-hydrated boundary render (#279) so a boundary
+ * hydrates through the EXACT same path as a page.
+ *
+ * `kind` marks an error/not-found boundary so the client knows whether to
+ * synthesize a `reset()`. For an error boundary, `errorForClient` is the SAFE
+ * projection ({message, digest}) — the raw `Error` (and its stack) is NEVER
+ * serialized (the dev overlay owns dev stacks; preserves the #270 posture).
+ */
+export function buildHydrationTail(args: {
+  component: string;
+  layouts: string[];
+  props: any;
+  ssrData: Record<string, any>;
+  manifestRoute: { file: string; imports: string[]; css: string[] } | null;
+  publicPrefix: string;
+  manifestErr: string | null;
+  kind?: "error" | "not-found";
+  errorForClient?: { message: string; digest?: string };
+}): string {
+  // Strip live, non-serializable handles (serverData / response / reset) + the
+  // request headers/cookies (SECURITY: never expose the session cookie to
+  // client JS — see #270). The raw `error` Error is dropped too; an error
+  // boundary's client-visible error rides in `errorForClient` instead.
+  const {
+    serverData: _sd,
+    response: _resp,
+    reset: _reset,
+    headers: _h,
+    cookies: _c,
+    error: _err,
+    ...restProps
+  } = args.props ?? {};
+  const serializableProps: any = { ...restProps, headers: {}, cookies: {} };
+  if (args.errorForClient) serializableProps.error = args.errorForClient;
+  const hydrationPayload: any = {
+    component: args.component,
+    layouts: args.layouts ?? [],
+    props: serializableProps,
+    ssrData: args.ssrData,
+  };
+  if (args.kind) hydrationPayload.kind = args.kind;
+  // Escape `<` (closes a </script> breakout) + U+2028/U+2029 (JSON-valid but
+  // JS statement terminators). Regex form keeps the separators visible in
+  // source rather than as invisible literals.
+  const json = JSON.stringify(hydrationPayload)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
+  if (args.manifestRoute) {
+    tail += `<script type="module" src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
+  } else {
+    tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${args.manifestErr}`)})</script>`;
+  }
+  if (process.env.PYLON_DEV_MODE) tail += DEV_LIVE_RELOAD_SNIPPET;
+  return tail;
+}
+
+/**
+ * The layout chain for a component, walked top-down from `app/` to the
+ * component's own directory — IDENTICAL to the bundler's `discoverRoutes`
+ * accumulation (and the SDK's `discoverAppRoutes`). A boundary's hydration
+ * needs the SERVER tree wrapped in the SAME layouts the bundler baked into
+ * its client entry; the catch path otherwise has only the failing PAGE's
+ * layouts, which would mismatch a root boundary covering a nested page.
+ */
+function resolveLayoutChain(componentRelPath: string, cwd: string): string[] {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const rel = componentRelPath.replace(/\\/g, "/");
+  const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  const parts = dir.split("/").filter(Boolean);
+  const layouts: string[] = [];
+  let acc = "";
+  for (const part of parts) {
+    acc = acc ? `${acc}/${part}` : part;
+    for (const ext of MODULE_EXTS) {
+      if (fs.existsSync(path.join(cwd, acc, `layout${ext}`))) {
+        layouts.push(`${acc}/layout`);
+        break;
+      }
+    }
+  }
+  return layouts;
+}
+
+/**
+ * A short, non-reversible correlation id for an error — surfaced to the
+ * client error boundary as `error.digest` (matching server logs) WITHOUT
+ * carrying any stack content. FNV-1a over message+stack, 8 hex chars.
+ */
+export function errorDigest(err: any): string {
+  const s = `${err?.message ?? ""}\n${err?.stack ?? ""}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Render a boundary (not-found/error) tree, stream it at `status`, and —
+ * when the boundary has a client bundle entry (#279) — append the hydration
+ * tail so onClick/useState/`reset()` work. With no manifest entry the
+ * boundary still renders (server-only, styled) — CSS/hydration must never
+ * block the error path.
  */
 async function renderBoundaryToClient(
   React: any,
@@ -806,6 +911,14 @@ async function renderBoundaryToClient(
   callId: string,
   status: number,
   headers: Record<string, string>,
+  tail?: {
+    component: string;
+    layouts: string[];
+    props: any;
+    ssrData: Record<string, any>;
+    kind: "error" | "not-found";
+    errorForClient?: { message: string; digest?: string };
+  },
 ): Promise<void> {
   const stream: ReadableStream<Uint8Array> = await renderToReadableStream(tree, {
     onError(e: unknown) {
@@ -813,7 +926,35 @@ async function renderBoundaryToClient(
       console.error("[ssr] boundary render error:", e);
     },
   });
-  const headBlob = await collectBoundaryHeadBlob();
+  // Resolve the boundary's own client entry (keyed by its component path) so
+  // the head gets ITS css/modulepreloads and the body-tail loads ITS script.
+  let manifestRoute:
+    | { file: string; imports: string[]; css: string[] }
+    | null = null;
+  let publicPrefix = "/_pylon/build/";
+  let headBlob = "";
+  if (tail) {
+    try {
+      const { getManifest } = await import("./ssr-client-bundler");
+      const manifest = await getManifest();
+      publicPrefix = manifest.public_prefix || publicPrefix;
+      manifestRoute = manifest.routes[tail.component] ?? null;
+    } catch {
+      manifestRoute = null;
+    }
+  }
+  if (manifestRoute) {
+    for (const css of manifestRoute.css) {
+      headBlob += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
+    }
+    for (const chunk of manifestRoute.imports) {
+      headBlob += `<link rel="modulepreload" href="${publicPrefix}${chunk}">`;
+    }
+  } else {
+    // No per-boundary entry → fall back to the global stylesheet union so the
+    // page is at least styled (static).
+    headBlob = await collectBoundaryHeadBlob();
+  }
   // renderToReadableStream resolved without throwing → safe to commit the
   // head now, then drain the (already-rendered) shell, injecting CSS.
   send({ type: "response_start", call_id: callId, status, headers });
@@ -826,6 +967,20 @@ async function renderBoundaryToClient(
     });
   };
   await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+  if (tail && manifestRoute) {
+    const tailHtml = buildHydrationTail({
+      component: tail.component,
+      layouts: tail.layouts,
+      props: tail.props,
+      ssrData: tail.ssrData,
+      manifestRoute,
+      publicPrefix,
+      manifestErr: null,
+      kind: tail.kind,
+      errorForClient: tail.errorForClient,
+    });
+    sendChunk(tailHtml);
+  }
   send({ type: "render_done", call_id: callId });
 }
 
@@ -848,7 +1003,7 @@ async function tryRenderBoundary(
     headers: Record<string, string>;
   },
 ): Promise<boolean> {
-  const { React, renderToReadableStream, cwd, componentPath, fileName, layouts, props, send, callId, status, headers } =
+  const { React, renderToReadableStream, cwd, componentPath, fileName, props, send, callId, status, headers } =
     opts;
   if (!React || !renderToReadableStream || !props) return false;
   const rel = findBoundary(componentPath, fileName);
@@ -857,9 +1012,45 @@ async function tryRenderBoundary(
     const mod = await importModule(cwd, rel);
     const Comp = mod.default ?? mod.Component ?? mod.NotFound ?? mod.Error;
     if (typeof Comp !== "function") return false;
-    let tree = React.createElement(Comp, props);
-    tree = await buildLayoutTree(cwd, tree, layouts, props, React);
-    await renderBoundaryToClient(React, renderToReadableStream, tree, send, callId, status, headers);
+    // The boundary hydrates through its OWN layout chain (walked from app/ to
+    // the boundary's dir) — NOT the failing page's chain — so the server tree
+    // matches the client entry the bundler baked for this boundary (#279).
+    const boundaryLayouts = resolveLayoutChain(rel, cwd);
+    // For an error boundary, project the thrown Error to the SAFE client shape
+    // ({message, digest}) and give BOTH server + client the SAME value (zero
+    // hydration mismatch) + a no-op reset() server-side. The raw Error/stack
+    // never reaches the client (the dev overlay owns dev stacks; #270).
+    let errorForClient: { message: string; digest?: string } | undefined;
+    let compProps = props;
+    if (fileName === "error") {
+      const rawErr = props.error;
+      errorForClient = {
+        message: rawErr?.message ?? String(rawErr ?? "Error"),
+        digest: errorDigest(rawErr),
+      };
+      compProps = { ...props, error: errorForClient, reset: () => {} };
+    }
+    let tree = React.createElement(Comp, compProps);
+    tree = await buildLayoutTree(cwd, tree, boundaryLayouts, compProps, React);
+    await renderBoundaryToClient(
+      React,
+      renderToReadableStream,
+      tree,
+      send,
+      callId,
+      status,
+      headers,
+      {
+        component: rel,
+        layouts: boundaryLayouts,
+        props: compProps,
+        // Catch-path boundaries don't set up serverData/use() (the by-name
+        // not-found dispatch through handleRenderRoute does); empty ssrData.
+        ssrData: {},
+        kind: fileName === "error" ? "error" : "not-found",
+        errorForClient,
+      },
+    );
     return true;
   } catch (e) {
     // Boundary render itself failed — no tertiary fallback; let the caller
@@ -1196,67 +1387,29 @@ export async function handleRenderRoute(
     // and `getManifest` parses with mtime-keyed caching. Falls back
     // to a no-hydration warning if the manifest can't be loaded
     // (rare — usually means the bundler crashed).
-    if (!isBoundaryComponent) {
-      // Strip live, non-serializable handles from the props that seed
-      // hydration: `serverData` (an RPC handle — the client rebuilds its
-      // own from `ssrData`) and `response` (a server-only controller — the
-      // client gets a no-op). Their resolved data rides along in `ssrData`.
-      //
-      // SECURITY: also strip the request `headers` + `cookies`. They were
-      // passed to the page for SERVER-side reads, but serializing them into
-      // the page HTML exposes the request's `Cookie` (the HttpOnly session
-      // token), `Authorization`, and client IP to any client-side JS —
-      // defeating HttpOnly and handing a same-page XSS an exfil target. The
-      // client gets empty maps (shape preserved so `props.headers`/`.cookies`
-      // aren't `undefined`); a page that must surface a request value to the
-      // browser should pass it explicitly via a prop or `serverData`.
-      const {
-        serverData: _sd,
-        response: _resp,
-        headers: _h,
-        cookies: _c,
-        ...restProps
-      } = props;
-      const serializableProps = { ...restProps, headers: {}, cookies: {} };
-      const hydrationPayload = {
+    // Pages always hydrate. A boundary dispatched BY NAME here (the host
+    // rendering `app/not-found` at 404) now hydrates too (#279) when it has a
+    // client entry - only stay server-only (no tail) when there's no entry to
+    // load. `buildHydrationTail` does the props strip (serverData/response +
+    // the security headers/cookies strip) + the </script> + U+2028/2029
+    // escaping. The CSS/modulepreload links were already injected into <head>.
+    const wantsHydration = !isBoundaryComponent || !!preloadManifestRoute;
+    if (wantsHydration) {
+      const tail = buildHydrationTail({
         component: msg.component,
         layouts: msg.layouts ?? [],
-        props: serializableProps,
+        props,
         ssrData: ssrValueCache,
-      };
-      // Escape `<` (closes the </script> breakout) AND the U+2028/U+2029 line
-      // separators — valid in JSON but statement terminators in JS, so they'd
-      // break the page if the blob were ever read as executable JS rather than
-      // application/json. Defense-in-depth.
-      const json = JSON.stringify(hydrationPayload)
-        .replaceAll("<", "\\u003c")
-        .replaceAll(" ", "\\u2028")
-        .replaceAll(" ", "\\u2029");
-
-      let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
-      if (preloadManifestRoute) {
-        // Per-route entry script comes last — it needs the inline
-        // `__PYLON_DATA__` above to have been parsed before it runs.
-        // CSS + modulepreload links were already injected into `<head>`
-        // above so they could start fetching as early as possible.
-        tail += `<script type="module" src="${preloadPublicPrefix}${preloadManifestRoute.file}"></script>`;
-      } else {
-        tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${preloadManifestErr}`)})</script>`;
-      }
-      // Dev-only browser live-reload. `pylon dev` (PYLON_DEV_MODE=1) re-execs
-      // the whole process on every file edit; each process serves a fresh
-      // boot id from /_pylon/dev/live. This client subscribes via
-      // EventSource and reloads the tab when the boot id changes — so saving
-      // a page, a component, or app/globals.css refreshes the browser with
-      // no manual F5. Stripped entirely in production builds.
-      if (process.env.PYLON_DEV_MODE) {
-        tail += DEV_LIVE_RELOAD_SNIPPET;
-      }
-      send({
-        type: "render_chunk",
-        call_id: msg.call_id,
-        data: Buffer.from(tail, "utf8").toString("base64"),
+        manifestRoute: preloadManifestRoute,
+        publicPrefix: preloadPublicPrefix,
+        manifestErr: preloadManifestErr,
+        kind: isBoundaryComponent
+          ? /(^|\/)error$/.test(msg.component)
+            ? "error"
+            : "not-found"
+          : undefined,
       });
+      sendChunk(tail);
     }
 
     send({ type: "render_done", call_id: msg.call_id });

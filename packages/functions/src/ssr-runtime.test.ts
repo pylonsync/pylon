@@ -4,7 +4,22 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyAutoIcons, applyAutoSocialImages, renderMetadata } from "./ssr-runtime";
+import {
+  applyAutoIcons,
+  applyAutoSocialImages,
+  renderMetadata,
+  buildHydrationTail,
+  errorDigest,
+} from "./ssr-runtime";
+
+// Pull the JSON out of the `__PYLON_DATA__` <script> a hydration tail emits.
+function extractPylonData(tail: string): any {
+  const m = tail.match(
+    /<script id="__PYLON_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+  );
+  if (!m) throw new Error("no __PYLON_DATA__ in tail");
+  return JSON.parse(m[1]); // JSON.parse natively decodes the < escaping
+}
 
 // `react` isn't a dependency of @pylonsync/functions — the SSR runtime
 // imports it dynamically from the host project at render time. For unit
@@ -224,5 +239,109 @@ describe("renderMetadata head-tag marking (client-nav sync)", () => {
   test("returns null when there's nothing to emit", () => {
     expect(renderMetadata(fakeReact, undefined)).toBeNull();
     expect(renderMetadata(fakeReact, {})).toBeNull();
+  });
+});
+
+describe("buildHydrationTail — boundary hydration (#279) + strip (#270)", () => {
+  const manifestRoute = { file: "app__error-x.js", imports: [], css: [] };
+
+  test("error boundary serializes {message,digest}; raw error/stack/cookies NEVER cross the wire", () => {
+    const tail = buildHydrationTail({
+      component: "app/error",
+      layouts: ["app/layout"],
+      props: {
+        url: "/boom",
+        auth: { user_id: "u1", is_admin: false, tenant_id: null, roles: [] },
+        // live, non-serializable + sensitive handles that MUST be stripped:
+        error: new Error("DB exploded at secretHost:5432"),
+        serverData: { get() {} },
+        response: { setStatus() {} },
+        reset: () => {},
+        headers: { cookie: "pylon_session=SUPERSECRET" },
+        cookies: { pylon_session: "SUPERSECRET" },
+      },
+      ssrData: {},
+      manifestRoute,
+      publicPrefix: "/_pylon/build/",
+      manifestErr: null,
+      kind: "error",
+      errorForClient: { message: "Something went wrong", digest: "deadbeef" },
+    });
+    const data = extractPylonData(tail);
+    expect(data.kind).toBe("error");
+    expect(data.component).toBe("app/error");
+    // The client error.tsx gets ONLY the safe projection.
+    expect(data.props.error).toEqual({
+      message: "Something went wrong",
+      digest: "deadbeef",
+    });
+    // Live handles stripped; headers/cookies emptied (shape preserved).
+    expect(data.props.serverData).toBeUndefined();
+    expect(data.props.response).toBeUndefined();
+    expect(data.props.reset).toBeUndefined();
+    expect(data.props.headers).toEqual({});
+    expect(data.props.cookies).toEqual({});
+    // The session cookie + the raw error message/stack are nowhere in the blob.
+    expect(tail).not.toContain("SUPERSECRET");
+    expect(tail).not.toContain("secretHost");
+    expect(tail).not.toContain("stack");
+    // The per-boundary entry script is appended.
+    expect(tail).toContain('src="/_pylon/build/app__error-x.js"');
+  });
+
+  test("not-found boundary carries kind but no error/reset", () => {
+    const tail = buildHydrationTail({
+      component: "app/not-found",
+      layouts: [],
+      props: { url: "/missing", auth: {}, response: {}, serverData: {} },
+      ssrData: {},
+      manifestRoute,
+      publicPrefix: "/_pylon/build/",
+      manifestErr: null,
+      kind: "not-found",
+    });
+    const data = extractPylonData(tail);
+    expect(data.kind).toBe("not-found");
+    expect(data.props.error).toBeUndefined();
+    expect(data.props.reset).toBeUndefined();
+  });
+
+  test("a page (no kind) hydrates without a kind field", () => {
+    const tail = buildHydrationTail({
+      component: "app/page",
+      layouts: ["app/layout"],
+      props: { url: "/", auth: {}, response: {}, serverData: {} },
+      ssrData: { "list:Note": [] },
+      manifestRoute,
+      publicPrefix: "/_pylon/build/",
+      manifestErr: null,
+    });
+    const data = extractPylonData(tail);
+    expect(data.kind).toBeUndefined();
+    expect(data.ssrData).toEqual({ "list:Note": [] });
+  });
+
+  test("no manifest entry → hydration-disabled warning, not an entry script", () => {
+    const tail = buildHydrationTail({
+      component: "app/page",
+      layouts: [],
+      props: { url: "/" },
+      ssrData: {},
+      manifestRoute: null,
+      publicPrefix: "/_pylon/build/",
+      manifestErr: "manifest crashed",
+    });
+    expect(tail).toContain("hydration disabled");
+    expect(tail).not.toContain('type="module" src=');
+  });
+
+  test("errorDigest is deterministic, stack-free, 8 hex chars", () => {
+    const e = new Error("boom");
+    const d1 = errorDigest(e);
+    const d2 = errorDigest(e);
+    expect(d1).toBe(d2);
+    expect(d1).toMatch(/^[0-9a-f]{8}$/);
+    // A different error yields a different digest.
+    expect(errorDigest(new Error("other"))).not.toBe(d1);
   });
 });

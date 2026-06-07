@@ -205,3 +205,37 @@ export type GenerateMetadata<
 > = (
   props: PageProps<TParams, TSearchParams>,
 ) => Metadata | Promise<Metadata>;
+
+/**
+ * Props an `app/.../error.tsx` boundary receives. Error boundaries are now
+ * HYDRATED (interactive — useState/onClick/effects work), so `reset` is a
+ * real callback that re-attempts rendering the segment (a transient error
+ * clears to the page; a deterministic one re-shows the boundary).
+ *
+ * `error` carries ONLY the thrown error's `message` plus a short,
+ * non-reversible `digest` (a correlation id matching the server log). The
+ * stack NEVER reaches the client — read it from the dev overlay
+ * (`PYLON_DEV_MODE`) or the server logs.
+ *
+ * ```tsx
+ * export default function Error({ error, reset }: ErrorBoundaryProps) {
+ *   return (
+ *     <div>
+ *       <p>Something went wrong: {error.message}</p>
+ *       <button onClick={reset}>Try again</button>
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
+export interface ErrorBoundaryProps {
+  error: { message: string; digest?: string };
+  reset: () => void;
+}
+
+/**
+ * Props an `app/.../not-found.tsx` boundary receives. Not-found boundaries
+ * are hydrated (interactive) too, but — matching Next — receive NO `reset`.
+ * Same shape as a page.
+ */
+export type NotFoundProps = PageProps;

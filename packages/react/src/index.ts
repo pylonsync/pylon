@@ -18,6 +18,8 @@ export type {
   SsrCookieOptions,
   Metadata,
   GenerateMetadata,
+  ErrorBoundaryProps,
+  NotFoundProps,
 } from "./ssr";
 
 // Client navigation hooks for SSR pages (Next-style).
