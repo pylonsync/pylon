@@ -1228,13 +1228,28 @@ export async function handleRenderRoute(
       ssrValueCache,
     );
 
+    // #277 cache-safety proof. A render is shareable (CDN/disk cacheable) ONLY
+    // if its output is auth-INDEPENDENT — so wrap props.auth in a Proxy that
+    // flips `authTouched` the moment a page/layout reads it. Reading auth at
+    // all (even for an anonymous request) opts the render OUT of caching,
+    // because the output could differ by identity. The raw auth is restored
+    // before serialization (so the hydration blob carries real values, and so
+    // JSON.stringify doesn't trip the Proxy itself).
+    let authTouched = false;
+    const authProxy = new Proxy(msg.auth as Record<string, unknown>, {
+      get(target, prop, receiver) {
+        authTouched = true;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
     props = {
       url: msg.url,
       params: msg.params,
       searchParams: msg.search_params,
       headers: msg.headers,
       cookies: msg.cookies,
-      auth: msg.auth,
+      auth: authProxy,
       // Response controller — a page/layout calls response.setStatus /
       // setHeader / setCookie / redirect / notFound to shape the reply.
       response,
@@ -1345,11 +1360,45 @@ export async function handleRenderRoute(
     // The shell rendered without a redirect()/notFound() throw, so the
     // page's chosen status (default 200) + headers + cookies go out now,
     // before the first body byte.
+    //
+    // #277 cache verdict (Stage 1, buffered path only — a streaming render
+    // commits its head before the body resolves, so `authTouched` isn't final
+    // yet). A render is shareable (CDN-cacheable via `public, s-maxage`) ONLY
+    // when ALL hold: it opted in (`export const revalidate` / `dynamic:
+    // "force-static"`), never read props.auth (authTouched), set no cookie,
+    // isn't `force-dynamic`, and per-caller strict policies are OFF — in strict
+    // mode serverData reads are auth-filtered, so the output isn't shareable.
+    // We emit an INTERNAL `x-pylon-cacheable` header the host turns into a
+    // public Cache-Control and STRIPS; its ABSENCE is the fail-closed default
+    // (the host keeps no-cache / no-store). The 200-only guard avoids caching
+    // an error/redirect.
+    const revalidateSecs =
+      typeof (mod as any).revalidate === "number" && (mod as any).revalidate > 0
+        ? Math.floor((mod as any).revalidate)
+        : (mod as any).dynamic === "force-static"
+          ? 31536000 // a year — only a deploy invalidates a force-static page
+          : null;
+    const forceDynamic = (mod as any).dynamic === "force-dynamic";
+    const strictPolicies = process.env.PYLON_STRICT_FN_POLICIES === "1";
+    const cacheable =
+      revalidateSecs != null &&
+      !forceDynamic &&
+      !authTouched &&
+      responseState.cookies.length === 0 &&
+      !strictPolicies &&
+      !Loading &&
+      responseState.status === 200;
+    // Restore the raw auth before any serialization below (the Proxy was only
+    // for the render-time auth-touch probe).
+    if (props) props.auth = msg.auth;
     send({
       type: "response_start",
       call_id: msg.call_id,
       status: responseState.status,
-      headers: finalizeHeaders(responseState),
+      headers: finalizeHeaders(
+        responseState,
+        cacheable ? { "x-pylon-cacheable": String(revalidateSecs) } : {},
+      ),
     });
 
     // Pre-load the manifest BEFORE the React stream starts emitting

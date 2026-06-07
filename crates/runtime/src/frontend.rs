@@ -1631,6 +1631,10 @@ fn build_ssr_response_headers(
     let mut saw_content_type = false;
     let mut saw_cache_control = false;
     let mut saw_set_cookie = false;
+    // #277: the render's internal cache proof — `Some(secs)` means it proved
+    // itself anonymous-safe + opted into caching. Captured + STRIPPED below so
+    // it never reaches the client or CDN.
+    let mut cacheable_secs: Option<u64> = None;
 
     // A header VALUE carrying CR/LF/NUL could smuggle extra headers (HTTP
     // response splitting). Drop it rather than trust the header library.
@@ -1668,6 +1672,12 @@ fn build_ssr_response_headers(
             }
             continue;
         }
+        if lname == "x-pylon-cacheable" {
+            // Internal #277 proof — capture the revalidate seconds and STRIP it
+            // (it must never leak to the client or the CDN).
+            cacheable_secs = value.trim().parse::<u64>().ok();
+            continue;
+        }
         if !header_value_is_safe(value) || !header_name_is_safe(name) {
             continue;
         }
@@ -1688,14 +1698,21 @@ fn build_ssr_response_headers(
     if !saw_cache_control {
         // A cookie-setting SSR response is personalized — a shared cache (e.g.
         // Cloudflare) must NEVER store it and replay it to another user, so it
-        // gets `no-store`. Otherwise `no-cache` (don't serve stale without
-        // revalidation; anonymous pages opt into edge caching explicitly).
-        let cc = if saw_set_cookie {
-            "no-store"
+        // gets `no-store`, an ABSOLUTE veto that overrides any cache opt-in
+        // (#277). Otherwise, if the render proved itself anonymous-safe + opted
+        // into caching (#277), let a shared cache store + serve it
+        // (`public, s-maxage`, with `stale-while-revalidate` so an origin
+        // restart doesn't cause a thundering herd). With no proof we fail
+        // closed to `no-cache` (don't serve stale without revalidation;
+        // caching is strictly opt-in + earned).
+        let cc: String = if saw_set_cookie {
+            "no-store".to_string()
+        } else if let Some(secs) = cacheable_secs {
+            format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
         } else {
-            "no-cache"
+            "no-cache".to_string()
         };
-        out.push(Header::from_bytes("Cache-Control", cc).unwrap());
+        out.push(Header::from_bytes("Cache-Control", cc.as_bytes()).unwrap());
     }
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         out.push(h);
@@ -2583,6 +2600,46 @@ mod tests {
             "private, max-age=0".to_string(),
         );
         assert_eq!(cc(&custom).as_deref(), Some("private, max-age=0"));
+    }
+
+    #[test]
+    fn ssr_cacheable_proof_yields_public_smaxage_and_is_stripped() {
+        let headers = |page: &std::collections::HashMap<String, String>| {
+            header_pairs(&build_ssr_response_headers(page, "*"))
+        };
+        let cc = |page: &std::collections::HashMap<String, String>| {
+            headers(page)
+                .into_iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v)
+        };
+
+        // #277: a proven-anonymous render (x-pylon-cacheable: N) → public,
+        // s-maxage=N, stale-while-revalidate=N — and the internal proof header
+        // NEVER reaches the client/CDN.
+        let mut anon_cacheable = std::collections::HashMap::new();
+        anon_cacheable.insert("x-pylon-cacheable".to_string(), "60".to_string());
+        assert_eq!(
+            cc(&anon_cacheable).as_deref(),
+            Some("public, s-maxage=60, stale-while-revalidate=60")
+        );
+        assert!(
+            !headers(&anon_cacheable)
+                .iter()
+                .any(|(k, _)| k == "x-pylon-cacheable"),
+            "the internal proof header must be stripped"
+        );
+
+        // Set-Cookie is an ABSOLUTE veto — even with the cacheable proof, a
+        // personalized response is no-store (never shared).
+        let mut cacheable_but_cookie = std::collections::HashMap::new();
+        cacheable_but_cookie.insert("x-pylon-cacheable".to_string(), "60".to_string());
+        cacheable_but_cookie.insert("set-cookie".to_string(), "sid=abc".to_string());
+        assert_eq!(cc(&cacheable_but_cookie).as_deref(), Some("no-store"));
+
+        // No proof ⇒ fail closed (no-cache), never accidentally public.
+        let no_proof = std::collections::HashMap::new();
+        assert_eq!(cc(&no_proof).as_deref(), Some("no-cache"));
     }
 
     #[test]
