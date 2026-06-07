@@ -1652,6 +1652,10 @@ fn start_server(
     // fallback. Only when the project actually has SSR routes + a functions
     // backend wired — API-only and legacy `web/dist` apps skip it.
     if !frontend_config.ssr_routes.is_empty() {
+        // #277 Stage 2: drop on-disk ISR entries from previous deploys so a new
+        // build never serves a prior build's HTML (cache is build-id-namespaced;
+        // this reclaims the stale namespaces' disk). Cheap, synchronous, safe.
+        crate::ssr_cache::wipe_stale_namespaces();
         if let Some(fn_ops_warm) = frontend_config.fn_ops.clone() {
             let _ = std::thread::Builder::new()
                 .name("ssr-bundle-warm".into())

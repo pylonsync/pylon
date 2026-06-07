@@ -628,7 +628,42 @@ pub fn try_handle(
                 route = %matched.route.path,
                 "SSR match"
             );
-            return serve_via_ssr_rpc(cfg, matched, request, cors_origin, None);
+            // #277 Stage 2 — on-disk ISR fast path. A render that proved
+            // itself anonymous-safe (Stage 1 `x-pylon-cacheable`) was teed to
+            // `.pylon/.cache/ssr`. Serve it straight off disk — skipping the
+            // Bun render entirely — when ALL hold:
+            //   - GET with NO query string (the cache key is path-only; a
+            //     query bypasses both read + write so distinct query strings
+            //     can't poison/explode the cache),
+            //   - NO session cookie present (defense-in-depth: an authed
+            //     request never receives a shared entry, even though the
+            //     entry is provably auth-independent), and
+            //   - a FRESH entry exists (within its revalidate window).
+            // A stale/missing entry falls through to a live render, which
+            // rewrites the entry; CloudFlare absorbs the tail via the
+            // stale-while-revalidate emitted on the live response.
+            // Disabled in dev: the namespace is fixed ("dev") with no artifact
+            // id, so a cached page would be served stale after an edit +
+            // restart (the dev boot id changes but the cache key doesn't) —
+            // a confusing "my change didn't show up" footgun. Dev always
+            // renders live.
+            let cacheable_eligible = !is_dev_mode()
+                && matches!(request.method(), Method::Get)
+                && url
+                    .split_once('?')
+                    .map(|(_, q)| q.is_empty())
+                    .unwrap_or(true)
+                && !session_cookie_present(cfg, &request);
+            if cacheable_eligible {
+                let (path_only, _) = url.split_once('?').unwrap_or((url.as_str(), ""));
+                if let Some(entry) = crate::ssr_cache::get(&matched.route.path, path_only, &[]) {
+                    if entry.fresh {
+                        tracing::debug!(url = %url, "SSR cache hit (disk)");
+                        return serve_cached_ssr(entry, cors_origin, request);
+                    }
+                }
+            }
+            return serve_via_ssr_rpc(cfg, matched, request, cors_origin, None, cacheable_eligible);
         }
         // No page matched. If the app defines a `not-found.tsx` boundary
         // and this looks like a document navigation (not a static asset),
@@ -642,7 +677,7 @@ pub fn try_handle(
                     route: nf.clone(),
                     params: std::collections::HashMap::new(),
                 };
-                return serve_via_ssr_rpc(cfg, matched, request, cors_origin, Some(404));
+                return serve_via_ssr_rpc(cfg, matched, request, cors_origin, Some(404), false);
             }
         }
     }
@@ -1199,6 +1234,12 @@ fn serve_via_ssr_rpc(
     request: Request,
     cors_origin: &str,
     initial_status: Option<u16>,
+    // #277 Stage 2: when true (GET, no query, no session cookie) this render's
+    // body is teed to disk if it emits the Stage-1 `x-pylon-cacheable` proof,
+    // completes cleanly (status 200, no Set-Cookie, no error), so subsequent
+    // anonymous requests serve from disk. False for boundaries + authed/query
+    // requests, which are never cached.
+    cacheable_eligible: bool,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
         Some(f) => f.clone(),
@@ -1291,18 +1332,51 @@ fn serve_via_ssr_rpc(
     let layouts = matched.route.layouts.clone();
     let route_path_owned = matched.route.path.clone();
     let path_only_owned = path_only.clone();
+    // #277 Stage 2 write-tee buffer. Allocated only for cacheable-eligible
+    // requests; the chunk callback mirrors every body byte here (push BEFORE
+    // the channel send, so the buffer is complete once respond() drains the
+    // stream to EOF). None for non-eligible renders → zero extra allocation.
+    let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = if cacheable_eligible {
+        Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    } else {
+        None
+    };
+    let tee_for_chunk = tee_buf.clone();
+    // Gate the tee on the response actually advertising the Stage-1 proof. The
+    // header arrives in `response_start` BEFORE the first body byte (same render
+    // thread, sequential), so a non-cacheable render never buffers its body.
+    let should_tee = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let should_tee_rs = should_tee.clone();
+    let should_tee_chunk = should_tee.clone();
     let render_thread = std::thread::Builder::new()
         .name("pylon-ssr-render".into())
         .stack_size(512 * 1024)
         .spawn(move || {
             let on_response_start: pylon_functions::runner::ResponseStartCallback = Box::new(
                 move |status: u16, headers: std::collections::HashMap<String, String>| {
+                    if headers
+                        .keys()
+                        .any(|k| k.eq_ignore_ascii_case("x-pylon-cacheable"))
+                    {
+                        should_tee_rs.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     // Capacity-1, fires at most once — never blocks.
                     let _ = rs_tx.send((status, headers));
                 },
             );
             let on_chunk: pylon_functions::runner::ByteStreamCallback =
                 Box::new(move |bytes: &[u8]| {
+                    // Tee to the cache buffer FIRST (push-before-send), so when
+                    // the main thread observes stream EOF the buffer already
+                    // holds every byte — no join race on the write path. Only
+                    // when the render advertised the proof (should_tee).
+                    if should_tee_chunk.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Some(buf) = tee_for_chunk.as_ref() {
+                            if let Ok(mut b) = buf.lock() {
+                                b.extend_from_slice(bytes);
+                            }
+                        }
+                    }
                     // sync_channel(64) bounds memory; a full channel
                     // blocks the render thread (= backpressure from a
                     // slow client). Send failure (body_rx dropped) means
@@ -1341,18 +1415,21 @@ fn serve_via_ssr_rpc(
             // hits EOF and tiny_http finalizes the chunked transfer.
         });
 
-    if let Err(e) = render_thread {
-        // Couldn't spawn the render thread. Inline 500.
-        tracing::error!(error = ?e, "failed to spawn SSR render thread");
-        let detail = is_dev_mode().then(|| {
-            (
-                "SSR_RENDER_THREAD_SPAWN_FAILED".to_string(),
-                format!("could not spawn the SSR render thread: {e}"),
-            )
-        });
-        let _ = request.respond(ssr_render_error_response(detail, cors_origin));
-        return Ok(());
-    }
+    let render_handle = match render_thread {
+        Ok(h) => h,
+        Err(e) => {
+            // Couldn't spawn the render thread. Inline 500.
+            tracing::error!(error = ?e, "failed to spawn SSR render thread");
+            let detail = is_dev_mode().then(|| {
+                (
+                    "SSR_RENDER_THREAD_SPAWN_FAILED".to_string(),
+                    format!("could not spawn the SSR render thread: {e}"),
+                )
+            });
+            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+            return Ok(());
+        }
+    };
 
     // Block until the page emits response_start (status + headers), or
     // the render thread dies first (Err = failed before any head). The
@@ -1387,6 +1464,127 @@ fn serve_via_ssr_rpc(
     // request.respond drains StreamingBody chunk-by-chunk as HTTP
     // chunked-transfer frames; returns at EOF (render thread done).
     let _ = request.respond(response);
+
+    // #277 Stage 2 write-tee. The body has fully streamed to the client; now
+    // persist it for subsequent anonymous requests IF this render earned it
+    // (Stage-1 `x-pylon-cacheable` proof + clean 200 + no Set-Cookie + no
+    // mid-render error). Off the hot path; best-effort. When not eligible the
+    // handle is simply dropped (the thread detaches, as before).
+    if let Some(buf) = tee_buf {
+        maybe_cache_render(
+            &matched.route.path,
+            &path_only,
+            status,
+            &page_headers,
+            buf,
+            render_handle,
+            err_rx,
+        );
+    }
+    Ok(())
+}
+
+/// #277 Stage 2: the host-edge shareability verdict. Returns `Some(revalidate
+/// secs)` only when the render emitted the Stage-1 anonymity proof
+/// (`x-pylon-cacheable: N`, N>0) AND the response is a clean, shareable 200
+/// with no Set-Cookie. `None` otherwise — fail-closed. Pure (header map in,
+/// verdict out) so the security-critical gate is directly unit-tested.
+fn ssr_cache_verdict(
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+) -> Option<u64> {
+    let secs = page_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-pylon-cacheable"))
+        .and_then(|(_, v)| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)?;
+    if status != 200 {
+        return None;
+    }
+    if page_headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("set-cookie"))
+    {
+        return None;
+    }
+    Some(secs)
+}
+
+/// #277 Stage 2: persist a finished render to the on-disk ISR cache, but only
+/// when it provably earned it. Fail-closed at every gate — a render that read
+/// auth, set a cookie, returned non-200, or errored mid-body is never stored.
+fn maybe_cache_render(
+    route_path: &str,
+    pathname: &str,
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    render_handle: std::thread::JoinHandle<()>,
+    err_rx: std::sync::mpsc::Receiver<(String, String)>,
+) {
+    // The host-edge shareability verdict (proof present + clean 200 + no
+    // Set-Cookie). None → don't cache (fail-closed).
+    let revalidate_secs = match ssr_cache_verdict(status, page_headers) {
+        Some(s) => s,
+        None => return,
+    };
+    // Wait for the render thread, then confirm it didn't error AFTER
+    // response_start — a partial/aborted body must never be cached. respond()
+    // already drained to EOF, so the join returns immediately.
+    let _ = render_handle.join();
+    if err_rx.try_recv().is_ok() {
+        return;
+    }
+    // Single-flight: skip if another request is already writing this key.
+    let _claim = match crate::ssr_cache::try_claim_write(route_path, pathname, &[]) {
+        Some(c) => c,
+        None => return,
+    };
+    let body = match buf.lock() {
+        Ok(b) => b.clone(),
+        Err(_) => return,
+    };
+    // Store the raw page headers (incl. the proof) so the serve path rebuilds
+    // a byte-equivalent response via build_ssr_response_headers.
+    let headers_vec: Vec<(String, String)> = page_headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    crate::ssr_cache::put(
+        route_path,
+        pathname,
+        &[],
+        status,
+        &headers_vec,
+        &body,
+        revalidate_secs,
+    );
+    tracing::debug!(
+        route = %route_path,
+        pathname = %pathname,
+        ttl = revalidate_secs,
+        bytes = body.len(),
+        "SSR cache write"
+    );
+}
+
+/// #277 Stage 2: serve a fresh cache entry straight off disk, skipping the Bun
+/// render. Rebuilds headers via `build_ssr_response_headers` from the stored
+/// page headers so the response matches a live cacheable render exactly (the
+/// internal `x-pylon-cacheable` proof is stripped there; the public/s-maxage
+/// Cache-Control + security defaults are re-applied).
+fn serve_cached_ssr(
+    entry: crate::ssr_cache::CacheEntry,
+    cors_origin: &str,
+    request: Request,
+) -> Result<(), Request> {
+    let page_headers: std::collections::HashMap<String, String> =
+        entry.headers.into_iter().collect();
+    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    for h in build_ssr_response_headers(&page_headers, cors_origin) {
+        resp = resp.with_header(h);
+    }
+    let _ = request.respond(resp);
     Ok(())
 }
 
@@ -2093,6 +2291,41 @@ fn is_hashed_name(name: &str) -> bool {
 /// Only covers session cookies — bearer tokens / API keys / JWTs
 /// don't apply to SSR HTML routes (those auth modes target
 /// programmatic / API consumers, not browser-rendered pages).
+/// #277 Stage 2: cheap cookie-anonymity gate for the disk-cache fast path.
+/// Returns true when the request carries the session cookie (by name) — in
+/// which case it bypasses the shared on-disk cache entirely (never serve a
+/// shared entry to a request that MIGHT be authed, and never tee its render).
+/// A present-but-invalid session cookie just costs a live render; that's the
+/// safe direction. Apps without a SessionStore/CookieConfig have no session
+/// cookie, so every GET is cache-eligible.
+fn session_cookie_present(cfg: &FrontendConfig, request: &Request) -> bool {
+    let Some(cookie_cfg) = cfg.cookie_config.as_ref() else {
+        return false;
+    };
+    for h in request.headers() {
+        if !h.field.as_str().as_str().eq_ignore_ascii_case("cookie") {
+            continue;
+        }
+        if cookie_header_has_named(h.value.as_str(), &cookie_cfg.name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pure: does a `Cookie:` header value contain a non-empty cookie named
+/// `name`? Extracted for unit testing the cache-eligibility gate.
+fn cookie_header_has_named(header_value: &str, name: &str) -> bool {
+    for pair in header_value.split(';') {
+        if let Some((k, v)) = pair.trim().split_once('=') {
+            if k == name && !v.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn resolve_request_auth(
     cfg: &FrontendConfig,
     cookies: &std::collections::HashMap<String, String>,
@@ -2647,6 +2880,76 @@ mod tests {
         // No proof ⇒ fail closed (no-cache), never accidentally public.
         let no_proof = std::collections::HashMap::new();
         assert_eq!(cc(&no_proof).as_deref(), Some("no-cache"));
+    }
+
+    #[test]
+    fn ssr_cache_verdict_only_stores_proven_anonymous_clean_200() {
+        let mk = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<String, String>>()
+        };
+
+        // Proof + clean 200 + no cookie → cache for the TTL.
+        assert_eq!(
+            ssr_cache_verdict(200, &mk(&[("x-pylon-cacheable", "60")])),
+            Some(60)
+        );
+
+        // Set-Cookie vetoes (personalized) even with the proof.
+        assert_eq!(
+            ssr_cache_verdict(
+                200,
+                &mk(&[("x-pylon-cacheable", "60"), ("set-cookie", "sid=x")])
+            ),
+            None
+        );
+        // Non-200 is never cached (404/redirect/error).
+        assert_eq!(
+            ssr_cache_verdict(404, &mk(&[("x-pylon-cacheable", "60")])),
+            None
+        );
+        assert_eq!(
+            ssr_cache_verdict(307, &mk(&[("x-pylon-cacheable", "60")])),
+            None
+        );
+        // No proof / zero TTL / garbage TTL → fail closed.
+        assert_eq!(ssr_cache_verdict(200, &mk(&[])), None);
+        assert_eq!(
+            ssr_cache_verdict(200, &mk(&[("x-pylon-cacheable", "0")])),
+            None
+        );
+        assert_eq!(
+            ssr_cache_verdict(200, &mk(&[("x-pylon-cacheable", "nope")])),
+            None
+        );
+    }
+
+    #[test]
+    fn cookie_header_named_detects_session_cookie_only() {
+        // Present + non-empty → eligible-bypass true.
+        assert!(cookie_header_has_named(
+            "pylon_session=abc123",
+            "pylon_session"
+        ));
+        assert!(cookie_header_has_named(
+            "theme=dark; pylon_session=abc; foo=1",
+            "pylon_session"
+        ));
+        // A DIFFERENT cookie (e.g. just a theme pref) is NOT a session — the
+        // request stays cache-eligible.
+        assert!(!cookie_header_has_named(
+            "theme=dark; foo=1",
+            "pylon_session"
+        ));
+        // Empty value (logged-out clear) is not a session.
+        assert!(!cookie_header_has_named("pylon_session=", "pylon_session"));
+        // A cookie whose name merely contains the session name doesn't match.
+        assert!(!cookie_header_has_named(
+            "not_pylon_session=x",
+            "pylon_session"
+        ));
     }
 
     #[test]
