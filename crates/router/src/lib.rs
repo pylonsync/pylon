@@ -532,6 +532,36 @@ pub trait FnOps: Send + Sync {
         })
     }
 
+    /// Run a `route.ts` form/method handler (#276). Bridges a non-GET HTTP
+    /// request to the Bun-side `ssr-form-runtime`, which imports `component`,
+    /// picks the handler by `method` (POST/PUT/PATCH/DELETE), runs it with the
+    /// parsed `form` fields + request context, and shapes the reply through the
+    /// SAME `SsrResponse` controller pages use (redirect/setCookie/setStatus).
+    /// `on_response_start` fires once with status + headers; `on_chunk`
+    /// receives any body bytes (usually none — the common case is a 303
+    /// redirect). Default impl returns SSR_FORM_NOT_IMPLEMENTED.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_form(
+        &self,
+        _component: &str,
+        _route_path: &str,
+        _method: &str,
+        _url: &str,
+        _params: serde_json::Value,
+        _search_params: serde_json::Value,
+        _form: serde_json::Value,
+        _headers: std::collections::HashMap<String, String>,
+        _cookies: std::collections::HashMap<String, String>,
+        _auth: pylon_functions::protocol::AuthInfo,
+        _on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
+        _on_chunk: pylon_functions::runner::ByteStreamCallback,
+    ) -> Result<(), pylon_functions::runner::FnCallError> {
+        Err(pylon_functions::runner::FnCallError {
+            code: "SSR_FORM_NOT_IMPLEMENTED".into(),
+            message: "this FnOps backend does not implement handle_form".into(),
+        })
+    }
+
     /// Hydration — bundle the user's `app/**/page.tsx` +
     /// `app/**/layout.tsx` into per-route entries with shared
     /// chunks. Returns a `BundleClientPaths` carrying the manifest

@@ -331,8 +331,11 @@ export interface RouteDefinition {
    * NOT matched as navigable URLs — the host renders `not-found` for
    * unmatched URLs (HTTP 404) and `error` on render failure (HTTP 500).
    * `path` records the segment prefix the boundary covers (`/` for root).
+   * `"route"` is a form/method handler (`app/.../route.ts` exporting
+   * POST/PUT/PATCH/DELETE) — matched on its `path` for non-GET requests only,
+   * never rendered as a page.
    */
-  kind?: "page" | "not-found" | "error";
+  kind?: "page" | "not-found" | "error" | "route";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -506,8 +509,8 @@ export interface ManifestRoute {
   auth?: string;
   component?: string;
   layouts?: string[];
-  /** "not-found" / "error" boundary modules; omitted for normal pages. */
-  kind?: "page" | "not-found" | "error";
+  /** "not-found" / "error" boundaries, or "route" form handlers; omitted for normal pages. */
+  kind?: "page" | "not-found" | "error" | "route";
 }
 
 export interface ManifestInputField {
@@ -720,8 +723,10 @@ export async function discoverAppRoutes(opts?: {
     layouts: string[];
     kind: "not-found" | "error";
   };
+  type RouteHandlerHit = { segments: string[]; component: string };
   const pages: PageHit[] = [];
   const boundaries: BoundaryHit[] = [];
+  const routeHandlers: RouteHandlerHit[] = [];
 
   // Resolve the first existing `<base>.{tsx,ts,jsx,js}` in `dir` and
   // return it as a cwd-relative, extension-less module path (or null).
@@ -770,6 +775,12 @@ export async function discoverAppRoutes(opts?: {
         layouts: nextLayouts,
         kind: "error",
       });
+    }
+    // Form/method handler (`route.ts` exporting POST/PUT/PATCH/DELETE). Matched
+    // on its path for non-GET requests only — never rendered, no layouts.
+    const routeHere = findModule(dir, "route");
+    if (routeHere) {
+      routeHandlers.push({ segments: [...segments], component: routeHere });
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
@@ -843,7 +854,16 @@ export async function discoverAppRoutes(opts?: {
       kind: b.kind,
     }));
 
-  return [...pageRoutes, ...boundaryRoutes];
+  // Form/method handlers. Keyed by the SAME path token form as pages
+  // (`:param` / `*catch-all`), matched by the host for non-GET methods only.
+  const routeRoutes: RouteDefinition[] = routeHandlers.map((r) => ({
+    path: segmentsToPath(r.segments),
+    mode: "ssr" as const,
+    component: r.component,
+    kind: "route" as const,
+  }));
+
+  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {

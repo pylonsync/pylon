@@ -1016,81 +1016,16 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
         if r.mode != "ssr" {
             continue;
         }
-        // Boundary routes (not-found / error) are never navigable — they're
-        // consulted by the host for unmatched-URL 404s + render-failure
-        // 500s, not matched as page URLs.
-        if matches!(r.kind.as_deref(), Some("not-found") | Some("error")) {
+        // Boundary routes (not-found / error) are never navigable, and a
+        // `route` handler (route.ts form/method handler) is matched only for
+        // non-GET methods by match_form_route — never rendered as a page.
+        if matches!(
+            r.kind.as_deref(),
+            Some("not-found") | Some("error") | Some("route")
+        ) {
             continue;
         }
-        let route_segs: Vec<&str> = r.path.split('/').filter(|s| !s.is_empty()).collect();
-
-        // Catch-all routes encode their last segment as `*name` (required,
-        // ≥1 segment) or `*?name` (optional, ≥0). It greedily consumes the
-        // remaining path; the matched sub-path is joined with `/` into one
-        // param value (split it in the page if you want segments). The
-        // marker is only honored on the LAST segment — discoverAppRoutes
-        // never emits one elsewhere, and a stray `*` mid-path falls through
-        // to the literal comparison below (no match).
-        let catch_all = route_segs
-            .last()
-            .and_then(|s| s.strip_prefix('*'))
-            .map(|rest| match rest.strip_prefix('?') {
-                Some(name) => (name, true), // *?name → optional
-                None => (rest, false),      // *name  → required
-            });
-
-        if let Some((ca_name, optional)) = catch_all {
-            let prefix = &route_segs[..route_segs.len() - 1];
-            // Required catch-all needs at least one segment to consume.
-            let min_len = prefix.len() + if optional { 0 } else { 1 };
-            if url_segs.len() < min_len {
-                continue;
-            }
-            let mut params = std::collections::HashMap::new();
-            let mut matched = true;
-            for (rs, us) in prefix.iter().zip(url_segs.iter()) {
-                if let Some(name) = rs.strip_prefix(':') {
-                    if us.is_empty() {
-                        matched = false;
-                        break;
-                    }
-                    params.insert(name.to_string(), (*us).to_string());
-                } else if rs != us {
-                    matched = false;
-                    break;
-                }
-            }
-            if matched {
-                // Join the remaining segments as the catch-all value (empty
-                // string when an optional catch-all matched zero segments).
-                let rest = url_segs[prefix.len()..].join("/");
-                params.insert(ca_name.to_string(), rest);
-                return Some(SsrMatch {
-                    route: r.clone(),
-                    params,
-                });
-            }
-            continue;
-        }
-
-        if route_segs.len() != url_segs.len() {
-            continue;
-        }
-        let mut params = std::collections::HashMap::new();
-        let mut matched = true;
-        for (rs, us) in route_segs.iter().zip(url_segs.iter()) {
-            if let Some(name) = rs.strip_prefix(':') {
-                if us.is_empty() {
-                    matched = false;
-                    break;
-                }
-                params.insert(name.to_string(), (*us).to_string());
-            } else if rs != us {
-                matched = false;
-                break;
-            }
-        }
-        if matched {
+        if let Some(params) = match_route_segments(&r.path, &url_segs) {
             return Some(SsrMatch {
                 route: r.clone(),
                 params,
@@ -1098,6 +1033,87 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
         }
     }
     None
+}
+
+/// Match a non-GET request to a `route.ts` form/method handler
+/// (`kind == "route"`), reusing the same path-pattern matcher pages use (so
+/// `:param` + `*catch-all` work in route paths too). First match wins.
+pub fn match_form_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Option<SsrMatch> {
+    let path = url.split('?').next().unwrap_or(url);
+    let url_segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for r in routes {
+        if r.mode != "ssr" || r.kind.as_deref() != Some("route") {
+            continue;
+        }
+        if let Some(params) = match_route_segments(&r.path, &url_segs) {
+            return Some(SsrMatch {
+                route: r.clone(),
+                params,
+            });
+        }
+    }
+    None
+}
+
+/// Match ONE route's path pattern against the URL segments, returning the
+/// captured params on a match. Shared by `match_ssr_route` (GET pages) and
+/// `match_form_route` (non-GET handlers).
+///
+/// Catch-all routes encode their last segment as `*name` (required, ≥1
+/// segment) or `*?name` (optional, ≥0) — it greedily consumes the remaining
+/// path, joined with `/` into one param value. The marker is only honored on
+/// the LAST segment; a stray `*` mid-path falls through to literal comparison.
+fn match_route_segments(
+    route_path: &str,
+    url_segs: &[&str],
+) -> Option<std::collections::HashMap<String, String>> {
+    let route_segs: Vec<&str> = route_path.split('/').filter(|s| !s.is_empty()).collect();
+
+    let catch_all = route_segs
+        .last()
+        .and_then(|s| s.strip_prefix('*'))
+        .map(|rest| match rest.strip_prefix('?') {
+            Some(name) => (name, true), // *?name → optional
+            None => (rest, false),      // *name  → required
+        });
+
+    if let Some((ca_name, optional)) = catch_all {
+        let prefix = &route_segs[..route_segs.len() - 1];
+        let min_len = prefix.len() + if optional { 0 } else { 1 };
+        if url_segs.len() < min_len {
+            return None;
+        }
+        let mut params = std::collections::HashMap::new();
+        for (rs, us) in prefix.iter().zip(url_segs.iter()) {
+            if let Some(name) = rs.strip_prefix(':') {
+                if us.is_empty() {
+                    return None;
+                }
+                params.insert(name.to_string(), (*us).to_string());
+            } else if rs != us {
+                return None;
+            }
+        }
+        let rest = url_segs[prefix.len()..].join("/");
+        params.insert(ca_name.to_string(), rest);
+        return Some(params);
+    }
+
+    if route_segs.len() != url_segs.len() {
+        return None;
+    }
+    let mut params = std::collections::HashMap::new();
+    for (rs, us) in route_segs.iter().zip(url_segs.iter()) {
+        if let Some(name) = rs.strip_prefix(':') {
+            if us.is_empty() {
+                return None;
+            }
+            params.insert(name.to_string(), (*us).to_string());
+        } else if rs != us {
+            return None;
+        }
+    }
+    Some(params)
 }
 
 /// Find the nearest `not-found.tsx` boundary covering an unmatched URL.
