@@ -1455,8 +1455,11 @@ fn serve_via_form_rpc(
         use std::io::Read;
         let mut limited = request.as_reader().take((MAX_FORM_BODY as u64) + 1);
         if limited.read_to_end(&mut body).is_err() {
-            let _ =
-                request.respond(form_text_response(400, "could not read request body", cors_origin));
+            let _ = request.respond(form_text_response(
+                400,
+                "could not read request body",
+                cors_origin,
+            ));
             return Ok(());
         }
     }
@@ -1537,8 +1540,8 @@ fn serve_via_form_rpc(
 
     if let Err(e) = form_thread {
         tracing::error!(error = ?e, "failed to spawn form handler thread");
-        let detail = is_dev_mode()
-            .then(|| ("SSR_FORM_THREAD_SPAWN_FAILED".to_string(), format!("{e}")));
+        let detail =
+            is_dev_mode().then(|| ("SSR_FORM_THREAD_SPAWN_FAILED".to_string(), format!("{e}")));
         let _ = request.respond(ssr_render_error_response(detail, cors_origin));
         return Ok(());
     }
@@ -1546,7 +1549,11 @@ fn serve_via_form_rpc(
     let (status, page_headers) = match rs_rx.recv() {
         Ok(v) => v,
         Err(_) => {
-            let detail = if is_dev_mode() { err_rx.recv().ok() } else { None };
+            let detail = if is_dev_mode() {
+                err_rx.recv().ok()
+            } else {
+                None
+            };
             let _ = request.respond(ssr_render_error_response(detail, cors_origin));
             return Ok(());
         }
@@ -2457,8 +2464,8 @@ mod tests {
     fn match_form_route_matches_route_handlers_only() {
         // A page and a route.ts handler can share a path: GET → page, POST → handler.
         let routes = vec![
-            route("/notes", None),             // page
-            route("/notes", Some("route")),    // route.ts handler
+            route("/notes", None),          // page
+            route("/notes", Some("route")), // route.ts handler
             route("/hooks/*rest", Some("route")),
         ];
         // GET matcher returns the PAGE, never the handler.
@@ -2483,7 +2490,7 @@ mod tests {
         assert_eq!(v["body"], serde_json::json!("hello world")); // + → space
         assert_eq!(v["tag"], serde_json::json!(["a", "b"])); // repeated → array
         assert_eq!(v["empty"], serde_json::json!("")); // empty value
-        // percent-decoding of reserved chars.
+                                                       // percent-decoding of reserved chars.
         let v2 = parse_urlencoded_form(b"q=a%26b%3Dc");
         assert_eq!(v2["q"], serde_json::json!("a&b=c"));
         // empty body → empty object.
