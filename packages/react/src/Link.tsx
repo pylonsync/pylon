@@ -30,7 +30,10 @@ declare global {
   interface Window {
     __pylon?: {
       prefetch: (href: string) => Promise<void>;
-      navigate: (href: string, opts?: { push?: boolean }) => Promise<void>;
+      navigate: (
+        href: string,
+        opts?: { push?: boolean; replace?: boolean },
+      ) => Promise<void>;
     };
   }
 }

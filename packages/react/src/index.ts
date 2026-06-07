@@ -20,6 +20,10 @@ export type {
   GenerateMetadata,
 } from "./ssr";
 
+// Client navigation hooks for SSR pages (Next-style).
+export { useRouter, useSearchParams, usePathname } from "./useRouter";
+export type { PylonRouter } from "./useRouter";
+
 import {
   defaultStorage,
   pylonFetch,

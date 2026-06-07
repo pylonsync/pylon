@@ -450,9 +450,16 @@ async function navigate(href, opts) {
   syncHeadMeta(doc);
   const tree = buildTree(route.Page, route.Layouts, withClientProps(data));
   activeRoot.render(tree);
-  if (push) {
-    history.pushState({ component: data.component }, "", url.pathname + url.search);
+  const target = url.pathname + url.search;
+  if (opts && opts.replace) {
+    history.replaceState({ component: data.component }, "", target);
+  } else if (push) {
+    history.pushState({ component: data.component }, "", target);
   }
+  // Notify the router hooks (useSearchParams / usePathname) so deep children
+  // re-read location after a Link click or a router.push(). popstate already
+  // covers back/forward, but pushState/replaceState fire no event.
+  window.dispatchEvent(new Event("pylon:navigation"));
   // After a successful nav, scroll to top (Next.js default).
   window.scrollTo(0, 0);
 }
