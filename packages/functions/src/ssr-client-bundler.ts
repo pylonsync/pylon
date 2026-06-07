@@ -510,6 +510,52 @@ function installNavHandlers() {
   window.addEventListener("popstate", () => {
     navigate(location.pathname + location.search, { push: false });
   });
+  // Progressive-enhancement form submit (#276): intercept <form data-pylon-form>
+  // so the page doesn't full-reload. fetch the same route.ts endpoint, follow
+  // the handler's redirect, and swap the destination in via navigate(). Without
+  // JS this listener never runs and the browser submits natively (POST →
+  // handler → 303 → GET) — identical result, just a full navigation.
+  document.addEventListener("submit", (e) => {
+    if (e.defaultPrevented) return;
+    const form = e.target;
+    if (!form || form.tagName !== "FORM") return;
+    if (!form.hasAttribute("data-pylon-form")) return;
+    const action = form.getAttribute("action");
+    if (!action) return;
+    // Off-origin actions / new-tab targets → let the browser submit.
+    if (action.startsWith("http://") || action.startsWith("https://") || action.startsWith("//")) return;
+    const tgt = form.getAttribute("target");
+    if (tgt && tgt !== "" && tgt !== "_self") return;
+    const method = (form.getAttribute("method") || "post").toUpperCase();
+    e.preventDefault();
+    // urlencoded body (matches the server's parser; files use the native path).
+    const body = new URLSearchParams();
+    const fd = new FormData(form);
+    fd.forEach((v, k) => {
+      if (typeof v === "string") body.append(k, v);
+    });
+    fetch(action, {
+      method,
+      body,
+      credentials: "same-origin",
+      headers: { Accept: "text/html" },
+    })
+      .then((res) => {
+        // fetch followed the handler's 303 → res.url is the destination page.
+        // Drive a client navigation to it (re-renders without a full reload).
+        const dest = new URL(res.url || action, location.href);
+        if (dest.origin === location.origin) {
+          navigate(dest.pathname + dest.search);
+        } else {
+          window.location.href = dest.href;
+        }
+      })
+      .catch(() => {
+        // Network/abort — fall back to a native submit so the user isn't stuck.
+        form.removeAttribute("data-pylon-form");
+        form.submit();
+      });
+  });
 }
 
 // Expose for <Link> component prefetch.

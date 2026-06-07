@@ -236,6 +236,24 @@ function dispatch(line: string): void {
             String(err),
         });
       });
+  } else if (msg.type === "handle_form") {
+    // route.ts form/method handler (#276) — lazy-imported like SSR so
+    // projects without route handlers pay nothing on startup.
+    import("./ssr-form-runtime")
+      .then((mod) =>
+        mod.handleForm(
+          msg as unknown as Parameters<typeof mod.handleForm>[0],
+          send,
+        ),
+      )
+      .catch((err) => {
+        send({
+          type: "error",
+          call_id: (msg as unknown as { call_id: string }).call_id,
+          code: "SSR_FORM_RUNTIME_CRASH",
+          message: err?.message || String(err),
+        });
+      });
   } else if (msg.type === "bundle_client") {
     // Hydration — build the client-side bundle once and report
     // the path back. Lazy-imported for the same reason as SSR.
@@ -426,7 +444,7 @@ export function buildDbReader(callId: string, unsafeOp = false): DbReader {
   return reader;
 }
 
-function buildDbWriter(callId: string, unsafeOp = false): DbWriter {
+export function buildDbWriter(callId: string, unsafeOp = false): DbWriter {
   // Drop the reader's `unsafe` shortcut before spreading — the
   // writer needs its own (which we attach below). Without this
   // strip, `writer.unsafe` would be a DbReader and the type

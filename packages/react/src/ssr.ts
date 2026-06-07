@@ -239,3 +239,72 @@ export interface ErrorBoundaryProps {
  * Same shape as a page.
  */
 export type NotFoundProps = PageProps;
+
+/**
+ * Parsed form fields handed to a `route.ts` handler. Mirrors URLSearchParams
+ * `get`/`getAll`/`has` semantics over the submitted body.
+ */
+export interface FormFields {
+  /** First value for `name`, or null. */
+  get(name: string): string | null;
+  /** All values for `name` (empty array if none). */
+  getAll(name: string): string[];
+  has(name: string): boolean;
+  /** Raw map: name → value (single) or values (repeated field). */
+  readonly fields: Record<string, string | string[]>;
+}
+
+/**
+ * Read + write DB handle for a `route.ts` form handler (mutation-shaped). The
+ * read surface is `ServerData`; writes go through the same policy-checked,
+ * broadcast-firing path a mutation's `ctx.db` uses.
+ */
+export interface FormDb extends ServerData {
+  insert<T = Record<string, unknown>>(
+    entity: string,
+    data: Record<string, unknown>,
+  ): Promise<T>;
+  update<T = Record<string, unknown>>(
+    entity: string,
+    id: string,
+    data: Record<string, unknown>,
+  ): Promise<T>;
+  delete(entity: string, id: string): Promise<void>;
+}
+
+/**
+ * The request a `route.ts` POST/PUT/PATCH/DELETE handler receives. Shape the
+ * reply through `response` — usually `response.redirect("/x?ok=1")` (303
+ * POST-redirect-GET, the default) after a write, so a no-JS browser follows
+ * with a GET. Enforce trust with `auth` inside the handler (forms run with the
+ * standard function trust model).
+ *
+ * ```ts
+ * import type { RouteHandler } from "@pylonsync/react";
+ * export const POST: RouteHandler = async ({ form, db, response, auth }) => {
+ *   const body = form.get("body");
+ *   if (!body) return response.redirect("/notes?error=empty");
+ *   await db.insert("Note", { body });
+ *   response.redirect("/notes?created=1");
+ * };
+ * ```
+ */
+export interface FormRequest<
+  TParams extends Record<string, string> = Record<string, string>,
+  TSearchParams extends Record<string, string> = Record<string, string>,
+> {
+  form: FormFields;
+  params: TParams;
+  searchParams: TSearchParams;
+  auth: PageAuth;
+  cookies: Record<string, string>;
+  headers: Record<string, string>;
+  db: FormDb;
+  response: SsrResponse;
+}
+
+/** Signature of a `route.ts` method handler export (POST/PUT/PATCH/DELETE). */
+export type RouteHandler<
+  TParams extends Record<string, string> = Record<string, string>,
+  TSearchParams extends Record<string, string> = Record<string, string>,
+> = (req: FormRequest<TParams, TSearchParams>) => void | Promise<void>;

@@ -7,6 +7,8 @@ export { Link } from "./Link";
 export type { LinkProps } from "./Link";
 export { Image } from "./Image";
 export type { ImageProps } from "./Image";
+export { Form } from "./Form";
+export type { FormProps } from "./Form";
 
 // SSR page-author types — the contract every `app/**/page.tsx` is handed
 // in props, plus `metadata` / `generateMetadata`. Type-only.
@@ -20,6 +22,10 @@ export type {
   GenerateMetadata,
   ErrorBoundaryProps,
   NotFoundProps,
+  FormFields,
+  FormDb,
+  FormRequest,
+  RouteHandler,
 } from "./ssr";
 
 // Client navigation hooks for SSR pages (Next-style).

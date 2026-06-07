@@ -541,9 +541,25 @@ pub fn try_handle(
     request: Request,
     cors_origin: &str,
 ) -> Result<(), Request> {
-    // Only GET / HEAD get the SPA treatment. POST/PATCH/DELETE always
-    // belong to API routing — serving them HTML would be a silent
-    // failure mode that's hard to debug.
+    // route.ts form/method handlers (#276): a non-GET request that matches a
+    // discovered `kind:"route"` path is dispatched to its POST/PUT/PATCH/DELETE
+    // handler. CSRF is already enforced upstream — the CsrfPlugin gates every
+    // non-safe method on Origin/Referer before any handler runs — so a
+    // cross-site form forgery never reaches here. Everything else non-GET falls
+    // through to the API router (the early return below).
+    if !matches!(request.method(), Method::Get | Method::Head)
+        && !cfg.ssr_routes.is_empty()
+        && cfg.fn_ops.is_some()
+    {
+        let url = request.url().to_string();
+        if let Some(matched) = match_form_route(&url, &cfg.ssr_routes) {
+            return serve_via_form_rpc(cfg, matched, request, cors_origin);
+        }
+    }
+
+    // Only GET / HEAD get the SPA treatment. POST/PATCH/DELETE that didn't
+    // match a route handler belong to API routing — serving them HTML would be
+    // a silent failure mode that's hard to debug.
     if !matches!(request.method(), Method::Get | Method::Head) {
         return Err(request);
     }
@@ -1374,6 +1390,229 @@ fn serve_via_ssr_rpc(
     Ok(())
 }
 
+/// Serve a non-GET request matched to a `route.ts` form/method handler (#276).
+/// Reads + parses the request body, invokes the handler in the Bun runtime via
+/// `handle_form`, and writes the response it shapes through `SsrResponse`
+/// (usually a 303 redirect — POST-redirect-GET — plus any Set-Cookie). Mirrors
+/// `serve_via_ssr_rpc`'s response plumbing; the body is read up front (a form
+/// POST carries one) and the handler may WRITE to the DB. CSRF was enforced
+/// upstream by the CsrfPlugin before this is reached.
+fn serve_via_form_rpc(
+    cfg: &FrontendConfig,
+    matched: SsrMatch,
+    mut request: Request,
+    cors_origin: &str,
+) -> Result<(), Request> {
+    let fn_ops = match cfg.fn_ops.as_ref() {
+        Some(f) => f.clone(),
+        None => return Err(request),
+    };
+    let component = match matched.route.component.as_deref() {
+        Some(c) => c.to_string(),
+        None => return Err(request),
+    };
+    let method = match request.method() {
+        Method::Post => "POST",
+        Method::Put => "PUT",
+        Method::Patch => "PATCH",
+        Method::Delete => "DELETE",
+        _ => return Err(request),
+    }
+    .to_string();
+
+    let url = request.url().to_string();
+    let (path_only, query) = match url.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (url.clone(), String::new()),
+    };
+
+    // Headers + cookies (immutable borrow) BEFORE reading the body (mutable).
+    let mut headers_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut cookies_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut content_type = String::new();
+    for h in request.headers() {
+        let name = h.field.as_str().as_str().to_ascii_lowercase();
+        let value = h.value.as_str().to_string();
+        if name == "cookie" {
+            for pair in value.split(';') {
+                if let Some((k, v)) = pair.trim().split_once('=') {
+                    cookies_map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        if name == "content-type" {
+            content_type = value.to_ascii_lowercase();
+        }
+        headers_map.insert(name, value);
+    }
+
+    // Read the body, capped — a form POST body is bounded; reject oversized.
+    const MAX_FORM_BODY: usize = 1024 * 1024; // 1 MiB
+    let mut body: Vec<u8> = Vec::new();
+    {
+        use std::io::Read;
+        let mut limited = request.as_reader().take((MAX_FORM_BODY as u64) + 1);
+        if limited.read_to_end(&mut body).is_err() {
+            let _ =
+                request.respond(form_text_response(400, "could not read request body", cors_origin));
+            return Ok(());
+        }
+    }
+    if body.len() > MAX_FORM_BODY {
+        let _ = request.respond(form_text_response(413, "form body too large", cors_origin));
+        return Ok(());
+    }
+
+    // Parse the body. urlencoded (the browser default for `<form method=post>`)
+    // is fully supported. multipart/form-data is STAGED — file uploads go
+    // through the existing /api/files path; reject with a clear 415 rather than
+    // silently dropping fields.
+    let form_json = if content_type.starts_with("application/x-www-form-urlencoded") {
+        parse_urlencoded_form(&body)
+    } else if content_type.starts_with("multipart/form-data") {
+        let _ = request.respond(form_text_response(
+            415,
+            "multipart/form-data isn't supported yet — use application/x-www-form-urlencoded, \
+             or upload files via /api/files",
+            cors_origin,
+        ));
+        return Ok(());
+    } else if body.is_empty() {
+        serde_json::json!({})
+    } else {
+        // Unknown content-type with a body — best-effort urlencoded.
+        parse_urlencoded_form(&body)
+    };
+
+    let params_json =
+        serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
+    let search_params_json = parse_query_string(&query);
+    let auth = resolve_request_auth(cfg, &cookies_map);
+
+    // Same head/body/error channel plumbing as serve_via_ssr_rpc.
+    let (rs_tx, rs_rx) =
+        std::sync::mpsc::sync_channel::<(u16, std::collections::HashMap<String, String>)>(1);
+    let (body_tx, body_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+    let streaming_body = crate::server::StreamingBody::new(body_rx);
+    let (err_tx, err_rx) = std::sync::mpsc::sync_channel::<(String, String)>(1);
+
+    let fn_ops_for_form = std::sync::Arc::clone(&fn_ops);
+    let component_owned = component.clone();
+    let route_path_owned = matched.route.path.clone();
+    let path_only_owned = path_only.clone();
+    let form_thread = std::thread::Builder::new()
+        .name("pylon-ssr-form".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let on_response_start: pylon_functions::runner::ResponseStartCallback = Box::new(
+                move |status: u16, headers: std::collections::HashMap<String, String>| {
+                    let _ = rs_tx.send((status, headers));
+                },
+            );
+            let on_chunk: pylon_functions::runner::ByteStreamCallback =
+                Box::new(move |bytes: &[u8]| {
+                    let _ = body_tx.send(bytes.to_vec());
+                });
+            let result = fn_ops_for_form.handle_form(
+                &component_owned,
+                &route_path_owned,
+                &method,
+                &path_only_owned,
+                params_json,
+                search_params_json,
+                form_json,
+                headers_map,
+                cookies_map,
+                auth,
+                Some(on_response_start),
+                on_chunk,
+            );
+            if let Err(e) = result {
+                tracing::error!(code = %e.code, message = %e.message, "form handler failed");
+                let _ = err_tx.send((e.code.clone(), e.message.clone()));
+            }
+        });
+
+    if let Err(e) = form_thread {
+        tracing::error!(error = ?e, "failed to spawn form handler thread");
+        let detail = is_dev_mode()
+            .then(|| ("SSR_FORM_THREAD_SPAWN_FAILED".to_string(), format!("{e}")));
+        let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+        return Ok(());
+    }
+
+    let (status, page_headers) = match rs_rx.recv() {
+        Ok(v) => v,
+        Err(_) => {
+            let detail = if is_dev_mode() { err_rx.recv().ok() } else { None };
+            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+            return Ok(());
+        }
+    };
+
+    let response = Response::new(
+        tiny_http::StatusCode(status),
+        build_ssr_response_headers(&page_headers, cors_origin),
+        streaming_body,
+        None,
+        None,
+    );
+    let _ = request.respond(response);
+    Ok(())
+}
+
+/// Parse an `application/x-www-form-urlencoded` body into a JSON object:
+/// `name → value` (single) or `name → [values]` (repeated fields), matching
+/// the URLSearchParams get/getAll semantics the TS `FormFields` exposes.
+fn parse_urlencoded_form(body: &[u8]) -> serde_json::Value {
+    let s = String::from_utf8_lossy(body);
+    let mut order: Vec<String> = Vec::new();
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for pair in s.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (percent_decode(k), percent_decode(v)),
+            None => (percent_decode(pair), String::new()),
+        };
+        if !map.contains_key(&k) {
+            order.push(k.clone());
+        }
+        map.entry(k).or_default().push(v);
+    }
+    let mut obj = serde_json::Map::new();
+    for k in order {
+        let mut vals = map.remove(&k).unwrap_or_default();
+        let val = if vals.len() == 1 {
+            serde_json::Value::String(vals.pop().unwrap())
+        } else {
+            serde_json::Value::Array(vals.into_iter().map(serde_json::Value::String).collect())
+        };
+        obj.insert(k, val);
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// A small text/plain response for the form path's pre-handler errors
+/// (400 / 413 / 415), with CORS + no-store.
+fn form_text_response(
+    status: u16,
+    body: &str,
+    cors_origin: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut resp = Response::from_data(body.as_bytes().to_vec())
+        .with_status_code(status)
+        .with_header(Header::from_bytes("Content-Type", "text/plain; charset=utf-8").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
+}
+
 /// Build the response header set for an SSR reply from the page's
 /// `response_start` headers, layering in defaults + CORS and splitting
 /// the newline-joined `set-cookie` value into one `Set-Cookie` header
@@ -2195,6 +2434,43 @@ mod tests {
         let m = match_ssr_route("/users/42/posts/7", &routes).expect("param + catch-all");
         assert_eq!(m.params.get("id").map(String::as_str), Some("42"));
         assert_eq!(m.params.get("rest").map(String::as_str), Some("posts/7"));
+    }
+
+    #[test]
+    fn match_form_route_matches_route_handlers_only() {
+        // A page and a route.ts handler can share a path: GET → page, POST → handler.
+        let routes = vec![
+            route("/notes", None),             // page
+            route("/notes", Some("route")),    // route.ts handler
+            route("/hooks/*rest", Some("route")),
+        ];
+        // GET matcher returns the PAGE, never the handler.
+        let g = match_ssr_route("/notes", &routes).expect("page matches GET");
+        assert_eq!(g.route.kind, None);
+        // Form matcher returns the kind:"route" handler.
+        let f = match_form_route("/notes", &routes).expect("handler matches non-GET");
+        assert_eq!(f.route.kind.as_deref(), Some("route"));
+        // Catch-all route handler captures the rest.
+        let c = match_form_route("/hooks/stripe/x", &routes).expect("catch-all handler");
+        assert_eq!(c.params.get("rest").map(String::as_str), Some("stripe/x"));
+        // No handler at an unknown path.
+        assert!(match_form_route("/missing", &routes).is_none());
+        // A bare page path has no form handler.
+        let only_page = vec![route("/about", None)];
+        assert!(match_form_route("/about", &only_page).is_none());
+    }
+
+    #[test]
+    fn parse_urlencoded_form_repeats_encoding_and_empty() {
+        let v = parse_urlencoded_form(b"body=hello+world&tag=a&tag=b&empty=");
+        assert_eq!(v["body"], serde_json::json!("hello world")); // + → space
+        assert_eq!(v["tag"], serde_json::json!(["a", "b"])); // repeated → array
+        assert_eq!(v["empty"], serde_json::json!("")); // empty value
+        // percent-decoding of reserved chars.
+        let v2 = parse_urlencoded_form(b"q=a%26b%3Dc");
+        assert_eq!(v2["q"], serde_json::json!("a&b=c"));
+        // empty body → empty object.
+        assert_eq!(parse_urlencoded_form(b""), serde_json::json!({}));
     }
 
     #[test]

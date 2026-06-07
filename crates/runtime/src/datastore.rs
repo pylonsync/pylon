@@ -4109,6 +4109,49 @@ impl pylon_router::FnOps for FnOpsImpl {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn handle_form(
+        &self,
+        component: &str,
+        route_path: &str,
+        method: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        form: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: FnAuth,
+        on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
+        on_chunk: pylon_functions::runner::ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        let runner = self.pool.pick();
+        // A route.ts form handler WRITES — wrap the runtime store in the same
+        // broadcast + hook stack a mutation's `ctx.db` uses, so its
+        // inserts/updates/deletes fire change events + run plugin hooks (reads
+        // pass straight through). The runner's policy gate + the standard
+        // function trust model apply identically to a mutation.
+        let auto = AutoBroadcastStore::new(&*self.runtime, &self.change_log, &self.notifier);
+        let hook_auth = auth_info_to_context(&auth);
+        let hooked = HookEnforcingDataStore::new(&auto, Arc::clone(&self.plugins), hook_auth);
+        let store: &dyn DataStore = &hooked;
+        runner.handle_form(
+            component,
+            route_path,
+            method,
+            url,
+            params,
+            search_params,
+            form,
+            headers,
+            cookies,
+            auth,
+            store,
+            on_response_start,
+            on_chunk,
+        )
+    }
+
     fn bundle_client(&self) -> Result<pylon_functions::runner::BundleClientPaths, FnCallError> {
         let runner = self.pool.pick();
         runner.bundle_client()

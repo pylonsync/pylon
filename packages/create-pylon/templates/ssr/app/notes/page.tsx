@@ -1,5 +1,11 @@
 import React, { Suspense, use } from "react";
-import { type Metadata, type PageProps, type ServerData } from "@pylonsync/react";
+import {
+  Form,
+  type Metadata,
+  type PageProps,
+  type ServerData,
+} from "@pylonsync/react";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -77,7 +83,7 @@ function NotesList({ serverData }: { serverData: ServerData }) {
 // of its `PageProps` and hands it to the suspending child. (The same props
 // carry `response` for status/redirect/cookies and `params`/`searchParams`
 // for the URL — all typed, all from @pylonsync/react.)
-export default function NotesPage({ serverData }: PageProps) {
+export default function NotesPage({ serverData, searchParams }: PageProps) {
   return (
     <div className="space-y-6">
       <section>
@@ -90,6 +96,29 @@ export default function NotesPage({ serverData }: PageProps) {
           shell that fetches later.
         </p>
       </section>
+
+      {/* No-JS form (#276). Posts to app/notes/route.ts, which creates a Note
+          and 303-redirects back here. Works with JS disabled; the runtime
+          enhances it (no full reload) when JS is on. */}
+      {searchParams.created ? (
+        <p className="rounded-md border border-emerald-600/30 bg-emerald-600/10 px-3 py-2 text-sm text-emerald-700">
+          Note added.
+        </p>
+      ) : null}
+      {searchParams.error ? (
+        <p className="rounded-md border border-red-600/30 bg-red-600/10 px-3 py-2 text-sm text-red-700">
+          {searchParams.error}
+        </p>
+      ) : null}
+      <Form action="/notes" className="flex items-center gap-2">
+        <input
+          name="body"
+          placeholder="Write a note…"
+          aria-label="Note"
+          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+        <Button type="submit">Add</Button>
+      </Form>
 
       <Card>
         <CardHeader>

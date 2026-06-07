@@ -75,7 +75,7 @@ type Send = (msg: Record<string, unknown>) => void;
  * it's thrown during the shell render. (Throw it OUTSIDE an error
  * boundary — an enclosing boundary would swallow the signal.)
  */
-class PylonRouteControl extends Error {
+export class PylonRouteControl extends Error {
   kind: "redirect" | "notFound";
   url?: string;
   redirectStatus?: number;
@@ -146,7 +146,7 @@ function serializeCookie(
   return c;
 }
 
-interface ResponseState {
+export interface ResponseState {
   status: number;
   headers: Record<string, string>;
   cookies: string[];
@@ -184,7 +184,14 @@ export interface SsrResponse {
   notFound(): never;
 }
 
-function makeResponseController(state: ResponseState): SsrResponse {
+// `defaultRedirectStatus` is the status `response.redirect(url)` uses when the
+// caller doesn't pass one: 307 for a page render (preserve the method on the
+// rare redirecting GET), 303 for a route.ts form handler (POST-redirect-GET —
+// the browser must follow with a GET, not re-POST).
+export function makeResponseController(
+  state: ResponseState,
+  defaultRedirectStatus = 307,
+): SsrResponse {
   return {
     setStatus(code) {
       if (!Number.isInteger(code) || code < 100 || code > 599) {
@@ -204,7 +211,7 @@ function makeResponseController(state: ResponseState): SsrResponse {
     setCookie(name, value, opts) {
       state.cookies.push(serializeCookie(name, value, opts));
     },
-    redirect(url, status = 307): never {
+    redirect(url, status = defaultRedirectStatus): never {
       assertNoControlChars(url, "redirect url");
       if (!Number.isInteger(status) || status < 300 || status > 399) {
         throw new Error(`pylon ssr: redirect() status must be 3xx, got ${status}`);
@@ -226,7 +233,7 @@ function makeResponseController(state: ResponseState): SsrResponse {
  * into one `Set-Cookie` header each (newline is forbidden inside a
  * cookie, so it can't be turned into header injection).
  */
-function finalizeHeaders(
+export function finalizeHeaders(
   state: ResponseState,
   extra?: Record<string, string>,
 ): Record<string, string> {
@@ -373,7 +380,7 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
 const MODULE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
 
 /** Import a project-relative module, trying each common extension. */
-async function importModule(cwd: string, relPath: string): Promise<any> {
+export async function importModule(cwd: string, relPath: string): Promise<any> {
   const base = `${cwd}/${relPath}`;
   let lastErr: unknown = null;
   for (const ext of MODULE_EXTS) {

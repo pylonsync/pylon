@@ -148,6 +148,66 @@ impl RenderRouteMessage {
     }
 }
 
+/// Outbound message for a `route.ts` form/method handler (#276). Like
+/// `RenderRouteMessage` but carries the HTTP `method` + the parsed `form`
+/// fields instead of layouts. The Bun `ssr-form-runtime` picks the matching
+/// handler export (POST/PUT/PATCH/DELETE), runs it with the form + request
+/// context, and replies through the SAME `response_start` / `render_chunk` /
+/// `render_done` (+ `db`) protocol a render uses — except the `db` ops here
+/// may WRITE (a form handler is mutation-shaped), so the host answers them
+/// against a broadcast-capable store.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandleFormMessage {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str, // always "handle_form"
+    pub call_id: String,
+    pub component: String,
+    pub route_path: String,
+    pub method: String,
+    pub url: String,
+    pub params: serde_json::Value,
+    pub search_params: serde_json::Value,
+    /// Parsed form fields: name → value (string) or values (array of strings
+    /// for repeated fields). `application/x-www-form-urlencoded` + multipart
+    /// TEXT fields.
+    pub form: serde_json::Value,
+    pub headers: std::collections::HashMap<String, String>,
+    pub cookies: std::collections::HashMap<String, String>,
+    pub auth: AuthInfo,
+}
+
+impl HandleFormMessage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        call_id: String,
+        component: String,
+        route_path: String,
+        method: String,
+        url: String,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        form: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: AuthInfo,
+    ) -> Self {
+        Self {
+            msg_type: "handle_form",
+            call_id,
+            component,
+            route_path,
+            method,
+            url,
+            params,
+            search_params,
+            form,
+            headers,
+            cookies,
+            auth,
+        }
+    }
+}
+
 /// Result of a DB operation, sent back to TypeScript.
 ///
 /// `op_id` is echoed from the incoming `DbOpMessage.op_id` when present.

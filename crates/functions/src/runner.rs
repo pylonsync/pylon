@@ -684,6 +684,151 @@ impl FnRunner {
         }
     }
 
+    /// Run a `route.ts` form/method handler — peer to `render_route`, but the
+    /// `db` ops it answers may WRITE (a form handler is mutation-shaped). The
+    /// caller passes a broadcast-capable `store` so inserts/updates/deletes
+    /// fire change events + hooks like a mutation. The handler's ctx exposes
+    /// `db` (read+write) + `response` only — it can't emit runFn/schedule
+    /// frames, so this loop only needs Db + the response protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_form(
+        &self,
+        component: &str,
+        route_path: &str,
+        method: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        form: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: crate::protocol::AuthInfo,
+        store: &dyn DataStore,
+        on_response_start: Option<ResponseStartCallback>,
+        on_chunk: ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        let _io = self.io_lock.lock().unwrap();
+        self.handle_form_inner(
+            component,
+            route_path,
+            method,
+            url,
+            params,
+            search_params,
+            form,
+            headers,
+            cookies,
+            auth,
+            store,
+            on_response_start,
+            on_chunk,
+        )
+    }
+
+    /// Body of `handle_form()` minus the io_lock acquisition.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_form_inner(
+        &self,
+        component: &str,
+        route_path: &str,
+        method: &str,
+        url: &str,
+        params: serde_json::Value,
+        search_params: serde_json::Value,
+        form: serde_json::Value,
+        headers: std::collections::HashMap<String, String>,
+        cookies: std::collections::HashMap<String, String>,
+        auth: crate::protocol::AuthInfo,
+        store: &dyn DataStore,
+        mut on_response_start: Option<ResponseStartCallback>,
+        mut on_chunk: ByteStreamCallback,
+    ) -> Result<(), FnCallError> {
+        use base64::Engine;
+        let timeout = *self.call_timeout.lock().unwrap();
+        let deadline = Instant::now() + timeout;
+        let call_id = format!("f_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+
+        let form_auth = auth.clone();
+        let policy_gate_snapshot = self.policy_gate.lock().unwrap().clone();
+        let strict_policies =
+            std::env::var("PYLON_STRICT_FN_POLICIES").ok().as_deref() == Some("1");
+
+        let msg = crate::protocol::HandleFormMessage::new(
+            call_id.clone(),
+            component.to_string(),
+            route_path.to_string(),
+            method.to_string(),
+            url.to_string(),
+            params,
+            search_params,
+            form,
+            headers,
+            cookies,
+            auth,
+        );
+        self.send(&msg)?;
+
+        loop {
+            let m = self.recv(deadline)?;
+            match m {
+                TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
+                    if let Some(ref mut cb) = on_response_start {
+                        cb(rs.status.unwrap_or(200), rs.headers);
+                    }
+                }
+                TsMessage::Db(db_msg) if db_msg.call_id == call_id => {
+                    // A form handler is mutation-shaped: reads AND writes are
+                    // allowed (the store broadcasts writes + runs hooks). Same
+                    // caller-aware policy gate as a mutation's ctx.db in strict
+                    // mode; the standard function trust model otherwise (the
+                    // handler enforces req.auth itself).
+                    let (result, _) = execute_db_op(
+                        store,
+                        &db_msg,
+                        policy_gate_snapshot.as_deref(),
+                        &form_auth,
+                        strict_policies,
+                    );
+                    let reply = match result {
+                        Ok(data) => {
+                            DbResultMessage::ok_with_op(call_id.clone(), db_msg.op_id.clone(), data)
+                        }
+                        Err(e) => DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            db_msg.op_id.clone(),
+                            &e.code,
+                            &e.message,
+                        ),
+                    };
+                    self.send(&reply)?;
+                }
+                TsMessage::RenderChunk(c) if c.call_id == call_id => {
+                    let bytes = match base64::engine::general_purpose::STANDARD.decode(&c.data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return Err(FnCallError {
+                                code: "RENDER_CHUNK_DECODE_FAILED".into(),
+                                message: format!("base64 decode failed: {e}"),
+                            });
+                        }
+                    };
+                    on_chunk(&bytes);
+                }
+                TsMessage::RenderDone(d) if d.call_id == call_id => {
+                    return Ok(());
+                }
+                TsMessage::Error(err) if err.call_id == call_id => {
+                    return Err(FnCallError {
+                        code: err.code,
+                        message: err.message,
+                    });
+                }
+                // Different call_id or unrelated message — skip.
+                _ => {}
+            }
+        }
+    }
+
     /// Result of a `bundle_client` RPC. Phase 1.5e shipped per-route
     /// entries + shared chunks, so the host needs both the manifest
     /// path (for SSR-side script-tag emission) and the output
