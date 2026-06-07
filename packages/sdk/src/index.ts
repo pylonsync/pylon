@@ -781,14 +781,27 @@ export async function discoverAppRoutes(opts?: {
   }
   walk(appDir, [], []);
 
+  // Segment kinds, least-to-most greedy:
+  //   static            "blog"          rank 0  (most specific)
+  //   dynamic param     "[slug]"        rank 1  → :slug
+  //   catch-all         "[...slug]"     rank 2  → *slug   (matches ≥1 segment)
+  //   optional catch-all"[[...slug]]"   rank 3  → *?slug  (matches ≥0 segments)
+  // A catch-all is only valid as the LAST segment of a route (it consumes
+  // the rest of the path); Next.js enforces the same.
+  const isOptionalCatchAll = (s: string): boolean =>
+    s.startsWith("[[...") && s.endsWith("]]");
+  const isCatchAll = (s: string): boolean =>
+    s.startsWith("[...") && s.endsWith("]") && !isOptionalCatchAll(s);
   const isParam = (s: string): boolean =>
-    s.startsWith("[") && s.endsWith("]");
+    s.startsWith("[") && s.endsWith("]") && !isCatchAll(s) && !isOptionalCatchAll(s);
+  const segRank = (s: string): number =>
+    isOptionalCatchAll(s) ? 3 : isCatchAll(s) ? 2 : isParam(s) ? 1 : 0;
   pages.sort((a, b) => {
     const minLen = Math.min(a.segments.length, b.segments.length);
     for (let i = 0; i < minLen; i++) {
-      const ap = isParam(a.segments[i]);
-      const bp = isParam(b.segments[i]);
-      if (ap !== bp) return ap ? 1 : -1;
+      const ar = segRank(a.segments[i]);
+      const br = segRank(b.segments[i]);
+      if (ar !== br) return ar - br; // more specific (lower rank) first
       if (a.segments[i] !== b.segments[i]) {
         return a.segments[i] < b.segments[i] ? -1 : 1;
       }
@@ -796,9 +809,17 @@ export async function discoverAppRoutes(opts?: {
     return a.segments.length - b.segments.length;
   });
 
+  // Convert a discovered file segment to its route-pattern token. The Rust
+  // matcher (frontend.rs `match_ssr_route`) reads these markers back:
+  //   :name   dynamic param      *name   catch-all      *?name  optional catch-all
+  const segmentToToken = (s: string): string => {
+    if (isOptionalCatchAll(s)) return `*?${s.slice(5, -2)}`; // [[...x]] → *?x
+    if (isCatchAll(s)) return `*${s.slice(4, -1)}`; //          [...x]   → *x
+    if (isParam(s)) return `:${s.slice(1, -1)}`; //             [x]      → :x
+    return s;
+  };
   const segmentsToPath = (segments: string[]): string =>
-    "/" +
-    segments.map((s) => (isParam(s) ? `:${s.slice(1, -1)}` : s)).join("/");
+    "/" + segments.map(segmentToToken).join("/");
 
   const pageRoutes: RouteDefinition[] = pages.map((p) => ({
     path: segmentsToPath(p.segments),

@@ -1023,6 +1023,56 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
             continue;
         }
         let route_segs: Vec<&str> = r.path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Catch-all routes encode their last segment as `*name` (required,
+        // ≥1 segment) or `*?name` (optional, ≥0). It greedily consumes the
+        // remaining path; the matched sub-path is joined with `/` into one
+        // param value (split it in the page if you want segments). The
+        // marker is only honored on the LAST segment — discoverAppRoutes
+        // never emits one elsewhere, and a stray `*` mid-path falls through
+        // to the literal comparison below (no match).
+        let catch_all = route_segs
+            .last()
+            .and_then(|s| s.strip_prefix('*'))
+            .map(|rest| match rest.strip_prefix('?') {
+                Some(name) => (name, true),  // *?name → optional
+                None => (rest, false),       // *name  → required
+            });
+
+        if let Some((ca_name, optional)) = catch_all {
+            let prefix = &route_segs[..route_segs.len() - 1];
+            // Required catch-all needs at least one segment to consume.
+            let min_len = prefix.len() + if optional { 0 } else { 1 };
+            if url_segs.len() < min_len {
+                continue;
+            }
+            let mut params = std::collections::HashMap::new();
+            let mut matched = true;
+            for (rs, us) in prefix.iter().zip(url_segs.iter()) {
+                if let Some(name) = rs.strip_prefix(':') {
+                    if us.is_empty() {
+                        matched = false;
+                        break;
+                    }
+                    params.insert(name.to_string(), (*us).to_string());
+                } else if rs != us {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                // Join the remaining segments as the catch-all value (empty
+                // string when an optional catch-all matched zero segments).
+                let rest = url_segs[prefix.len()..].join("/");
+                params.insert(ca_name.to_string(), rest);
+                return Some(SsrMatch {
+                    route: r.clone(),
+                    params,
+                });
+            }
+            continue;
+        }
+
         if route_segs.len() != url_segs.len() {
             continue;
         }
@@ -1941,6 +1991,62 @@ mod tests {
     fn find_not_found_none_when_no_boundary() {
         let routes = vec![route("/", None), route("/blog", None)];
         assert!(find_not_found_route("/missing", &routes).is_none());
+    }
+
+    #[test]
+    fn match_ssr_route_catch_all_consumes_rest() {
+        // app/docs/[...slug]/page.tsx → "/docs/*slug"
+        let routes = vec![route("/docs/*slug", None)];
+        let m = match_ssr_route("/docs/a/b/c", &routes).expect("catch-all matches");
+        assert_eq!(m.params.get("slug").map(String::as_str), Some("a/b/c"));
+        // Single trailing segment still matches a required catch-all.
+        let m1 = match_ssr_route("/docs/intro", &routes).expect("one segment matches");
+        assert_eq!(m1.params.get("slug").map(String::as_str), Some("intro"));
+        // The bare prefix does NOT match a REQUIRED catch-all (needs ≥1).
+        assert!(match_ssr_route("/docs", &routes).is_none());
+    }
+
+    #[test]
+    fn match_ssr_route_optional_catch_all_matches_bare_prefix() {
+        // app/shop/[[...filters]]/page.tsx → "/shop/*?filters"
+        let routes = vec![route("/shop/*?filters", None)];
+        // Zero trailing segments → empty-string param.
+        let m0 = match_ssr_route("/shop", &routes).expect("optional matches bare prefix");
+        assert_eq!(m0.params.get("filters").map(String::as_str), Some(""));
+        // One or more → joined.
+        let m2 = match_ssr_route("/shop/red/small", &routes).expect("optional matches deep");
+        assert_eq!(m2.params.get("filters").map(String::as_str), Some("red/small"));
+    }
+
+    #[test]
+    fn match_ssr_route_specificity_static_beats_catch_all() {
+        // Routes arrive pre-sorted by discoverAppRoutes: static, then param,
+        // then catch-all. First match wins, so specificity is honored.
+        let routes = vec![
+            route("/docs/api", None),    // static
+            route("/docs/:section", None), // dynamic param
+            route("/docs/*slug", None),  // catch-all
+        ];
+        // Exact static wins over both dynamic and catch-all.
+        let exact = match_ssr_route("/docs/api", &routes).unwrap();
+        assert_eq!(exact.route.path, "/docs/api");
+        // Single non-static segment → dynamic param wins over catch-all.
+        let dyn_ = match_ssr_route("/docs/guides", &routes).unwrap();
+        assert_eq!(dyn_.route.path, "/docs/:section");
+        assert_eq!(dyn_.params.get("section").map(String::as_str), Some("guides"));
+        // Multi-segment → only the catch-all can match.
+        let deep = match_ssr_route("/docs/guides/intro", &routes).unwrap();
+        assert_eq!(deep.route.path, "/docs/*slug");
+        assert_eq!(deep.params.get("slug").map(String::as_str), Some("guides/intro"));
+    }
+
+    #[test]
+    fn match_ssr_route_catch_all_with_param_prefix() {
+        // app/users/[id]/[...rest]/page.tsx → "/users/:id/*rest"
+        let routes = vec![route("/users/:id/*rest", None)];
+        let m = match_ssr_route("/users/42/posts/7", &routes).expect("param + catch-all");
+        assert_eq!(m.params.get("id").map(String::as_str), Some("42"));
+        assert_eq!(m.params.get("rest").map(String::as_str), Some("posts/7"));
     }
 
     #[test]
