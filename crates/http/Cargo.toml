@@ -11,5 +11,5 @@ categories.workspace = true
 version.workspace = true
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.246" }
+pylon-kernel = { path = "../core", version = "0.3.247" }
 serde_json = { workspace = true }
