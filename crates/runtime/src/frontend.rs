@@ -1035,8 +1035,8 @@ pub fn match_ssr_route(url: &str, routes: &[pylon_kernel::ManifestRoute]) -> Opt
             .last()
             .and_then(|s| s.strip_prefix('*'))
             .map(|rest| match rest.strip_prefix('?') {
-                Some(name) => (name, true),  // *?name → optional
-                None => (rest, false),       // *name  → required
+                Some(name) => (name, true), // *?name → optional
+                None => (rest, false),      // *name  → required
             });
 
         if let Some((ca_name, optional)) = catch_all {
@@ -1435,7 +1435,11 @@ fn build_ssr_response_headers(
         // Cloudflare) must NEVER store it and replay it to another user, so it
         // gets `no-store`. Otherwise `no-cache` (don't serve stale without
         // revalidation; anonymous pages opt into edge caching explicitly).
-        let cc = if saw_set_cookie { "no-store" } else { "no-cache" };
+        let cc = if saw_set_cookie {
+            "no-store"
+        } else {
+            "no-cache"
+        };
         out.push(Header::from_bytes("Cache-Control", cc).unwrap());
     }
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
@@ -1579,9 +1583,7 @@ fn cached_bundle_outdir() -> &'static std::sync::Mutex<Option<std::path::PathBuf
 /// `getManifest` reads directly, so that path stays cheap too. Returns the
 /// bundler error (for logging) when the build fails; the lazy first-request
 /// path remains the fallback.
-pub fn warm_client_bundle(
-    fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>,
-) -> Result<(), String> {
+pub fn warm_client_bundle(fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>) -> Result<(), String> {
     let mut cache = cached_bundle_outdir().lock().unwrap();
     if cache.is_some() {
         // A real request already built it between boot and now — nothing to do.
@@ -2136,7 +2138,10 @@ mod tests {
         assert_eq!(m0.params.get("filters").map(String::as_str), Some(""));
         // One or more → joined.
         let m2 = match_ssr_route("/shop/red/small", &routes).expect("optional matches deep");
-        assert_eq!(m2.params.get("filters").map(String::as_str), Some("red/small"));
+        assert_eq!(
+            m2.params.get("filters").map(String::as_str),
+            Some("red/small")
+        );
     }
 
     #[test]
@@ -2144,9 +2149,9 @@ mod tests {
         // Routes arrive pre-sorted by discoverAppRoutes: static, then param,
         // then catch-all. First match wins, so specificity is honored.
         let routes = vec![
-            route("/docs/api", None),    // static
+            route("/docs/api", None),      // static
             route("/docs/:section", None), // dynamic param
-            route("/docs/*slug", None),  // catch-all
+            route("/docs/*slug", None),    // catch-all
         ];
         // Exact static wins over both dynamic and catch-all.
         let exact = match_ssr_route("/docs/api", &routes).unwrap();
@@ -2154,11 +2159,17 @@ mod tests {
         // Single non-static segment → dynamic param wins over catch-all.
         let dyn_ = match_ssr_route("/docs/guides", &routes).unwrap();
         assert_eq!(dyn_.route.path, "/docs/:section");
-        assert_eq!(dyn_.params.get("section").map(String::as_str), Some("guides"));
+        assert_eq!(
+            dyn_.params.get("section").map(String::as_str),
+            Some("guides")
+        );
         // Multi-segment → only the catch-all can match.
         let deep = match_ssr_route("/docs/guides/intro", &routes).unwrap();
         assert_eq!(deep.route.path, "/docs/*slug");
-        assert_eq!(deep.params.get("slug").map(String::as_str), Some("guides/intro"));
+        assert_eq!(
+            deep.params.get("slug").map(String::as_str),
+            Some("guides/intro")
+        );
     }
 
     #[test]
@@ -2275,7 +2286,10 @@ mod tests {
         // A page that sets its OWN Cache-Control is never overridden.
         let mut custom = std::collections::HashMap::new();
         custom.insert("set-cookie".to_string(), "sid=abc".to_string());
-        custom.insert("cache-control".to_string(), "private, max-age=0".to_string());
+        custom.insert(
+            "cache-control".to_string(),
+            "private, max-age=0".to_string(),
+        );
         assert_eq!(cc(&custom).as_deref(), Some("private, max-age=0"));
     }
 
