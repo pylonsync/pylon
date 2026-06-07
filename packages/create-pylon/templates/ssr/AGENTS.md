@@ -23,6 +23,7 @@ Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like fram
 ## Key gotchas
 
 - **Policies deny by default; server functions BYPASS them.** Direct client CRUD (`/api/entities/*`) and sync are policy-checked. Functions run with full DB access — enforce trust with `ctx.auth` checks inside the handler, not policies.
+- **Type page props from the SDK, don't hand-roll them.** `import type { PageProps, Metadata } from "@pylonsync/react"`. Every page/layout gets `{ url, params, searchParams, auth, response, serverData }`; `PageProps<{ slug: string }>` types a `[slug]` route's params. Request headers/cookies are intentionally NOT on `PageProps` — they're server-only and stripped from hydration, so reading them in the render would mismatch.
 - **`serverData` (SSR) is READ-ONLY.** No write methods; the runtime rejects write frames (`SSR_WRITE_FORBIDDEN`). Mutations belong in actions/functions, never in a page render.
 - **`response.*` / `response.redirect()` / `response.notFound()` must fire in the synchronous shell render**, before any `await` / `<Suspense>`. The HTTP head commits when the shell is ready — status/headers/cookies set from a suspended subtree are lost, and `redirect`/`notFound` thrown below a Suspense boundary are swallowed.
 - **`ctx.llm` and `ctx.connections` are on mutation + action only, NOT query** (reactive purity). `action` has no direct `ctx.db` — use `ctx.runQuery` / `ctx.runMutation`.

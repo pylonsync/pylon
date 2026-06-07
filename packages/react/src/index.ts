@@ -8,6 +8,18 @@ export type { LinkProps } from "./Link";
 export { Image } from "./Image";
 export type { ImageProps } from "./Image";
 
+// SSR page-author types — the contract every `app/**/page.tsx` is handed
+// in props, plus `metadata` / `generateMetadata`. Type-only.
+export type {
+  PageProps,
+  PageAuth,
+  ServerData,
+  SsrResponse,
+  SsrCookieOptions,
+  Metadata,
+  GenerateMetadata,
+} from "./ssr";
+
 import {
   defaultStorage,
   pylonFetch,

@@ -1,5 +1,5 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, type Metadata, type PageProps } from "@pylonsync/react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -9,15 +9,23 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-interface PageProps {
-  url: string;
-}
+// SEO metadata. Export `metadata` (static) or `generateMetadata(props)`
+// (dynamic) from any page or layout — Pylon renders the <title>/<meta>
+// into <head> server-side. The `Metadata` type is exported from
+// @pylonsync/react.
+export const metadata: Metadata = {
+  title: "__APP_NAME__ — full-stack Pylon app",
+  description:
+    "Server-rendered React, file-based routes, a synced database, and a typed client — one binary, one port.",
+};
 
-// `app/page.tsx` → `/`. Pages receive `{ url, auth, searchParams }` from
-// the SSR runtime. This renders to HTML on the server; the per-route
-// chunk hydrates it in the browser so interactive pages (see /counter)
-// just work. shadcn/ui is pre-wired — `Button`/`Card` resolve through the
-// `@/` alias and add more with `npx shadcn@latest add <component>`.
+// `app/page.tsx` → `/`. Every page receives `PageProps` from the SSR
+// runtime: `{ url, params, searchParams, auth, response, serverData }` —
+// the type is exported from @pylonsync/react, no hand-rolled interface.
+// This renders to HTML on the server; the per-route chunk hydrates it in
+// the browser so interactive pages (see /counter) just work. shadcn/ui is
+// pre-wired — `Button`/`Card` resolve through the `@/` alias; add more with
+// `npx shadcn@latest add <component>`.
 export default function IndexPage({ url }: PageProps) {
   return (
     <div className="space-y-8">
@@ -68,6 +76,9 @@ export default function IndexPage({ url }: PageProps) {
           <Link href="/counter">See hydration in action →</Link>
         </Button>
         <Button asChild variant="outline">
+          <Link href="/notes">Server data in the render →</Link>
+        </Button>
+        <Button asChild variant="ghost">
           <a
             href="https://docs.pylon.dev"
             target="_blank"

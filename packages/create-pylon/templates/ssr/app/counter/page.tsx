@@ -1,10 +1,6 @@
 import React from "react";
+import type { PageProps } from "@pylonsync/react";
 import { Button } from "@/components/ui/button";
-
-interface PageProps {
-  url: string;
-  searchParams: Record<string, string>;
-}
 
 // `app/counter/page.tsx` → `/counter`. This page is server-rendered AND
 // interactive: the HTML arrives with the initial count already in it (try

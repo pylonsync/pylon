@@ -1,20 +1,14 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, type PageAuth } from "@pylonsync/react";
 
-// Auth shape injected by the SSR runtime. `auth.user_id` is null for
-// anonymous visitors. Wire a sign-in flow with @pylonsync/client when
-// you're ready — for now this just shows the session state.
-interface AuthShape {
-  user_id: string | null;
-  is_admin: boolean;
-  tenant_id: string | null;
-  roles: string[];
-}
-
+// A layout receives the page props plus `children`. `auth.user_id` is null
+// for anonymous visitors — wire a sign-in flow with @pylonsync/client when
+// you're ready; for now this just shows the session state. The `PageAuth`
+// type is exported from @pylonsync/react so you never hand-roll it.
 interface LayoutProps {
   children: React.ReactNode;
   url: string;
-  auth: AuthShape;
+  auth: PageAuth;
 }
 
 // The root layout wraps every page. It receives `url` and `auth` from the
@@ -49,6 +43,9 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
               </Link>
               <Link href="/counter" className="hover:text-foreground">
                 Counter
+              </Link>
+              <Link href="/notes" className="hover:text-foreground">
+                Notes
               </Link>
               <span
                 className={signedIn ? "text-emerald-600" : "text-muted-foreground/60"}
