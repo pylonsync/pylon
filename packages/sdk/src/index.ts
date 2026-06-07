@@ -669,8 +669,9 @@ export function routesToManifest(routes: RouteDefinition[]): ManifestRoute[] {
  * ones at each depth — so the Rust matcher's first-match-wins
  * lookup picks the right route.
  *
- * Phase 1 only: no `loading.tsx` / `error.tsx` / `not-found.tsx`
- * support yet.
+ * `not-found.tsx` / `error.tsx` boundaries are emitted as `kind`-tagged
+ * routes here; `loading.tsx` is resolved at render time by the SSR runtime
+ * (filesystem walk), so it needs no discovery entry.
  */
 export async function discoverAppRoutes(opts?: {
   appDir?: string;

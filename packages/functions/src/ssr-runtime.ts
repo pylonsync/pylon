@@ -1250,6 +1250,41 @@ export async function handleRenderRoute(
     metadata = applyAutoIcons(msg.component, metadata);
     const metaFragment = renderMetadata(React, metadata);
 
+    // loading.tsx (#278): the nearest `loading` module — walked up from the
+    // page dir, like not-found/error — becomes ONE route-level Suspense
+    // fallback wrapping the page. When present, the shell (layouts) + this
+    // skeleton flush immediately and React reveals the real page content when
+    // the page's top-level `use()` resolves, instead of buffering the whole
+    // document (see the `allReady` gate below). A page with no loading.tsx
+    // keeps the byte-identical buffered single-flush path.
+    //
+    // The skeleton is SERVER-ONLY and must not read `serverData` (a read would
+    // suspend the FALLBACK itself, delaying the shell). It gets the page props
+    // for url/params/searchParams/auth.
+    const loadingRel = findBoundary(msg.component, "loading");
+    let Loading: any = null;
+    if (loadingRel) {
+      try {
+        const lMod = await importModule(cwd, loadingRel);
+        const L = lMod.default ?? lMod.Loading ?? lMod.loading;
+        if (typeof L === "function") Loading = L;
+      } catch {
+        // A broken loading.tsx must never block the page — fall back to the
+        // buffered path.
+        Loading = null;
+      }
+    }
+
+    // The page leaf, optionally wrapped in the single Suspense boundary.
+    let pageLeaf: any = React.createElement(Component, props);
+    if (Loading) {
+      pageLeaf = React.createElement(
+        React.Suspense,
+        { fallback: React.createElement(Loading, props) },
+        pageLeaf,
+      );
+    }
+
     // Resolve the layout chain. Each layout module exports a default
     // function that accepts the same props + `children`. Walk leaf →
     // root: start with the page component as `tree`, then for each
@@ -1258,13 +1293,8 @@ export async function handleRenderRoute(
     // the page. The metadata fragment is the FIRST child so React hoists
     // its <title>/<meta> into the <head> a layout renders.
     let tree: any = metaFragment
-      ? React.createElement(
-          React.Fragment,
-          null,
-          metaFragment,
-          React.createElement(Component, props),
-        )
-      : React.createElement(Component, props);
+      ? React.createElement(React.Fragment, null, metaFragment, pageLeaf)
+      : pageLeaf;
     tree = await buildLayoutTree(cwd, tree, msg.layouts, props, React);
     const element = tree;
     const stream: ReadableStream<Uint8Array> = await renderToReadableStream(
@@ -1290,7 +1320,16 @@ export async function handleRenderRoute(
     // whole-document hydration (which leaves the boundary stuck on its
     // fallback). Pages with no async data have no boundaries, so `allReady`
     // resolves immediately — zero cost for the common case.
-    if ((stream as any).allReady) {
+    //
+    // EXCEPTION (#278): when a loading.tsx wraps the page in a Suspense
+    // boundary, we DELIBERATELY skip the buffer and stream — the shell +
+    // skeleton flush first, then React reveals the real content + its reveal
+    // script as the page's `use()` resolves. Hydration stays clean because
+    // there's exactly ONE route-level boundary and the tail `__PYLON_DATA__`
+    // (emitted below, after the stream drains to EOF) still carries a fully
+    // resolved `ssrData` map — so the client's `use()` reads a fulfilled
+    // value and never re-suspends.
+    if (!Loading && (stream as any).allReady) {
       await (stream as any).allReady;
     }
 
