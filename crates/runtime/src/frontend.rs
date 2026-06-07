@@ -1366,6 +1366,35 @@ fn build_ssr_response_headers(
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         out.push(h);
     }
+    // Baseline security headers on the user-facing SSR HTML. Previously only
+    // Studio carried these, so app pages were clickjackable (no X-Frame-Options)
+    // and MIME-sniffable. X-Frame-Options is SAMEORIGIN (not Studio's DENY) so
+    // an app can still embed its OWN pages in an iframe; cross-origin framing —
+    // the clickjacking vector — is blocked. A Content-Security-Policy is left to
+    // the app (via response.setHeader) because a default `default-src 'self'`
+    // would break any page loading external fonts/images/analytics. Each is a
+    // DEFAULT: skip it when the page already set that header (an embeddable
+    // widget can override X-Frame-Options, a page can ship its own CSP), so we
+    // never emit a conflicting duplicate.
+    let has = |out: &[Header], name: &str| {
+        out.iter()
+            .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+    };
+    for (name, value) in [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "SAMEORIGIN"),
+        ("Referrer-Policy", "strict-origin-when-cross-origin"),
+        (
+            "Permissions-Policy",
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()",
+        ),
+    ] {
+        if !has(&out, name) {
+            if let Ok(h) = Header::from_bytes(name, value.as_bytes()) {
+                out.push(h);
+            }
+        }
+    }
     out
 }
 
@@ -2003,6 +2032,31 @@ mod tests {
         custom.insert("set-cookie".to_string(), "sid=abc".to_string());
         custom.insert("cache-control".to_string(), "private, max-age=0".to_string());
         assert_eq!(cc(&custom).as_deref(), Some("private, max-age=0"));
+    }
+
+    #[test]
+    fn ssr_headers_carry_security_defaults_overridable() {
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &std::collections::HashMap::new(),
+            "*",
+        ));
+        let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("x-frame-options").as_deref(), Some("SAMEORIGIN")); // clickjacking
+        assert_eq!(get("x-content-type-options").as_deref(), Some("nosniff"));
+        assert!(get("referrer-policy").is_some());
+        assert!(get("permissions-policy").is_some());
+        // A page can override X-Frame-Options (embeddable widget) with NO
+        // duplicate header emitted.
+        let mut page = std::collections::HashMap::new();
+        page.insert("x-frame-options".to_string(), "ALLOWALL".to_string());
+        let p2 = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let xfo: Vec<&String> = p2
+            .iter()
+            .filter(|(n, _)| n == "x-frame-options")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(xfo.len(), 1, "no duplicate X-Frame-Options");
+        assert_eq!(xfo[0], "ALLOWALL");
     }
 
     #[test]

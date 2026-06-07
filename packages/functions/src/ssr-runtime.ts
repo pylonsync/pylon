@@ -1191,14 +1191,37 @@ export async function handleRenderRoute(
       // hydration: `serverData` (an RPC handle — the client rebuilds its
       // own from `ssrData`) and `response` (a server-only controller — the
       // client gets a no-op). Their resolved data rides along in `ssrData`.
-      const { serverData: _sd, response: _resp, ...serializableProps } = props;
+      //
+      // SECURITY: also strip the request `headers` + `cookies`. They were
+      // passed to the page for SERVER-side reads, but serializing them into
+      // the page HTML exposes the request's `Cookie` (the HttpOnly session
+      // token), `Authorization`, and client IP to any client-side JS —
+      // defeating HttpOnly and handing a same-page XSS an exfil target. The
+      // client gets empty maps (shape preserved so `props.headers`/`.cookies`
+      // aren't `undefined`); a page that must surface a request value to the
+      // browser should pass it explicitly via a prop or `serverData`.
+      const {
+        serverData: _sd,
+        response: _resp,
+        headers: _h,
+        cookies: _c,
+        ...restProps
+      } = props;
+      const serializableProps = { ...restProps, headers: {}, cookies: {} };
       const hydrationPayload = {
         component: msg.component,
         layouts: msg.layouts ?? [],
         props: serializableProps,
         ssrData: ssrValueCache,
       };
-      const json = JSON.stringify(hydrationPayload).replaceAll("<", "\\u003c");
+      // Escape `<` (closes the </script> breakout) AND the U+2028/U+2029 line
+      // separators — valid in JSON but statement terminators in JS, so they'd
+      // break the page if the blob were ever read as executable JS rather than
+      // application/json. Defense-in-depth.
+      const json = JSON.stringify(hydrationPayload)
+        .replaceAll("<", "\\u003c")
+        .replaceAll(" ", "\\u2028")
+        .replaceAll(" ", "\\u2029");
 
       let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
       if (preloadManifestRoute) {
