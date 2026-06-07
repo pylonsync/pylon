@@ -1641,6 +1641,35 @@ fn start_server(
         }
     }
 
+    // Warm the SSR client (hydration) bundle off the request path. It is
+    // otherwise built lazily on the first request that needs it — a cold
+    // `Bun.build` that, on a fresh artifact deploy, runs against an empty
+    // `.pylon/client-build/`. That cold build racing the request timeout was a
+    // contributing factor in a production first-paint outage. Building it now,
+    // during boot, means the first real user request finds a ready manifest.
+    // Fire-and-forget on a dedicated thread so boot isn't blocked; a failure is
+    // logged and harmless because the lazy first-request path is still the
+    // fallback. Only when the project actually has SSR routes + a functions
+    // backend wired — API-only and legacy `web/dist` apps skip it.
+    if !frontend_config.ssr_routes.is_empty() {
+        if let Some(fn_ops_warm) = frontend_config.fn_ops.clone() {
+            let _ = std::thread::Builder::new()
+                .name("ssr-bundle-warm".into())
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    match fn_ops_warm.bundle_client() {
+                        Ok(_) => tracing::info!(
+                            "  SSR client bundle warmed in {:?}",
+                            started.elapsed()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "SSR client bundle warm failed (will build lazily on first request): {e}"
+                        ),
+                    }
+                });
+        }
+    }
+
     // Use recv() in a loop instead of incoming_requests() so we can share
     // the Arc<Server> with the shutdown path (incoming_requests borrows &self
     // which prevents moving the Arc into another thread).
