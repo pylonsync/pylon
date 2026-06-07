@@ -1657,8 +1657,11 @@ fn start_server(
                 .name("ssr-bundle-warm".into())
                 .spawn(move || {
                     let started = std::time::Instant::now();
-                    match fn_ops_warm.bundle_client() {
-                        Ok(_) => tracing::info!(
+                    // Populates the asset route's outdir cache + writes the
+                    // manifest, so neither the first asset request nor the
+                    // first render re-triggers the build (see warm_client_bundle).
+                    match crate::frontend::warm_client_bundle(&fn_ops_warm) {
+                        Ok(()) => tracing::info!(
                             "  SSR client bundle warmed in {:?}",
                             started.elapsed()
                         ),

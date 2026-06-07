@@ -1566,6 +1566,36 @@ fn cached_bundle_outdir() -> &'static std::sync::Mutex<Option<std::path::PathBuf
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// Build the SSR client (hydration) bundle now and memoize its outdir, off
+/// the request path. Called once from the boot-time warm thread (server.rs)
+/// so a fresh artifact deploy doesn't run the cold `Bun.build` on the first
+/// user request.
+///
+/// It populates the SAME `cached_bundle_outdir` the asset route uses and
+/// holds that lock across the build exactly like `serve_pylon_client_bundle`
+/// does — so a request that races boot serializes on this mutex and finds the
+/// finished result instead of triggering a SECOND build. The build also
+/// writes `.pylon/client-build/manifest.json`, which the SSR render path's
+/// `getManifest` reads directly, so that path stays cheap too. Returns the
+/// bundler error (for logging) when the build fails; the lazy first-request
+/// path remains the fallback.
+pub fn warm_client_bundle(
+    fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>,
+) -> Result<(), String> {
+    let mut cache = cached_bundle_outdir().lock().unwrap();
+    if cache.is_some() {
+        // A real request already built it between boot and now — nothing to do.
+        return Ok(());
+    }
+    match fn_ops.bundle_client() {
+        Ok(paths) => {
+            *cache = Some(std::path::PathBuf::from(paths.outdir));
+            Ok(())
+        }
+        Err(e) => Err(format!("{}: {}", e.code, e.message)),
+    }
+}
+
 /// Pick a content-type for a build asset based on its extension.
 /// Phase 1.5e emits `.js` entries + `.js` chunks; `.json` for the
 /// manifest; `.css` reserved for 1.5f.
