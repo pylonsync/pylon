@@ -449,48 +449,51 @@ fn dev_boot_id() -> &'static str {
 /// process dies, the page's EventSource reconnects to the fresh process,
 /// reads a different boot id, and reloads the tab. The matching client
 /// script is injected into every SSR page in dev (see ssr-runtime.ts).
+///
+/// Written RAW via `Request::into_writer()` + an explicit flush per event —
+/// NOT `request.respond()`. tiny_http buffers respond() output in a 1KB
+/// BufWriter that it only flushes after the whole body EOFs; this stream
+/// never EOFs, so the status line + `hello` event sat unsent (~45s of
+/// heartbeats to fill 1KB) and the browser's EventSource never connected —
+/// hot reload was dead. The raw writer also moves the connection off the
+/// request-pool worker (the heartbeat loop runs on its own thread), so an
+/// open dev tab doesn't pin a pool slot.
 fn serve_dev_live_reload(request: Request, cors_origin: &str) -> Result<(), Request> {
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let streaming_body = crate::server::StreamingBody::new(rx);
-
+    // Head + first event in one write. `Connection: close` because we take
+    // the socket over for the stream's lifetime — no further requests ride
+    // this connection (EventSource holds it open; reconnects open fresh).
     // `retry:` sets the client's reconnect delay; `hello` carries the id.
-    let hello = format!("retry: 500\nevent: hello\ndata: {}\n\n", dev_boot_id());
-    if tx.send(hello.into_bytes()).is_err() {
-        return Ok(());
-    }
-
-    // Heartbeat keeps proxies/connections alive and lets us notice when the
-    // client has gone (send fails → StreamingBody's rx was dropped) so the
-    // thread exits instead of leaking.
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: close\r\n\
+         X-Accel-Buffering: no\r\n\
+         Access-Control-Allow-Origin: {cors_origin}\r\n\
+         \r\n\
+         retry: 500\nevent: hello\ndata: {}\n\n",
+        dev_boot_id()
+    );
+    let mut writer = request.into_writer();
+    // Dedicated thread per open dev tab (dev-only endpoint). The heartbeat
+    // keeps proxies/connections alive; a failed write/flush means the client
+    // went away → exit, dropping the writer, which closes the connection.
     std::thread::Builder::new()
         .name("pylon-dev-live-reload".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if tx.send(b": ping\n\n".to_vec()).is_err() {
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            use std::io::Write as _;
+            if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
                 return;
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if writer.write_all(b": ping\n\n").is_err() || writer.flush().is_err() {
+                    return;
+                }
             }
         })
         .ok();
-
-    let response = Response::new(
-        tiny_http::StatusCode(200),
-        vec![
-            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
-            Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-            Header::from_bytes("Connection", "keep-alive").unwrap(),
-            // Disable proxy buffering so events flush immediately.
-            Header::from_bytes("X-Accel-Buffering", "no").unwrap(),
-            Header::from_bytes(
-                "Access-Control-Allow-Origin",
-                cors_origin.as_bytes().to_vec(),
-            )
-            .unwrap(),
-        ],
-        streaming_body,
-        None,
-        None,
-    );
-    let _ = request.respond(response);
     Ok(())
 }
 
@@ -2412,6 +2415,70 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// Regression: the dev live-reload SSE must deliver its HTTP head + the
+    /// `hello` event IMMEDIATELY — not after tiny_http's 1KB write buffer
+    /// fills (~45s of heartbeats). The old `request.respond()` path buffered
+    /// exactly that way (raw_print never returns for an infinite body, and
+    /// tiny_http only flushes after it returns), so the browser's EventSource
+    /// never connected and hot reload was dead. Drives a REAL tiny_http
+    /// server + raw TcpStream so the flush behavior is what's actually
+    /// asserted.
+    #[test]
+    fn dev_live_reload_sse_flushes_hello_immediately() {
+        use std::io::{Read as _, Write as _};
+
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral");
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(addr) => addr.port(),
+            _ => unreachable!("bound to an IP addr"),
+        };
+        let handler = std::thread::spawn(move || {
+            if let Ok(req) = server.recv() {
+                let _ = serve_dev_live_reload(req, "*");
+            }
+        });
+
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        stream
+            .write_all(b"GET /_pylon/dev/live HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+            .unwrap();
+
+        // The head + hello must arrive well within 3s (they're sent + flushed
+        // in one write; the generous budget is only for CI scheduling).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut got: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 2048];
+        while std::time::Instant::now() < deadline {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    got.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&got).contains("event: hello") {
+                        break;
+                    }
+                }
+                Err(_) => continue, // read timeout tick — keep polling until deadline
+            }
+        }
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "no HTTP head flushed — got: {text:?}"
+        );
+        assert!(text.contains("Content-Type: text/event-stream"), "{text:?}");
+        assert!(
+            text.contains("event: hello") && text.contains(&format!("data: {}", dev_boot_id())),
+            "hello event with boot id not delivered — got: {text:?}"
+        );
+        // Closing our end unblocks the heartbeat thread's next write → it
+        // exits; the handler thread already returned after into_writer().
+        drop(stream);
+        let _ = handler.join();
+    }
 
     #[test]
     fn social_image_rel_allowlist() {
