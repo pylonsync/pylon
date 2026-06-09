@@ -154,6 +154,38 @@ extension SyncEngineIntegrationTests.FakeServer {
             rows[change.entity]?[change.row_id] = change.data ?? [:]
         }
     }
+
+    // P0-2: resetReplica(wipeMutations:) must wipe the ON-DISK rows, not just
+    // memory — else user A's SQLite rows rehydrate into user B's session on the
+    // next launch (the cross-identity read leak on the Mac app).
+    func testResetReplicaWipesOnDiskRows() async throws {
+        let path = NSTemporaryDirectory() + "pylon_reset_\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let persistence = try SQLitePersistence(path: path)
+        // Seed the previous identity's rows on disk.
+        try await persistence.persist(ChangeEvent(seq: 1, entity: "Recording", row_id: "r1", kind: .insert, data: ["t": "secret"]))
+        let seeded = try await persistence.loadAllRows()
+        XCTAssertFalse(seeded.isEmpty)
+
+        let client = PylonClient(
+            config: PylonClientConfig(baseURL: URL(string: "http://test.invalid")!),
+            storage: MemoryStorage(),
+            transport: MockTransport()
+        )
+        let engine = await SyncEngine(
+            config: SyncEngineConfig(baseURL: URL(string: "http://test.invalid")!, transport: .poll, pollInterval: 60),
+            client: client,
+            persistence: persistence
+        )
+        await engine.resetReplica(wipeMutations: true)
+
+        let rowsAfter = try await persistence.loadAllRows()
+        XCTAssertTrue(rowsAfter.isEmpty, "resetReplica must wipe disk rows, not just memory")
+        let store = await engine.store
+        XCTAssertNil(store.get("Recording", id: "r1"), "memory replica also cleared")
+        let cursorAfter = await engine.currentCursor()
+        XCTAssertEqual(cursorAfter.last_seq, 0, "cursor reset to 0")
+    }
 }
 
 private func jsonValueToAny(_ v: JSONValue) -> Any {

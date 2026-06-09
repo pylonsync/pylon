@@ -9,6 +9,38 @@ import PylonClient
 /// (which surfaced as the yapless Mac app showing stale/ghost recordings).
 final class SyncParityTests: XCTestCase {
 
+    // MARK: - Push-rejection wire shape (P0-1)
+
+    /// The server emits a rejected op's error as an OBJECT `{code, message}`.
+    /// `PushOpResult.error` MUST decode that (and the legacy bare-string form),
+    /// else the WHOLE `PushResponse` decode throws → the engine misreads it as
+    /// a transient failure → rejected mutations retry forever and rollback
+    /// never runs. This is the exact wire contract `/api/sync/push` produces.
+    func testPushResponseDecodesObjectAndStringError() throws {
+        let objectForm = """
+        {"applied":1,"errors":[],"cursor":{"last_seq":7},
+         "results":[
+           {"op_id":"a","status":"applied","seq":7},
+           {"op_id":"b","status":"error","error":{"code":"VALIDATION","message":"bad title"}}
+         ]}
+        """.data(using: .utf8)!
+        let resp = try JSONDecoder().decode(PushResponse.self, from: objectForm)
+        let rejected = resp.results?.first { $0.op_id == "b" }
+        XCTAssertEqual(rejected?.status, "error")
+        XCTAssertEqual(rejected?.error?.code, "VALIDATION")
+        XCTAssertEqual(rejected?.error?.message, "bad title",
+                       "object-form error must decode (whole response would throw pre-fix)")
+
+        // Legacy bare-string form still decodes.
+        let stringForm = """
+        {"applied":0,"errors":["nope"],"cursor":{"last_seq":3},
+         "results":[{"op_id":"c","status":"error","error":"nope"}]}
+        """.data(using: .utf8)!
+        let resp2 = try JSONDecoder().decode(PushResponse.self, from: stringForm)
+        XCTAssertEqual(resp2.results?.first?.error?.message, "nope")
+        XCTAssertNil(resp2.results?.first?.error?.code)
+    }
+
     // MARK: - applyReconcileBatch (phantom-row sweep)
 
     func testReconcileBatchRemovesServerAbsentRow() {

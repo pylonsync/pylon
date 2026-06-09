@@ -148,6 +148,12 @@ public final class SQLitePersistence: SyncPersistence, @unchecked Sendable {
         }
     }
 
+    public func clearRows() async throws {
+        try await withQueue {
+            try self.execStatement("DELETE FROM rows") { _ in }
+        }
+    }
+
     // MARK: - MutationQueuePersistence
 
     public func saveAll(_ mutations: [PendingMutation]) async throws {

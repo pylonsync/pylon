@@ -4,6 +4,22 @@ import PylonClient
 
 final class MutationQueueTests: XCTestCase {
 
+    // P0-2: identity flip must drop the outgoing identity's un-pushed writes
+    // (pending AND failed) so they're not replayed under the new token —
+    // unlike clear(), which keeps failed for the UI.
+    func testWipeAllDropsPendingAndFailed() async {
+        let queue = MutationQueue()
+        let id1 = await queue.add(ClientChange(entity: "Todo", row_id: "t1", kind: .insert))
+        let id2 = await queue.add(ClientChange(entity: "Todo", row_id: "t2", kind: .insert))
+        await queue.markFailed(id2, error: "boom")
+        let before = await queue.all()
+        XCTAssertEqual(before.count, 2)
+        await queue.wipeAll()
+        let after = await queue.all()
+        XCTAssertTrue(after.isEmpty, "wipeAll must drop pending AND failed")
+        _ = id1
+    }
+
     func testAddSetsOpIdOnOutgoingChange() async {
         let queue = MutationQueue()
         let id = await queue.add(ClientChange(entity: "Todo", row_id: "t1", kind: .insert, data: ["title": "x"]))

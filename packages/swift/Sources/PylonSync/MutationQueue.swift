@@ -130,6 +130,15 @@ public actor MutationQueue {
         await flush()
     }
 
+    /// Drop EVERY queued mutation (pending + failed) and clear the persisted
+    /// copy. Used on an identity flip: the outgoing identity's un-pushed
+    /// writes must NOT be replayed under the incoming identity's token — the
+    /// "cross-identity write leak" the TS client's `wipeMutations` prevents.
+    public func wipeAll() async {
+        queue.removeAll()
+        await flush()
+    }
+
     public func remove(_ id: String) async {
         queue.removeAll { $0.id == id }
         await flush()

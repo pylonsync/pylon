@@ -42,6 +42,27 @@ final class SQLitePersistenceTests: XCTestCase {
         XCTAssertNil(loaded["Todo"]?.first { $0["id"]?.stringValue == "t1" })
     }
 
+    // P0-2: resetReplica must wipe on-disk rows, else the previous identity's
+    // rows rehydrate on next launch (cross-identity read leak). clearRows is
+    // the persistence primitive that makes that possible.
+    func testClearRowsWipesAllEntities() async throws {
+        let path = tempPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let p = try SQLitePersistence(path: path)
+        try await p.persist(ChangeEvent(seq: 1, entity: "Recording", row_id: "r1", kind: .insert, data: ["t": "a"]))
+        try await p.persist(ChangeEvent(seq: 2, entity: "Note", row_id: "n1", kind: .insert, data: ["b": "hi"]))
+        let seeded = try await p.loadAllRows()
+        XCTAssertFalse(seeded.isEmpty)
+        try await p.clearRows()
+        let cleared = try await p.loadAllRows()
+        XCTAssertTrue(cleared.isEmpty, "clearRows must drop every entity's rows")
+        // Cursor + mutation queue are untouched (engine resets those itself).
+        try await p.saveCursor(SyncCursor(last_seq: 9))
+        try await p.clearRows()
+        let cursor = try await p.loadCursor()
+        XCTAssertEqual(cursor?.last_seq, 9, "clearRows must not touch the cursor")
+    }
+
     func testMutationQueueRoundTrip() async throws {
         let path = tempPath()
         defer { try? FileManager.default.removeItem(atPath: path) }

@@ -98,6 +98,41 @@ public struct PushRequest: Sendable, Codable {
     }
 }
 
+/// A per-op push error. The server emits this as an OBJECT `{code, message}`
+/// (current) — older builds used a bare string. Decode BOTH: with a plain
+/// `String?`, the object form throws while decoding the whole `PushResponse`,
+/// which the engine then misreads as a TRANSIENT failure → rejected mutations
+/// retry forever and optimistic rollback never runs (the TS client handles
+/// both shapes; this MUST match).
+public struct PushOpError: Sendable, Codable {
+    public var code: String?
+    public var message: String
+
+    public init(code: String? = nil, message: String) {
+        self.code = code
+        self.message = message
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let s = try? decoder.singleValueContainer().decode(String.self) {
+            self.code = nil
+            self.message = s
+            return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.code = try c.decodeIfPresent(String.self, forKey: .code)
+        self.message = (try? c.decode(String.self, forKey: .message)) ?? "rejected"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(code, forKey: .code)
+        try c.encode(message, forKey: .message)
+    }
+
+    enum CodingKeys: String, CodingKey { case code, message }
+}
+
 /// Per-op result in a push response (servers ≥ 0.3.188). The engine maps
 /// these by `op_id` so a partial batch failure (op 1 applied, op 2 rejected,
 /// op 3 applied) lands on the right mutations — positional mapping
@@ -108,7 +143,7 @@ public struct PushOpResult: Sendable, Codable {
     /// "error" (failure).
     public var status: String?
     public var seq: Int64?
-    public var error: String?
+    public var error: PushOpError?
 }
 
 public struct PushResponse: Sendable, Codable {

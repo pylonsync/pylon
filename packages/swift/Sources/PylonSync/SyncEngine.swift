@@ -219,7 +219,9 @@ public actor SyncEngine {
     public func pull() async {
         let tokenNow = await client.currentToken()
         if lastSeenTokenObserved && lastSeenToken != tokenNow {
-            await resetReplica()
+            // Identity flip → wipe the previous identity's rows AND queued
+            // writes (don't push user A's offline mutations under B's token).
+            await resetReplica(wipeMutations: true)
             Task { await self.refreshResolvedSession() }
         }
         lastSeenToken = tokenNow
@@ -437,7 +439,7 @@ public actor SyncEngine {
                     case "applied", "replayed", "deduped":
                         await mutations.markApplied(m.id)
                     case "error":
-                        await failPushedMutation(m, error: r.error ?? "rejected")
+                        await failPushedMutation(m, error: r.error?.message ?? "rejected")
                     default:
                         break // "pending" → leave queued, retry next push
                     }
@@ -727,7 +729,8 @@ public actor SyncEngine {
             let next = try await client.me()
             let tenantNow = next.tenantId
             if lastSeenTenantObserved && lastSeenTenant != tenantNow {
-                await resetReplica()
+                // Tenant flip is an identity change → wipe rows + queued writes.
+                await resetReplica(wipeMutations: true)
             }
             lastSeenTenant = tenantNow
             lastSeenTenantObserved = true
@@ -744,11 +747,22 @@ public actor SyncEngine {
         await refreshResolvedSession()
     }
 
-    public func resetReplica() async {
+    /// Drop the local replica and reset the cursor to 0 so the next pull
+    /// resnapshots. Wipes BOTH memory and the on-disk rows (else a phantom
+    /// replica rehydrates on next launch). `wipeMutations` is true on an
+    /// IDENTITY flip (token/tenant) — the outgoing identity's un-pushed writes
+    /// must not be replayed under the new token; false on a same-identity 410
+    /// resnapshot, where pending offline writes are still valid and must
+    /// survive. Mirrors the TS `resetReplicaInner({ wipeMutations })`.
+    public func resetReplica(wipeMutations: Bool = false) async {
         cursor = SyncCursor()
         store.clearAll()
         if let persistence {
+            try? await persistence.clearRows()
             try? await persistence.saveCursor(cursor)
+        }
+        if wipeMutations {
+            await mutations.wipeAll()
         }
     }
 
@@ -916,4 +930,10 @@ public protocol SyncPersistence: MutationQueuePersistence {
     func loadCursor() async throws -> SyncCursor?
     func saveCursor(_ cursor: SyncCursor) async throws
     func persist(_ change: ChangeEvent) async throws
+    /// Delete every persisted entity row. Used by `resetReplica` so an identity
+    /// flip / 410 resnapshot doesn't leave the previous identity's (or stale)
+    /// rows on disk to be rehydrated on next launch — the on-disk half of the
+    /// "cross-identity read leak". Does NOT touch the cursor or the mutation
+    /// queue (the engine resets those explicitly).
+    func clearRows() async throws
 }
