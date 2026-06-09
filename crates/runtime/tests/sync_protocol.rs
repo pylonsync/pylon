@@ -490,3 +490,84 @@ fn deny_all_entity_excluded_from_snapshot() {
         "admin snapshot must converge too: {admin_resp}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Security: /api/sync/push must NOT let a non-admin write framework-internal
+// `_`-prefixed entities. The policy gate allows them (no app policy ⇒ allowed
+// for underscore entities), trusting the route edge to gate — the entity REST
+// surface does, and the push surface must too. Pre-fix a guest could insert/
+// update/delete `_Connection`, `_PylonJobs`, etc. through push. The gate is
+// per-op: a rejected `_`-op must not block legit ops in the same batch.
+// ---------------------------------------------------------------------------
+#[test]
+fn push_rejects_underscore_entities_for_non_admin() {
+    // A REGISTERED `_`-entity (framework-internal, no app policy) — stands in
+    // for `_Connection`/`_PylonJobs` etc. on a real deployment. Registered, so
+    // the mutation pipeline does NOT reject it as "unknown entity"; the policy
+    // gate ALLOWS it (underscore bypass). The route-edge gate is the only thing
+    // standing between a guest and writing framework state.
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "_Internal".into(),
+        fields: vec![ManifestField {
+            name: "val".into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port); // non-admin
+
+    // Without the gate this insert APPLIES (registered entity + policy bypass)
+    // — the actual privilege hole. The legit Note insert in the same batch
+    // proves the gate is per-op, not a whole-request rejection.
+    let body = r#"{"changes":[
+        {"op_id":"op-evil","entity":"_Internal","row_id":"i1","kind":"insert","data":{"val":"x"}},
+        {"op_id":"op-ok","entity":"Note","row_id":"n1","kind":"insert","data":{"title":"hi","body":""}}
+    ]}"#;
+    let (status, resp_body) = http(port, "POST", "/api/sync/push", Some(&token), Some(body));
+    assert_eq!(status, 200, "push request itself returns 200: {resp_body}");
+    let resp: Value = serde_json::from_str(&resp_body).unwrap();
+    let results = resp["results"].as_array().expect("per-op results");
+    let evil = results
+        .iter()
+        .find(|r| r["op_id"] == "op-evil")
+        .expect("evil op result");
+    assert_eq!(
+        evil["status"], "error",
+        "underscore-entity write by a non-admin must be rejected: {resp_body}"
+    );
+    assert_eq!(
+        evil["error"]["code"], "NOT_FOUND",
+        "rejection must not confirm the table exists: {resp_body}"
+    );
+    // Per-op gate: the legit Note insert in the SAME batch still applies.
+    let ok = results
+        .iter()
+        .find(|r| r["op_id"] == "op-ok")
+        .expect("ok op result");
+    assert_eq!(
+        ok["status"], "applied",
+        "legit op must still apply: {resp_body}"
+    );
+
+    // And it really didn't write: no `_Internal` change leaked into the log.
+    let (_, pull_resp) = pull(port, &token, 0);
+    let changes = pull_resp["changes"].as_array().unwrap();
+    assert!(
+        changes.iter().all(|c| c["entity"] != "_Internal"),
+        "rejected underscore write must not have hit the store: {pull_resp}"
+    );
+}

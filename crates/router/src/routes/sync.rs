@@ -474,6 +474,32 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
     let mut op_results: Vec<serde_json::Value> = Vec::with_capacity(push_req.changes.len());
 
     for change in &push_req.changes {
+        // SECURITY: gate framework-internal `_`-prefixed entities
+        // (_Connection, _PylonJobs, _PylonWorkflows, _PylonSchemaVersion, …)
+        // to admins. Apps register no policy for them, so the policy gate's
+        // "no policy ⇒ Allowed for underscore entities" bypass (it trusts the
+        // route edge to gate) would otherwise let ANY caller insert/update/
+        // delete framework state through /api/sync/push. The entity REST
+        // surface already gates this (entities.rs); the push surface must too.
+        // 404 (not 403) so we don't confirm the table exists. Done BEFORE the
+        // op-id claim so a rejected op leaves no in-flight claim behind.
+        if change.entity.starts_with('_') && !ctx.auth_ctx.is_admin {
+            errors.push(format!(
+                "{} {}/{}: Entity not found",
+                change_kind_label(&change.kind),
+                change.entity,
+                change.row_id
+            ));
+            op_results.push(serde_json::json!({
+                "op_id": change.op_id,
+                "entity": change.entity,
+                "row_id": change.row_id,
+                "kind": change_kind_label(&change.kind),
+                "status": "error",
+                "error": { "code": "NOT_FOUND", "message": "Entity not found" },
+            }));
+            continue;
+        }
         // Tristate op-id state machine:
         //   Proceed       → run the write; on failure forget
         //   InFlight      → concurrent writer mid-flight; respond
