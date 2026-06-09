@@ -22,6 +22,15 @@ export const metadata: Metadata = {
     "A list of notes read from the database during the server render — no client fetch, no loading flash.",
 };
 
+// Progressive streaming opt-in (#278). With this, the page shell — heading,
+// blurb, the <Form> — flushes to the browser IMMEDIATELY, and the inner
+// <Suspense> around <NotesList> streams in its "Loading notes…" fallback,
+// then swaps in the real rows when serverData resolves. Without it, the whole
+// page (including the notes) is buffered and arrives in one shot. Streaming
+// pages are never CDN/disk-cached (the head commits before the data resolves),
+// so don't combine it with `export const revalidate`.
+export const streaming = true;
+
 // The `Note` entity from app.ts. Type your rows however you like; the
 // shape is whatever your entity declares.
 interface Note {

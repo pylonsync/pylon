@@ -207,6 +207,40 @@ export type GenerateMetadata<
 ) => Metadata | Promise<Metadata>;
 
 /**
+ * Per-route configuration, declared as top-level `export const` in a
+ * `page.tsx` (Next-shaped). All optional. The runtime reads these statically
+ * before the render.
+ *
+ * ```ts
+ * export const revalidate = 60;          // CDN + origin-disk cache for 60s
+ * export const dynamic = "force-dynamic"; // never cache
+ * export const streaming = true;          // progressive Suspense streaming
+ * ```
+ *
+ * - `revalidate` — seconds an auth-independent render stays cacheable
+ *   (`public, s-maxage=N`); also kept in the origin disk cache. See the
+ *   "Anonymous output caching" rules — it only takes effect if the render
+ *   never reads `auth`, sets no cookie, and isn't running strict policies.
+ * - `dynamic` — `"force-static"` caches until the next deploy; `"force-dynamic"`
+ *   opts out of all caching.
+ * - `streaming` — opt into PROGRESSIVE streaming: the shell + each inner
+ *   `<Suspense>` fallback flush immediately, then each boundary's real content
+ *   streams in as its data resolves (instead of buffering the whole document).
+ *   A page with a `loading.tsx` already streams at the route level; this
+ *   extends it to a page's OWN inner boundaries. Mutually exclusive with
+ *   caching: a streaming render commits its HTTP head before suspended
+ *   subtrees finish, so it can never be marked cacheable (and a deep
+ *   `<Suspense>` throw resolves via its `error.tsx` at HTTP 200, not a 5xx).
+ *   Set `response.*` (status/cookies) only in the synchronous shell — late
+ *   calls from a suspended subtree are dropped (the runtime warns).
+ */
+export interface RouteSegmentConfig {
+  revalidate?: number;
+  dynamic?: "force-static" | "force-dynamic";
+  streaming?: boolean;
+}
+
+/**
  * Props an `app/.../error.tsx` boundary receives. Error boundaries are now
  * HYDRATED (interactive — useState/onClick/effects work), so `reset` is a
  * real callback that re-attempts rendering the segment (a transient error

@@ -20,6 +20,7 @@ export type {
   SsrCookieOptions,
   Metadata,
   GenerateMetadata,
+  RouteSegmentConfig,
   ErrorBoundaryProps,
   NotFoundProps,
   FormFields,

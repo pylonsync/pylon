@@ -1134,6 +1134,78 @@ function makeServerData(reader: any, valueCache: Record<string, any>): any {
   return sd;
 }
 
+/**
+ * #278: does this route STREAM (vs buffer the whole document)? Streaming is
+ * opt-in: a `loading.tsx` (route-level Suspense) or `export const streaming =
+ * true` (inner-boundary). Pure for testing.
+ */
+export function computeWantsStream(hasLoading: boolean, mod: any): boolean {
+  return hasLoading || mod?.streaming === true;
+}
+
+/**
+ * #277: how long an opt-in page stays cacheable, in seconds — or null if it
+ * never opted in. `export const revalidate = N` (N>0) → N; `dynamic:
+ * "force-static"` → a year (only a deploy invalidates); else null. Pure.
+ */
+export function computeRevalidateSecs(mod: any): number | null {
+  if (typeof mod?.revalidate === "number" && mod.revalidate > 0) {
+    return Math.floor(mod.revalidate);
+  }
+  if (mod?.dynamic === "force-static") return 31536000;
+  return null;
+}
+
+/**
+ * #277 cache verdict — the security-critical predicate, extracted pure so the
+ * leak class (a personalized/streaming render marked cacheable) is a TEST, not
+ * a mental walkthrough. INVARIANT: result ⟹ !wantsStream (a streaming render
+ * commits its head before auth/cookies/status are final, so it can never be
+ * cached). Fail-closed: every condition must hold.
+ */
+export function computeCacheVerdict(args: {
+  revalidateSecs: number | null;
+  forceDynamic: boolean;
+  authTouched: boolean;
+  cookieCount: number;
+  strictPolicies: boolean;
+  wantsStream: boolean;
+  status: number;
+}): boolean {
+  return (
+    args.revalidateSecs != null &&
+    !args.forceDynamic &&
+    !args.authTouched &&
+    args.cookieCount === 0 &&
+    !args.strictPolicies &&
+    !args.wantsStream &&
+    args.status === 200
+  );
+}
+
+/**
+ * #278: diff the response head committed at `response_start` against the final
+ * state after EOF, to catch a late response.* mutation from a suspended subtree
+ * that the already-sent head couldn't carry. Returns the dropped pieces, or
+ * null if nothing was lost. Pure.
+ */
+export function diffCommittedResponse(
+  snapshot: { status: number; cookies: string[]; headerKeys: string[] },
+  final: { status: number; cookies: string[]; headers: Record<string, string> },
+): { droppedCookies: string[]; statusChanged: boolean; newHeaderKeys: string[] } | null {
+  const droppedCookies = final.cookies.filter(
+    (c) => !snapshot.cookies.includes(c),
+  );
+  const statusChanged = final.status !== snapshot.status;
+  const newHeaderKeys = Object.keys(final.headers)
+    .sort()
+    .filter((k) => !snapshot.headerKeys.includes(k));
+  if (droppedCookies.length || statusChanged || newHeaderKeys.length) {
+    return { droppedCookies, statusChanged, newHeaderKeys };
+  }
+  return null;
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
@@ -1307,6 +1379,16 @@ export async function handleRenderRoute(
       );
     }
 
+    // Streaming decision (#278). Computed from STATIC module exports only —
+    // knowable before any await, so the buffer/cache decision never reads
+    // non-final render state. A page STREAMS (shell + each inner <Suspense>
+    // fallback flush immediately, content reveals as data resolves) when it has
+    // a loading.tsx (route-level boundary, #278 Stage 1) OR explicitly opts in
+    // with `export const streaming = true` (inner-boundary streaming, Stage 2).
+    // Every un-annotated page keeps the byte-identical BUFFERED path (allReady)
+    // that 100% of today's prod traffic rides — this is opt-in, never default.
+    const wantsStream = computeWantsStream(!!Loading, mod);
+
     // Resolve the layout chain. Each layout module exports a default
     // function that accepts the same props + `children`. Walk leaf →
     // root: start with the page component as `tree`, then for each
@@ -1324,9 +1406,26 @@ export async function handleRenderRoute(
       {
         onError(err: unknown) {
           // React captures render errors during the streaming render
-          // and feeds them here. Phase 1 logs to stderr; Phase 1.5
-          // sends a structured signal so the host can truncate the
-          // body + emit a debug overlay.
+          // and feeds them here. We log to stderr; we do NOT truncate or
+          // rewrite the response here — on a streamed render the HTTP head is
+          // already committed, so a mid-stream error just closes the body
+          // (partial HTML); the dev overlay (#275) only covers failures BEFORE
+          // response_start (host-side err channel). Buffered renders surface
+          // their error through the catch/boundary path below.
+          if (err instanceof PylonRouteControl) {
+            // A redirect()/notFound() thrown from BELOW a <Suspense> boundary:
+            // the shell already committed the head, so React swallowed it and
+            // it can't change the response. This is a known limitation on BOTH
+            // the buffered and streamed paths (response.* must fire in the
+            // synchronous shell). Surface it loudly instead of silently losing.
+            // eslint-disable-next-line no-console
+            console.error(
+              `[ssr] response.${err.kind}() called below a <Suspense> boundary was ignored — ` +
+                `the HTTP head was already sent. Call response.redirect()/notFound() in the ` +
+                `synchronous shell render, before any await/<Suspense>.`,
+            );
+            return;
+          }
           // eslint-disable-next-line no-console
           console.error("[ssr] renderToReadableStream onError:", err);
         },
@@ -1343,15 +1442,17 @@ export async function handleRenderRoute(
     // fallback). Pages with no async data have no boundaries, so `allReady`
     // resolves immediately — zero cost for the common case.
     //
-    // EXCEPTION (#278): when a loading.tsx wraps the page in a Suspense
-    // boundary, we DELIBERATELY skip the buffer and stream — the shell +
-    // skeleton flush first, then React reveals the real content + its reveal
-    // script as the page's `use()` resolves. Hydration stays clean because
-    // there's exactly ONE route-level boundary and the tail `__PYLON_DATA__`
-    // (emitted below, after the stream drains to EOF) still carries a fully
-    // resolved `ssrData` map — so the client's `use()` reads a fulfilled
-    // value and never re-suspends.
-    if (!Loading && (stream as any).allReady) {
+    // EXCEPTION (#278): a STREAMING render (loading.tsx route-level boundary,
+    // or `export const streaming = true` for inner boundaries) DELIBERATELY
+    // skips the buffer — the shell + each <Suspense> fallback flush first, then
+    // React reveals each boundary's real content + its reveal script as that
+    // boundary's `use()` resolves. Hydration stays clean for ANY number of
+    // boundaries because Pylon runs hydrateRoot ONCE, post-EOF: the entry
+    // <script> is appended AFTER the full `__PYLON_DATA__` blob (which carries
+    // the fully-resolved `ssrData` map) and after all of React's $RC reveals,
+    // so the client's `use()` reads a fulfilled value and never re-suspends —
+    // there is no progressive hydration racing the stream.
+    if (!wantsStream && (stream as any).allReady) {
       await (stream as any).allReady;
     }
 
@@ -1372,25 +1473,41 @@ export async function handleRenderRoute(
     // public Cache-Control and STRIPS; its ABSENCE is the fail-closed default
     // (the host keeps no-cache / no-store). The 200-only guard avoids caching
     // an error/redirect.
-    const revalidateSecs =
-      typeof (mod as any).revalidate === "number" && (mod as any).revalidate > 0
-        ? Math.floor((mod as any).revalidate)
-        : (mod as any).dynamic === "force-static"
-          ? 31536000 // a year — only a deploy invalidates a force-static page
-          : null;
+    const revalidateSecs = computeRevalidateSecs(mod);
     const forceDynamic = (mod as any).dynamic === "force-dynamic";
     const strictPolicies = process.env.PYLON_STRICT_FN_POLICIES === "1";
-    const cacheable =
-      revalidateSecs != null &&
-      !forceDynamic &&
-      !authTouched &&
-      responseState.cookies.length === 0 &&
-      !strictPolicies &&
-      !Loading &&
-      responseState.status === 200;
+    // INVARIANT: cacheable ⟹ !wantsStream. A streaming render commits its head
+    // (response_start) BEFORE suspended subtrees finish, so `authTouched`,
+    // `responseState.cookies`, and `.status` are NOT final here — caching it
+    // could share a personalized/non-final body. So `!wantsStream` (NOT just
+    // `!Loading`) is the gate: a `streaming = true` page has `Loading` null but
+    // `wantsStream` true, and must still be excluded. Fail-closed. (See
+    // computeCacheVerdict — pure + unit-tested for the leak class.)
+    const cacheable = computeCacheVerdict({
+      revalidateSecs,
+      forceDynamic,
+      authTouched,
+      cookieCount: responseState.cookies.length,
+      strictPolicies,
+      wantsStream,
+      status: responseState.status,
+    });
     // Restore the raw auth before any serialization below (the Proxy was only
     // for the render-time auth-touch probe).
     if (props) props.auth = msg.auth;
+    // #278: on a STREAMING render the head commits NOW, before suspended
+    // subtrees run. Snapshot what's committed so we can detect (after EOF) a
+    // late response.setStatus/setCookie/setHeader from a suspended subtree that
+    // got silently dropped — and warn loudly instead of leaving the dev to
+    // debug a missing Set-Cookie. Buffered renders need no snapshot (the whole
+    // render is done before this point, so nothing can change after).
+    const committedSnapshot = wantsStream
+      ? {
+          status: responseState.status,
+          cookies: responseState.cookies.map((c) => String(c)),
+          headerKeys: Object.keys(responseState.headers).sort(),
+        }
+      : null;
     send({
       type: "response_start",
       call_id: msg.call_id,
@@ -1463,6 +1580,47 @@ export async function handleRenderRoute(
       });
     };
     await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+
+    // #278: detect a late response.* mutation from a suspended subtree that the
+    // already-committed head couldn't carry, and warn loudly (a silently
+    // dropped Set-Cookie reads as "logged out" / missing CSRF in prod). Only
+    // for streamed renders — a buffered render finalized before response_start,
+    // so nothing changes after. The fix for the dev is to move the call into
+    // the synchronous shell (or drop `streaming = true`); we name what was lost.
+    if (committedSnapshot) {
+      // Same diff the unit tests exercise — call the pure helper so the tested
+      // path IS the prod path (no drift).
+      const dropped = diffCommittedResponse(committedSnapshot, {
+        status: responseState.status,
+        cookies: responseState.cookies,
+        headers: responseState.headers,
+      });
+      if (dropped) {
+        const parts: string[] = [];
+        if (dropped.droppedCookies.length)
+          parts.push(
+            `Set-Cookie [${dropped.droppedCookies
+              .map((c) => {
+                const eq = c.indexOf("="); // serialized "name=value; …"
+                return eq >= 0 ? c.slice(0, eq) : c;
+              })
+              .join(", ")}]`,
+          );
+        if (dropped.statusChanged)
+          parts.push(
+            `status ${committedSnapshot.status}→${responseState.status}`,
+          );
+        if (dropped.newHeaderKeys.length)
+          parts.push(`headers [${dropped.newHeaderKeys.join(", ")}]`);
+        // eslint-disable-next-line no-console
+        console.error(
+          `[ssr] response.* called below a <Suspense> boundary on a streaming ` +
+            `route was DROPPED (the HTTP head already shipped): ${parts.join("; ")}. ` +
+            `Set response status/cookies/headers in the synchronous shell render, ` +
+            `before any await/<Suspense> — or remove \`export const streaming = true\`.`,
+        );
+      }
+    }
 
     // Hydration tail. After React's stream EOFs we append the
     // hydration markers so the browser can hydrate:

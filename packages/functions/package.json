@@ -21,7 +21,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "bun test"
   },
   "keywords": [
     "pylon",
@@ -31,7 +32,12 @@
   ],
   "license": "MIT OR Apache-2.0",
   "devDependencies": {
-    "typescript": "^5.5"
+    "typescript": "^5.5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "happy-dom": "^15.0.0"
   },
   "peerDependencies": {
     "bun-types": "*"
