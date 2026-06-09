@@ -22,7 +22,45 @@ import {
   computeRevalidateSecs,
   computeWantsStream,
   diffCommittedResponse,
+  isDevMode,
 } from "./ssr-runtime";
+
+// ---------------------------------------------------------------------------
+// isDevMode — must match the Rust host's is_dev_mode() exactly
+// ---------------------------------------------------------------------------
+
+describe("isDevMode (PYLON_DEV_MODE parity with Rust host)", () => {
+  const orig = process.env.PYLON_DEV_MODE;
+  const set = (v: string | undefined) => {
+    if (v === undefined) delete process.env.PYLON_DEV_MODE;
+    else process.env.PYLON_DEV_MODE = v;
+  };
+
+  test("ONLY '1' / 'true' (case-insensitive) are dev; 'false'/'0'/unset are NOT", () => {
+    try {
+      set("1");
+      expect(isDevMode()).toBe(true);
+      set("true");
+      expect(isDevMode()).toBe(true);
+      set("TRUE");
+      expect(isDevMode()).toBe(true);
+      // The bug this guards: a prod machine explicitly set PYLON_DEV_MODE=false,
+      // and `if (process.env.PYLON_DEV_MODE)` treated the truthy STRING "false"
+      // as dev → injected the live-reload script → EventSource 404-looped on
+      // /_pylon/dev/live in prod.
+      set("false");
+      expect(isDevMode()).toBe(false);
+      set("0");
+      expect(isDevMode()).toBe(false);
+      set("");
+      expect(isDevMode()).toBe(false);
+      set(undefined);
+      expect(isDevMode()).toBe(false);
+    } finally {
+      set(orig);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Pure verdict logic

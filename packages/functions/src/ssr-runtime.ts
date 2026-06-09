@@ -8,6 +8,20 @@
 // react-dom dependency requirement, no startup cost.
 
 /**
+ * Is the runtime in dev mode? MUST match the Rust host's `is_dev_mode()`
+ * (crates/runtime/src/frontend.rs): `PYLON_DEV_MODE` is on ONLY for the exact
+ * strings "1" or "true" (case-insensitive). A bare `if (process.env.PYLON_DEV_MODE)`
+ * is WRONG — the string "false"/"0" is truthy in JS, so an explicit
+ * `PYLON_DEV_MODE=false` on a PROD machine would wrongly enable dev behavior
+ * (e.g. the live-reload `<script>` was being injected into prod pages, whose
+ * EventSource then 404-retried `/_pylon/dev/live` forever).
+ */
+export function isDevMode(): boolean {
+  const v = process.env.PYLON_DEV_MODE;
+  return v === "1" || v?.toLowerCase() === "true";
+}
+
+/**
  * The message payload the host sends. Matches RenderRouteMessage in
  * crates/functions/src/protocol.rs.
  */
@@ -856,7 +870,7 @@ export function buildHydrationTail(args: {
   } else {
     tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${args.manifestErr}`)})</script>`;
   }
-  if (process.env.PYLON_DEV_MODE) tail += DEV_LIVE_RELOAD_SNIPPET;
+  if (isDevMode()) tail += DEV_LIVE_RELOAD_SNIPPET;
   return tail;
 }
 
@@ -1741,8 +1755,7 @@ export async function handleRenderRoute(
     // In dev, send the full stack as the message so the host can paint a
     // useful error overlay instead of an opaque 500. In prod, send only the
     // message (the host shows a generic page; the stack stays in logs).
-    const devMode =
-      process.env.PYLON_DEV_MODE === "1" || process.env.PYLON_DEV_MODE === "true";
+    const devMode = isDevMode();
     send({
       type: "error",
       call_id: msg.call_id,
