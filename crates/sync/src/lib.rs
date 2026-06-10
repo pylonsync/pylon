@@ -708,6 +708,49 @@ impl ChangeLog {
                         drop(events);
                         match store.pull_range(cursor.last_seq, limit) {
                             Some(changes) if !changes.is_empty() => {
+                                // Contiguity fence: the persisted log must hand
+                                // back an UNBROKEN run starting at `cursor+1`. A
+                                // hole — leading (first seq > cursor+1) or
+                                // internal (a skipped seq mid-run) — means an
+                                // event is permanently absent from disk: the
+                                // bg persister dropped it under a full channel
+                                // (change_log_persister try_send Full), or the
+                                // pruner deleted past retention. Either way the
+                                // client CANNOT advance its cursor across the
+                                // hole — doing so silently skips the missing
+                                // seq forever, with no later 410 to recover
+                                // (the divergence the old code shipped: it set
+                                // last_seq to the max returned and called it a
+                                // gapless delta).
+                                //
+                                // This path only runs when the cursor is BEHIND
+                                // the in-memory ring front, i.e. an OLD range
+                                // whose events are long since durably written —
+                                // so a hole here is a real loss, never a
+                                // not-yet-flushed in-flight write (those live in
+                                // the ring and never reach this branch). Fail
+                                // closed to a resync; the client rehydrates from
+                                // entity-list state. Same recovery as the
+                                // confirmed-empty (pruned) branch below.
+                                let expected_first = cursor.last_seq + 1;
+                                let contiguous = changes.first().map(|e| e.seq)
+                                    == Some(expected_first)
+                                    && changes.windows(2).all(|w| w[1].seq == w[0].seq + 1);
+                                if !contiguous {
+                                    let gap_at = changes
+                                        .windows(2)
+                                        .find(|w| w[1].seq != w[0].seq + 1)
+                                        .map(|w| w[0].seq + 1)
+                                        .unwrap_or(expected_first);
+                                    eprintln!(
+                                        "[change_log] persisted delta from cursor={} has a seq gap near {} (event dropped or pruned); forcing client resync rather than skipping the hole",
+                                        cursor.last_seq, gap_at
+                                    );
+                                    return Err(PullError::ResyncRequired {
+                                        oldest_seq: front_seq,
+                                        cursor: cursor.clone(),
+                                    });
+                                }
                                 let last_seq =
                                     changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
                                 let has_more = changes.len() >= limit;
@@ -1447,5 +1490,96 @@ mod tests {
             !resp.has_more,
             "has_more=false so the client doesn't spin a tight retry loop"
         );
+    }
+
+    /// A store with a HOLE: it persists every appended event EXCEPT the
+    /// one whose seq matches `drop_seq` — modelling the bg persister
+    /// dropping an event when its channel was full under load. `pull_range`
+    /// then returns a non-contiguous run (e.g. [2, 4, 5] with 3 missing).
+    #[derive(Debug)]
+    struct GappedStore {
+        events: Mutex<Vec<ChangeEvent>>,
+        drop_seq: u64,
+    }
+    impl ChangeLogStore for GappedStore {
+        fn append(&self, event: &ChangeEvent) {
+            if event.seq == self.drop_seq {
+                return; // dropped: channel was full
+            }
+            self.events.lock().unwrap().push(event.clone());
+        }
+        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+            let v = self.events.lock().unwrap();
+            let start = v.len().saturating_sub(limit);
+            v[start..].to_vec()
+        }
+        fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
+            Some(
+                self.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.seq > since)
+                    .take(limit)
+                    .cloned()
+                    .collect(),
+            )
+        }
+    }
+
+    /// When the cursor is behind the ring front AND the persisted log has
+    /// a HOLE (an event the bg persister dropped under a full channel),
+    /// pull MUST force a resync — NOT ship the surviving events as a
+    /// gapless delta. The old code set `last_seq` to the max seq returned,
+    /// so the client advanced its cursor across the missing seq and
+    /// skipped that change forever with no 410 to recover. Regression for
+    /// the on-disk change-log gap (Rust P1).
+    #[test]
+    fn pull_with_evicted_cursor_and_gapped_store_requires_resync() {
+        let store = std::sync::Arc::new(GappedStore {
+            events: Mutex::new(Vec::new()),
+            drop_seq: 3, // the persister "dropped" seq 3
+        });
+        let log = ChangeLog::with_capacity(2).with_store(store.clone());
+        for i in 1..=5 {
+            log.append("A", &format!("a{}", i), ChangeKind::Insert, None);
+        }
+        // Ring holds [4, 5]; the store holds [1, 2, 4, 5] (3 was dropped).
+        // A cursor of 1 is behind the ring front (4), so pull falls back
+        // to the store, which returns [2, 4, 5] — an internal gap at 3.
+        let err = log
+            .pull(&SyncCursor { last_seq: 1 }, 10)
+            .expect_err("a seq gap in the persisted delta must force resync, not a silent skip");
+        match err {
+            PullError::ResyncRequired { cursor, .. } => {
+                assert_eq!(cursor.last_seq, 1, "echoes the caller's cursor");
+            }
+        }
+    }
+
+    /// Companion to the gap test: a store whose persisted log is INTACT
+    /// (no drop) must still serve the disk-fallback delta normally — the
+    /// contiguity fence must NOT false-positive into a spurious resync,
+    /// which would be the 280GB-egress failure mode. Belt to the gap
+    /// test's braces.
+    #[test]
+    fn pull_with_evicted_cursor_and_intact_store_serves_delta() {
+        let store = std::sync::Arc::new(GappedStore {
+            events: Mutex::new(Vec::new()),
+            drop_seq: 0, // never drops (no event has seq 0)
+        });
+        let log = ChangeLog::with_capacity(2).with_store(store.clone());
+        for i in 1..=5 {
+            log.append("A", &format!("a{}", i), ChangeKind::Insert, None);
+        }
+        // Ring holds [4, 5]; the store holds [1..=5] contiguously. Cursor=1
+        // → disk fallback returns [2, 3, 4, 5], a clean contiguous run.
+        let resp = log
+            .pull(&SyncCursor { last_seq: 1 }, 10)
+            .expect("an intact persisted log must serve the delta, not resync");
+        assert_eq!(resp.changes.len(), 4);
+        assert_eq!(resp.changes.first().map(|e| e.seq), Some(2));
+        assert_eq!(resp.changes.last().map(|e| e.seq), Some(5));
+        assert_eq!(resp.cursor.last_seq, 5);
     }
 }

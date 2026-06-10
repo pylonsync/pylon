@@ -39,6 +39,36 @@ struct SseClient {
 /// reconnect — SSE is a notify-sooner, not a durable-delivery transport.
 const BROADCAST_QUEUE_DEPTH: usize = 1024;
 
+/// Default per-client socket write deadline. Bounds how long the shard
+/// worker can block on ONE slow consumer's `write_all`/`flush` while
+/// holding the shard lock — past this, the write errors, the client is
+/// dropped, and the rest of the shard keeps flowing. 5s is generous for
+/// a healthy client (a TLS-terminated CDN edge draining a 1KB frame) but
+/// short enough that a wedged socket doesn't stall the shard for long.
+const DEFAULT_SSE_WRITE_TIMEOUT_MS: u64 = 5_000;
+
+/// Parse the per-client write deadline from the raw env value. `None`
+/// (unset / unparseable) → the 5s default. `"0"` → no deadline (blocking
+/// writes — opt-out, not recommended). Any positive integer → that many
+/// milliseconds. Pure + side-effect-free so the parsing is unit-testable
+/// without touching the process environment.
+fn parse_sse_write_timeout(raw: Option<&str>) -> Option<Duration> {
+    match raw.map(str::trim) {
+        Some("0") => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(ms) if ms > 0 => Some(Duration::from_millis(ms)),
+            _ => Some(Duration::from_millis(DEFAULT_SSE_WRITE_TIMEOUT_MS)),
+        },
+        None => Some(Duration::from_millis(DEFAULT_SSE_WRITE_TIMEOUT_MS)),
+    }
+}
+
+/// The configured per-client write deadline, read from
+/// `PYLON_SSE_WRITE_TIMEOUT_MS` (see [`parse_sse_write_timeout`]).
+fn sse_write_timeout() -> Option<Duration> {
+    parse_sse_write_timeout(std::env::var("PYLON_SSE_WRITE_TIMEOUT_MS").ok().as_deref())
+}
+
 /// A single shard holding a subset of SSE clients, protected by its own lock.
 /// Sharding reduces contention: concurrent broadcasts only block within the
 /// same shard, not across the entire client set.
@@ -167,6 +197,18 @@ impl SseShard {
 
     fn count(&self) -> usize {
         self.clients.lock().unwrap().len()
+    }
+
+    /// Test-only: read the write deadline on a registered client's stream
+    /// so the head-of-line guard's wiring (`add_client` →
+    /// `set_write_timeout`) can be asserted end-to-end.
+    #[cfg(test)]
+    fn client_write_timeout(&self, id: u64) -> Option<Duration> {
+        self.clients
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|c| c.stream.write_timeout().ok().flatten())
     }
 }
 
@@ -371,6 +413,18 @@ impl SseHub {
     /// authenticated this connection. The optional `guard` binds the
     /// client's slot in the per-IP connection counter.
     fn add_client(&self, stream: TcpStream, auth: AuthContext, guard: Option<IpConnGuard>) -> u64 {
+        // Bound every per-client socket write so one wedged consumer (full
+        // kernel send buffer, dead-but-unreset connection) can't block the
+        // shard worker — and the shard's `clients` lock — indefinitely.
+        // The broadcast/keepalive paths write `write_all` + `flush`
+        // SYNCHRONOUSLY while holding that lock; without a deadline a single
+        // stuck socket head-of-lines every other subscriber on the shard
+        // and backs the broadcast channel up until events drop for the whole
+        // shard. On timeout the write errors → the client is marked dead +
+        // removed → it recovers via the change-log cursor on reconnect.
+        // `set_write_timeout` failing is non-fatal: the client just keeps
+        // the OS default (blocking), same as before this guard.
+        let _ = stream.set_write_timeout(sse_write_timeout());
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
@@ -626,5 +680,105 @@ mod tests {
         *next_id = 5;
         drop(next_id);
         // Next add_client would get ID 5, distributing to shard 5 % 16 = 5.
+    }
+
+    // P2 head-of-line guard: the per-client write deadline parsing.
+    #[test]
+    fn sse_write_timeout_parse() {
+        // Unset → the 5s default (never blocking-forever by accident).
+        assert_eq!(
+            parse_sse_write_timeout(None),
+            Some(Duration::from_millis(DEFAULT_SSE_WRITE_TIMEOUT_MS))
+        );
+        // Explicit "0" → opt out (blocking writes).
+        assert_eq!(parse_sse_write_timeout(Some("0")), None);
+        // Positive integer → that many ms.
+        assert_eq!(
+            parse_sse_write_timeout(Some("2000")),
+            Some(Duration::from_millis(2000))
+        );
+        // Whitespace tolerated.
+        assert_eq!(
+            parse_sse_write_timeout(Some("  750 ")),
+            Some(Duration::from_millis(750))
+        );
+        // Garbage → safe default, never an unbounded (None) write.
+        assert_eq!(
+            parse_sse_write_timeout(Some("banana")),
+            Some(Duration::from_millis(DEFAULT_SSE_WRITE_TIMEOUT_MS))
+        );
+    }
+
+    // P2 head-of-line guard: the deadline must ACTUALLY bound a write to a
+    // wedged socket. A real connected pair whose receiver never reads will
+    // fill the kernel send buffer; without `set_write_timeout` the writer
+    // blocks forever (the head-of-line stall under the shard lock). With
+    // the deadline applied, the write returns an error within ~deadline
+    // instead of hanging — proving the mechanism the shard relies on
+    // works on this platform, not just that the field is set.
+    #[test]
+    fn write_deadline_bounds_a_wedged_socket() {
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Connect FIRST — the OS completes the handshake into the listen
+        // backlog, so connect() returns without us having called accept()
+        // yet (avoids the accept-before-connect deadlock).
+        let mut client = TcpStream::connect(addr).expect("connect");
+        // Accept but NEVER read — the receive side stays full so the
+        // sender's kernel buffer backs up and stays backed up. Hold the
+        // accepted socket for the test body so it isn't dropped/reset.
+        let (_hold, _) = listener.accept().expect("accept");
+        client
+            .set_write_timeout(parse_sse_write_timeout(Some("300")))
+            .expect("set deadline");
+
+        // Blast until the buffers fill and the write deadline trips. A
+        // healthy bound returns Err(WouldBlock/TimedOut) within a few
+        // hundred ms; an unbounded socket would hang here forever.
+        let started = std::time::Instant::now();
+        let big = vec![0u8; 256 * 1024];
+        let mut errored = false;
+        for _ in 0..512 {
+            if client.write_all(&big).is_err() {
+                errored = true;
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                break; // safety valve — should never hit with the deadline
+            }
+        }
+        assert!(
+            errored,
+            "a bounded write to a never-draining socket must error, not block forever"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the write deadline must trip well before the 5s safety valve"
+        );
+    }
+
+    // P2 head-of-line guard: registering a client through the hub must
+    // leave a write deadline on its stream. This pins the WIRING
+    // (`add_client` → `set_write_timeout`), not just the mechanism —
+    // deleting that line drops the deadline to None and fails here.
+    #[test]
+    fn add_client_sets_a_write_deadline() {
+        use std::net::{TcpListener, TcpStream};
+        let hub = empty_hub();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let _client = TcpStream::connect(addr).expect("connect");
+        let (server_stream, _) = listener.accept().expect("accept");
+
+        let id = hub.add_client(server_stream, AuthContext::anonymous(), None);
+        let shard = &hub.shards[(id as usize) % NUM_SHARDS];
+        assert!(
+            shard.client_write_timeout(id).is_some(),
+            "a registered SSE client must carry a bounded write deadline so a \
+             wedged consumer can't head-of-line the shard"
+        );
     }
 }
