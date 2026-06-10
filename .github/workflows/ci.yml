@@ -134,6 +134,26 @@ jobs:
         run: cargo test --workspace --all-targets -- --test-threads=1
       - run: cargo test --workspace --doc
 
+  # Catastrophic-performance-regression gate. Runs the release-only
+  # `perf_guard` tests (crates/runtime/tests/perf_guard.rs) — they assert each
+  # core data-plane op stays within a generous (~20x+) wall-clock bound, so a
+  # slow shared runner won't flake but an algorithmic blowup (dropped index,
+  # O(n)->O(n^2), lock storm) fails the build with a message naming the op.
+  # Release build is required: the bounds are calibrated to SIZING.md and the
+  # tests cfg(not(debug_assertions)) themselves out of debug.
+  perf-guard:
+    name: perf guard
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install xmlsec1 + libxml2 (pylon-runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      - run: cargo test --release -p pylon-runtime --test perf_guard -- --nocapture
+
   build:
     name: build (${{ matrix.target }})
     needs: changes
