@@ -765,7 +765,19 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
             match crate::seq_allocator::SqliteSeqAllocator::new(Arc::clone(runtime)) {
                 Some(allocator) => {
                     let allocator = std::sync::Arc::new(allocator);
-                    let initial = runtime.current_sqlite_change_seq().unwrap_or(0);
+                    // Seed the change-log snapshot cursor to the allocator's
+                    // FLOOR (the value its first `next()` issues one above),
+                    // NOT the persisted `_pylon_change_seq` value — that was
+                    // already bumped by `+chunk_size` when the allocator
+                    // reserved its first chunk inside `new()`. Using the
+                    // post-reservation value seeds the cursor a full chunk
+                    // (1000) above the seqs we actually issue (1, 2, 3, …), so
+                    // every delta in the first chunk lands below the client's
+                    // cursor and gets dropped as "already seen" — live queries
+                    // silently never update on SQLite (`pylon dev`) until 1000+
+                    // writes. (Postgres reads `initial` before wiring, so it's
+                    // unaffected.)
+                    let initial = allocator.floor_seq();
                     let alloc_for_provider = std::sync::Arc::clone(&allocator);
                     let provider: pylon_sync::SeqProvider =
                         std::sync::Arc::new(move || alloc_for_provider.next());

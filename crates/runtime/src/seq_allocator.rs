@@ -90,6 +90,14 @@ pub struct SqliteSeqAllocator {
     /// Chunk size copied from constructor — used by `next()` to decide
     /// when to request more.
     chunk_size: u64,
+    /// The seq floor for this boot: the value the FIRST `next()` issues
+    /// one above (`floor + 1`). Equals the persisted high-water that
+    /// existed BEFORE this allocator reserved its first chunk. The
+    /// ChangeLog must be seeded with `with_initial_seq(floor)` so its
+    /// snapshot cursor sits at — not above — the first seq we'll issue;
+    /// otherwise every event in the first chunk lands below the cursor
+    /// and clients silently drop the deltas.
+    floor: u64,
 }
 
 enum ExtendRequest {
@@ -173,7 +181,19 @@ impl SqliteSeqAllocator {
             reservation_end,
             persist_sender: tx,
             chunk_size,
+            floor: initial_current,
         })
+    }
+
+    /// The seq floor for this boot — the first `next()` returns
+    /// `floor_seq() + 1`. Callers wire the ChangeLog with
+    /// `with_initial_seq(allocator.floor_seq())` so the snapshot cursor
+    /// matches the seqs this allocator issues. Reading the persisted
+    /// `_pylon_change_seq` value instead would capture the
+    /// POST-reservation high-water (floor + chunk_size), seeding the
+    /// cursor a whole chunk too high and dropping every delta below it.
+    pub fn floor_seq(&self) -> u64 {
+        self.floor
     }
 
     /// Issue the next seq. Hot-path safe: in-memory atomic only;
@@ -356,6 +376,67 @@ mod tests {
         assert!(
             first_after > highest_before,
             "post-restart first seq ({first_after}) must be > pre-restart highest ({highest_before})"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn floor_seq_is_exactly_one_below_the_first_issued_seq() {
+        // The contract callers rely on: seed the ChangeLog snapshot
+        // cursor with `floor_seq()` and the first delta (`next()`) lands
+        // exactly one above it. If this drifts, deltas in the first
+        // chunk fall at/below the cursor and clients drop them.
+        let tmp = std::env::temp_dir().join("pylon-seq-floor.sqlite");
+        let rt = open_runtime(&tmp);
+        let alloc = SqliteSeqAllocator::new_with_chunk(rt.clone(), 100).unwrap();
+        let floor = alloc.floor_seq();
+        assert_eq!(
+            alloc.next(),
+            floor + 1,
+            "first issued seq must be exactly floor_seq() + 1"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn floor_seeded_changelog_delivers_deltas_above_the_snapshot_cursor() {
+        // Regression for the SQLite "live queries never update" bug: the
+        // change-log snapshot cursor (what a client adopts on its first
+        // pull) was seeded from the POST-reservation `_pylon_change_seq`
+        // value (floor + chunk_size), while the allocator issues seqs
+        // from floor + 1. Every delta in the first chunk landed BELOW the
+        // cursor, so clients dropped it as "already seen" and live
+        // queries silently never updated on `pylon dev` (SQLite). Wire
+        // the ChangeLog the way `serve()` does — `with_initial_seq(
+        // floor_seq())` — and assert the first appended delta sits ABOVE
+        // the cursor a fresh client would adopt.
+        use pylon_sync::{ChangeKind, ChangeLog, SeqProvider};
+
+        let tmp = std::env::temp_dir().join("pylon-seq-floor-wiring.sqlite");
+        let rt = open_runtime(&tmp);
+        let allocator = Arc::new(SqliteSeqAllocator::new_with_chunk(rt.clone(), 100).unwrap());
+
+        let alloc_for_provider = Arc::clone(&allocator);
+        let provider: SeqProvider = Arc::new(move || alloc_for_provider.next());
+        let log = ChangeLog::new()
+            .with_seq(provider)
+            .with_initial_seq(allocator.floor_seq());
+
+        // The cursor a freshly-connecting client adopts from the snapshot.
+        let snapshot_cursor = log.current_seq();
+        let first_seq = log.append(
+            "T",
+            "row-1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({ "x": 1 })),
+        );
+
+        assert!(
+            first_seq > snapshot_cursor,
+            "first delta seq ({first_seq}) must be ABOVE the client's snapshot \
+             cursor ({snapshot_cursor}); seeding the cursor from the \
+             post-reservation _pylon_change_seq value drops every SQLite \
+             live-query delta in the first chunk"
         );
         let _ = std::fs::remove_file(&tmp);
     }
