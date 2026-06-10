@@ -4337,11 +4337,13 @@ pub fn try_spawn_functions(
         }
     };
 
-    // Pool size from PYLON_FN_POOL_SIZE env. Default 1 preserves
-    // pre-pool behaviour so an upgrade doesn't surprise anyone with
-    // 4× memory baseline. "auto" picks cpus/2. See FnRunnerPool
-    // module docs for the design.
-    let pool_size = pylon_functions::pool::FnRunnerPool::size_from_env(1);
+    // Pool size from PYLON_FN_POOL_SIZE env. Unset → default_pool_size()
+    // (CPU/2 clamped to [2,4]) so SSR + functions aren't globally serialized
+    // through one runner out of the box — a slow render no longer head-of-lines
+    // every other request. "auto" / explicit N override. See FnRunnerPool docs.
+    let pool_size = pylon_functions::pool::FnRunnerPool::size_from_env(
+        pylon_functions::pool::FnRunnerPool::default_pool_size(),
+    );
 
     // Spawn the first runner separately so we can capture its function
     // defs for the registry — all runners load the same fn_dir and

@@ -610,7 +610,10 @@ impl FnRunner {
         self.send(&msg)?;
 
         loop {
-            let m = self.recv(deadline)?;
+            // Recycle the runner if this render wedges — a stuck render must
+            // not poison the runner for every subsequent request (the homepage
+            // outage). The host then serves stale-on-error from the ISR cache.
+            let m = self.recv_or_recycle(deadline, "SSR render")?;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -769,7 +772,9 @@ impl FnRunner {
         self.send(&msg)?;
 
         loop {
-            let m = self.recv(deadline)?;
+            // Recycle the runner if the form handler wedges (same rationale as
+            // the SSR render loop) so a stuck POST can't poison the runner.
+            let m = self.recv_or_recycle(deadline, "form handler")?;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -841,7 +846,9 @@ impl FnRunner {
         let msg = crate::protocol::BundleClientMessage::new(call_id.clone());
         self.send(&msg)?;
         loop {
-            let m = self.recv(deadline)?;
+            // Recycle the runner if the client-bundle build wedges so a stuck
+            // build doesn't poison the runner for subsequent calls.
+            let m = self.recv_or_recycle(deadline, "client bundle build")?;
             match m {
                 TsMessage::BundleClientResult(r) if r.call_id == call_id => {
                     if let Some(err) = r.error {
@@ -1005,7 +1012,7 @@ impl FnRunner {
         loop {
             let msg = match self.recv(deadline) {
                 Ok(m) => m,
-                Err(e) if e.code == "FN_TIMEOUT" => {
+                Err(e) if err_requires_recycle(&e.code) => {
                     // The child is now in an unknown state — it owns the call
                     // mid-flight and may be holding open whatever resource it
                     // had. Kill it; the supervisor will respawn. Better to
@@ -1406,6 +1413,43 @@ impl FnRunner {
             }),
         }
     }
+
+    /// Receive the next message, RECYCLING the runner on a hard call timeout.
+    ///
+    /// A deadline-exceeded means the bun child is wedged mid-op (a hung
+    /// `fetch`, an infinite loop) — it owns the call in-flight, may be holding
+    /// open resources, and will not answer the NEXT request either. Killing it
+    /// (the supervisor then respawns a fresh child) is the only way to get the
+    /// runner back; leaving it alive poisons it, because `pick()` keys off
+    /// `is_alive()` (process up) and keeps routing requests straight back into
+    /// the wedge. That is exactly the SSR-render wedge that took the homepage
+    /// down: every render to the stuck runner timed out in turn.
+    ///
+    /// `call_inner` has long done this inline (with extra trace bookkeeping);
+    /// the render / form / bundle loops did NOT, so they're the ones that need
+    /// this. `label` names the operation for the log line.
+    fn recv_or_recycle(&self, deadline: Instant, label: &str) -> Result<TsMessage, FnCallError> {
+        match self.recv(deadline) {
+            Ok(m) => Ok(m),
+            Err(e) if err_requires_recycle(&e.code) => {
+                tracing::warn!(
+                    "[functions] Recycling wedged TS runtime: {label} exceeded its call timeout"
+                );
+                self.kill();
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Whether a recv error means the runner is wedged and must be recycled
+/// (killed → supervisor respawns). A hard call-timeout = the child is stuck
+/// mid-op and won't answer again → recycle. `RUNNER_EXITED` is already dead
+/// (the supervisor's `is_alive()` will catch it) and `RUNNER_NOT_STARTED`
+/// hasn't come up yet — neither needs a kill here.
+fn err_requires_recycle(code: &str) -> bool {
+    code == "FN_TIMEOUT"
 }
 
 /// Kill a child and pass through an error message — used during start()
@@ -1756,6 +1800,24 @@ mod tests {
             message: "fail".into(),
         };
         assert_eq!(format!("{e}"), "[TEST] fail");
+    }
+
+    #[test]
+    fn only_a_hard_timeout_recycles_the_runner() {
+        // A call-deadline timeout = the child is wedged mid-op → recycle (kill,
+        // supervisor respawns). This is what the SSR-render / form / bundle
+        // loops now key off — pre-fix only `call_inner` recycled, so a wedged
+        // RENDER left the runner poisoned and every subsequent render to it
+        // timed out (the homepage outage).
+        assert!(err_requires_recycle("FN_TIMEOUT"));
+        // An already-exited child is caught by the supervisor's is_alive();
+        // a not-yet-started one just isn't up — neither needs a kill here.
+        assert!(!err_requires_recycle("RUNNER_EXITED"));
+        assert!(!err_requires_recycle("RUNNER_NOT_STARTED"));
+        // A normal function error must NEVER recycle the runner — that would
+        // turn an app bug into a runtime restart storm.
+        assert!(!err_requires_recycle("POLICY_DENIED"));
+        assert!(!err_requires_recycle("SOME_USER_ERROR"));
     }
 
     // ---------------------------------------------------------------

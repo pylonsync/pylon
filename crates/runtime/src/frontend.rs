@@ -422,7 +422,7 @@ fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), 
 /// True when this runtime was launched by `pylon dev` (which exports
 /// `PYLON_DEV_MODE=1`). Gates dev-only surfaces — currently the
 /// live-reload SSE endpoint — so they can never exist in production.
-fn is_dev_mode() -> bool {
+pub(crate) fn is_dev_mode() -> bool {
     std::env::var("PYLON_DEV_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -1313,11 +1313,26 @@ fn serve_via_ssr_rpc(
     if !ready_timeout.is_zero() && !fn_ops.wait_for_runner_ready(ready_timeout) {
         tracing::warn!(
             route = %matched.route.path,
-            "SSR runner not ready after {}ms; serving retryable 503",
+            "SSR runner not ready after {}ms",
             ready_timeout.as_millis()
         );
-        let _ = request.respond(ssr_warming_response(cors_origin));
-        return Ok(());
+        // Stale-on-error: a shareable page that has EVER rendered stays up
+        // through a total worker outage — serve the cached copy (even stale)
+        // rather than a 503. Falls back to the warming 503 only when nothing
+        // is cached for this route.
+        return match try_serve_stale_on_error(
+            &matched.route.path,
+            &path_only,
+            cacheable_eligible,
+            cors_origin,
+            request,
+        ) {
+            Ok(()) => Ok(()),
+            Err(req) => {
+                let _ = req.respond(ssr_warming_response(cors_origin));
+                Ok(())
+            }
+        };
     }
 
     // Stream render output via tiny_http chunked transfer encoding.
@@ -1464,16 +1479,28 @@ fn serve_via_ssr_rpc(
         Err(_) => {
             // Render produced no response_start → an early failure (bad
             // import, a throw in the shell render with no error.tsx boundary).
-            // In dev, surface the error + stack in an overlay; in prod, a
-            // generic 500 (the detail stays in logs). err_rx.recv() blocks
-            // until the render thread sends the detail or finishes.
-            let detail = if is_dev_mode() {
-                err_rx.recv().ok()
-            } else {
-                None
+            // In dev, surface the error + stack in an overlay so the developer
+            // sees it immediately. In prod, prefer a stale cached copy
+            // (stale-on-error) over a 500 for cacheable routes; fall back to a
+            // generic 500 (detail stays in logs) only when nothing is cached.
+            if is_dev_mode() {
+                let detail = err_rx.recv().ok();
+                let _ = request.respond(ssr_render_error_response(detail, cors_origin));
+                return Ok(());
+            }
+            return match try_serve_stale_on_error(
+                &matched.route.path,
+                &path_only,
+                cacheable_eligible,
+                cors_origin,
+                request,
+            ) {
+                Ok(()) => Ok(()),
+                Err(req) => {
+                    let _ = req.respond(ssr_render_error_response(None, cors_origin));
+                    Ok(())
+                }
             };
-            let _ = request.respond(ssr_render_error_response(detail, cors_origin));
-            return Ok(());
         }
     };
 
@@ -1605,6 +1632,90 @@ fn serve_cached_ssr(
         entry.headers.into_iter().collect();
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
     for h in build_ssr_response_headers(&page_headers, cors_origin) {
+        resp = resp.with_header(h);
+    }
+    let _ = request.respond(resp);
+    Ok(())
+}
+
+/// Reliability: serve the last good ISR render — even if STALE — when the live
+/// render can't produce a response (the Bun worker pool is down / wedged /
+/// still cold-booting, or the render failed before emitting a head). This
+/// decouples page availability from worker health: a shareable page that has
+/// EVER been rendered stays up through a total worker outage instead of 503/
+/// 500-ing. Only applies to cacheable-eligible requests (GET, no query, no
+/// session cookie) — the only ones that have a stored, provably-anonymous
+/// entry. Returns `Ok(())` if a stale copy was served, or `Err(request)` (the
+/// request untouched) so the caller falls back to its normal error response.
+fn try_serve_stale_on_error(
+    route_path: &str,
+    pathname: &str,
+    cacheable_eligible: bool,
+    cors_origin: &str,
+    request: Request,
+) -> Result<(), Request> {
+    match stale_on_error_candidate(route_path, pathname, cacheable_eligible) {
+        Some(entry) => {
+            tracing::warn!(
+                route = %route_path,
+                pathname = %pathname,
+                fresh = entry.fresh,
+                "SSR render unavailable — serving cached copy (stale-on-error)"
+            );
+            serve_cached_ssr_stale(entry, cors_origin, request)
+        }
+        None => Err(request),
+    }
+}
+
+/// The cached render eligible to answer a render-failure, or `None` to fall
+/// through to the 503/500. KEY PROPERTY: a STALE entry (past its revalidate
+/// window) is still returned — stale-on-error deliberately prefers a slightly
+/// old page over an error. Only cacheable-eligible requests (GET, no query, no
+/// session cookie) have a stored, provably-anonymous entry to serve.
+fn stale_on_error_candidate(
+    route_path: &str,
+    pathname: &str,
+    cacheable_eligible: bool,
+) -> Option<crate::ssr_cache::CacheEntry> {
+    if !cacheable_eligible {
+        return None;
+    }
+    crate::ssr_cache::get(route_path, pathname, &[])
+}
+
+/// Serve a cached entry as a stale-on-error fallback. Like `serve_cached_ssr`
+/// but (1) replaces the stored long-lived `Cache-Control` with a SHORT one — a
+/// stale-error response must not be cached at the edge as if fresh, or a
+/// recovered worker's output wouldn't surface — while still letting CloudFlare
+/// absorb a thundering herd during the outage, and (2) stamps
+/// `X-Pylon-Cache: stale-on-error` for observability.
+fn serve_cached_ssr_stale(
+    entry: crate::ssr_cache::CacheEntry,
+    cors_origin: &str,
+    request: Request,
+) -> Result<(), Request> {
+    let page_headers: std::collections::HashMap<String, String> =
+        entry.headers.into_iter().collect();
+    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    for h in build_ssr_response_headers(&page_headers, cors_origin) {
+        // Drop the stored Cache-Control; we re-apply a short one below.
+        if h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("cache-control")
+        {
+            continue;
+        }
+        resp = resp.with_header(h);
+    }
+    if let Ok(h) = Header::from_bytes(
+        "Cache-Control",
+        "public, max-age=10, stale-while-revalidate=30",
+    ) {
+        resp = resp.with_header(h);
+    }
+    if let Ok(h) = Header::from_bytes("X-Pylon-Cache", "stale-on-error") {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -3062,6 +3173,40 @@ mod tests {
             ssr_cache_verdict(200, &mk(&[("x-pylon-cacheable", "nope")])),
             None
         );
+    }
+
+    #[test]
+    fn stale_on_error_prefers_a_stale_cached_entry_over_an_error() {
+        // Reliability: when the live render can't produce a response, a page
+        // that was EVER rendered should stay up. The fallback deliberately
+        // returns a STALE entry (past its revalidate window) — a slightly-old
+        // page beats a 503/500 — and only for cacheable-eligible requests.
+        // Drives the real on-disk cache via the PYLON_SSR_CACHE_ROOT override
+        // (CI runs `--test-threads=1`, so the global-env mutation is safe).
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("PYLON_SSR_CACHE_ROOT", tmp.path());
+        std::env::set_var("PYLON_ARTIFACT_ID", "stale-on-error-test");
+
+        let headers = vec![("content-type".to_string(), "text/html".to_string())];
+        // TTL 0 → the entry is immediately STALE.
+        crate::ssr_cache::put("/p", "/p", &[], 200, &headers, b"<html>old</html>", 0);
+
+        // Cacheable-eligible + a stale entry exists → it's a valid fallback,
+        // and it's the STALE entry (the whole point of stale-on-error).
+        let cand = stale_on_error_candidate("/p", "/p", true).expect("stale entry is a candidate");
+        assert!(!cand.fresh, "fallback is the stale entry");
+        assert_eq!(cand.body, b"<html>old</html>");
+
+        // NOT cacheable-eligible (authed / has query) → never serve a shared
+        // anonymous page as a fallback, even though one is cached.
+        assert!(stale_on_error_candidate("/p", "/p", false).is_none());
+
+        // Cacheable-eligible but nothing cached for this route → no fallback;
+        // the caller emits its 503/500.
+        assert!(stale_on_error_candidate("/never", "/never", true).is_none());
+
+        std::env::remove_var("PYLON_SSR_CACHE_ROOT");
+        std::env::remove_var("PYLON_ARTIFACT_ID");
     }
 
     #[test]

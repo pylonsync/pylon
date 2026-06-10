@@ -26,8 +26,12 @@
 //! # Configuration
 //!
 //! - `PYLON_FN_POOL_SIZE` — number of bun processes to spawn.
-//!   Default 1 (single-runner behavior preserved — no machines get
-//!   unexpectedly OOM'd by 4× memory baseline on upgrade).
+//!   Unset → `default_pool_size()`: CPU/2 clamped to [2, 4]. A floor of
+//!   2 because SSR + functions are I/O-bound (renders await DB fetches)
+//!   and each runner serializes one request at a time — a single runner
+//!   serializes ALL of them, so one slow render head-of-lines the rest.
+//!   Capped at 4 so a big box doesn't multiply the per-runner memory
+//!   baseline without bound. Explicit N or "auto" overrides.
 //! - Each runner ~80-120MB resident baseline plus the user's app
 //!   footprint. Set per-deployment based on RAM headroom.
 //!
@@ -220,9 +224,28 @@ impl FnRunnerPool {
         all
     }
 
-    /// Resolve the pool size from the env. Default 1 preserves the
-    /// pre-pool behaviour so a framework upgrade doesn't surprise
-    /// anyone with 4× memory baseline overnight.
+    /// The default pool size when `PYLON_FN_POOL_SIZE` is unset: CPU/2
+    /// clamped to `[2, 4]`. Floor 2 so SSR/functions aren't globally
+    /// serialized out of the box (I/O-bound renders overlap their awaits
+    /// across runners even on a 1-vCPU box — the win there is concurrency,
+    /// not parallelism); cap 4 so a large box doesn't multiply the
+    /// ~100MB/runner baseline without bound. Operators override with an
+    /// explicit `PYLON_FN_POOL_SIZE=N` or `"auto"`.
+    pub fn default_pool_size() -> usize {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Self::pool_default_for_cpus(cpus)
+    }
+
+    /// Pure core of `default_pool_size` (CPU count in, size out) so the
+    /// clamp is unit-tested without depending on the test host's core count.
+    pub fn pool_default_for_cpus(cpus: usize) -> usize {
+        (cpus / 2).clamp(2, 4)
+    }
+
+    /// Resolve the pool size from the env. `default` is what to use when
+    /// `PYLON_FN_POOL_SIZE` is unset (callers pass `default_pool_size()`).
     ///
     /// PYLON_FN_POOL_SIZE = "auto" picks max(1, cpus / 2) so
     /// operators can opt into "use the machine's actual capacity"
@@ -335,6 +358,20 @@ mod tests {
     #[test]
     fn parse_pool_size_bogus_input_uses_default() {
         assert_eq!(FnRunnerPool::parse_pool_size("twelve", 2, 8), 2);
+    }
+
+    #[test]
+    fn pool_default_floors_at_two_and_caps_at_four() {
+        // Floor 2 so SSR/functions are never globally serialized through one
+        // runner, even on a 1-core box (pre-fix the default was 1 → every
+        // render serialized behind the slowest).
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(1), 2);
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(2), 2);
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(4), 2);
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(6), 3);
+        // Cap 4 so a big box doesn't multiply the per-runner memory baseline.
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(8), 4);
+        assert_eq!(FnRunnerPool::pool_default_for_cpus(64), 4);
     }
 
     #[test]

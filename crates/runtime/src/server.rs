@@ -524,7 +524,7 @@ fn file_read_authorized(
 
 #[cfg(test)]
 mod file_auth_tests {
-    use super::file_read_authorized;
+    use super::{ephemeral_sessions_boot_check, file_read_authorized, local_put_owned_by_other};
     use pylon_storage::files::{FileOwner, FileStorageError};
 
     fn owner(uid: &str) -> Result<Option<FileOwner>, FileStorageError> {
@@ -555,6 +555,46 @@ mod file_auth_tests {
         // Anonymous caller against an unowned asset → still denied (no
         // `None == None` foot-gun serving ownerless files to anon).
         assert!(!file_read_authorized(&Ok(None), None));
+    }
+
+    #[test]
+    fn local_put_refuses_overwrite_of_another_users_asset() {
+        // Owned by a DIFFERENT user → MUST refuse (the overwrite hole —
+        // pre-fix local-put wrote bytes with no owner check at all).
+        assert!(local_put_owned_by_other(
+            &owner("victim"),
+            "attacker",
+            false
+        ));
+        // Owned by the caller → allowed (the legitimate upload completing).
+        assert!(!local_put_owned_by_other(&owner("me"), "me", false));
+        // Admin may overwrite anyone's asset (matches DELETE's admin bypass).
+        assert!(!local_put_owned_by_other(&owner("victim"), "admin", true));
+        // Unowned (Ok(None)) → allowed; the caller claims it on write.
+        assert!(!local_put_owned_by_other(&Ok(None), "me", false));
+        // Unreadable sidecar (Err) → fail CLOSED, refuse the write.
+        assert!(local_put_owned_by_other(
+            &Err(FileStorageError {
+                code: "IO".into(),
+                message: "boom".into(),
+            }),
+            "me",
+            false,
+        ));
+    }
+
+    #[test]
+    fn in_memory_sessions_refused_in_prod_allowed_in_dev_or_optin() {
+        // Production boot (not dev) with NO persistent backend + no explicit
+        // opt-in → MUST refuse (the silent footgun: sessions evaporate on
+        // restart / aren't shared across replicas). Pre-fix this returned an
+        // in-memory store with no warning.
+        assert!(ephemeral_sessions_boot_check(false, false).is_err());
+        // Dev boot → ephemeral is fine (matches the in-memory datastore).
+        assert!(ephemeral_sessions_boot_check(false, true).is_ok());
+        // Explicit opt-in (PYLON_SESSION_IN_MEMORY=1) → allowed even in prod.
+        assert!(ephemeral_sessions_boot_check(true, false).is_ok());
+        assert!(ephemeral_sessions_boot_check(true, true).is_ok());
     }
 }
 
@@ -3424,10 +3464,36 @@ fn start_server(
 
             let storage = pylon_storage::files::select_from_env();
             let (status, body) = match storage.init_upload(filename, mime_type, size) {
-                Ok(init) => (
-                    200u16,
-                    serde_json::to_string(&init).unwrap_or_else(|_| "{}".into()),
-                ),
+                Ok(init) => {
+                    // Bind the freshly-minted asset to its initiator NOW so the
+                    // `local-put` byte-receiver can reject a write from any
+                    // OTHER user, and so a confirmed file can never later be
+                    // overwritten by a different caller. Without this the
+                    // owner was only recorded at confirm-time (after the PUT),
+                    // leaving a window where any authed user who knew/guessed
+                    // the id could overwrite another user's bytes. Ownership-
+                    // less backends (Stack0/S3 — gated by the presigned URL +
+                    // API key) no-op via `requires_owner_check()`.
+                    if storage.requires_owner_check() {
+                        if let Some(uid) = auth_ctx.user_id.as_ref() {
+                            let owner = pylon_storage::files::FileOwner {
+                                user_id: uid.clone(),
+                                tenant_id: auth_ctx.tenant_id.clone(),
+                            };
+                            if let Err(e) = storage.record_owner(&init.asset_id, &owner) {
+                                tracing::warn!(
+                                    file_id = %init.asset_id,
+                                    error = %e.message,
+                                    "Failed to bind file owner at init"
+                                );
+                            }
+                        }
+                    }
+                    (
+                        200u16,
+                        serde_json::to_string(&init).unwrap_or_else(|_| "{}".into()),
+                    )
+                }
                 Err(e) => (500u16, json_error(&e.code, &e.message)),
             };
             let response = with_security_headers(
@@ -3662,8 +3728,52 @@ fn start_server(
                     return;
                 }
                 let local = pylon_storage::files::local_from_env();
+                // Owner gate: the byte-receiver must refuse a write to an asset
+                // owned by a DIFFERENT user — otherwise any authenticated user
+                // could overwrite another user's pending upload OR a confirmed
+                // file by knowing/guessing its id. Fresh assets are bound to
+                // their initiator at `/api/files/init`; unowned assets (legacy,
+                // or a direct `store()`) are CLAIMED on first write below. Fail
+                // CLOSED on a lookup error.
+                use pylon_storage::files::FileStorage as _;
+                let caller = auth_ctx.user_id.clone().unwrap_or_default();
+                let prior_owner = local.owner_of(asset_id);
+                if local_put_owned_by_other(&prior_owner, &caller, auth_ctx.is_admin) {
+                    // 404 (not 403) to avoid confirming the asset exists —
+                    // matches the GET/DELETE owner-mismatch behaviour.
+                    let err = json_error("NOT_FOUND", "File not found");
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(404u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("PUT", 404);
+                    return;
+                }
                 let (status, body) = match local.write_bytes(asset_id, &bytes) {
-                    Ok(()) => (204u16, String::new()),
+                    Ok(()) => {
+                        // Claim an unowned asset for the caller so a later,
+                        // different user can't overwrite it (the asset had no
+                        // init-time binding — legacy or direct write).
+                        if matches!(prior_owner, Ok(None)) && !caller.is_empty() {
+                            let owner = pylon_storage::files::FileOwner {
+                                user_id: caller.clone(),
+                                tenant_id: auth_ctx.tenant_id.clone(),
+                            };
+                            let _ = local.record_owner(asset_id, &owner);
+                        }
+                        (204u16, String::new())
+                    }
                     Err(e) => (500u16, json_error(&e.code, &e.message)),
                 };
                 let response = with_security_headers(
@@ -6269,8 +6379,61 @@ fn build_auth_stores(
         .or_else(|| app_db_path.map(|p| format!("{p}.sessions.db")));
 
     match (force_in_memory, sqlite_path) {
-        (true, _) | (_, None) => Ok(in_memory_auth_stores(session_lifetime)),
+        (true, _) => Ok(in_memory_auth_stores(session_lifetime)),
         (false, Some(path)) => build_sqlite_auth_stores(&path, session_lifetime),
+        // No persistent backend configured. In dev this is fine — ephemeral
+        // sessions match the ephemeral in-memory datastore. In a production
+        // boot it's a silent footgun: sessions evaporate on every restart and
+        // are NOT shared across replicas, so users get logged out at random
+        // and multi-machine auth breaks — but it looks fine in a single-box
+        // demo. Refuse to boot rather than degrade silently (mirrors the
+        // SQLite/Postgres fail-fast). Operators who genuinely want ephemeral
+        // sessions in prod opt in explicitly with PYLON_SESSION_IN_MEMORY=1.
+        (false, None) => {
+            ephemeral_sessions_boot_check(force_in_memory, crate::frontend::is_dev_mode())?;
+            Ok(in_memory_auth_stores(session_lifetime))
+        }
+    }
+}
+
+/// Boot policy for when NO persistent session backend is configured (no
+/// Postgres `DATABASE_URL`, no SQLite path). In-memory sessions are only
+/// acceptable in dev, or with an explicit opt-in: a production boot must fail
+/// fast rather than silently losing sessions on every restart and failing to
+/// share them across replicas (users randomly logged out; multi-machine auth
+/// broken — but it looks fine in a single-box demo). Returns `Ok(())` to allow
+/// the ephemeral fallback or `Err(msg)` to refuse the boot.
+fn ephemeral_sessions_boot_check(force_in_memory: bool, is_dev: bool) -> Result<(), String> {
+    if force_in_memory || is_dev {
+        Ok(())
+    } else {
+        Err(
+            "[pylon] Refusing to boot with in-memory sessions outside dev: \
+             sessions would be lost on every restart and not shared across replicas \
+             (users randomly logged out; multi-machine auth broken). Configure a \
+             database — DATABASE_URL=postgres://… or PYLON_SESSION_DB=/path/to/sessions.db \
+             — or set PYLON_SESSION_IN_MEMORY=1 to explicitly accept ephemeral sessions."
+                .to_string(),
+        )
+    }
+}
+
+/// Decide whether a `local-put` byte write must be REFUSED because the asset is
+/// already owned by someone other than the caller. Fails CLOSED: an ownership-
+/// lookup error refuses the write. An unowned asset (`Ok(None)`) is allowed —
+/// the caller claims it on write. Admins bypass the owner match.
+fn local_put_owned_by_other(
+    prior_owner: &Result<
+        Option<pylon_storage::files::FileOwner>,
+        pylon_storage::files::FileStorageError,
+    >,
+    caller: &str,
+    is_admin: bool,
+) -> bool {
+    match prior_owner {
+        Ok(Some(owner)) => !is_admin && owner.user_id != caller,
+        Ok(None) => false,
+        Err(_) => true,
     }
 }
 
