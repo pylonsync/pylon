@@ -155,7 +155,27 @@ fn test_manifest() -> AppManifest {
         routes: vec![],
         queries: vec![],
         actions: vec![],
-        policies: vec![],
+        // These tests exercise CRUD / sync / pagination MECHANICS, not policy
+        // enforcement, so the entities are explicitly public. An entity with NO
+        // policy is default-DENIED (the framework's secure-by-default posture —
+        // see pylon_policy `_default_deny`), so the manifest must declare the
+        // intent; an empty `policies` list is what a real app would have to
+        // change too. (Policy-enforcement behavior is covered by the policy
+        // crate's own tests + the access-control integration tests.)
+        policies: vec![
+            ManifestPolicy {
+                name: "todo_public".into(),
+                entity: Some("Todo".into()),
+                allow: "true".into(),
+                ..Default::default()
+            },
+            ManifestPolicy {
+                name: "user_public".into(),
+                entity: Some("User".into()),
+                allow: "true".into(),
+                ..Default::default()
+            },
+        ],
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
@@ -633,11 +653,15 @@ fn health_and_metrics() {
 fn error_handling() {
     let base = start_test_server();
 
-    // Unknown entity.
+    // Unknown entity. Under default-deny, an entity with no registered policy
+    // is refused with 403 — and the API deliberately does NOT distinguish
+    // "entity doesn't exist" (404) from "exists but denied" (403), so an
+    // unknown name reads the same as a denied one (no entity enumeration). All
+    // three are acceptable "you can't read this" answers.
     let (status, _) = http_request("GET", &format!("{base}/api/entities/Nonexistent"), None);
     assert!(
-        status == 400 || status == 404,
-        "unknown entity should be 400 or 404, got {status}"
+        status == 400 || status == 403 || status == 404,
+        "unknown entity should be 400/403/404, got {status}"
     );
 
     // Invalid JSON body.
