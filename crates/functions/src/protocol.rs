@@ -377,6 +377,38 @@ pub enum TsMessage {
     BundleClientResult(BundleClientResultMessage),
 }
 
+impl TsMessage {
+    /// The `call_id` this message belongs to, or `None` for the one-shot
+    /// startup `Ready` handshake (the only message with no call to route to).
+    ///
+    /// This is what makes concurrent calls over a single Bun connection safe:
+    /// the host's reader thread routes EVERY message to the waiting call by
+    /// this id, so two in-flight renders can never receive each other's output.
+    /// Every variant except `Ready` carries a `call_id` (the protocol was
+    /// designed for it); a missing arm here would silently drop that message
+    /// type, so this match is deliberately exhaustive (no `_` catch-all).
+    pub fn call_id(&self) -> Option<&str> {
+        match self {
+            TsMessage::Ready(_) => None,
+            TsMessage::Db(m) => Some(&m.call_id),
+            TsMessage::Stream(m) => Some(&m.call_id),
+            TsMessage::Schedule(m) => Some(&m.call_id),
+            TsMessage::ElevateAuth(m) => Some(&m.call_id),
+            TsMessage::CancelSchedule(m) => Some(&m.call_id),
+            TsMessage::RunFn(m) => Some(&m.call_id),
+            TsMessage::SendEmail(m) => Some(&m.call_id),
+            TsMessage::LlmComplete(m) => Some(&m.call_id),
+            TsMessage::Connection(m) => Some(&m.call_id),
+            TsMessage::Return(m) => Some(&m.call_id),
+            TsMessage::Error(m) => Some(&m.call_id),
+            TsMessage::ResponseStart(m) => Some(&m.call_id),
+            TsMessage::RenderChunk(m) => Some(&m.call_id),
+            TsMessage::RenderDone(m) => Some(&m.call_id),
+            TsMessage::BundleClientResult(m) => Some(&m.call_id),
+        }
+    }
+}
+
 /// Handshake payload from the TS runtime.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadyMessage {

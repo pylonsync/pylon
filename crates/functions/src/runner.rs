@@ -4,12 +4,38 @@
 //! all communication. It handles DB operations, stream forwarding, scheduling,
 //! and transaction management.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Per-runner demux table: `call_id` → the channel feeding that call's recv
+/// loop. The single reader thread routes EVERY inbound message to the right
+/// call by id (see [`TsMessage::call_id`]), which is what lets multiple calls
+/// (renders, functions) run concurrently over one Bun connection — they can
+/// never receive each other's messages. Registered/unregistered per call via
+/// [`CallRoute`] (RAII).
+type RouteTable = Mutex<HashMap<String, Sender<TsMessage>>>;
+
+/// RAII registration for one call's demux route — removes the `call_id` from
+/// the table (and decrements the in-flight gauge) when the call's frame drops,
+/// whether it returned, errored, or unwound on a panic.
+struct CallRoute {
+    table: Arc<RouteTable>,
+    gauge: Arc<AtomicUsize>,
+    call_id: String,
+}
+impl Drop for CallRoute {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.table.lock() {
+            g.remove(&self.call_id);
+        }
+        self.gauge.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 use pylon_http::DataStore;
 
@@ -88,8 +114,8 @@ pub type ScheduleHook = Box<
 /// Callback invoked when a running function asks to run *another* function
 /// (action → query/mutation). The wrapper is responsible for any per-type
 /// setup — notably wrapping mutations in their own BEGIN/COMMIT, which
-/// can't happen inside `call_inner` because that path holds the io_lock
-/// and is called with the outer action's non-transactional store.
+/// can't happen inside `call_inner` because that path is called with the
+/// outer action's non-transactional store.
 ///
 /// Returns the nested function's return value or a `FnCallError`-shaped
 /// `(code, message)` pair. The runner translates the error back into the
@@ -187,12 +213,22 @@ pub struct FnRunner {
     process: Mutex<Option<Child>>,
     /// Stdin half — guarded so concurrent senders don't interleave bytes.
     stdin: Mutex<Option<std::process::ChildStdin>>,
-    /// Channel of parsed messages from the reader thread. Single consumer
-    /// (callers serialize via `io_lock`), so no per-call demuxing.
-    inbox: Mutex<Option<Receiver<TsMessage>>>,
-    /// Held for the duration of a call to keep request/response in order.
-    /// Also serializes the underlying single Bun process.
-    io_lock: Mutex<()>,
+    /// Per-call demux table for the CURRENT child. The reader thread routes
+    /// each inbound message to the waiting call by `call_id`, so concurrent
+    /// calls (renders, functions) multiplex over the one Bun connection
+    /// instead of serializing. `None` until `start()`; replaced on respawn (a
+    /// fresh table per child so a dead child's reader can't touch the new one).
+    routes: Mutex<Option<Arc<RouteTable>>>,
+    /// Number of calls currently in flight on this runner. Shared with each
+    /// call's `CallRoute` guard. Feeds the health probe: an idle runner
+    /// (in_flight == 0) is healthy; a busy one is healthy only while messages
+    /// keep flowing (`last_msg_at`).
+    in_flight: Arc<AtomicUsize>,
+    /// Epoch-millis of the last message the reader received from the child.
+    /// Shared with the reader thread. With multiplexing there's no held lock to
+    /// probe for "wedged", so the health signal is "are messages still flowing
+    /// while calls are in flight?".
+    last_msg_at: Arc<AtomicU64>,
     call_counter: AtomicU64,
     pub trace_log: TraceLog,
     schedule_hook: Mutex<Option<ScheduleHook>>,
@@ -233,8 +269,9 @@ impl FnRunner {
         Self {
             process: Mutex::new(None),
             stdin: Mutex::new(None),
-            inbox: Mutex::new(None),
-            io_lock: Mutex::new(()),
+            routes: Mutex::new(None),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            last_msg_at: Arc::new(AtomicU64::new(0)),
             call_counter: AtomicU64::new(0),
             trace_log: TraceLog::new(trace_capacity),
             schedule_hook: Mutex::new(None),
@@ -338,16 +375,28 @@ impl FnRunner {
             .take()
             .ok_or_else(|| kill_and_msg(&mut child, "Failed to capture stdout".to_string()))?;
 
-        let (tx, rx): (Sender<TsMessage>, Receiver<TsMessage>) = mpsc::channel();
+        // A fresh demux table for THIS child. The reader routes call messages
+        // here by call_id; the one-shot `Ready` (no call_id) goes to ready_tx.
+        let routes: Arc<RouteTable> = Arc::new(Mutex::new(HashMap::new()));
+        let (ready_tx, ready_rx): (Sender<TsMessage>, Receiver<TsMessage>) = mpsc::channel();
+        let routes_for_reader = Arc::clone(&routes);
+        let last_msg_for_reader = Arc::clone(&self.last_msg_at);
         std::thread::Builder::new()
             .name("pylon-fn-reader".into())
-            .spawn(move || reader_loop(BufReader::new(stdout), tx))
+            .spawn(move || {
+                reader_loop(
+                    BufReader::new(stdout),
+                    routes_for_reader,
+                    ready_tx,
+                    last_msg_for_reader,
+                )
+            })
             .map_err(|e| kill_and_msg(&mut child, format!("Failed to spawn reader thread: {e}")))?;
 
-        // Read Ready BEFORE publishing the new IO. If we published first, a
-        // concurrent caller could send a request and `recv()` would eat the
-        // Ready in the catch-all match arm, leaving us in protocol limbo.
-        let ready_msg = match rx.recv_timeout(Duration::from_secs(10)) {
+        // Read Ready BEFORE publishing the routes. The reader sends the
+        // call_id-less Ready to its own channel, so there's no risk a
+        // concurrent caller's route eats it.
+        let ready_msg = match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(m) => m,
             Err(_) => {
                 let _ = child.kill();
@@ -373,7 +422,7 @@ impl FnRunner {
 
         // Handshake succeeded — publish.
         *self.stdin.lock().unwrap() = Some(stdin);
-        *self.inbox.lock().unwrap() = Some(rx);
+        *self.routes.lock().unwrap() = Some(routes);
         *self.process.lock().unwrap() = Some(child);
         *self.started_with.lock().unwrap() = Some((
             command.to_string(),
@@ -404,20 +453,18 @@ impl FnRunner {
 
     /// Deeper "is the runtime responsive?" probe — distinct from
     /// `is_alive` which only checks the OS process. This tries to
-    /// acquire the io_lock (held for the duration of every active
-    /// function call) within `timeout`. If we can grab it, no
-    /// function is stuck holding it and the runtime is processing
-    /// requests at the expected rate. If we can't, either the
-    /// runtime is under sustained load OR a single function call is
-    /// wedged — both are interesting signals for an external health
-    /// probe.
+    /// derive responsiveness from the MESSAGE FLOW (not a held lock — with
+    /// multiplexing no lock is held during a call). An idle runner (no calls in
+    /// flight) is healthy by definition. A busy runner is healthy only if the
+    /// reader has received SOME message within `timeout`: a runtime that's
+    /// genuinely making progress streams render chunks / db round-trips / a
+    /// return, so silence-while-busy is the "wedged" signal.
     ///
-    /// Used by /health/deep so Fly's health check fails when the bun
-    /// runtime is thrashing, even though the HTTP listener itself is
-    /// still up and answering /health 200. This is the failure mode
-    /// that caused the runtime-kill cycle during today's incident:
-    /// /health stayed green while every function call took 30s + got
-    /// killed, taking all 150 functions offline during respawn.
+    /// Used by /health/deep so Fly's health check fails when the bun runtime is
+    /// thrashing, even though the HTTP listener itself is still up and answering
+    /// /health 200. This is the failure mode that caused the runtime-kill cycle
+    /// during a past incident: /health stayed green while every function call
+    /// took 30s + got killed, taking all functions offline during respawn.
     ///
     /// Returns Ok(()) when the runtime is responsive within timeout,
     /// Err(reason) when it isn't.
@@ -425,23 +472,21 @@ impl FnRunner {
         if !self.is_alive() {
             return Err("runtime process not alive".into());
         }
-        let deadline = Instant::now() + timeout;
-        // Small busy-wait on try_lock. The std Mutex has no
-        // try_lock_for so we poll every 10ms. The deadline bounds the
-        // total cost at ~timeout — no risk of spinning forever.
-        loop {
-            if self.io_lock.try_lock().is_ok() {
-                // Got it; runtime isn't holding the lock right now.
-                // Lock immediately released as the guard drops.
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "io_lock contended for >{}ms — runtime may be wedged on a slow call",
-                    timeout.as_millis()
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        // No calls in flight → nothing could be wedged → healthy.
+        if self.in_flight.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        // Busy: healthy only while messages keep arriving.
+        let last = self.last_msg_at.load(Ordering::Relaxed);
+        let now = now_millis();
+        let silent_for = now.saturating_sub(last);
+        if silent_for <= timeout.as_millis() as u64 {
+            Ok(())
+        } else {
+            Err(format!(
+                "no runtime message for {silent_for}ms with {} call(s) in flight — wedged",
+                self.in_flight.load(Ordering::Relaxed)
+            ))
         }
     }
 
@@ -472,7 +517,15 @@ impl FnRunner {
         }
         // Drop stdin so the reader thread sees EOF and exits.
         *self.stdin.lock().unwrap() = None;
-        *self.inbox.lock().unwrap() = None;
+        // Disconnect every in-flight call NOW (clear the route senders) so each
+        // recv returns Disconnected → RUNNER_EXITED immediately, rather than
+        // waiting for the reader to observe EOF. Then drop our handle to the
+        // table so no new call registers on a dead child.
+        if let Some(table) = self.routes.lock().unwrap().take() {
+            if let Ok(mut g) = table.lock() {
+                g.clear();
+            }
+        }
     }
 
     /// Backwards-compatible: `start()` now performs the handshake itself
@@ -500,11 +553,10 @@ impl FnRunner {
         on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
-        // Serialize all top-level calls — one Bun process, NDJSON over stdio
-        // is not multiplexed at this layer. Nested calls (action → query)
-        // recurse through `call_inner` WITHOUT re-acquiring the lock.
-        // `std::sync::Mutex` is not re-entrant, so doing otherwise wedges.
-        let _io = self.io_lock.lock().unwrap();
+        // Top-level calls MULTIPLEX over the one Bun connection (NDJSON is
+        // demuxed by call_id), so there's no serializing lock. Each call —
+        // including nested ones (action → query) — registers its own demux
+        // route inside `call_inner`.
         self.call_inner(store, fn_name, fn_type, args, auth, on_stream, request)
     }
 
@@ -541,7 +593,6 @@ impl FnRunner {
         on_response_start: Option<ResponseStartCallback>,
         on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
-        let _io = self.io_lock.lock().unwrap();
         self.render_route_inner(
             component,
             layouts,
@@ -559,7 +610,7 @@ impl FnRunner {
         )
     }
 
-    /// Body of `render_route()` minus the io_lock acquisition.
+    /// Body of `render_route()` — registers a demux route, then streams.
     #[allow(clippy::too_many_arguments)]
     fn render_route_inner(
         &self,
@@ -581,6 +632,10 @@ impl FnRunner {
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
         let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+        // Register this render's demux route BEFORE sending so the reader can
+        // route every reply (response_start, chunks, db round-trips, done) to
+        // THIS render's channel. `_route` unregisters on scope exit.
+        let (_route, rx) = self.register_call(&call_id)?;
 
         // The page can reach the DB mid-render via the `serverData` handle
         // (React 19 `use()` + Suspense). Those arrive as `{type:"db",...}`
@@ -613,7 +668,7 @@ impl FnRunner {
             // Recycle the runner if this render wedges — a stuck render must
             // not poison the runner for every subsequent request (the homepage
             // outage). The host then serves stale-on-error from the ISR cache.
-            let m = self.recv_or_recycle(deadline, "SSR render")?;
+            let m = self.recv_or_recycle(&rx, deadline, "SSR render")?;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -710,7 +765,6 @@ impl FnRunner {
         on_response_start: Option<ResponseStartCallback>,
         on_chunk: ByteStreamCallback,
     ) -> Result<(), FnCallError> {
-        let _io = self.io_lock.lock().unwrap();
         self.handle_form_inner(
             component,
             route_path,
@@ -728,7 +782,7 @@ impl FnRunner {
         )
     }
 
-    /// Body of `handle_form()` minus the io_lock acquisition.
+    /// Body of `handle_form()` — registers a demux route, then streams.
     #[allow(clippy::too_many_arguments)]
     fn handle_form_inner(
         &self,
@@ -750,6 +804,9 @@ impl FnRunner {
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
         let call_id = format!("f_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+        // Register the demux route before send (same as render) so concurrent
+        // form handlers can't receive each other's messages.
+        let (_route, rx) = self.register_call(&call_id)?;
 
         let form_auth = auth.clone();
         let policy_gate_snapshot = self.policy_gate.lock().unwrap().clone();
@@ -774,7 +831,7 @@ impl FnRunner {
         loop {
             // Recycle the runner if the form handler wedges (same rationale as
             // the SSR render loop) so a stuck POST can't poison the runner.
-            let m = self.recv_or_recycle(deadline, "form handler")?;
+            let m = self.recv_or_recycle(&rx, deadline, "form handler")?;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -839,16 +896,16 @@ impl FnRunner {
     /// path (for SSR-side script-tag emission) and the output
     /// directory (for serving files at `/_pylon/build/<rel>`).
     pub fn bundle_client(&self) -> Result<BundleClientPaths, FnCallError> {
-        let _io = self.io_lock.lock().unwrap();
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
         let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+        let (_route, rx) = self.register_call(&call_id)?;
         let msg = crate::protocol::BundleClientMessage::new(call_id.clone());
         self.send(&msg)?;
         loop {
             // Recycle the runner if the client-bundle build wedges so a stuck
             // build doesn't poison the runner for subsequent calls.
-            let m = self.recv_or_recycle(deadline, "client bundle build")?;
+            let m = self.recv_or_recycle(&rx, deadline, "client bundle build")?;
             match m {
                 TsMessage::BundleClientResult(r) if r.call_id == call_id => {
                     if let Some(err) = r.error {
@@ -901,7 +958,6 @@ impl FnRunner {
         request: Option<crate::protocol::RequestInfo>,
         caller_internal: bool,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
-        let _io = self.io_lock.lock().unwrap();
         self.call_inner_with_caller_internal(
             store,
             fn_name,
@@ -914,16 +970,13 @@ impl FnRunner {
         )
     }
 
-    /// Protocol-only call — assumes the caller already holds `io_lock`.
-    /// This is the body of a `call()` minus the lock. It is `pub` so the
+    /// Protocol-only call. This is the body of a `call()`. It is `pub` so the
     /// nested-call hook in `FnOpsImpl` can re-enter the protocol for a
-    /// transactional mutation wrap without re-acquiring the mutex (which
-    /// would deadlock since `std::sync::Mutex` is not re-entrant).
+    /// transactional mutation wrap; it registers its OWN demux route, so it
+    /// multiplexes safely alongside the parent call (no shared lock).
     ///
-    /// # Safety contract
-    /// Do not call directly from code that didn't acquire `io_lock` via a
-    /// prior `call()` invocation. Callers outside this crate should use
-    /// `call()`; the only external caller is the nested-call hook.
+    /// Callers outside this crate should use `call()`; the only external caller
+    /// is the nested-call hook.
     pub fn call_inner(
         &self,
         store: &dyn DataStore,
@@ -975,6 +1028,12 @@ impl FnRunner {
         let deadline = Instant::now() + timeout;
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
+        // Register this call's demux route before send so its replies route to
+        // THIS call's channel — even when it runs concurrently with a render or
+        // another call (or is itself a nested action→query call) on the same
+        // runner. `_route` unregisters + decrements the in-flight gauge on any
+        // exit path (return, error, early `?`).
+        let (_route, rx) = self.register_call(&call_id)?;
         let mut trace = TraceBuilder::new_with_tenant(
             call_id.clone(),
             fn_name.to_string(),
@@ -1010,7 +1069,7 @@ impl FnRunner {
 
         // Process messages until we get a return or error.
         loop {
-            let msg = match self.recv(deadline) {
+            let msg = match recv_on(&rx, deadline) {
                 Ok(m) => m,
                 Err(e) if err_requires_recycle(&e.code) => {
                     // The child is now in an unknown state — it owns the call
@@ -1216,7 +1275,11 @@ impl FnRunner {
                         }
                         None => {
                             // No hook installed — fall back to direct recursion.
-                            // Already inside io_lock, so use call_inner. Nested
+                            // The nested call_inner registers its OWN demux route
+                            // (a fresh call_id), so it multiplexes correctly even
+                            // though the parent call's route is still open: the
+                            // parent's TS side is blocked awaiting this reply, so
+                            // no parent-routed message arrives meanwhile. Nested
                             // calls never get HTTP request metadata.
                             match self.call_inner(
                                 store,
@@ -1387,49 +1450,66 @@ impl FnRunner {
         Ok(())
     }
 
-    fn recv(&self, deadline: Instant) -> Result<TsMessage, FnCallError> {
-        let inbox_guard = self.inbox.lock().unwrap();
-        let inbox = inbox_guard.as_ref().ok_or_else(|| FnCallError {
-            code: "RUNNER_NOT_STARTED".into(),
-            message: "TypeScript function runner is not running".into(),
-        })?;
-
-        let now = Instant::now();
-        let remaining = if deadline <= now {
-            Duration::ZERO
-        } else {
-            deadline - now
-        };
-
-        match inbox.recv_timeout(remaining) {
-            Ok(msg) => Ok(msg),
-            Err(RecvTimeoutError::Timeout) => Err(FnCallError {
-                code: "FN_TIMEOUT".into(),
-                message: "Function exceeded the configured call timeout".into(),
-            }),
-            Err(RecvTimeoutError::Disconnected) => Err(FnCallError {
-                code: "RUNNER_EXITED".into(),
-                message: "TypeScript function runner process exited unexpectedly".into(),
-            }),
-        }
+    /// Register a demux route for `call_id` and return its receiver + an RAII
+    /// guard. The guard unregisters the route (and decrements the in-flight
+    /// gauge) when dropped — on return, error, or panic — so a finished call
+    /// never leaves a dangling route. MUST be called before `send()` so the
+    /// reader can route the very first reply.
+    fn register_call(
+        &self,
+        call_id: &str,
+    ) -> Result<(CallRoute, Receiver<TsMessage>), FnCallError> {
+        let table = self
+            .routes
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| FnCallError {
+                code: "RUNNER_NOT_STARTED".into(),
+                message: "TypeScript function runner is not running".into(),
+            })?;
+        let (tx, rx) = mpsc::channel();
+        table.lock().unwrap().insert(call_id.to_string(), tx);
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        // A call STARTING is progress: reset the silence clock so the health
+        // probe measures "no message since this call began", not since an
+        // earlier idle period. Without this, a runner that sat idle past the
+        // probe window and then takes a normal call would read as wedged on the
+        // first probe (the start-handshake stamp would be stale by then).
+        self.last_msg_at.store(now_millis(), Ordering::Relaxed);
+        Ok((
+            CallRoute {
+                table,
+                gauge: Arc::clone(&self.in_flight),
+                call_id: call_id.to_string(),
+            },
+            rx,
+        ))
     }
 
-    /// Receive the next message, RECYCLING the runner on a hard call timeout.
+    /// Receive the next message for a call from ITS demux channel, RECYCLING the
+    /// runner on a hard call timeout.
     ///
     /// A deadline-exceeded means the bun child is wedged mid-op (a hung
-    /// `fetch`, an infinite loop) — it owns the call in-flight, may be holding
-    /// open resources, and will not answer the NEXT request either. Killing it
-    /// (the supervisor then respawns a fresh child) is the only way to get the
-    /// runner back; leaving it alive poisons it, because `pick()` keys off
-    /// `is_alive()` (process up) and keeps routing requests straight back into
-    /// the wedge. That is exactly the SSR-render wedge that took the homepage
-    /// down: every render to the stuck runner timed out in turn.
+    /// `fetch`, an infinite loop) — it may be holding open resources and will
+    /// not answer the NEXT request either. Killing it (the supervisor respawns)
+    /// is the only way to get the runner back; leaving it alive poisons it,
+    /// because `pick()` keys off `is_alive()` (process up) and keeps routing
+    /// requests straight back into the wedge. That is exactly the SSR-render
+    /// wedge that took the homepage down. `label` names the op for the log.
     ///
-    /// `call_inner` has long done this inline (with extra trace bookkeeping);
-    /// the render / form / bundle loops did NOT, so they're the ones that need
-    /// this. `label` names the operation for the log line.
-    fn recv_or_recycle(&self, deadline: Instant, label: &str) -> Result<TsMessage, FnCallError> {
-        match self.recv(deadline) {
+    /// With multiplexing, killing the runner on one call's timeout also fails
+    /// the OTHER in-flight calls (their routes get disconnected). That's the
+    /// correct tradeoff: a wedged child can't be trusted, and the supervisor
+    /// respawns a fresh one; the failed siblings retry / surface a clean error
+    /// rather than ride a poisoned process.
+    fn recv_or_recycle(
+        &self,
+        rx: &Receiver<TsMessage>,
+        deadline: Instant,
+        label: &str,
+    ) -> Result<TsMessage, FnCallError> {
+        match recv_on(rx, deadline) {
             Ok(m) => Ok(m),
             Err(e) if err_requires_recycle(&e.code) => {
                 tracing::warn!(
@@ -1440,6 +1520,25 @@ impl FnRunner {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Block up to `deadline` for the next message on a call's demux channel.
+/// A timeout maps to `FN_TIMEOUT` (the call exceeded its budget) and a
+/// disconnected channel to `RUNNER_EXITED` (the reader cleared routes because
+/// the child died).
+fn recv_on(rx: &Receiver<TsMessage>, deadline: Instant) -> Result<TsMessage, FnCallError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(msg) => Ok(msg),
+        Err(RecvTimeoutError::Timeout) => Err(FnCallError {
+            code: "FN_TIMEOUT".into(),
+            message: "Function exceeded the configured call timeout".into(),
+        }),
+        Err(RecvTimeoutError::Disconnected) => Err(FnCallError {
+            code: "RUNNER_EXITED".into(),
+            message: "TypeScript function runner process exited unexpectedly".into(),
+        }),
     }
 }
 
@@ -1465,7 +1564,18 @@ fn kill_and_msg(child: &mut Child, msg: String) -> String {
 /// Background reader thread: parses NDJSON lines from the Bun stdout into
 /// TsMessage values and forwards them to the channel. Exits when stdout
 /// closes (child died or was killed).
-fn reader_loop(mut stdout: BufReader<std::process::ChildStdout>, tx: Sender<TsMessage>) {
+/// Reader thread: parse each NDJSON line and DEMUX it to the waiting call by
+/// `call_id`. The one-shot `Ready` (no call_id) goes to `ready_tx`. Every other
+/// message is routed to its call's channel; a message for an unknown call_id
+/// (a late frame after the call unregistered) is dropped. On child exit the
+/// table is cleared so every in-flight call's recv returns `Disconnected`
+/// (→ `RUNNER_EXITED`) instead of hanging until its deadline.
+fn reader_loop(
+    mut stdout: BufReader<std::process::ChildStdout>,
+    routes: Arc<RouteTable>,
+    ready_tx: Sender<TsMessage>,
+    last_msg_at: Arc<AtomicU64>,
+) {
     let mut line = String::new();
     loop {
         line.clear();
@@ -1476,15 +1586,58 @@ fn reader_loop(mut stdout: BufReader<std::process::ChildStdout>, tx: Sender<TsMe
         }
         match serde_json::from_str::<TsMessage>(line.trim()) {
             Ok(msg) => {
-                if tx.send(msg).is_err() {
-                    break; // Receiver dropped — runner shutting down
-                }
+                // Liveness: a message just arrived, so the runtime is
+                // responsive. Feeds the health probe (busy-but-flowing = OK).
+                last_msg_at.store(now_millis(), Ordering::Relaxed);
+                route_message(&routes, &ready_tx, msg);
             }
             Err(e) => {
                 tracing::warn!(
                     "[functions] Skipping unparseable line from Bun runtime: {e} (line={:?})",
                     line.trim()
                 );
+            }
+        }
+    }
+    // Child gone — disconnect every in-flight call so its recv returns
+    // Disconnected (RUNNER_EXITED) immediately, rather than blocking until the
+    // call timeout.
+    if let Ok(mut g) = routes.lock() {
+        g.clear();
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Route ONE parsed message to its destination. The security-critical core of
+/// multiplexing: a message is delivered ONLY to the channel registered under
+/// its own `call_id`, so a render/function can never receive another call's
+/// output. The call_id-less `Ready` goes to the handshake channel; a message
+/// for an unregistered id (a late frame after the call unwound) is dropped.
+fn route_message(routes: &RouteTable, ready_tx: &Sender<TsMessage>, msg: TsMessage) {
+    match msg.call_id() {
+        None => {
+            // Startup handshake — no call to route to. A send failure means
+            // start() already moved on; harmless (the reader exits on EOF).
+            let _ = ready_tx.send(msg);
+        }
+        Some(id) => {
+            // Clone the Sender out under the lock, then send WITHOUT holding it
+            // (a slow receiver must not block the reader / other routes).
+            let route = routes.lock().unwrap().get(id).cloned();
+            match route {
+                // Send failure = that call already unwound; drop quietly.
+                Some(tx) => {
+                    let _ = tx.send(msg);
+                }
+                None => {
+                    tracing::trace!("[functions] dropping message for unknown call_id {id}");
+                }
             }
         }
     }
@@ -1800,6 +1953,81 @@ mod tests {
             message: "fail".into(),
         };
         assert_eq!(format!("{e}"), "[TEST] fail");
+    }
+
+    #[test]
+    fn route_message_delivers_only_to_the_matching_call() {
+        use crate::protocol::{ReadyMessage, ReturnMessage};
+        // The cross-request-leak guard: a message must reach ONLY the channel
+        // registered under its own call_id.
+        let routes: RouteTable = Mutex::new(HashMap::new());
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        routes.lock().unwrap().insert("c_a".to_string(), tx_a);
+        routes.lock().unwrap().insert("c_b".to_string(), tx_b);
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let ret = |id: &str| {
+            TsMessage::Return(ReturnMessage {
+                call_id: id.to_string(),
+                value: serde_json::json!(id),
+            })
+        };
+
+        // A message for c_b reaches ONLY c_b — never c_a (the leak this guards).
+        route_message(&routes, &ready_tx, ret("c_b"));
+        assert!(
+            rx_a.try_recv().is_err(),
+            "call A must not receive B's message"
+        );
+        match rx_b.try_recv() {
+            Ok(TsMessage::Return(m)) => assert_eq!(m.call_id, "c_b"),
+            other => panic!("c_b's channel should have B's Return, got {other:?}"),
+        }
+
+        // The call_id-less Ready goes to the handshake channel, not any route.
+        route_message(
+            &routes,
+            &ready_tx,
+            TsMessage::Ready(ReadyMessage {
+                functions: vec![],
+                error: None,
+            }),
+        );
+        assert!(matches!(ready_rx.try_recv(), Ok(TsMessage::Ready(_))));
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+
+        // A message for an UNKNOWN call_id (late frame after a call unwound) is
+        // dropped — it must not leak into another live call or the handshake.
+        route_message(&routes, &ready_tx, ret("c_ghost"));
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+        assert!(ready_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ts_message_call_id_is_exhaustive_and_only_ready_is_none() {
+        use crate::protocol::{ReadyMessage, ReturnMessage};
+        // Ready is the ONLY message without a call_id (the reader routes it to
+        // the handshake). Any other variant returning None would be silently
+        // dropped, so this locks the invariant the demux relies on.
+        assert_eq!(
+            TsMessage::Ready(ReadyMessage {
+                functions: vec![],
+                error: None,
+            })
+            .call_id(),
+            None
+        );
+        assert_eq!(
+            TsMessage::Return(ReturnMessage {
+                call_id: "c_1".into(),
+                value: serde_json::Value::Null,
+            })
+            .call_id(),
+            Some("c_1")
+        );
     }
 
     #[test]
