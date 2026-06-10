@@ -102,6 +102,17 @@ export class TestServer {
   /** Count of snapshot pulls served (since = 0). The egress storm was a
    *  runaway count here; the regression test bounds it. */
   snapshotPullCount = 0;
+  /** Count of /api/sync/push requests received. Lets a test assert the
+   *  engine actually shipped a batch (e.g. hydrated offline writes that
+   *  must drain once leader-elected), independent of the no-op push
+   *  response the harness returns. */
+  pushRequestCount = 0;
+  /** `${entity}/${row_id}` of every op the engine pushed, across all
+   *  push requests. Lets a test assert a SPECIFIC mutation reached the
+   *  server — robust against a stray retry from an unrelated engine
+   *  whose pending timer fires against the globally-installed fetch
+   *  mock (that pushes ITS ops, never this test's row). */
+  readonly receivedPushKeys: string[] = [];
   /** Captured outbound WS messages from clients — tests assert against
    *  this to verify `reactive-subscribe`, `crdt-subscribe`, etc., were
    *  actually sent over the wire. */

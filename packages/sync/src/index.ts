@@ -309,6 +309,22 @@ export class SyncEngine {
   private applyQueue: Promise<void> = Promise.resolve();
 
   /**
+   * Live-event hold buffer, active ONLY while a from-zero snapshot pull is in
+   * flight. A snapshot is full state as-of `snapshot_seq` S; its rows arrive
+   * tagged `seq = S`. If a live WS frame (or a tab broadcast) at `seq = S+k`
+   * applies FIRST — during the snapshot's (possibly multi-page) HTTP fetch — it
+   * advances the cursor past S, and then EVERY snapshot row (seq ≤ S) is
+   * dropped by the monotonic filter in enqueueApply, leaving a near-empty
+   * replica with the cursor persisted ahead (no 410, no heal until a reconcile
+   * happens to fire). The store has no per-row seq guard, so we can't just
+   * apply the snapshot unconditionally — an older snapshot row would clobber a
+   * newer live update. So we instead ORDER them: hold live/broadcast applies
+   * here while snapshotting, then replay them (seq-filtered) AFTER the snapshot
+   * lands. null = not snapshotting → normal apply.
+   */
+  private snapshotHold: ChangeEvent[] | null = null;
+
+  /**
    * Serialized channel for outbound network ops (pull, push, reconcile,
    * refresh, resetReplica). Replaces the per-op `inFlightX` mutexes +
    * the fire-and-forget `void refreshResolvedSession()` calls that used
@@ -596,12 +612,15 @@ export class SyncEngine {
           const mqPersistence = new IndexedDBMutationPersistence(persistence);
           this.mutations.attachPersistence(mqPersistence);
           await this.mutations.hydrate();
-          // Fire-and-forget — the actual mutation HTTP calls happen
-          // async, and we don't want to block engine startup on them.
-          // pull()/reconcile() below run in parallel; push()'s
-          // mutations carry op_ids so racing the broadcasts won't
-          // double-apply.
-          void this.push();
+          // The hydrated offline writes are drained in the leader path
+          // below (after `initMultiTab` settles), NOT here. We're still
+          // pre-election at this point, so `isMultiTabLeader` is false
+          // and a push() now would hit the follower branch — broadcasting
+          // the batch to a not-yet-constructed orchestrator (a silent
+          // no-op) and stranding every offline write until an unrelated
+          // mutation happened to fire push() again. The drain moved to
+          // the leader path so it runs once we actually own the network.
+          // Test: `hydrated offline writes are pushed once leader-elected`.
         } catch {
           // Queue persistence optional — memory-only still works.
         }
@@ -668,6 +687,20 @@ export class SyncEngine {
       await this.applySessionTransition(bootstrapSession, /* broadcast */ true);
     } else {
       await this.refreshResolvedSession();
+    }
+
+    // Drain hydrated offline writes now that we ARE the leader. The
+    // startup hydrate (in the persist block above) ran pre-election,
+    // when a push() would have taken the follower branch and broadcast
+    // into a not-yet-running orchestrator — a no-op that stranded the
+    // writes. We own the network now, so the follower gate in pushInner
+    // passes and the batch actually reaches /api/sync/push. Fire-and-
+    // forget (op_ids dedupe against the broadcasts) and ahead of pull()
+    // so the server has the writes before the cold-load snapshot lands —
+    // the snapshot then returns them as canonical instead of leaving the
+    // reconcile backstop to recover the optimistic ghosts.
+    if (this.mutations.pending().length > 0) {
+      void this.push();
     }
 
     // Pull from server, then connect real-time transport.
@@ -1054,8 +1087,18 @@ export class SyncEngine {
   private enqueueApply(
     changes: ChangeEvent[],
     targetCursor?: SyncCursor,
-    opts: { fromBroadcast?: boolean } = {},
+    opts: { fromBroadcast?: boolean; isPull?: boolean } = {},
   ): Promise<void> {
+    // Snapshot fence: while a from-zero snapshot is in flight, hold live WS
+    // frames + tab broadcasts so they can't advance the cursor past the
+    // snapshot's rows and filter them out (see `snapshotHold`). The pull's own
+    // apply (`isPull`) is exempt — it IS the snapshot. Held events are replayed
+    // in arrival (≈seq) order once the snapshot lands. Synchronous + before the
+    // queue chain so held events never interleave into the applyQueue.
+    if (this.snapshotHold !== null && !opts.isPull) {
+      this.snapshotHold.push(...changes);
+      return Promise.resolve();
+    }
     const prev = this.applyQueue;
     const next = prev.then(async () => {
       // Per-event monotonic filter: re-applies of an already-seen seq
@@ -1371,6 +1414,12 @@ export class SyncEngine {
     // bootstrap reconcile (the snapshot path already returned every
     // policy-visible row, per-entity refetch right after is waste).
     const startedFromZero = this.cursor.last_seq === 0;
+    // A from-zero pull is a SNAPSHOT — open the live-event hold for its whole
+    // (possibly multi-page) duration so a racing WS frame can't leapfrog the
+    // cursor and filter the snapshot rows out. Nested pulls (delta tail /
+    // has_more, 410 recursion) run at a non-zero cursor → they don't touch
+    // this, and their applies pass `isPull` so they're never held.
+    if (startedFromZero) this.snapshotHold = [];
     try {
       // Snapshot pagination: when the cursor is 0 and the server's
       // table is larger than a single batch, the response carries
@@ -1390,7 +1439,7 @@ export class SyncEngine {
         const resp = await this.request<
           PullResponse & { snapshot_after?: string | null }
         >("GET", `/api/sync/pull?${params.toString()}`);
-        await this.enqueueApply(resp.changes, resp.cursor);
+        await this.enqueueApply(resp.changes, resp.cursor, { isPull: true });
         // `snapshot_after` is only set when the server is mid-snapshot.
         // Continue paginating in the same loop iteration so we don't
         // leave a fresh client with a partial replica.
@@ -1434,6 +1483,16 @@ export class SyncEngine {
       // truth. Record it so onConnected skips the reconcile that would
       // otherwise re-fetch every entity via cursor pagination.
       this.lastPullStartedFromZero = startedFromZero;
+      // Snapshot landed cleanly → replay the live events we held during it, in
+      // arrival (≈seq) order. They filter against the now-correct cursor
+      // (snapshot_seq), so events newer than the snapshot apply and older ones
+      // (already in the snapshot) are deduped. Clearing `snapshotHold` first
+      // means this replay applies normally (it isn't re-held).
+      if (startedFromZero && this.snapshotHold) {
+        const held = this.snapshotHold;
+        this.snapshotHold = null;
+        if (held.length > 0) await this.enqueueApply(held);
+      }
     } catch (err) {
       // Swallow network + transient errors so the poll/reconnect loop
       // keeps trying — but on 429 bump the backoff counter so the next
@@ -1488,6 +1547,15 @@ export class SyncEngine {
           }, delayMs);
         }
       }
+    } finally {
+      // Snapshot pull failed (network error / 410 mid-fetch): DISCARD any
+      // still-held live events rather than applying them. The cursor stays at 0
+      // so the retry resnapshots and re-covers them; applying them here would
+      // advance the cursor and turn the retry into a gappy delta. On success
+      // the try already drained + nulled the hold, so this is a no-op there.
+      // Nested non-zero pulls never set `snapshotHold`, so this only fires for
+      // the from-zero snapshot that owns it.
+      if (startedFromZero && this.snapshotHold !== null) this.snapshotHold = null;
     }
   }
 

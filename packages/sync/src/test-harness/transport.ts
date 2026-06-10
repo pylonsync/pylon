@@ -279,6 +279,20 @@ async function handle(
 
   // /api/sync/push — accept ops from optimistic mutations.
   if (url.endsWith("/api/sync/push") && method === "POST") {
+    server.pushRequestCount += 1;
+    // Record which ops were pushed so a test can assert a specific
+    // mutation reached the server (not just "some push happened").
+    try {
+      const body = typeof _init?.body === "string" ? JSON.parse(_init.body) : null;
+      const changes = Array.isArray(body?.changes) ? body.changes : [];
+      for (const c of changes) {
+        if (c && typeof c.entity === "string" && typeof c.row_id === "string") {
+          server.receivedPushKeys.push(`${c.entity}/${c.row_id}`);
+        }
+      }
+    } catch {
+      /* body not JSON / no changes — count still recorded above */
+    }
     const outcome = server.consumeNextPushOutcome();
     if (outcome?.kind === "network") {
       // Reject like a real offline fetch: no HTTP status → the engine

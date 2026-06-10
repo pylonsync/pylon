@@ -822,4 +822,123 @@ describe("sync scenarios", () => {
     // And the replica survives — token rotation must not wipe it.
     expect(env.engine.store.get("Recording", "r1")).not.toBeNull();
   });
+
+  // SNAPSHOT-DROP RACE (pins the `snapshotHold` fence, TS F1). A live WS
+  // event that lands DURING a from-zero snapshot fetch leapfrogs the
+  // cursor: the event applies at seq S+1 first, so when the snapshot's
+  // own rows (pinned at seq ≤ S) finally apply, the monotonic
+  // `seq > cursor.last_seq` filter drops every one of them. The user's
+  // whole replica vanishes for a beat (until the next reconcile),
+  // because one concurrent broadcast raced the snapshot.
+  //
+  // The fix buffers live/broadcast applies in `snapshotHold` for the
+  // duration of a from-zero pull, applies the snapshot first, then
+  // flushes the held events in order — so the snapshot is never behind
+  // the cursor when it lands. This reproduces the race deterministically
+  // via a 410 (which forces a from-zero re-pull AFTER the WS is
+  // connected) plus a `beforePull` hook that injects a higher-seq live
+  // event right as the snapshot is being served.
+  test("a live WS event during a from-zero snapshot doesn't drop the snapshot", async () => {
+    let armed = false;
+    let injected = false;
+    env = createTestEnv({
+      transport: "websocket",
+      // Fires server-side just before the pull response is built. On the
+      // armed from-zero re-pull, deliver a live insert for a DIFFERENT
+      // row at a seq just past the snapshot — the exact interleave that
+      // leapfrogs the cursor mid-fetch.
+      beforePull: (_auth, since) => {
+        if (since !== 0 || !armed || injected) return;
+        injected = true;
+        const liveSeq = env!.server.nextSeqValue() + 1; // > snapshot_seq
+        env!.server.pushToUser("u1", {
+          seq: liveSeq,
+          entity: "Note",
+          row_id: "n2",
+          kind: "insert",
+          data: { id: "n2", title: "live" },
+          timestamp: "",
+        });
+      },
+    });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n1", title: "snapshot" }]);
+    await env.start();
+    await env.flush();
+    // Baseline: the snapshot row is present and the WS is connected.
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+
+    // Arm the injection, then force a from-zero re-pull via a 410. The
+    // delta pull 410s → resetReplica wipes the replica → pullInner
+    // re-pulls from seq=0. The beforePull hook injects the racing live
+    // event while that snapshot is served.
+    armed = true;
+    env.server.primeNextPullStatus(410);
+    await env.engine.pull();
+    await env.flush();
+
+    // The injection must actually have fired — otherwise the test is
+    // vacuous (no race happened).
+    expect(injected).toBe(true);
+    // The snapshot row MUST survive even though a higher-seq live event
+    // applied during the fetch. Pre-fix, n1 was dropped by the monotonic
+    // cursor filter (cursor had already leapfrogged to the live seq).
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+    // ...and the racing live event is also present.
+    expect(env.engine.store.get("Note", "n2")).not.toBeNull();
+  });
+
+  // STRANDED OFFLINE WRITES (pins the leader-path mutation drain, TS F3).
+  // A write made offline is queued and persisted; on next boot the engine
+  // hydrates it into the mutation queue. The hydrate runs PRE-election,
+  // while `isMultiTabLeader` is still false — so the old startup push()
+  // took the follower branch and broadcast the batch to a not-yet-running
+  // orchestrator (a silent no-op). `onInitialLeader` only flips the flag;
+  // nothing re-pushed. The offline write was stranded until an unrelated
+  // mutation fired push() again — the yapless "recording I made on the
+  // plane never uploaded until I recorded another one" class of bug.
+  //
+  // The fix drains the pending queue in the leader path, once election
+  // has settled and we own the network. This test injects a hydrated-
+  // style pending mutation BEFORE start() (persistence is off in the
+  // harness, so this stands in for `mutations.hydrate()`), then asserts
+  // start() actually shipped it to /api/sync/push with no further action.
+  test("hydrated offline writes are pushed once leader-elected", async () => {
+    // WS transport specifically: poll mode's `performPollTick` pushes on
+    // every tick, which would mask the bug. In WS-only mode the sole
+    // startup push is the leader-path drain — onConnected pulls but never
+    // pushes — so this isolates exactly the path the fix restores.
+    env = createTestEnv({ transport: "websocket" });
+    env.signIn({ userId: "u1" });
+
+    // An offline write rehydrated into the queue before the engine boots.
+    env.engine.mutations.add({
+      entity: "Note",
+      row_id: "n1",
+      kind: "insert",
+      data: { id: "n1", title: "written offline" },
+    });
+    // Mirror the optimistic row the offline write left in the replica.
+    env.engine.store.applyChange({
+      seq: 0,
+      entity: "Note",
+      row_id: "n1",
+      kind: "insert",
+      data: { id: "n1", title: "written offline" },
+      timestamp: "",
+    });
+    expect(env.engine.mutations.pending()).toHaveLength(1);
+    expect(env.server.receivedPushKeys).not.toContain("Note/n1");
+
+    await env.start();
+    await env.flush();
+
+    // The leader must have drained THIS write to the server with no extra
+    // user action. Asserting the specific op key (not just "a push
+    // happened") keeps the test robust against a stray retry timer from
+    // an unrelated engine firing against the shared fetch mock. Pre-fix
+    // Note/n1 never reached the server — the startup push was a no-op
+    // follower broadcast and nothing re-pushed.
+    expect(env.server.receivedPushKeys).toContain("Note/n1");
+  });
 });
