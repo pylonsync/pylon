@@ -19,9 +19,10 @@
 //! be stored or replayed.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-deploy namespace. The artifact id on cloud; `"dev"` otherwise (a dev
@@ -95,20 +96,158 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+// ---- In-memory layer over the on-disk cache (hot-path latency) ----
+//
+// A cache HIT otherwise costs two `fs::read`s (`.html` + `.meta`) plus a JSON
+// parse PER request. At the SSR cache's measured hit throughput (~23k rps on
+// the Rust-only path) that syscall + parse tax is the dominant cost. This
+// RwLock-fronted map sits in front of disk: a hit takes the READ lock and
+// clones an `Arc<MemEntry>` (concurrent, no syscall) — only a miss-populate or
+// an eviction takes the write lock. Entries are immutable per build + TTL'd, so
+// there's deliberately NO recency-update on read (which would force a write and
+// defeat the RwLock); eviction is oldest-inserted (FIFO) once over the byte
+// budget. Freshness is recomputed per get from the stored `rendered_at`, so a
+// stale entry is still surfaced (stale-on-error relies on that).
+//
+// Coherence: every write goes through `put()` (disk + mem together) and the
+// build namespace is fixed for the process, so the key space is unambiguous and
+// a new deploy is a new process with an empty map. Bounded by
+// `PYLON_SSR_MEMCACHE_BYTES` (default 32 MiB; `0` disables → pure disk).
+struct MemEntry {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Arc<Vec<u8>>,
+    rendered_at: u64,
+    revalidate_secs: u64,
+    seq: u64,
+}
+
+struct MemInner {
+    map: HashMap<String, Arc<MemEntry>>,
+    bytes: usize,
+    seq: u64,
+}
+
+struct MemCache {
+    inner: RwLock<MemInner>,
+    budget_bytes: usize,
+}
+
+impl MemCache {
+    fn get(&self, key: &str) -> Option<Arc<MemEntry>> {
+        self.inner.read().unwrap().map.get(key).cloned()
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        status: u16,
+        headers: &[(String, String)],
+        body: &[u8],
+        rendered_at: u64,
+        revalidate_secs: u64,
+    ) {
+        // Never let one oversized page evict the whole working set — it serves
+        // from disk instead.
+        if body.len() > self.budget_bytes {
+            return;
+        }
+        let mut g = self.inner.write().unwrap();
+        g.seq += 1;
+        let entry = Arc::new(MemEntry {
+            status,
+            headers: headers.to_vec(),
+            body: Arc::new(body.to_vec()),
+            rendered_at,
+            revalidate_secs,
+            seq: g.seq,
+        });
+        if let Some(old) = g.map.insert(key.to_string(), Arc::clone(&entry)) {
+            g.bytes = g.bytes.saturating_sub(old.body.len());
+        }
+        g.bytes += entry.body.len();
+        // Evict oldest-inserted (FIFO) until under budget. The map is small
+        // (budget / page-size) so the min-scan on the rare overflow is cheap.
+        while g.bytes > self.budget_bytes {
+            let victim = g
+                .map
+                .iter()
+                .min_by_key(|(_, v)| v.seq)
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(k) => {
+                    if let Some(v) = g.map.remove(&k) {
+                        g.bytes = g.bytes.saturating_sub(v.body.len());
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn clear(&self) {
+        let mut g = self.inner.write().unwrap();
+        g.map.clear();
+        g.bytes = 0;
+    }
+}
+
+fn mem_cache() -> Option<&'static MemCache> {
+    static MEM: std::sync::OnceLock<Option<MemCache>> = std::sync::OnceLock::new();
+    MEM.get_or_init(|| {
+        let budget = std::env::var("PYLON_SSR_MEMCACHE_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(32 * 1024 * 1024);
+        if budget == 0 {
+            return None;
+        }
+        Some(MemCache {
+            inner: RwLock::new(MemInner {
+                map: HashMap::new(),
+                bytes: 0,
+                seq: 0,
+            }),
+            budget_bytes: budget,
+        })
+    })
+    .as_ref()
+}
+
 /// Look up a cached render. Returns None on any miss / read error (the caller
 /// then renders live — a corrupt or partial entry must never 500 the page).
+/// Consults the in-memory layer first (no syscall); a disk hit is promoted into
+/// it so the next request skips disk too (warm-after-restart).
 pub fn get(route_path: &str, pathname: &str, vary: &[(String, String)]) -> Option<CacheEntry> {
     let key = cache_key(route_path, pathname, vary);
+    if let Some(mem) = mem_cache() {
+        if let Some(e) = mem.get(&key) {
+            let age = now_secs().saturating_sub(e.rendered_at);
+            return Some(CacheEntry {
+                status: e.status,
+                headers: e.headers.clone(),
+                body: (*e.body).clone(),
+                fresh: age < e.revalidate_secs,
+            });
+        }
+    }
     let dir = cache_dir();
     let body = std::fs::read(dir.join(format!("{key}.html"))).ok()?;
     let meta_raw = std::fs::read(dir.join(format!("{key}.meta"))).ok()?;
     let meta: Meta = serde_json::from_slice(&meta_raw).ok()?;
-    let age = now_secs().saturating_sub(meta.rendered_at);
+    let rendered_at = meta.rendered_at;
+    let revalidate_secs = meta.revalidate_secs;
+    let status = meta.status;
+    let headers = meta.headers;
+    if let Some(mem) = mem_cache() {
+        mem.put(&key, status, &headers, &body, rendered_at, revalidate_secs);
+    }
+    let age = now_secs().saturating_sub(rendered_at);
     Some(CacheEntry {
-        status: meta.status,
-        headers: meta.headers,
+        status,
+        headers,
         body,
-        fresh: age < meta.revalidate_secs,
+        fresh: age < revalidate_secs,
     })
 }
 
@@ -126,6 +265,12 @@ pub fn put(
     revalidate_secs: u64,
 ) {
     let key = cache_key(route_path, pathname, vary);
+    let rendered_at = now_secs();
+    // Populate the in-memory layer too — the just-rendered page is hot, so the
+    // first cookie-anonymous reader after this serves from RAM, not disk.
+    if let Some(mem) = mem_cache() {
+        mem.put(&key, status, headers, body, rendered_at, revalidate_secs);
+    }
     let dir = cache_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -133,7 +278,7 @@ pub fn put(
     let meta = Meta {
         status,
         revalidate_secs,
-        rendered_at: now_secs(),
+        rendered_at,
         headers: headers.to_vec(),
     };
     let meta_json = match serde_json::to_vec(&meta) {
@@ -170,6 +315,11 @@ fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// served and the disk doesn't grow unbounded across deploys. Keeps only the
 /// current build's dir. No-op when there's no cache yet.
 pub fn wipe_stale_namespaces() {
+    // Drop any in-memory entries too (defensive — at boot the map is empty, but
+    // this keeps mem and disk in lockstep if ever called mid-process).
+    if let Some(mem) = mem_cache() {
+        mem.clear();
+    }
     let root = cache_base();
     let current = build_namespace();
     let entries = match std::fs::read_dir(&root) {
@@ -227,6 +377,55 @@ mod tests {
     // PYLON_ARTIFACT_ID); serialize them so cargo's parallel runner can't have
     // one clobber the other's namespace mid-test.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fresh_mem(budget: usize) -> MemCache {
+        MemCache {
+            inner: RwLock::new(MemInner {
+                map: HashMap::new(),
+                bytes: 0,
+                seq: 0,
+            }),
+            budget_bytes: budget,
+        }
+    }
+
+    #[test]
+    fn mem_layer_serves_recomputes_freshness_and_evicts_oldest() {
+        let m = fresh_mem(1024);
+        let h = vec![("content-type".to_string(), "text/html".to_string())];
+
+        // Put a FRESH entry (large TTL) — get returns it, fresh, byte-identical.
+        m.put("a", 200, &h, b"AAAA", now_secs(), 600);
+        let e = m.get("a").expect("hit");
+        assert_eq!(e.status, 200);
+        assert_eq!(&*e.body, b"AAAA");
+
+        // Freshness is recomputed PER get from rendered_at, so a TTL-0 entry
+        // reads back STALE (stale-on-error depends on this) — but is still
+        // present, not evicted.
+        m.put("b", 200, &h, b"BB", now_secs(), 0);
+        let b = m.get("b").expect("stale entry still cached");
+        assert!(now_secs().saturating_sub(b.rendered_at) >= b.revalidate_secs);
+
+        // A body larger than the whole budget is NOT cached (it would evict the
+        // working set) — it serves from disk instead.
+        m.put("huge", 200, &h, &vec![0u8; 2048], now_secs(), 600);
+        assert!(m.get("huge").is_none());
+
+        // Byte-budget eviction is oldest-inserted (FIFO): fill past 1024 with
+        // 300-byte bodies; the earliest keys are evicted first.
+        let m2 = fresh_mem(1024);
+        for i in 0..5 {
+            m2.put(&format!("k{i}"), 200, &h, &vec![b'x'; 300], now_secs(), 600);
+        }
+        // 5 * 300 = 1500 > 1024 → at most 3 survive (3*300=900 ≤ 1024).
+        let survivors = (0..5)
+            .filter(|i| m2.get(&format!("k{i}")).is_some())
+            .count();
+        assert!(survivors <= 3, "budget enforced (survivors={survivors})");
+        assert!(m2.get("k4").is_some(), "newest survives");
+        assert!(m2.get("k0").is_none(), "oldest evicted first");
+    }
 
     #[test]
     fn key_is_deterministic_and_param_order_independent() {

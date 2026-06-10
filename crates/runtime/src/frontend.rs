@@ -3188,22 +3188,25 @@ mod tests {
         std::env::set_var("PYLON_ARTIFACT_ID", "stale-on-error-test");
 
         let headers = vec![("content-type".to_string(), "text/html".to_string())];
-        // TTL 0 → the entry is immediately STALE.
-        crate::ssr_cache::put("/p", "/p", &[], 200, &headers, b"<html>old</html>", 0);
+        // TTL 0 → the entry is immediately STALE. Unique keys so the shared
+        // process-wide in-memory cache layer can't collide with the ssr_cache
+        // module's own tests under a parallel runner.
+        let rp = "/__stale_oe__";
+        crate::ssr_cache::put(rp, rp, &[], 200, &headers, b"<html>old</html>", 0);
 
         // Cacheable-eligible + a stale entry exists → it's a valid fallback,
         // and it's the STALE entry (the whole point of stale-on-error).
-        let cand = stale_on_error_candidate("/p", "/p", true).expect("stale entry is a candidate");
+        let cand = stale_on_error_candidate(rp, rp, true).expect("stale entry is a candidate");
         assert!(!cand.fresh, "fallback is the stale entry");
         assert_eq!(cand.body, b"<html>old</html>");
 
         // NOT cacheable-eligible (authed / has query) → never serve a shared
         // anonymous page as a fallback, even though one is cached.
-        assert!(stale_on_error_candidate("/p", "/p", false).is_none());
+        assert!(stale_on_error_candidate(rp, rp, false).is_none());
 
         // Cacheable-eligible but nothing cached for this route → no fallback;
         // the caller emits its 503/500.
-        assert!(stale_on_error_candidate("/never", "/never", true).is_none());
+        assert!(stale_on_error_candidate("/__never_oe__", "/__never_oe__", true).is_none());
 
         std::env::remove_var("PYLON_SSR_CACHE_ROOT");
         std::env::remove_var("PYLON_ARTIFACT_ID");
