@@ -1,0 +1,256 @@
+{
+  "manifest_version": 1,
+  "name": "market",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Listing",
+      "fields": [
+        {
+          "name": "sellerId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sellerName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "price",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "category",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "condition",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "seed",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_status",
+          "fields": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_seller",
+          "fields": [
+            "sellerId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_created",
+          "fields": [
+            "createdAt"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "Offer",
+      "fields": [
+        {
+          "name": "listingId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "listingTitle",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "sellerId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "buyerId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "buyerName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "amount",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_listing",
+          "fields": [
+            "listingId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_buyer",
+          "fields": [
+            "buyerId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_seller",
+          "fields": [
+            "sellerId"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/listing/:id",
+      "mode": "ssr",
+      "component": "app/listing/[id]/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/me",
+      "mode": "ssr",
+      "component": "app/me/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/sell",
+      "mode": "ssr",
+      "component": "app/sell/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "listing_access",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.sellerId",
+      "allowDelete": "auth.userId == data.sellerId",
+      "entity": "Listing"
+    },
+    {
+      "name": "offer_access",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.buyerId || auth.userId == data.sellerId",
+      "allowDelete": "auth.userId == data.buyerId",
+      "entity": "Offer"
+    }
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
+}
