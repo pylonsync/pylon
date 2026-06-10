@@ -234,9 +234,25 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
 // Watch mode
 // ---------------------------------------------------------------------------
 
+/// Directory to watch for file changes — the parent of the entry file, or `.`.
+///
+/// The subtlety that broke hot reload for almost every app: `pylon dev`
+/// auto-discovers `app.ts` in the CWD and passes the BARE relative name. But
+/// `Path::new("app.ts").parent()` is `Some("")` (an empty path), NOT `None`, so
+/// a naive `.parent().unwrap_or(Path::new("."))` returns the EMPTY path — the
+/// `unwrap_or` only fires on `None`. `read_dir("")` then fails, the mtime map
+/// is always empty, no change is ever detected, and nothing reloads. Treat an
+/// empty (or absent) parent as the current directory.
+fn resolve_watch_dir(entry_file: &str) -> PathBuf {
+    match Path::new(entry_file).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
-    let entry_path = Path::new(entry_file);
-    let watch_dir = entry_path.parent().unwrap_or(Path::new("."));
+    let watch_dir_buf = resolve_watch_dir(entry_file);
+    let watch_dir = watch_dir_buf.as_path();
 
     if !json_mode {
         println!("pylon dev");
@@ -907,5 +923,31 @@ fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_watch_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_watch_dir_handles_bare_relative_entry() {
+        // The bug: `pylon dev` auto-discovers "app.ts" (bare relative name) and
+        // Path::new("app.ts").parent() is Some("") — NOT None — so the old
+        // `.unwrap_or(".")` returned the EMPTY path, read_dir("") failed, and
+        // nothing was ever watched (hot reload dead for almost every app).
+        assert_eq!(resolve_watch_dir("app.ts"), PathBuf::from("."));
+        assert_eq!(resolve_watch_dir("schema.ts"), PathBuf::from("."));
+        // A nested relative path keeps its real parent.
+        assert_eq!(
+            resolve_watch_dir("examples/ssr-hello/app.ts"),
+            PathBuf::from("examples/ssr-hello")
+        );
+        // Absolute path keeps its parent.
+        assert_eq!(
+            resolve_watch_dir("/srv/app/app.ts"),
+            PathBuf::from("/srv/app")
+        );
     }
 }
