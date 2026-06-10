@@ -594,21 +594,76 @@ function readSocialImageMeta(relPath: string): {
   return { type, width, height, v };
 }
 
-/** Absolute origin for OG URLs (crawlers require absolute). Prefers the
- *  request Host (works for any custom domain the app serves), falling
- *  back to PYLON_PUBLIC_URL. Empty string → relative (dev last resort). */
-function resolveRequestOrigin(headers: Record<string, string> | undefined): string {
-  const host = headers?.["host"];
-  if (host) {
-    const proto =
-      headers?.["x-forwarded-proto"] ||
-      (/^(localhost|127\.|\[?::1|0\.0\.0\.0)/.test(host) ? "http" : "https");
-    return `${proto}://${host}`;
+const LOOPBACK_HOST = /^(localhost|127\.|\[?::1|0\.0\.0\.0)/;
+
+/** Normalize a bare host or a full URL down to a lowercase `host` (host:port).
+ *  Returns "" for unparseable input. */
+function hostOf(value: string): string {
+  const t = (value || "").trim();
+  if (!t) return "";
+  try {
+    return (t.includes("://") ? new URL(t).host : t.replace(/^\/+|\/+$/g, "")).toLowerCase();
+  } catch {
+    return "";
   }
-  const env = ((globalThis as any).process?.env?.PYLON_PUBLIC_URL || "")
-    .trim()
-    .replace(/\/+$/, "");
-  return env;
+}
+
+/** Pure origin resolution (exported for tests).
+ *
+ *  SECURITY: the request `Host` (and `X-Forwarded-Proto`) is attacker-
+ *  controlled. It's only trusted to build the absolute origin baked into
+ *  `og:image` / canonical URLs when it's in the allowlist — the configured
+ *  public/canonical host, an explicit `PYLON_TRUSTED_HOSTS` entry, or
+ *  loopback. An untrusted (or absent) Host falls back to the configured
+ *  public origin. Without this, `Host: evil.com` on a cacheable
+ *  (force-static / `revalidate`) render bakes `https://evil.com/_pylon/og…`
+ *  into the HTML, which is then teed into the shared ISR/CDN cache and
+ *  served to every subsequent visitor (cache poisoning). */
+export function resolveOrigin(opts: {
+  host?: string;
+  forwardedProto?: string;
+  publicUrl?: string;
+  canonicalHost?: string;
+  trustedHostsCsv?: string;
+}): string {
+  const publicUrl = (opts.publicUrl || "").trim().replace(/\/+$/, "");
+  const host = opts.host?.trim().toLowerCase();
+  if (host) {
+    const allow = new Set<string>();
+    const add = (v: string) => {
+      const h = hostOf(v);
+      if (h) allow.add(h);
+    };
+    add(opts.publicUrl || "");
+    add(opts.canonicalHost || "");
+    for (const x of (opts.trustedHostsCsv || "").split(",")) add(x);
+    const isLoopback = LOOPBACK_HOST.test(host);
+    if (isLoopback || allow.has(host)) {
+      // Only honor a forwarded proto for a TRUSTED host — else an attacker
+      // could downgrade the cached URL to http://. Default https off-loopback.
+      const proto = opts.forwardedProto || (isLoopback ? "http" : "https");
+      return `${proto}://${host}`;
+    }
+  }
+  // Untrusted / absent Host → the configured canonical origin. (Prefer the
+  // full public URL; fall back to the canonical host as https.)
+  if (publicUrl) return publicUrl;
+  const canon = hostOf(opts.canonicalHost || "");
+  return canon ? `https://${canon}` : "";
+}
+
+/** Absolute origin for OG URLs (crawlers require absolute). Trusts the
+ *  request Host only when it's allowlisted; otherwise uses PYLON_PUBLIC_URL.
+ *  See `resolveOrigin` for the security rationale. */
+function resolveRequestOrigin(headers: Record<string, string> | undefined): string {
+  const env = (globalThis as any).process?.env ?? {};
+  return resolveOrigin({
+    host: headers?.["host"],
+    forwardedProto: headers?.["x-forwarded-proto"],
+    publicUrl: env.PYLON_PUBLIC_URL,
+    canonicalHost: env.PYLON_CANONICAL_HOST,
+    trustedHostsCsv: env.PYLON_TRUSTED_HOSTS,
+  });
 }
 
 /** Merge auto-discovered social-card images into a page's metadata. An

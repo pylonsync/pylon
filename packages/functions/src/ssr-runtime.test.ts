@@ -10,7 +10,47 @@ import {
   renderMetadata,
   buildHydrationTail,
   errorDigest,
+  resolveOrigin,
 } from "./ssr-runtime";
+
+describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
+  const publicUrl = "https://www.notbehind.com";
+
+  test("trusts the Host only when it's the configured public origin", () => {
+    expect(resolveOrigin({ host: "www.notbehind.com", publicUrl })).toBe(
+      "https://www.notbehind.com",
+    );
+  });
+
+  test("an attacker Host falls back to the public origin (no poisoning)", () => {
+    // The crux: Host: evil.com must NOT produce https://evil.com (which would
+    // be baked into og:image + teed into the shared ISR/CDN cache).
+    expect(resolveOrigin({ host: "evil.com", publicUrl })).toBe(
+      "https://www.notbehind.com",
+    );
+  });
+
+  test("explicit PYLON_TRUSTED_HOSTS + canonical host are honored", () => {
+    expect(
+      resolveOrigin({ host: "cdn.notbehind.com", publicUrl, trustedHostsCsv: "cdn.notbehind.com, x.com" }),
+    ).toBe("https://cdn.notbehind.com");
+    expect(resolveOrigin({ host: "notbehind.com", publicUrl, canonicalHost: "notbehind.com" })).toBe(
+      "https://notbehind.com",
+    );
+  });
+
+  test("loopback is trusted for dev; X-Forwarded-Proto honored only there", () => {
+    expect(resolveOrigin({ host: "localhost:4321" })).toBe("http://localhost:4321");
+    // Attacker downgrade attempt on an untrusted host is ignored (falls back).
+    expect(
+      resolveOrigin({ host: "evil.com", forwardedProto: "http", publicUrl }),
+    ).toBe("https://www.notbehind.com");
+  });
+
+  test("no public origin + untrusted host → empty (relative, never poisoned)", () => {
+    expect(resolveOrigin({ host: "evil.com" })).toBe("");
+  });
+});
 
 // Pull the JSON out of the `__PYLON_DATA__` <script> a hydration tail emits.
 function extractPylonData(tail: string): any {
@@ -78,11 +118,17 @@ describe("opengraph-image file convention", () => {
       pngHeader(1200, 630),
     );
 
-    const md = applyAutoSocialImages(
-      "app/blog/page",
-      { host: "example.com" },
-      undefined,
-    );
+    // Host must be allowlisted to be trusted for the absolute OG origin
+    // (the cache-poisoning fence). Configure it as the public origin.
+    const prevPub = process.env.PYLON_PUBLIC_URL;
+    process.env.PYLON_PUBLIC_URL = "https://example.com";
+    let md;
+    try {
+      md = applyAutoSocialImages("app/blog/page", { host: "example.com" }, undefined);
+    } finally {
+      if (prevPub === undefined) delete process.env.PYLON_PUBLIC_URL;
+      else process.env.PYLON_PUBLIC_URL = prevPub;
+    }
 
     expect(md?.openGraph?.image).toContain(
       "https://example.com/_pylon/og?src=app%2Fblog%2Fopengraph-image.png",
