@@ -532,6 +532,40 @@ mod tests {
     }
 
     #[test]
+    fn default_scaffold_manifest_is_lint_clean() {
+        // The `create-pylon` scaffold (templates/basic/app.ts) ships a `Post`
+        // entity WITH a `post_access` policy (public read, authed write). It
+        // must lint clean — a newcomer running `pylon dev` should never hit a
+        // PYL002 (no-policy → 403) cliff or a PYL001/PYL004 warning out of the
+        // box. If the default template drifts to something lint-dirty, this
+        // fails. Mirrors the scaffold exactly.
+        let post = entity_with(
+            "Post",
+            vec![
+                field("title"),
+                field("slug"),
+                field("body"),
+                field("publishedAt"),
+            ],
+        );
+        let post_policy = policy_with(
+            "post_access",
+            "Post",
+            &[
+                ("read", "true"),
+                ("insert", "auth.userId != null"),
+                ("update", "auth.userId != null"),
+                ("delete", "auth.userId != null"),
+            ],
+        );
+        let findings = lint_manifest(&manifest(vec![post], vec![post_policy]));
+        assert!(
+            findings.is_empty(),
+            "default scaffold must lint clean, got: {findings:?}"
+        );
+    }
+
+    #[test]
     fn pyl003_flags_data_check_without_existing() {
         // Canonical IDOR shape — payload-only ownership check.
         let m = manifest(

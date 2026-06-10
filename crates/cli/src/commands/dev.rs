@@ -208,6 +208,22 @@ fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
             println!();
         }
 
+        // Policy lint (esp. PYL002: an entity with no policy default-denies at
+        // runtime). Surface it in --once too so scripts / CI catch it.
+        let lint_findings = crate::commands::lint::lint_manifest(&manifest);
+        if !lint_findings.is_empty() {
+            for f in &lint_findings {
+                let loc = match (&f.entity, &f.policy) {
+                    (Some(e), Some(p)) => format!(" [{e} · {p}]"),
+                    (Some(e), None) => format!(" [{e}]"),
+                    _ => String::new(),
+                };
+                println!("  \u{26a0} policy {}{}: {}", f.rule, loc, f.message);
+                println!("       fix: {}", f.fix);
+            }
+            println!();
+        }
+
         println!("Schema valid. Use 'pylon dev' (without --once) to start the dev server.");
     }
 
@@ -562,6 +578,23 @@ fn run_rebuild_and_get_manifest(
             manifest.policies.len(),
             manifest.routes.len(),
         );
+        // Surface policy-lint findings here at dev startup AND on every
+        // rebuild. The big one is PYL002: an entity with NO policy
+        // default-DENIES at runtime, so reads/writes return 403 with no other
+        // signal — a newcomer who forgot a policy would otherwise just see
+        // silent 403s in the browser. Make it a loud, actionable warning with
+        // the one-line fix. Non-fatal: the dev server still starts (you may be
+        // mid-edit). Run `pylon lint` for the full report.
+        let lint_findings = crate::commands::lint::lint_manifest(&manifest);
+        for f in &lint_findings {
+            let loc = match (&f.entity, &f.policy) {
+                (Some(e), Some(p)) => format!(" [{e} · {p}]"),
+                (Some(e), None) => format!(" [{e}]"),
+                _ => String::new(),
+            };
+            eprintln!("[{n}] \u{26a0} policy {}{}: {}", f.rule, loc, f.message);
+            eprintln!("       fix: {}", f.fix);
+        }
     }
 
     if has_errors {

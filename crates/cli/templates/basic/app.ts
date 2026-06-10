@@ -1,4 +1,4 @@
-import { entity, field, defineRoute, buildManifest } from "./sdk";
+import { entity, field, policy, defineRoute, buildManifest } from "./sdk";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -26,6 +26,26 @@ const postBySlug = defineRoute({
 });
 
 // ---------------------------------------------------------------------------
+// Policies
+//
+// Pylon is SECURE BY DEFAULT: an entity with NO policy is denied — every read
+// and write returns 403 until you declare access explicitly. (That's on
+// purpose: it stops you from accidentally shipping a table wide open.) This
+// policy makes posts publicly readable but writable only by a signed-in user.
+// Edit the `allow*` expressions — they can reference `auth` (the caller) and
+// `data` (the row) — e.g. `allowUpdate: "auth.userId == data.authorId"`.
+// ---------------------------------------------------------------------------
+
+const postPolicy = policy({
+  name: "post_access",
+  entity: "Post",
+  allowRead: "true",
+  allowInsert: "auth.userId != null",
+  allowUpdate: "auth.userId != null",
+  allowDelete: "auth.userId != null",
+});
+
+// ---------------------------------------------------------------------------
 // Manifest
 // ---------------------------------------------------------------------------
 
@@ -33,6 +53,7 @@ const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Post],
+  policies: [postPolicy],
   routes: [home, postBySlug],
 });
 
