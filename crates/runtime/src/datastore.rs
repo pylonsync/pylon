@@ -4309,6 +4309,32 @@ fn op_method(op: pylon_functions::runner::PolicyOp) -> &'static str {
     }
 }
 
+/// Decide whether to spawn the Bun runner. Spawn when there are server
+/// functions to load OR SSR routes to render: a pure-SSR app (file-based
+/// `app/**/page.tsx` + entity CRUD) has no `functions/` dir but still needs
+/// the runner to execute renders. Only an app with neither stays API-only.
+fn should_spawn_runner(fn_dir_exists: bool, has_ssr_routes: bool) -> bool {
+    fn_dir_exists || has_ssr_routes
+}
+
+#[cfg(test)]
+mod runner_spawn_gate_tests {
+    use super::should_spawn_runner;
+
+    #[test]
+    fn spawns_for_functions_or_ssr_but_not_for_neither() {
+        // Functions present, no SSR — classic backend.
+        assert!(should_spawn_runner(true, false));
+        // Pure-SSR app: no functions/ dir, but SSR routes need the runner.
+        // This is the case that used to silently 404 every GET.
+        assert!(should_spawn_runner(false, true));
+        // Both.
+        assert!(should_spawn_runner(true, true));
+        // Neither — genuinely nothing to run; stay API-only.
+        assert!(!should_spawn_runner(false, false));
+    }
+}
+
 pub fn try_spawn_functions(
     runtime: Arc<Runtime>,
     job_queue: Arc<crate::jobs::JobQueue>,
@@ -4320,7 +4346,15 @@ pub fn try_spawn_functions(
     policy_engine: Arc<pylon_policy::PolicyEngine>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
-    if !std::path::Path::new(&fn_dir).exists() {
+    let fn_dir_exists = std::path::Path::new(&fn_dir).exists();
+    // A pure-SSR app (file-based `app/**/page.tsx` routes + entity CRUD, no
+    // server functions) has no `functions/` dir — but native SSR rendering
+    // still runs through this same Bun runner, so we must spawn it whenever
+    // there are SSR routes. Without this, such an app silently 404s every GET
+    // (the SSR dispatcher needs `fn_ops` to render). Only bail when there's
+    // genuinely nothing to run: no functions dir AND no SSR routes.
+    let has_ssr_routes = runtime.manifest().routes.iter().any(|r| r.mode == "ssr");
+    if !should_spawn_runner(fn_dir_exists, has_ssr_routes) {
         return None;
     }
 

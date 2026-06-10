@@ -942,12 +942,12 @@ async function main() {
       (f) => f.endsWith(".ts") || f.endsWith(".js")
     );
   } catch {
-    send({
-      type: "ready",
-      functions: [],
-      error: `Cannot read functions directory: ${fnDir}`,
-    });
-    return;
+    // No `functions/` directory. Legitimate for a pure-SSR app (file-based
+    // `app/**/page.tsx` routes + entity CRUD, no server functions) — the host
+    // still spawns this runner to execute SSR renders. Load zero functions and
+    // fall through so we send `ready` AND start the reader loop; returning here
+    // would leave the runner unable to serve renders (silent 404s).
+    files = [];
   }
 
   for (const file of files) {
