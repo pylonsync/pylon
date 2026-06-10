@@ -7,6 +7,7 @@ import { mutation, v } from "@pylonsync/functions";
  * do that right after.
  */
 export default mutation({
+  auth: "guest",
   args: {
     name: v.string(),
     slug: v.string(),

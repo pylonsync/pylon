@@ -9,6 +9,7 @@ import { mutation, v } from "@pylonsync/functions";
 const ORDER = ["confirmed", "in_production", "ready", "shipped", "delivered"];
 
 export default mutation({
+  auth: "guest",
   args: {
     orderId: v.id("Order"),
     status: v.string(),

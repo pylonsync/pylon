@@ -11,7 +11,13 @@
  * No server-side functions are needed — todos are CRUD'd directly
  * through `/api/entities/Todo`, with policies enforcing ownership.
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 const User = entity(
   "User",
@@ -78,7 +84,9 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [userPolicy, todoPolicy],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves
+  // the frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

@@ -5,6 +5,8 @@ import { mutation } from "@pylonsync/functions";
  * useful when you've stress-tested with 1000+ bots and want a reset.
  */
 export default mutation({
+  // Public demo: guests can clear bots. Defaults to auth: "user" without this.
+  auth: "guest",
   args: {},
   async handler(ctx) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

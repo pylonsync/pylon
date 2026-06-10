@@ -6,6 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * viewer/admin but can't touch owners. Users cannot edit their own role.
  */
 export default mutation({
+  auth: "guest",
   args: {
     memberId: v.id("OrgMember"),
     role: v.string(),

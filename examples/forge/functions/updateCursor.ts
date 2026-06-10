@@ -6,6 +6,9 @@ import { mutation, v } from "@pylonsync/functions";
  * the Cursor live query.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     roomId: v.string(),
     name: v.string(),

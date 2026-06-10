@@ -8,6 +8,7 @@ import { mutation, v } from "@pylonsync/functions";
  * and the invited user sees it on next login via an "Invites" banner.
  */
 export default mutation({
+  auth: "guest",
   args: {
     email: v.string(),
     role: v.string(),

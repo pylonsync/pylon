@@ -12,7 +12,13 @@
  *   - Hot path is single-digit KB per second per client
  *   - No sidecar, no Redis, no separate realtime layer
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // Each dot tracks its current position + target. Clients interpolate
 // between updates, so we only need to write when the target changes.
@@ -77,7 +83,9 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [dotPolicy, statsPolicy],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves
+  // the frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

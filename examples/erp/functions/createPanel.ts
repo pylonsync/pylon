@@ -7,6 +7,7 @@ import { mutation, v } from "@pylonsync/functions";
  * column-allowlist + policy gates apply at query time.
  */
 export default mutation({
+  auth: "guest",
   args: {
     title: v.string(),
     entity: v.string(),

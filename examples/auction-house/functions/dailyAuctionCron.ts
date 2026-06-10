@@ -123,6 +123,9 @@ const AUCTION_DURATION_SECS = 22 * 60 * 60; // 22h window so the next day's auct
 const LOTS_PER_AUCTION = 6;
 
 export default action({
+	// Scheduler-driven, but declare guest so a guest-session caller is never
+	// rejected by the post-v0.3.256 auth: "user" default.
+	auth: "guest",
 	args: {},
 	async handler(ctx) {
 		const now = new Date();

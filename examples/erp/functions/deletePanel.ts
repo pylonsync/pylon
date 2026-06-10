@@ -5,6 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * can't delete panels from another org by guessing the id.
  */
 export default mutation({
+  auth: "guest",
   args: { panelId: v.id("DashboardPanel") },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

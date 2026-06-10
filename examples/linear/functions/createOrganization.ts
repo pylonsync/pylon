@@ -1,6 +1,9 @@
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: { name: v.string(), slug: v.string() },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

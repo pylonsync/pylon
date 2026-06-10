@@ -678,10 +678,25 @@
       ]
     }
   ],
-  "routes": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
   "queries": [],
   "actions": [],
   "policies": [
+    {
+      "name": "user_directory_read",
+      "allowRead": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.id",
+      "entity": "User"
+    },
     {
       "name": "organization_access",
       "allowRead": "auth.userId != null",
@@ -770,5 +785,30 @@
       "allowDelete": "auth.tenantId == data.orgId",
       "entity": "IssueActivity"
     }
-  ]
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
 }

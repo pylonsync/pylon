@@ -1,0 +1,142 @@
+{
+  "manifest_version": 1,
+  "name": "bench",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Counter",
+      "fields": [
+        {
+          "name": "label",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "value",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_label",
+          "fields": [
+            "label"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "Sample",
+      "fields": [
+        {
+          "name": "runId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "atSec",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "mutations",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "p50ms",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "p95ms",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "p99ms",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_run_at",
+          "fields": [
+            "runId",
+            "atSec"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "counter_public",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "entity": "Counter"
+    },
+    {
+      "name": "sample_public",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "entity": "Sample"
+    }
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
+}

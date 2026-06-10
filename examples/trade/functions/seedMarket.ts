@@ -29,6 +29,10 @@ const SYMBOLS = [
  * openPrice to current price (simulating a market open).
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can seed
+  // the market. Without this the function defaults to auth: "user" and rejects
+  // guests.
+  auth: "guest",
   args: {},
   async handler(ctx) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

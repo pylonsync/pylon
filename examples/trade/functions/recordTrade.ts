@@ -7,6 +7,10 @@ import { mutation, v } from "@pylonsync/functions";
  * run a cron/scheduled job instead of a client loop.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can drive
+  // the market maker. Without this the function defaults to auth: "user" and
+  // rejects guests.
+  auth: "guest",
   args: {
     symbol: v.string(),
     price: v.number(),

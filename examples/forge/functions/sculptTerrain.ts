@@ -17,6 +17,9 @@ import { mutation, v } from "@pylonsync/functions";
  * heights JSON. For a 64×64 grid that's ~35 KB of payload per stroke.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     roomId: v.string(),
     cx: v.number(),

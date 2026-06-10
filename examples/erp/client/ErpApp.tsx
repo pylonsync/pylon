@@ -20,19 +20,17 @@ import {
   type AggregateSpec,
 } from "@pylonsync/react";
 
-// Vercel env vars for the deployed build:
-//   VITE_PYLON_URL    = https://pylon-erp.fly.dev
-//   VITE_PYLON_WS_URL = wss://pylon-erp.fly.dev:4322
-// Local dev picks up port+1 (4322) from the pylon dev output.
-const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
-const WS_URL =
-  process.env.NEXT_PUBLIC_PYLON_WS_URL ??
-  (BASE_URL.startsWith("https://")
-    ? `${BASE_URL.replace(/^https:/, "wss:").replace(/\/$/, "")}:4322`
-    : undefined);
+// Same-origin under native SSR: the Pylon binary serves this app and its API
+// on one port, so the client talks to its own origin (and the sync engine
+// derives the WebSocket URL from it). Falls back to the dev port only during
+// the (never-rendered) server import of this module.
+const BASE_URL =
+  typeof window !== "undefined"
+    ? window.location.origin
+    : "http://localhost:4321";
 // Namespace so the ERP doesn't inherit auth/replica state from the chat
 // demo (or any other Pylon app) when they share a browser origin.
-init({ baseUrl: BASE_URL, appName: "erp", wsUrl: WS_URL });
+init({ baseUrl: BASE_URL, appName: "erp" });
 configureClient({ baseUrl: BASE_URL, appName: "erp" });
 
 // ---------------------------------------------------------------------------

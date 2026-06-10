@@ -13,7 +13,13 @@
  *   - Single live query per entity serves the whole room
  *   - No custom realtime protocol — pure Pylon mutations + subs
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // A primitive in the scene.
 const Prim = entity(
@@ -120,7 +126,9 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [primPolicy, cursorPolicy, terrainPolicy],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves
+  // the frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

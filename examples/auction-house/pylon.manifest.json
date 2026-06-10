@@ -384,7 +384,16 @@
       ]
     }
   ],
-  "routes": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
   "queries": [],
   "actions": [],
   "policies": [
@@ -445,6 +454,12 @@
           "tenant_id"
         ]
       }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
     },
     "trusted_origins": []
   }

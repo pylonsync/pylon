@@ -26,6 +26,10 @@ const LIVE_LOTS = [
 ];
 
 export default mutation({
+  // Public demo: the client seeds sample auctions on first load with only a
+  // guest session. Without this the function defaults to auth: "user" and
+  // rejects guests.
+  auth: "guest",
   args: {
     force: v.optional(v.boolean()),
   },

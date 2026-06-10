@@ -5,6 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * via createProductOption so a configurator can stream them in.
  */
 export default mutation({
+  auth: "guest",
   args: {
     name: v.string(),
     category: v.string(),

@@ -97,6 +97,12 @@
           "type": "datetime",
           "optional": false,
           "unique": false
+        },
+        {
+          "name": "sortKey",
+          "type": "float",
+          "optional": true,
+          "unique": false
         }
       ],
       "indexes": [
@@ -118,7 +124,16 @@
       ]
     }
   ],
-  "routes": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
   "queries": [],
   "actions": [],
   "policies": [

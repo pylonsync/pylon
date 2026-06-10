@@ -1,6 +1,10 @@
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can manage
+  // their watchlist. Without this the function defaults to auth: "user" and
+  // rejects guests.
+  auth: "guest",
   args: {
     userId: v.string(),
     symbol: v.string(),

@@ -3,6 +3,9 @@ import { mutation, v } from "@pylonsync/functions";
 const KINDS = ["box", "sphere", "cone", "torus"];
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     roomId: v.string(),
     kind: v.string(),

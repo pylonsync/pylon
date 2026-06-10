@@ -6,6 +6,9 @@ import { mutation, v } from "@pylonsync/functions";
  * runs without relying on in-memory state.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call
+  // this. Without it the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     runId: v.string(),
     atSec: v.number(),

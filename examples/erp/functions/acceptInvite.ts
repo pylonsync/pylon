@@ -6,6 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * row and stamps the invite's acceptedAt.
  */
 export default mutation({
+  auth: "guest",
   args: {
     inviteId: v.id("OrgInvite"),
   },

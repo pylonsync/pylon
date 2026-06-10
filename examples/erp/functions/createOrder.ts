@@ -9,6 +9,7 @@ import { mutation, v } from "@pylonsync/functions";
  * lineTotal is computed; productionStatus starts as "queued".
  */
 export default mutation({
+  auth: "guest",
   args: {
     customerId: v.id("Customer"),
     notes: v.optional(v.string()),

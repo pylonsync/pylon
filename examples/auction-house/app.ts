@@ -17,7 +17,13 @@
  *   - Scheduled functions for auto-closing
  *   - Per-user auth + balance enforcement
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Entities
@@ -206,7 +212,9 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [userPolicy, auctionPolicy, lotPolicy, bidPolicy, watchPolicy],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves the
+  // frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

@@ -8,6 +8,9 @@ import { mutation, v } from "@pylonsync/functions";
  * and the caller can retry.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     teamId: v.id("Team"),
     title: v.string(),

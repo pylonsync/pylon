@@ -23,6 +23,7 @@ export interface Todo {
   dueAt?: string;
   completedAt?: string;
   createdAt: string;
+  sortKey?: number;
 }
 
 // ---------------------------------------------------------------------------

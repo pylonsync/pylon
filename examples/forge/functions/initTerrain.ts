@@ -10,6 +10,9 @@ import { mutation, v } from "@pylonsync/functions";
  * terrain and staying under ~35 KB per update.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     roomId: v.string(),
     size: v.optional(v.int()),

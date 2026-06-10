@@ -9,6 +9,10 @@ import { mutation, v } from "@pylonsync/functions";
 const INITIAL_LIVE_WINDOW_SECS = 30;
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can drive
+  // the live auctioneer controls. Without this the function defaults to
+  // auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     lotId: v.string(),
   },

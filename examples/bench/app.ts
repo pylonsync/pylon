@@ -15,7 +15,13 @@
  * interesting question is how they degrade under load. This demo
  * lets you reproducibly measure that in under a minute.
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // A single tiny entity the workers write to. Kept intentionally small
 // so IO cost is dominated by the sync/broadcast path, not the storage.
@@ -75,7 +81,9 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [counterPolicy, samplePolicy],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves the
+  // frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

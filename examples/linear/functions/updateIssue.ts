@@ -6,6 +6,9 @@ import { mutation, v } from "@pylonsync/functions";
  * stamp startedAt/completedAt/cancelledAt as Linear does.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     issueId: v.id("Issue"),
     title: v.optional(v.string()),

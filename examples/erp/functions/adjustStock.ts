@@ -10,6 +10,7 @@ import { mutation, v } from "@pylonsync/functions";
  * reconciling an undercount).
  */
 export default mutation({
+  auth: "guest",
   args: {
     materialId: v.id("Material"),
     delta: v.number(),

@@ -1,6 +1,10 @@
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
+  // Public demo: the in-app Login flow calls this with a fresh guest session
+  // (POST /api/auth/guest) before upgrading. Without this the function defaults
+  // to auth: "user" and rejects the guest, breaking onboarding.
+  auth: "guest",
   args: { email: v.string(), displayName: v.string() },
   async handler(ctx, args) {
     const email = args.email.trim().toLowerCase();

@@ -26,7 +26,13 @@ import { Switch } from "@pylonsync/example-ui/switch";
 import { Label } from "@pylonsync/example-ui/label";
 import { cn } from "@pylonsync/example-ui/utils";
 
-const BASE_URL = "http://localhost:4321";
+// Same-origin under native SSR: the Pylon binary serves this app and its API
+// on one port, so the client talks to its own origin. Falls back to the dev
+// port only during the (never-rendered) server import of this module.
+const BASE_URL =
+  typeof window !== "undefined"
+    ? window.location.origin
+    : "http://localhost:4321";
 init({ baseUrl: BASE_URL, appName: "arena" });
 configureClient({ baseUrl: BASE_URL, appName: "arena" });
 

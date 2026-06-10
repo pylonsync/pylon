@@ -10,6 +10,9 @@ import { mutation, v } from "@pylonsync/functions";
  * WS frame per broadcast, one IO per mutation.
  */
 export default mutation({
+  // Public demo: guest sessions drive the simulation. Defaults to
+  // auth: "user" (rejecting guests) without this.
+  auth: "guest",
   args: {
     dotId: v.id("Dot"),
     x: v.number(),

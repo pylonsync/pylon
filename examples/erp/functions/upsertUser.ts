@@ -6,6 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * the same person gets the same color across sessions.
  */
 export default mutation({
+  auth: "guest",
   args: {
     email: v.string(),
     displayName: v.string(),

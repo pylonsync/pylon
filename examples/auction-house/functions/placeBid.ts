@@ -12,6 +12,9 @@ import { mutation, v } from "@pylonsync/functions";
 const ANTISHILL_RESET_SECS = 12;
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can bid.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     lotId: v.string(),
     amountCents: v.int(),

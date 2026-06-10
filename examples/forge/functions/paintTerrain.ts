@@ -9,6 +9,9 @@ import { mutation, v } from "@pylonsync/functions";
  * close to 1 (we normalize at the end to avoid drift).
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     roomId: v.string(),
     cx: v.number(),

@@ -5,6 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * adjustStock to record receipts.
  */
 export default mutation({
+  auth: "guest",
   args: {
     name: v.string(),
     unit: v.string(),

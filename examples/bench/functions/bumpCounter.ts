@@ -6,6 +6,9 @@ import { mutation, v } from "@pylonsync/functions";
  * round-trip that gets timed client-side.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can call
+  // this. Without it the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     label: v.string(),
     delta: v.number(),

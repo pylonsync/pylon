@@ -11,6 +11,9 @@ const PALETTE = [
  * Bots are separate rows with isBot = true.
  */
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can spawn.
+  // Without this the function defaults to auth: "user" and rejects guests.
+  auth: "guest",
   args: {
     userId: v.string(),
     label: v.optional(v.string()),

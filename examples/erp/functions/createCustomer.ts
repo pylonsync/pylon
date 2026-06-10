@@ -4,6 +4,7 @@ import { mutation, v } from "@pylonsync/functions";
  * Create a customer record scoped to the caller's active org.
  */
 export default mutation({
+  auth: "guest",
   args: {
     name: v.string(),
     email: v.optional(v.string()),

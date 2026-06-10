@@ -1,4 +1,10 @@
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
 // Linear-style issue tracker. Organization → Team(s) → Issue, with cycles,
@@ -285,7 +291,9 @@ const manifest = buildManifest({
     orgScoped("Comment"),
     orgScoped("IssueActivity"),
   ],
-  routes: [],
+  // File-based SSR routing: app/page.tsx → "/". The single binary serves the
+  // frontend and the API on one port — no separate Next.js app.
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

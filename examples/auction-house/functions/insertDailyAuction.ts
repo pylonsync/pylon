@@ -10,6 +10,9 @@ import { mutation, v } from "@pylonsync/functions";
  * an unattended auction (no live auctioneer to drive lot transitions).
  */
 export default mutation({
+	// Internal already blocks client calls; declare guest so the post-v0.3.256
+	// auth: "user" default never rejects a guest-session caller.
+	auth: "guest",
 	args: {
 		title: v.string(),
 		description: v.string(),

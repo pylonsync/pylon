@@ -9,6 +9,9 @@ import { query } from "@pylonsync/functions";
  * retries on its next tick).
  */
 export default query({
+	// Internal already blocks client calls; declare guest so the post-v0.3.256
+	// auth: "user" default never rejects a guest-session caller.
+	auth: "guest",
 	args: {},
 	internal: true,
 	async handler(ctx) {

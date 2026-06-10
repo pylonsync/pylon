@@ -26,6 +26,10 @@ function pickColor(seed: string) {
 }
 
 export default mutation({
+  // Public demo: anyone with a guest session (POST /api/auth/guest) can host an
+  // auction. Without this the function defaults to auth: "user" and rejects
+  // guests.
+  auth: "guest",
   args: {
     title: v.string(),
     description: v.string(),
