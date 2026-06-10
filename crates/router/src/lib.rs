@@ -593,6 +593,25 @@ pub trait FnOps: Send + Sync {
     fn check_rate_limit(&self, _fn_name: &str, _identity: &str) -> Result<(), u64> {
         Ok(())
     }
+
+    /// Block up to `timeout` for the TypeScript function runner to become
+    /// responsive, returning `true` once it is (or `false` if the timeout
+    /// elapses with no live runner).
+    ///
+    /// The Rust HTTP listener accepts connections the moment it binds — but
+    /// the Bun runner that executes SSR renders + functions boots
+    /// asynchronously (spawn the child, load the app bundle, wire stdio).
+    /// On a fresh deploy or a Fly cold-start from auto-stop, a request can
+    /// land in that window and hit `RUNNER_NOT_STARTED`, surfacing to the
+    /// user as a 500 even though the runner is seconds from ready. Callers
+    /// on user-facing HTML paths (SSR render, route handlers) await this
+    /// first so a cold request waits for a warm runner instead of failing.
+    ///
+    /// Default impl returns `true` — stub/alternate backends with no
+    /// separate runner are always "ready".
+    fn wait_for_runner_ready(&self, _timeout: std::time::Duration) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

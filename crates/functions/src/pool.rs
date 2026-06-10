@@ -174,6 +174,34 @@ impl FnRunnerPool {
         ))
     }
 
+    /// Block up to `timeout` for the pool to have a live, responsive runner.
+    /// Returns `true` as soon as one answers a health probe; `false` if the
+    /// timeout elapses with none alive.
+    ///
+    /// Unlike `health_probe` (a single round-trip that fails immediately when
+    /// no child has spawned yet), this POLLS — so it bridges the cold-boot
+    /// window where the Rust listener is up but `bun` is still spawning +
+    /// loading the app bundle. `any_alive()` is the cheap liveness gate; only
+    /// once a child exists do we spend a short probe confirming it answers.
+    /// Used by user-facing HTML render paths so a cold request waits for a
+    /// warm runner instead of failing with `RUNNER_NOT_STARTED`.
+    pub fn wait_until_responsive(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.any_alive() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let probe = remaining.min(Duration::from_millis(500));
+                if !probe.is_zero() && self.health_probe(probe).is_ok() {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return self.any_alive() && self.health_probe(Duration::from_millis(50)).is_ok();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Recent traces across all runners, merged + capped. Used by
     /// admin trace endpoints (/api/fn/traces, Studio) so the
     /// operator sees activity from EVERY runner in one stream
@@ -251,6 +279,29 @@ mod tests {
         // SOME runner from the pool (the start slot for each).
         assert!(Arc::as_ptr(&a) as usize != 0);
         assert!(Arc::as_ptr(&b) as usize != 0);
+    }
+
+    // Cold-start robustness: with no live runner, `wait_until_responsive`
+    // must return false AFTER ~the timeout (bounded), never hang and never
+    // return true. This is the safety net that turns a wedged pool into a
+    // retryable 503 instead of an infinite request hang; the happy path
+    // (a live runner returns true fast) needs a real bun child so it's
+    // covered by integration, not here.
+    #[test]
+    fn wait_until_responsive_times_out_with_no_live_runner() {
+        let pool = FnRunnerPool::new(vec![dummy_runner(), dummy_runner()]);
+        let start = std::time::Instant::now();
+        let ready = pool.wait_until_responsive(Duration::from_millis(150));
+        let elapsed = start.elapsed();
+        assert!(!ready, "an all-dead pool must report not-ready");
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "must wait the full timeout before giving up (was {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must be bounded — never hang (was {elapsed:?})"
+        );
     }
 
     // Tests exercise `parse_pool_size` (the pure parser) instead

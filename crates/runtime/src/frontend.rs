@@ -1300,6 +1300,26 @@ fn serve_via_ssr_rpc(
     // AuthInfo — matches Phase 1 behavior.
     let auth = resolve_request_auth(cfg, &cookies_map);
 
+    // Cold-start robustness: the Rust HTTP listener accepts connections the
+    // moment it binds, but the Bun runner that executes this render boots
+    // asynchronously (fresh artifact deploy, Fly cold-start from auto-stop).
+    // A render landing in that window used to fail with RUNNER_NOT_STARTED →
+    // a user-facing 500. Wait briefly for a warm runner so the request lands
+    // on a ready one; if the pool is still not up after the bounded wait,
+    // serve a retryable 503 ("starting up", auto-refresh) rather than a hard
+    // 500. Static assets are served on a different path and stay fast
+    // throughout. Set PYLON_SSR_RUNNER_READY_TIMEOUT_MS=0 to opt out.
+    let ready_timeout = ssr_runner_ready_timeout();
+    if !ready_timeout.is_zero() && !fn_ops.wait_for_runner_ready(ready_timeout) {
+        tracing::warn!(
+            route = %matched.route.path,
+            "SSR runner not ready after {}ms; serving retryable 503",
+            ready_timeout.as_millis()
+        );
+        let _ = request.respond(ssr_warming_response(cors_origin));
+        return Ok(());
+    }
+
     // Stream render output via tiny_http chunked transfer encoding.
     // The render thread writes each base64-decoded chunk into `body_tx`;
     // the response writer reads from `body_rx` through `StreamingBody`.
@@ -1695,6 +1715,18 @@ fn serve_via_form_rpc(
     let search_params_json = parse_query_string(&query);
     let auth = resolve_request_auth(cfg, &cookies_map);
 
+    // Same cold-start runner-readiness wait as serve_via_ssr_rpc — a route
+    // handler hit during the boot window shouldn't 500 either.
+    let ready_timeout = ssr_runner_ready_timeout();
+    if !ready_timeout.is_zero() && !fn_ops.wait_for_runner_ready(ready_timeout) {
+        tracing::warn!(
+            "route handler runner not ready after {}ms; serving retryable 503",
+            ready_timeout.as_millis()
+        );
+        let _ = request.respond(ssr_warming_response(cors_origin));
+        return Ok(());
+    }
+
     // Same head/body/error channel plumbing as serve_via_ssr_rpc.
     let (rs_tx, rs_rx) =
         std::sync::mpsc::sync_channel::<(u16, std::collections::HashMap<String, String>)>(1);
@@ -1967,6 +1999,45 @@ fn ssr_error_response(status: u16, cors_origin: &str) -> Response<std::io::Curso
     let mut resp = Response::from_data(body)
         .with_status_code(status)
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
+}
+
+/// How long an SSR/route render waits for the TypeScript runner to become
+/// ready on a cold boot before falling back to a retryable 503. Override with
+/// `PYLON_SSR_RUNNER_READY_TIMEOUT_MS`; default 20s (generous for a cold
+/// `bun` boot + first bundle build, but bounded so a wedged pool still
+/// returns). 0 disables the wait (legacy fail-fast behavior).
+fn ssr_runner_ready_timeout() -> std::time::Duration {
+    let ms = std::env::var("PYLON_SSR_RUNNER_READY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(20_000);
+    std::time::Duration::from_millis(ms)
+}
+
+/// The graceful 503 served when the TypeScript runner is still booting after
+/// `ssr_runner_ready_timeout()` — used instead of a hard 500 so the browser
+/// (and any CDN) retries shortly. The tiny page auto-refreshes. This is the
+/// cold-start safety net; in practice the readiness wait succeeds first.
+fn ssr_warming_response(cors_origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+<meta http-equiv=\"refresh\" content=\"2\"><title>Starting up…</title>\
+<meta name=\"robots\" content=\"noindex\"></head>\
+<body style=\"font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0\">\
+<div style=\"text-align:center;color:#555\"><p>Starting up…</p>\
+<p style=\"font-size:.85rem\">This page is warming up and will load in a moment.</p></div>\
+</body></html>"
+        .as_bytes()
+        .to_vec();
+    let mut resp = Response::from_data(body)
+        .with_status_code(503u16)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        .with_header(Header::from_bytes("Retry-After", "2").unwrap())
+        // Never let a shared cache pin the warming page.
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         resp = resp.with_header(h);
     }

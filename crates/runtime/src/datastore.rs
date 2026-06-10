@@ -3733,6 +3733,14 @@ impl pylon_router::FnOps for FnOpsImpl {
         self.registry.list()
     }
 
+    fn wait_for_runner_ready(&self, timeout: std::time::Duration) -> bool {
+        // Bridge the cold-boot window where the Rust listener is up but the
+        // Bun runner hasn't finished spawning — see
+        // `FnRunnerPool::wait_until_responsive`. Without this, a render
+        // landing in that window fails with `RUNNER_NOT_STARTED` → a 500.
+        self.pool.wait_until_responsive(timeout)
+    }
+
     fn call(
         &self,
         fn_name: &str,
