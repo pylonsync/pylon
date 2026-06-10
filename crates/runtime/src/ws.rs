@@ -290,6 +290,31 @@ impl RoomSubscriptions {
 /// Must be a power of two for even modulo distribution.
 const NUM_SHARDS: usize = 16;
 
+/// Where a `presence`/`topic` WS frame should be delivered.
+#[derive(Debug, PartialEq, Eq)]
+enum PresenceTarget {
+    /// Room-scoped fanout to that room's subscribers (sender is a member).
+    Room,
+    /// Legacy un-scoped global broadcast (opt-in only).
+    Global,
+    /// Don't relay — roomless without opt-in, or a non-member sender.
+    Drop,
+}
+
+/// Routing decision for a `presence`/`topic` frame. Secure by default:
+/// a frame with a `room` relays ONLY if the sender is a member; a roomless
+/// frame is dropped unless the operator opted into the global firehose. This
+/// closes the cross-tenant relay where `broadcast_presence` fanned every
+/// frame to every connected client with no scoping.
+fn presence_target(has_room: bool, room_member: bool, allow_unscoped: bool) -> PresenceTarget {
+    match (has_room, room_member, allow_unscoped) {
+        (true, true, _) => PresenceTarget::Room,
+        (true, false, _) => PresenceTarget::Drop,
+        (false, _, true) => PresenceTarget::Global,
+        (false, _, false) => PresenceTarget::Drop,
+    }
+}
+
 /// Maximum number of outbound messages queued per shard. Once the broadcast
 /// worker thread falls this many behind, the OLDEST queued message is
 /// dropped to make room for the new one. That means slow subscribers can
@@ -1890,7 +1915,46 @@ fn run_authenticated_session(
                                 .unwrap_or_else(|| "admin".to_string());
                             obj.insert("from".into(), serde_json::Value::String(from));
                         }
-                        hub.broadcast_presence(&stamped.to_string());
+                        let text = stamped.to_string();
+
+                        // SECURITY: `broadcast_presence` fans a frame to EVERY
+                        // connected client with no tenant/room scoping (and the
+                        // WS layer accepts anonymous connections), so an
+                        // un-scoped relay is a cross-tenant message-injection +
+                        // presence-leak channel. Route by `room` instead:
+                        //   - room present  → require membership (admin bypass)
+                        //     and deliver ONLY to that room's subscribers.
+                        //   - room absent   → DROP by default; opt back into the
+                        //     legacy global firehose with
+                        //     PYLON_WS_UNSCOPED_PRESENCE=1 (single-tenant apps).
+                        let room = parsed
+                            .get("room")
+                            .and_then(|v| v.as_str())
+                            .filter(|r| !r.is_empty());
+                        let is_member = match room {
+                            Some(room) => {
+                                auth_ctx.is_admin
+                                    || auth_ctx.user_id.as_deref().is_some_and(|uid| {
+                                        rooms
+                                            .as_ref()
+                                            .map(|b| b.is_in_room(room, uid))
+                                            .unwrap_or(false)
+                                    })
+                            }
+                            None => false,
+                        };
+                        let allow_unscoped = std::env::var("PYLON_WS_UNSCOPED_PRESENCE")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        match presence_target(room.is_some(), is_member, allow_unscoped) {
+                            PresenceTarget::Room => {
+                                if let Some(room) = room {
+                                    hub.push_to_room_subscribers(room, &text);
+                                }
+                            }
+                            PresenceTarget::Global => hub.broadcast_presence(&text),
+                            PresenceTarget::Drop => {}
+                        }
                     }
                     "crdt-subscribe" | "crdt-unsubscribe" => handle_crdt_control(
                         &hub,
@@ -2563,6 +2627,21 @@ mod tests {
     fn shard_count_starts_at_zero() {
         let shard = Shard::new();
         assert_eq!(shard.count(), 0);
+    }
+
+    // presence/topic must NOT global-firehose across tenants by default.
+    #[test]
+    fn presence_target_is_secure_by_default() {
+        // Roomless frame, no opt-in → DROP (was: global cross-tenant relay).
+        assert_eq!(presence_target(false, false, false), PresenceTarget::Drop);
+        // Roomless + explicit opt-in → global (single-tenant apps).
+        assert_eq!(presence_target(false, false, true), PresenceTarget::Global);
+        // Room + member → room-scoped delivery.
+        assert_eq!(presence_target(true, true, false), PresenceTarget::Room);
+        // Room + NON-member → drop (can't inject into a room you're not in).
+        assert_eq!(presence_target(true, false, false), PresenceTarget::Drop);
+        // Opt-in flag never widens a non-member's room frame.
+        assert_eq!(presence_target(true, false, true), PresenceTarget::Drop);
     }
 
     #[test]

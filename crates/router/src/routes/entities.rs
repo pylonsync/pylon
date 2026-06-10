@@ -376,6 +376,18 @@ pub(crate) fn handle(
         }
 
         let policy_check = match method {
+            // GET-by-id authorizes against the fetched row. GET-list has no
+            // row at the edge, so a data-dependent read policy can't be
+            // evaluated here — use the scan-level gate (rejects only
+            // data-INDEPENDENT denials) and defer per-row filtering to
+            // `handle_list`. Without the scan gate + per-row filter, a
+            // data-independent-OR policy (`auth.userId != null || …`) passes
+            // the edge with data:None and `handle_list` dumps EVERY row
+            // (cross-tenant read); and a purely data-dependent policy 403s
+            // the whole list for legitimate members.
+            HttpMethod::Get if entity_id.is_none() => ctx
+                .policy_engine
+                .check_entity_scan(entity_name, ctx.auth_ctx),
             HttpMethod::Get => ctx.policy_engine.check_entity_read(
                 entity_name,
                 ctx.auth_ctx,
@@ -417,7 +429,7 @@ pub(crate) fn handle(
         }
 
         return Some(match (method, entity_id) {
-            (HttpMethod::Get, None) => handle_list(ctx.store, entity_name, url),
+            (HttpMethod::Get, None) => handle_list(ctx, entity_name, url),
             (HttpMethod::Post, None) => handle_insert(ctx, entity_name, body),
             (HttpMethod::Get, Some(id)) => handle_get(ctx.store, entity_name, id),
             (HttpMethod::Patch, Some(id)) => handle_update(ctx, entity_name, id, body),

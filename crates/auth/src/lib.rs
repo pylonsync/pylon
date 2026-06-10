@@ -411,6 +411,14 @@ pub struct Session {
     /// powers row-scoped policies like `data.orgId == auth.tenantId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// True for anonymous guest sessions (`create_guest`). MUST be
+    /// persisted + re-derived so a guest token resolves to a GUEST auth
+    /// context — otherwise `is_authenticated()` returns true for a guest
+    /// and the `auth:"user"` / `AuthMode::User` gate is defeated. `default`
+    /// so sessions serialized before this field deserialize as non-guest
+    /// (the `guest_`-prefix fallback in `to_auth_context` covers those).
+    #[serde(default)]
+    pub is_guest: bool,
 }
 
 impl Session {
@@ -427,6 +435,7 @@ impl Session {
             device: None,
             created_at: now,
             tenant_id: None,
+            is_guest: false,
         }
     }
 
@@ -444,13 +453,24 @@ impl Session {
             device: None,
             created_at: now,
             tenant_id: None,
+            is_guest: false,
         }
     }
 
     /// Convert this session to an auth context, carrying the selected
     /// tenant so row-scoped policies see `auth.tenantId`.
+    ///
+    /// A guest session resolves to a GUEST context (not authenticated), so
+    /// `is_authenticated()` is false and the `auth:"user"` gate rejects it.
+    /// The `guest_`-prefix fallback downgrades guest sessions persisted
+    /// before `is_guest` existed.
     pub fn to_auth_context(&self) -> AuthContext {
-        let ctx = AuthContext::authenticated(self.user_id.clone());
+        let is_guest = self.is_guest || self.user_id.starts_with("guest_");
+        let ctx = if is_guest {
+            AuthContext::guest(self.user_id.clone())
+        } else {
+            AuthContext::authenticated(self.user_id.clone())
+        };
         match &self.tenant_id {
             Some(t) => ctx.with_tenant(t.clone()),
             None => ctx,
@@ -2381,6 +2401,10 @@ impl SessionStore {
         // away" after working briefly, fixed only by a fresh
         // /api/auth/select-org call.
         new.tenant_id = old.tenant_id.clone();
+        // Carry guest status across token rotation so a refreshed guest
+        // session stays a guest (the prefix fallback also covers it, but
+        // keep the persisted flag accurate).
+        new.is_guest = old.is_guest;
         sessions.insert(new.token.clone(), new.clone());
         if let Some(b) = &self.backend {
             b.save(&new);
@@ -2475,7 +2499,18 @@ impl SessionStore {
         let mut rng = rand::thread_rng();
         let bytes: [u8; 16] = rng.gen();
         let guest_id = format!("guest_{}", hex_encode(&bytes));
-        self.create(guest_id)
+        let mut session = self.create(guest_id);
+        // `create` stored it as non-guest; flip the flag + re-persist so the
+        // session resolves to a guest context (not an authenticated user).
+        session.is_guest = true;
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.insert(session.token.clone(), session.clone());
+        }
+        if let Some(b) = &self.backend {
+            b.save(&session);
+        }
+        session
     }
 
     /// Upgrade a guest session to a real user. Replaces the user_id.
@@ -3678,8 +3713,20 @@ mod tests {
         assert!(session.user_id.starts_with("guest_"));
         assert!(!session.token.is_empty());
 
+        // Drive the REAL resolution path (create_guest → resolve), the one
+        // every request uses — NOT AuthContext::guest() directly. A guest
+        // MUST NOT pass is_authenticated() or the AuthMode::User gate, else
+        // an anonymous caller minting a guest token defeats `auth:"user"`.
         let ctx = store.resolve(Some(&session.token));
-        assert!(ctx.is_authenticated());
+        assert!(ctx.is_guest, "resolved guest session must be is_guest");
+        assert!(
+            !ctx.is_authenticated(),
+            "a guest must NOT resolve as authenticated (auth:\"user\" bypass)"
+        );
+        assert!(
+            !AuthMode::User.check(&ctx),
+            "the AuthMode::User gate must reject a resolved guest"
+        );
         assert!(ctx.user_id.unwrap().starts_with("guest_"));
     }
 

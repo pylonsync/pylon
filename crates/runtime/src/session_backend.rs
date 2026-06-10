@@ -52,15 +52,21 @@ impl SqliteSessionBackend {
                 expires_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 device TEXT,
-                tenant_id TEXT
+                tenant_id TEXT,
+                is_guest INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS {TABLE}_user_idx ON {TABLE}(user_id);
             CREATE INDEX IF NOT EXISTS {TABLE}_exp_idx ON {TABLE}(expires_at);"
         ))
         .map_err(|e| format!("init schema: {e}"))?;
-        // Idempotent migration for pre-existing session DBs.
+        // Idempotent migrations for pre-existing session DBs (ADD COLUMN
+        // errors are swallowed — no-op when the column already exists).
         let _ = conn.execute(
             &format!("ALTER TABLE {TABLE} ADD COLUMN tenant_id TEXT"),
+            [],
+        );
+        let _ = conn.execute(
+            &format!("ALTER TABLE {TABLE} ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 0"),
             [],
         );
         Ok(Self {
@@ -76,7 +82,7 @@ impl SessionBackend for SqliteSessionBackend {
             Err(_) => return Vec::new(),
         };
         let mut stmt = match guard.prepare(&format!(
-            "SELECT token, user_id, expires_at, created_at, device, tenant_id FROM {TABLE}"
+            "SELECT token, user_id, expires_at, created_at, device, tenant_id, is_guest FROM {TABLE}"
         )) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -89,6 +95,7 @@ impl SessionBackend for SqliteSessionBackend {
                 created_at: row.get::<_, i64>(3)? as u64,
                 device: row.get::<_, Option<String>>(4)?,
                 tenant_id: row.get::<_, Option<String>>(5)?,
+                is_guest: row.get::<_, i64>(6).unwrap_or(0) != 0,
             })
         }) {
             Ok(i) => i,
@@ -101,13 +108,14 @@ impl SessionBackend for SqliteSessionBackend {
         if let Ok(guard) = self.conn.lock() {
             let _ = guard.execute(
                 &format!(
-                    "INSERT INTO {TABLE} (token, user_id, expires_at, created_at, device, tenant_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO {TABLE} (token, user_id, expires_at, created_at, device, tenant_id, is_guest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(token) DO UPDATE SET
                        user_id=excluded.user_id,
                        expires_at=excluded.expires_at,
                        device=excluded.device,
-                       tenant_id=excluded.tenant_id"
+                       tenant_id=excluded.tenant_id,
+                       is_guest=excluded.is_guest"
                 ),
                 rusqlite::params![
                     session.token,
@@ -116,6 +124,7 @@ impl SessionBackend for SqliteSessionBackend {
                     session.created_at as i64,
                     session.device,
                     session.tenant_id,
+                    session.is_guest as i64,
                 ],
             );
         }
@@ -163,8 +172,10 @@ mod pg {
                         expires_at BIGINT NOT NULL,
                         created_at BIGINT NOT NULL,
                         device TEXT,
-                        tenant_id TEXT
+                        tenant_id TEXT,
+                        is_guest BOOLEAN NOT NULL DEFAULT FALSE
                     );
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE;
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_user_idx ON {PG_TABLE}(user_id);
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
@@ -183,7 +194,7 @@ mod pg {
             let rows = c
                 .query(
                     &format!(
-                        "SELECT token, user_id, expires_at, created_at, device, tenant_id
+                        "SELECT token, user_id, expires_at, created_at, device, tenant_id, is_guest
                          FROM {PG_TABLE}"
                     ),
                     &[],
@@ -197,6 +208,7 @@ mod pg {
                     created_at: row.get::<_, i64>(3) as u64,
                     device: row.get::<_, Option<String>>(4),
                     tenant_id: row.get::<_, Option<String>>(5),
+                    is_guest: row.try_get::<_, bool>(6).unwrap_or(false),
                 })
                 .collect()
         }
@@ -205,13 +217,14 @@ mod pg {
             if let Ok(mut c) = self.client.lock() {
                 let _ = c.execute(
                     &format!(
-                        "INSERT INTO {PG_TABLE} (token, user_id, expires_at, created_at, device, tenant_id)
-                         VALUES ($1, $2, $3, $4, $5, $6)
+                        "INSERT INTO {PG_TABLE} (token, user_id, expires_at, created_at, device, tenant_id, is_guest)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
                          ON CONFLICT (token) DO UPDATE SET
                            user_id = EXCLUDED.user_id,
                            expires_at = EXCLUDED.expires_at,
                            device = EXCLUDED.device,
-                           tenant_id = EXCLUDED.tenant_id"
+                           tenant_id = EXCLUDED.tenant_id,
+                           is_guest = EXCLUDED.is_guest"
                     ),
                     &[
                         &session.token,
@@ -220,6 +233,7 @@ mod pg {
                         &(session.created_at as i64),
                         &session.device,
                         &session.tenant_id,
+                        &session.is_guest,
                     ],
                 );
             }
@@ -250,6 +264,23 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].user_id, "user_1");
         assert_eq!(loaded[0].token, session.token);
+        assert!(!loaded[0].is_guest, "a normal session is not a guest");
+    }
+
+    // The guest flag MUST survive the SQL round-trip — else a guest session
+    // reloaded from disk (e.g. after a restart, or hydrated on boot via
+    // load_all) resolves as a non-guest and the auth:"user" gate is defeated.
+    #[test]
+    fn guest_flag_survives_roundtrip() {
+        let backend = SqliteSessionBackend::in_memory().unwrap();
+        let mut session = Session::new("guest_abc".to_string());
+        session.is_guest = true;
+        backend.save(&session);
+        let loaded = backend.load_all();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].is_guest, "guest flag must persist through SQLite");
+        // And the resolved auth context must be a non-authenticated guest.
+        assert!(!loaded[0].to_auth_context().is_authenticated());
     }
 
     #[test]

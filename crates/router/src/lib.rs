@@ -1441,7 +1441,21 @@ fn route_inner(
 // Entity CRUD helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u16, String) {
+pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16, String) {
+    let store = ctx.store;
+    // Per-row read-policy fence: this is the ONLY list path, and unlike the
+    // /cursor + /query paths it previously skipped per-row filtering — so any
+    // entity whose read policy passed the (data-less) edge check leaked every
+    // row, including other tenants'. Mirror the cursor path: keep only rows
+    // the caller is actually allowed to read, BEFORE counting or projecting.
+    let row_visible = |row: &serde_json::Value| -> bool {
+        ctx.auth_ctx.is_admin
+            || matches!(
+                ctx.policy_engine
+                    .check_entity_read(entity, ctx.auth_ctx, Some(row)),
+                pylon_policy::PolicyResult::Allowed
+            )
+    };
     let qp = parse_query_params(url);
 
     // ---- Pagination ---------------------------------------------------
@@ -1512,7 +1526,7 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
         count_filter.remove("$offset");
         count_filter.remove("$order");
         match store.query_filtered(entity, &serde_json::Value::Object(count_filter)) {
-            Ok(rows) => Some(rows.len()),
+            Ok(rows) => Some(rows.iter().filter(|r| row_visible(r)).count()),
             Err(_) => None,
         }
     } else {
@@ -1554,6 +1568,10 @@ pub(crate) fn handle_list(store: &dyn DataStore, entity: &str, url: &str) -> (u1
     let auth_user = &manifest.auth.user;
     let rows: Vec<serde_json::Value> = rows
         .into_iter()
+        // Per-row read-policy fence FIRST — drop rows the caller can't read
+        // before any projection. This is the fix for the cross-tenant list
+        // leak: previously every queried row was returned.
+        .filter(|r| row_visible(r))
         .map(|r| maybe_project_user_row(entity, r, auth_user))
         // Every other entity goes through the generic serverOnly
         // strip — closes the "stripeCustomerId on Org leaked via
@@ -2360,6 +2378,39 @@ pub(crate) fn require_admin(ctx: &RouterContext) -> Option<(u16, String)> {
             json_error(
                 "FORBIDDEN",
                 "this endpoint requires admin auth (PYLON_ADMIN_TOKEN)",
+            ),
+        ))
+    }
+}
+
+/// Confine a GDPR action to the caller's tenant. A GLOBAL operator admin
+/// (`PYLON_ADMIN_TOKEN` → `tenant_id == None`) stays unscoped by design. But a
+/// TENANT-SCOPED admin (an `adminField`/`PYLON_ADMIN_EMAILS` admin who has
+/// selected an org) must only export/purge users who belong to that org —
+/// otherwise a per-org admin in a SaaS deployment could export or DELETE users
+/// in OTHER orgs (the cross-tenant read+delete the #244 invariant forbids for
+/// every other admin data path). Returns `Some(403)` when a tenant-scoped
+/// admin targets a non-member.
+///
+/// Note: this gates WHO can be targeted; gdpr_purge still deletes all of that
+/// member's rows. A user who belongs to multiple orgs would have their rows in
+/// other orgs purged too — acceptable for "delete this user's data," and far
+/// narrower than the prior "purge any user in any tenant".
+pub(crate) fn require_gdpr_tenant_scope(
+    ctx: &RouterContext,
+    target_user_id: &str,
+) -> Option<(u16, String)> {
+    let Some(tenant) = ctx.auth_ctx.tenant_id() else {
+        return None; // global operator admin — unscoped by design
+    };
+    if ctx.orgs.role_of(tenant, target_user_id).is_some() {
+        None // target is a member of the admin's active tenant
+    } else {
+        Some((
+            403,
+            json_error(
+                "FORBIDDEN",
+                "a tenant-scoped admin can only run GDPR actions on members of their own organization",
             ),
         ))
     }
@@ -3964,6 +4015,37 @@ mod auth_gate_tests {
         });
     }
 
+    // A TENANT-SCOPED admin (is_admin + a selected org) must NOT export or
+    // purge a user who isn't a member of their org — that was the
+    // cross-tenant GDPR read+delete. The stub OrgStore is empty, so the
+    // target is a non-member → 403. (A GLOBAL admin with no tenant stays
+    // unscoped — covered by `gdpr_export_returns_envelope_for_admin`.)
+    // Reverting `require_gdpr_tenant_scope` lets these reach the handler →
+    // not 403 → the test fails (non-vacuous).
+    #[test]
+    fn gdpr_tenant_admin_cannot_target_non_member() {
+        let tenant_admin = AuthContext::admin().with_tenant("org-x".into());
+        assert!(tenant_admin.is_admin && tenant_admin.tenant_id().is_some());
+        with_ctx(false, &tenant_admin, |ctx| {
+            let (status, _b, _ct) = route(
+                ctx,
+                HttpMethod::Delete,
+                "/api/admin/users/victim/purge",
+                "",
+                None,
+            );
+            assert_eq!(status, 403, "tenant admin must not purge a non-member");
+            let (status, _b, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/admin/users/victim/export",
+                "",
+                None,
+            );
+            assert_eq!(status, 403, "tenant admin must not export a non-member");
+        });
+    }
+
     #[test]
     fn gdpr_export_returns_envelope_for_admin() {
         let admin = AuthContext::admin();
@@ -4415,6 +4497,222 @@ mod auth_gate_tests {
             Expect::Rejected,
             Expect::Rejected,
         );
+    }
+
+    // GET /api/entities/<E> (the plain list route) MUST filter rows by the
+    // per-row read policy — like /cursor and /query do. Before the fix it
+    // returned EVERY row whenever the (data-less) edge check passed, leaking
+    // other owners'/tenants' rows. Here a per-row policy
+    // (`auth.userId == data.ownerId`) + a store holding two owners' rows must
+    // yield ONLY the caller's row. Reverting the `.filter(row_visible)` in
+    // handle_list makes this return BOTH rows → the test fails (non-vacuous).
+    #[test]
+    fn handle_list_filters_rows_by_read_policy() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+
+        // A store that returns two Doc rows owned by different users.
+        struct TwoOwnerStore {
+            manifest: AppManifest,
+        }
+        impl pylon_http::DataStore for TwoOwnerStore {
+            fn manifest(&self) -> &AppManifest {
+                &self.manifest
+            }
+            fn insert(
+                &self,
+                _e: &str,
+                _d: &serde_json::Value,
+            ) -> Result<String, pylon_http::DataError> {
+                Ok("id".into())
+            }
+            fn get_by_id(
+                &self,
+                _e: &str,
+                _i: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                Ok(None)
+            }
+            fn list(&self, _e: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(Vec::new())
+            }
+            fn list_after(
+                &self,
+                _e: &str,
+                _a: Option<&str>,
+                _l: usize,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(Vec::new())
+            }
+            fn update(
+                &self,
+                _e: &str,
+                _i: &str,
+                _d: &serde_json::Value,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn delete(&self, _e: &str, _i: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn lookup(
+                &self,
+                _e: &str,
+                _f: &str,
+                _v: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                Ok(None)
+            }
+            fn link(
+                &self,
+                _e: &str,
+                _i: &str,
+                _r: &str,
+                _t: &str,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn unlink(&self, _e: &str, _i: &str, _r: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn query_filtered(
+                &self,
+                _e: &str,
+                _f: &serde_json::Value,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(vec![
+                    serde_json::json!({"id": "d1", "ownerId": "u-1", "body": "mine"}),
+                    serde_json::json!({"id": "d2", "ownerId": "u-2", "body": "SECRET other tenant"}),
+                ])
+            }
+            fn query_graph(
+                &self,
+                _q: &serde_json::Value,
+            ) -> Result<serde_json::Value, pylon_http::DataError> {
+                Ok(serde_json::json!({}))
+            }
+            fn transact(
+                &self,
+                _o: &[serde_json::Value],
+            ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
+                Ok((true, Vec::new()))
+            }
+        }
+
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![ManifestPolicy {
+                name: "docOwner".into(),
+                entity: Some("Doc".into()),
+                allow_read: Some("auth.userId == data.ownerId".into()),
+                ..Default::default()
+            }],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let store = TwoOwnerStore {
+            manifest: manifest.clone(),
+        };
+        let session_store = SessionStore::new();
+        let magic_codes = MagicCodeStore::new();
+        let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
+        let siwe = pylon_auth::siwe::NonceStore::new();
+        let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
+        let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
+        let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
+        let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
+        let policy_engine = PolicyEngine::from_manifest(&manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let rooms = StubRooms;
+        let cache = StubCache;
+        let pubsub = StubPubSub;
+        let jobs = StubJobs;
+        let scheduler = StubScheduler;
+        let workflows = StubWorkflows;
+        let files = StubFiles;
+        let openapi = StubOpenApi;
+        let email = StubEmail;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
+
+        // Caller is user u-1 — must see ONLY their own Doc.
+        let user = AuthContext::authenticated("u-1".into());
+        let ctx = RouterContext {
+            store: &store,
+            session_store: &session_store,
+            magic_codes: &magic_codes,
+            oauth_state: &oauth_state,
+            account_store: &account_store,
+            api_keys: &api_keys,
+            orgs: &orgs,
+            siwe: &*siwe,
+            phone_codes: &phone_codes,
+            passkeys: &passkeys,
+            verification: &verification,
+            audit: &audit,
+            trusted_devices: &trusted_devices,
+            org_sso: &org_sso,
+            saml: &saml,
+            trusted_origins: &[],
+            policy_engine: &policy_engine,
+            change_log: &change_log,
+            notifier: &notifier,
+            rooms: &rooms,
+            cache: &cache,
+            pubsub: &pubsub,
+            jobs: &jobs,
+            scheduler: &scheduler,
+            workflows: &workflows,
+            files: &files,
+            openapi: &openapi,
+            functions: None,
+            email: &email,
+            shards: None,
+            plugin_hooks: &NoopPluginHooks,
+            auth_ctx: &user,
+            is_dev: false,
+            request_headers: &[],
+            peer_ip: "127.0.0.1",
+            cookie_config: &cookie_config,
+            response_headers: RefCell::new(Vec::new()),
+        };
+
+        let (status, body, _ct) = route(&ctx, HttpMethod::Get, "/api/entities/Doc", "", None);
+        assert_eq!(
+            status, 200,
+            "list should succeed for a member, body: {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let data = parsed
+            .get("data")
+            .and_then(|d| d.as_array())
+            .expect("data array");
+        let ids: Vec<&str> = data
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(ids.contains(&"d1"), "caller's own row must be present");
+        assert!(
+            !ids.contains(&"d2"),
+            "another owner's row MUST be filtered out (cross-tenant list leak); got {ids:?}"
+        );
+        assert_eq!(data.len(), 1, "only the caller's row should be returned");
     }
 
     /// One-shot audit of every admin-required GET route. Every entry

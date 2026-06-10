@@ -421,10 +421,16 @@ fn handle_gdpr(ctx: &RouterContext, method: HttpMethod, url: &str) -> Option<(u1
         if let Some(err) = require_admin(ctx) {
             return Some(err);
         }
+        if let Some(err) = crate::require_gdpr_tenant_scope(ctx, user_id) {
+            return Some(err);
+        }
         return Some(gdpr_export(ctx, user_id));
     }
     if action == "purge" && method == HttpMethod::Delete {
         if let Some(err) = require_admin(ctx) {
+            return Some(err);
+        }
+        if let Some(err) = crate::require_gdpr_tenant_scope(ctx, user_id) {
             return Some(err);
         }
         return Some(gdpr_purge(ctx, user_id));

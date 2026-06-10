@@ -509,6 +509,55 @@ fn canonical_redirect_target(canonical: &str, host: &str, url: &str) -> Option<S
     Some(format!("https://{canonical}{path}"))
 }
 
+/// Authorization decision for `GET /api/files/<id>` on an ownership-tracking
+/// backend. FAIL CLOSED: serve only when the asset has a recorded owner that
+/// matches the caller. A missing owner (`Ok(None)` — written-but-unconfirmed,
+/// or a `store()`'d file with no sidecar) or an unreadable sidecar (`Err`)
+/// must NOT serve the bytes (the IDOR this closes). Admin + non-ownership
+/// backends are gated by the caller before this is consulted.
+fn file_read_authorized(
+    owner: &Result<Option<pylon_storage::files::FileOwner>, pylon_storage::files::FileStorageError>,
+    caller_user_id: Option<&str>,
+) -> bool {
+    matches!(owner, Ok(Some(o)) if Some(o.user_id.as_str()) == caller_user_id)
+}
+
+#[cfg(test)]
+mod file_auth_tests {
+    use super::file_read_authorized;
+    use pylon_storage::files::{FileOwner, FileStorageError};
+
+    fn owner(uid: &str) -> Result<Option<FileOwner>, FileStorageError> {
+        Ok(Some(FileOwner {
+            user_id: uid.into(),
+            tenant_id: None,
+        }))
+    }
+
+    #[test]
+    fn file_get_fails_closed_on_missing_or_unreadable_owner() {
+        // Owner present + matches → allowed.
+        assert!(file_read_authorized(&owner("u1"), Some("u1")));
+        // Owner present + mismatch → denied.
+        assert!(!file_read_authorized(&owner("u2"), Some("u1")));
+        // NO owner recorded (Ok(None)) → MUST deny (the IDOR — pre-fix served).
+        assert!(!file_read_authorized(&Ok(None), Some("u1")));
+        // Unreadable sidecar (Err) → MUST deny.
+        assert!(!file_read_authorized(
+            &Err(FileStorageError {
+                code: "IO".into(),
+                message: "boom".into(),
+            }),
+            Some("u1")
+        ));
+        // Anonymous caller against an owned asset → denied.
+        assert!(!file_read_authorized(&owner("u1"), None));
+        // Anonymous caller against an unowned asset → still denied (no
+        // `None == None` foot-gun serving ownerless files to anon).
+        assert!(!file_read_authorized(&Ok(None), None));
+    }
+}
+
 #[cfg(test)]
 mod canonical_redirect_tests {
     use super::{canonical_redirect_target, is_apex_www_counterpart};
@@ -3790,10 +3839,23 @@ fn start_server(
                     }
                     let storage = pylon_storage::files::select_from_env();
                     let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
-                    // Owner check for backends that track ownership.
+                    // Owner check for backends that track ownership. FAIL
+                    // CLOSED: serve only when the asset has a recorded owner
+                    // that matches the caller. Previously this denied only on
+                    // a present-but-mismatched owner and fell through (served
+                    // the bytes) when owner_of returned Ok(None) — no owner
+                    // recorded, e.g. a file written via local-put before
+                    // /confirm, or any store()'d file — or Err (unreadable
+                    // sidecar). That let any authenticated user read those
+                    // assets (IDOR). The sibling DELETE handler already fails
+                    // closed on Ok(None); GET now matches it.
                     if storage.requires_owner_check() && !auth_ctx.is_admin {
-                        if let Ok(Some(owner)) = storage.owner_of(asset_id) {
-                            if Some(&owner.user_id) != auth_ctx.user_id.as_ref() {
+                        let owned_by_caller = file_read_authorized(
+                            &storage.owner_of(asset_id),
+                            auth_ctx.user_id.as_deref(),
+                        );
+                        if !owned_by_caller {
+                            {
                                 let err = json_error("NOT_FOUND", "File not found");
                                 let response = with_security_headers(
                                     Response::from_string(&err)
