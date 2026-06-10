@@ -1625,9 +1625,9 @@ export function LandingPage({
 								apps.
 							</h1>
 							<p className="lede">
-								Render your React frontend and run your backend from <b>one server.</b>{" "}
+								Render your React frontend and a backend from <b>one high-performance server.</b>{" "}
 								Server-rendered React, routing, and image optimization next to schema, live queries, auth, jobs, and search.{" "}
-								SQLite or Postgres. Deploy to your VPS or Pylon Cloud. <b>No separate Next.js.</b>
+								SQLite or Postgres. Deploy to your VPS or Pylon Cloud.
 							</p>
 							{/* Primary CTA: actually start building. The fastest
 							    path from "landed on the site" to "running app on
