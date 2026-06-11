@@ -151,11 +151,14 @@ const Watch = entity(
 // Policies
 // ---------------------------------------------------------------------------
 
-// Users read their own row.
+// Each user reads only their own row — the row's primary key is the user id,
+// and User holds passwordHash + balanceCents + email. The public bid feed
+// shows bidderName from a value denormalized onto the Bid row, so nothing
+// needs to read another user's User row.
 const userPolicy = policy({
   name: "user_self",
   entity: "User",
-  allowRead: "auth.userId != null",
+  allowRead: "auth.userId == data.id",
   allowInsert: "false",
   allowUpdate: "false",
   allowDelete: "false",
@@ -191,14 +194,14 @@ const bidPolicy = policy({
   allowDelete: "false",
 });
 
-// Watchlist is per-user.
+// Watchlist is per-user — every verb scopes to the owner.
 const watchPolicy = policy({
   name: "watch_owner",
   entity: "Watch",
-  allowRead: "auth.userId != null",
+  allowRead: "auth.userId == data.userId",
   allowInsert: "auth.userId == data.userId",
-  allowUpdate: "auth.userId != null",
-  allowDelete: "auth.userId != null",
+  allowUpdate: "auth.userId == data.userId",
+  allowDelete: "auth.userId == data.userId",
 });
 
 // ---------------------------------------------------------------------------
