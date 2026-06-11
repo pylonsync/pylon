@@ -139,6 +139,39 @@ impl IdentityProvider {
         in_response_to_id: &str,
         attributes: &[ResponseAttribute],
     ) -> Result<Response, Box<dyn std::error::Error>> {
+        let signed_xml = self.sign_authn_response_to_xml(
+            idp_x509_cert_der,
+            subject_name_id,
+            audience,
+            acs_url,
+            issuer,
+            in_response_to_id,
+            attributes,
+        )?;
+        let signed_response = Response::from_str(signed_xml.as_str())?;
+        Ok(signed_response)
+    }
+
+    /// Like [`Self::sign_authn_response`], but returns the signed XML
+    /// **string** instead of a parsed [`Response`].
+    ///
+    /// This is the form you must transmit: an XML-DSig enveloped signature is
+    /// computed over the canonicalized bytes of the signed element, so any
+    /// re-serialization (e.g. `Response::from_str(...).to_string()`) can
+    /// perturb those bytes and invalidate the signature ("data do not match"
+    /// at the verifier). `sign_authn_response` returns a parsed `Response`
+    /// purely for ergonomics; round-tripping it back to XML is unsafe for the
+    /// signature. Prefer this method whenever the bytes will be verified.
+    pub fn sign_authn_response_to_xml(
+        &self,
+        idp_x509_cert_der: &CertificateDer,
+        subject_name_id: &str,
+        audience: &str,
+        acs_url: &str,
+        issuer: &str,
+        in_response_to_id: &str,
+        attributes: &[ResponseAttribute],
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let response = build_response_template(
             idp_x509_cert_der,
             subject_name_id,
@@ -154,7 +187,6 @@ impl IdentityProvider {
             response_xml_unsigned.as_str(),
             self.export_private_key_der()?.as_slice(),
         )?;
-        let signed_response = Response::from_str(signed_xml.as_str())?;
-        Ok(signed_response)
+        Ok(signed_xml)
     }
 }

@@ -30,7 +30,6 @@ use samael::crypto::CertificateDer;
 use samael::idp::response_builder::ResponseAttribute;
 use samael::idp::sp_extractor::RequiredAttribute;
 use samael::idp::{CertificateParams, IdentityProvider, KeyType, Rsa};
-use samael::traits::ToXml;
 
 const ISSUER: &str = "https://test-idp.example/saml";
 const SP_ENTITY_ID: &str = "https://my-sp.example";
@@ -90,8 +89,14 @@ fn sign_response(idp: &IdentityProvider, cert_der: &CertificateDer, request_id: 
         },
         value: "jane@acme.com",
     }];
-    let signed = idp
-        .sign_authn_response(
+    // Use the string-returning signer: an enveloped XML-DSig is computed over
+    // the canonical bytes of the signed element, so we must transmit those
+    // exact bytes. `sign_authn_response` (which returns a parsed `Response`)
+    // would force a `Response::from_str(...).to_string()` round-trip here that
+    // perturbs the canonicalization and breaks verification ("data do not
+    // match") — the exact failure this test once hit on CI.
+    let signed_xml = idp
+        .sign_authn_response_to_xml(
             cert_der,
             "jane@acme.com",
             SP_ENTITY_ID,
@@ -101,9 +106,8 @@ fn sign_response(idp: &IdentityProvider, cert_der: &CertificateDer, request_id: 
             &attrs,
         )
         .expect("sign Response");
-    let xml = ToXml::to_string(&signed).expect("Response → XML");
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+    base64::engine::general_purpose::STANDARD.encode(signed_xml.as_bytes())
 }
 
 #[test]
