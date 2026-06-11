@@ -86,6 +86,9 @@ webp = "0.3"
 [dev-dependencies]
 rand = { workspace = true }
 tempfile = "3"
+# Used by tests/oidc_provider.rs to pre-generate the OIDC signing key
+# outside the timed HTTP request path (see the comment in start_server).
+pylon-auth = { path = "../auth" }
 
 [[bench]]
 name = "bench"

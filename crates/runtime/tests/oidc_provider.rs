@@ -122,6 +122,20 @@ fn start_server() -> u16 {
         std::env::set_var("PYLON_LOGIN_URL", "/login");
     }
 
+    // Pre-generate the OIDC signing key at the configured path BEFORE the
+    // server boots. The keystore otherwise lazy-generates an RSA-2048 key
+    // inside the first `/oidc/jwks` request handler, and RSA keygen has a
+    // long-tailed runtime (usually ~50ms, but occasionally multiple seconds
+    // while searching for primes). The test HTTP client uses a fixed 5s read
+    // timeout, so a slow keygen on the *timed* jwks request intermittently
+    // timed out → empty body → status 0 → a spurious `oidc_full_route_surface`
+    // failure (only the keygen moved off the request path here — all jwks
+    // assertions still exercise the real serialized key). Generating the key
+    // up front (no timeout) means the first jwks hit takes the fast
+    // `path.exists()` load path, so the assertion is deterministic.
+    pylon_auth::oidc_provider::OidcKeyStore::load_or_generate(&key_path)
+        .expect("pre-generate OIDC signing key for test");
+
     let manifest = test_manifest();
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let rt2 = Arc::clone(&rt);
