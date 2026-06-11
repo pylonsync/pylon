@@ -323,7 +323,9 @@ impl Runtime {
 /// (`crate::server::serve_runtime` → `policy_engine.set_resolver(...)`)
 /// so policies like
 ///
-///     allowRead: "exists(OrgMember where orgId == data.orgId and userId == auth.userId)"
+/// ```text
+/// allowRead: "exists(OrgMember where orgId == data.orgId and userId == auth.userId)"
+/// ```
 ///
 /// resolve to a real row-existence check instead of failing closed.
 ///

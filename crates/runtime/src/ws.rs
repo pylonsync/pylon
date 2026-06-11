@@ -2176,7 +2176,9 @@ fn handle_crdt_control(
 ///
 /// Subscribe shape:
 ///
-///     { "type": "room-subscribe", "room": "channel:foo" }
+/// ```text
+/// { "type": "room-subscribe", "room": "channel:foo" }
+/// ```
 ///
 /// On subscribe the membership check runs against `RoomBridge::is_in_room`
 /// (mirrors the HTTP `/api/rooms/broadcast` membership gate added in
@@ -2193,7 +2195,9 @@ fn handle_crdt_control(
 ///
 /// Unsubscribe shape:
 ///
-///     { "type": "room-unsubscribe", "room": "channel:foo" }
+/// ```text
+/// { "type": "room-unsubscribe", "room": "channel:foo" }
+/// ```
 ///
 /// Unsubscribe drops the registry entry — no ACK. Disconnect cleanup
 /// uses the same path via `room_subscriptions.unsubscribe_all`.
@@ -2308,12 +2312,14 @@ fn fanout_room_leaves_on_disconnect(
 ///
 /// Subscribe shape:
 ///
-///     {
-///       "type": "reactive-subscribe",
-///       "sub_id": "<client-minted id>",
-///       "fn_name": "getMessagesWithAuthors",
-///       "args": { ... }
-///     }
+/// ```text
+/// {
+///   "type": "reactive-subscribe",
+///   "sub_id": "<client-minted id>",
+///   "fn_name": "getMessagesWithAuthors",
+///   "args": { ... }
+/// }
+/// ```
 ///
 /// The server runs the handler under the connection's auth context,
 /// records the dep set, and pushes the initial result back. From then
@@ -2327,7 +2333,9 @@ fn fanout_room_leaves_on_disconnect(
 ///
 /// Unsubscribe shape:
 ///
-///     { "type": "reactive-unsubscribe", "sub_id": "..." }
+/// ```text
+/// { "type": "reactive-unsubscribe", "sub_id": "..." }
+/// ```
 ///
 /// Errors push a `reactive-error` frame so the client can surface
 /// the failure instead of waiting indefinitely for a `reactive-result`.
