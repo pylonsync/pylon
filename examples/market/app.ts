@@ -25,19 +25,26 @@ import {
 // A thing for sale. `seed` drives a deterministic gradient "photo" so the
 // demo needs no image hosting. `status` flips active → sold when an offer
 // is accepted.
+//
+// `sellerId: field.owner()` is what lets SellForm create a listing with a
+// plain, optimistic `db.insert` (it shows in the live ticker the instant
+// you post — no server round-trip) while the seller id stays unspoofable:
+// the framework stamps it from the session and rejects any forged value.
+// No createListing function needed. `status` + `createdAt` default
+// server-side so the client doesn't have to send them.
 const Listing = entity(
   "Listing",
   {
-    sellerId: field.string(),
+    sellerId: field.string().owner(),
     sellerName: field.string(),
     title: field.string(),
     description: field.string(),
     price: field.float(),
     category: field.string(),
     condition: field.string(), // new | like-new | good | fair
-    status: field.string(), // active | sold
+    status: field.string().default("active"), // active | sold
     seed: field.string(),
-    createdAt: field.datetime(),
+    createdAt: field.datetime().defaultNow(),
   },
   {
     indexes: [
@@ -56,12 +63,16 @@ const Offer = entity(
     listingId: field.string(),
     listingTitle: field.string(),
     sellerId: field.string(),
-    buyerId: field.string(),
+    // `buyerId: field.owner()` keeps the bidder unspoofable on the
+    // optimistic db.useMutation path too — even though makeOffer also
+    // stamps it server-side, the field-level guarantee is defense in
+    // depth (and documents intent).
+    buyerId: field.string().owner(),
     buyerName: field.string(),
     amount: field.float(),
     message: field.string().optional(),
-    status: field.string(), // pending | accepted | declined
-    createdAt: field.datetime(),
+    status: field.string().default("pending"), // pending | accepted | declined
+    createdAt: field.datetime().defaultNow(),
   },
   {
     indexes: [

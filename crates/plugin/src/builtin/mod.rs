@@ -26,5 +26,6 @@ pub mod ai_proxy;
 pub mod cache;
 pub mod cache_client;
 pub mod csrf;
+pub mod owner_stamp;
 pub mod rate_limit;
 pub mod tenant_scope;

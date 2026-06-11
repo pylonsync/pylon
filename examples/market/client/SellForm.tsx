@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { callFn, useRouter } from "@pylonsync/react";
+import { db, useRouter } from "@pylonsync/react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Textarea } from "@pylonsync/example-ui/textarea";
@@ -18,7 +18,7 @@ const selectClass =
   "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 function Form() {
-  const { name } = useIdentity();
+  const { userId, name } = useIdentity();
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -35,16 +35,27 @@ function Form() {
     if (!Number.isFinite(value) || value < 0) return setErr("Set a price.");
     setBusy(true);
     setErr(null);
+    // Local-first by default — no createListing function, no opt-in
+    // optimism flag. `db.insert` paints the listing into the local store
+    // synchronously (it's in the "just listed" ticker before the network
+    // call even leaves the tab) and pushes in the background. `sellerId`
+    // is declared `field.owner()` in app.ts, so the server stamps and
+    // verifies it from the session — we send our own id only so the
+    // optimistic row is complete; a forged seller id would be rejected.
     try {
-      const res = await callFn<{ id: string }>("createListing", {
-        title,
-        description,
-        price: value,
+      const id = await db.insert("Listing", {
+        sellerId: userId,
+        sellerName: name,
+        title: title.trim(),
+        description: description.trim(),
+        price: Math.max(0, Math.round(value * 100) / 100),
         category,
         condition,
-        sellerName: name,
+        status: "active",
+        seed: Math.random().toString(36).slice(2, 8),
+        createdAt: new Date().toISOString(),
       });
-      router.push(`/listing/${res.id}`);
+      router.push(`/listing/${id}`);
     } catch (e) {
       setErr((e as Error).message ?? "Could not post your listing.");
       setBusy(false);

@@ -10,7 +10,11 @@
           "name": "sellerId",
           "type": "string",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "readonly": true,
+          "default": {
+            "$auth": "userId"
+          }
         },
         {
           "name": "sellerName",
@@ -52,7 +56,8 @@
           "name": "status",
           "type": "string",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": "active"
         },
         {
           "name": "seed",
@@ -64,7 +69,8 @@
           "name": "createdAt",
           "type": "datetime",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": "now"
         }
       ],
       "indexes": [
@@ -116,7 +122,11 @@
           "name": "buyerId",
           "type": "string",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "readonly": true,
+          "default": {
+            "$auth": "userId"
+          }
         },
         {
           "name": "buyerName",
@@ -140,13 +150,15 @@
           "name": "status",
           "type": "string",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": "pending"
         },
         {
           "name": "createdAt",
           "type": "datetime",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": "now"
         }
       ],
       "indexes": [

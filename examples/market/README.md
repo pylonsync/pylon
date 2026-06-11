@@ -39,12 +39,24 @@ Open a second tab (or an incognito window for a second identity) and trade:
 |------|-----------|---------------|
 | `/` | SSR grid (`serverData.query`) + live ticker island | Server data + realtime side by side |
 | `/listing/:id` | SSR detail + dynamic `generateMetadata` + offers island | Data-driven SEO + the realtime centerpiece |
-| `/sell` | client island | A write (`createListing`) + client nav |
+| `/sell` | client island | An optimistic `db.insert("Listing", …)` + client nav |
 | `/me` | client island (3 live queries) | Your listings + offers, all live |
 
 - **Schema + policies** live in `app.ts`: `Listing` and `Offer`, public-read,
   owner-scoped writes.
+- **Optimism is the default.** Posting a listing is a plain
+  `db.insert("Listing", …)` — no server function. The row paints into the
+  local store instantly (it's in the "just listed" ticker before the network
+  round-trip finishes) because that's how the sync engine works. It stays
+  secure because `sellerId` is declared **`field.owner()`** in `app.ts`: the
+  server stamps + verifies the owner from the session, so a forged seller id
+  is rejected. Reach for `field.owner()` (instead of writing a function) any
+  time the only server-authoritative part of a create is *who made it* —
+  `authorId`, `buyerId`, `createdBy`.
 - **Functions** (`functions/`) carry the logic that spans rows — e.g.
-  `respondToOffer` marks the listing sold and declines the other offers in one
-  mutation. They're declared `auth: "guest"` so the public demo works without
-  a login (every visitor gets a guest session + a generated handle).
+  `makeOffer` denormalizes the listing title + validates the listing is still
+  active; `respondToOffer` marks the listing sold and declines the other
+  offers in one mutation. Function calls (`db.useMutation`) take an
+  `optimistic` builder when you want the same instant feedback for a
+  multi-row write. They're declared `auth: "guest"` so the public demo works
+  without a login (every visitor gets a guest session + a generated handle).

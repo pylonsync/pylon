@@ -1194,6 +1194,15 @@ fn start_server(
                 runtime.manifest(),
             ),
         ));
+        // Auto-stamp any field declared `field.X().owner()`. This is what
+        // makes optimistic, local-first writes the DEFAULT for owned data:
+        // the client `db.insert`s with its own id (instant local paint)
+        // and the server overwrites/validates the owner from the session,
+        // so a forged owner id is rejected. Same posture as tenant_scope —
+        // drop the annotation on the field and isolation is automatic.
+        reg.register(Arc::new(
+            pylon_plugin::builtin::owner_stamp::OwnerStampPlugin::from_manifest(runtime.manifest()),
+        ));
         Arc::new(reg)
     });
     let room_mgr = Arc::new(RoomManager::new(120)); // 2 min idle timeout

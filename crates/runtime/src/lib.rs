@@ -3748,6 +3748,15 @@ fn apply_field_defaults(
             continue;
         }
         let Some(default) = &f.default else { continue };
+        // Dynamic, auth-derived defaults (e.g. `field.X().owner()` →
+        // `{"$auth":"userId"}`) are filled by the auth-aware mutation
+        // pipeline (OwnerStampPlugin), not here — this storage-layer
+        // pass has no AuthContext, so stamping the literal sentinel
+        // object as the value would both corrupt the row and defeat
+        // the security guarantee. Skip them.
+        if is_dynamic_default(default) {
+            continue;
+        }
         let value = if default == &serde_json::Value::String("now".to_string()) {
             serde_json::Value::String(crate::tinybird_logger::iso_now_ms())
         } else {
@@ -3756,6 +3765,23 @@ fn apply_field_defaults(
         obj.insert(f.name.clone(), value);
     }
     out
+}
+
+/// A manifest `default` is *dynamic* when its value can't be known
+/// without request context — currently only the auth-derived owner
+/// sentinel `{"$auth": "userId"}` emitted by `field.X().owner()`.
+///
+/// These are filled by the auth-aware plugin chain
+/// ([`pylon_plugin::builtin::owner_stamp::OwnerStampPlugin`]), never by
+/// the storage-layer `apply_field_defaults` pass. Keeping the predicate
+/// here (next to the only consumer) means a new dynamic-default kind is
+/// a one-line addition that automatically gets skipped at the storage
+/// layer.
+pub(crate) fn is_dynamic_default(default: &serde_json::Value) -> bool {
+    default
+        .as_object()
+        .and_then(|o| o.get("$auth"))
+        .is_some()
 }
 
 fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
@@ -3910,6 +3936,71 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
         }
+    }
+
+    /// A manifest field built with `field.X().owner()` serializes its
+    /// default as `{"$auth":"userId"}`. The storage-layer
+    /// `apply_field_defaults` pass must NOT stamp that sentinel object
+    /// as the field value — it has no auth context, and writing the
+    /// literal `{"$auth":"userId"}` into the row would both corrupt the
+    /// data and silently defeat the owner-stamp security guarantee
+    /// (the row would carry a fake "owner" that's actually a sentinel,
+    /// not a user id). Static literal defaults and `"now"` still fill.
+    #[test]
+    fn apply_field_defaults_skips_the_owner_auth_sentinel() {
+        let owner_sentinel = serde_json::json!({ "$auth": "userId" });
+        assert!(
+            is_dynamic_default(&owner_sentinel),
+            "the owner sentinel must be recognized as a dynamic default"
+        );
+        assert!(
+            !is_dynamic_default(&serde_json::json!("now")),
+            "\"now\" is a static default, not dynamic"
+        );
+        assert!(
+            !is_dynamic_default(&serde_json::json!("active")),
+            "a literal string default is not dynamic"
+        );
+
+        let mut m = test_manifest();
+        let ent = &mut m.entities[0];
+        ent.fields.push(ManifestField {
+            name: "ownerId".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: true,
+            default: Some(owner_sentinel),
+            enum_values: None,
+            encrypted: false,
+        });
+        ent.fields.push(ManifestField {
+            name: "status".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: Some(serde_json::json!("active")),
+            enum_values: None,
+            encrypted: false,
+        });
+
+        let row = serde_json::json!({ "email": "a@b.com", "displayName": "A" });
+        let filled = apply_field_defaults(&m, "User", &row);
+
+        // The literal default fills as usual...
+        assert_eq!(filled["status"], serde_json::json!("active"));
+        // ...but the owner sentinel is left absent for the auth-aware
+        // OwnerStampPlugin to fill — it must NOT be stamped as a value.
+        assert!(
+            filled.get("ownerId").is_none(),
+            "owner sentinel must not be materialized at the storage layer; got {:?}",
+            filled.get("ownerId")
+        );
     }
 
     #[test]
