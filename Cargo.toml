@@ -101,6 +101,13 @@ samael = { version = "0.0.20", default-features = false, features = ["xmlsec"] }
 # either system version. Drop the patch when samael ships a fix upstream.
 [patch.crates-io]
 samael = { path = "vendor/samael" }
+# Vendored to add `Request::upgrade_split` — the stock `upgrade()` fuses
+# the connection's reader/writer halves into one opaque Box<dyn ReadWrite>,
+# which makes concurrent read + broadcast-write on a multiplexed WebSocket
+# impossible (the per-client writer thread needs its own write half).
+# Drop when upstream exposes the split halves. (tiny_http is MIT/Apache-2.0;
+# license files retained in vendor/tiny_http.)
+tiny_http = { path = "vendor/tiny_http" }
 
 [workspace.lints.rust]
 unused_crate_dependencies = "warn"

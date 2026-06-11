@@ -1533,7 +1533,13 @@ pub fn start_ws_server(
         // connect storm doesn't force us through tungstenite's HTTP parse
         // and the session-resolve round trip. The guard is dropped when
         // the reader thread exits (or fails to start), freeing the slot.
-        let ip = match stream.peer_addr() {
+        // catch_unwind: std's sockaddr conversion ASSERTS (panics, not
+        // errors) when getpeername returns a short address — observed
+        // on macOS when the peer disconnects mid-accept. Treat it like
+        // any other dead-on-arrival connection.
+        let peer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.peer_addr()))
+            .unwrap_or_else(|_| Err(std::io::Error::other("peer_addr panicked")));
+        let ip = match peer {
             Ok(addr) => addr.ip(),
             Err(_) => continue,
         };
@@ -1605,10 +1611,10 @@ fn handle_ws_connection(
     // clone fails (rare; should only happen at extreme fd pressure),
     // fall back to single-thread mode with the reader-drains-outbound
     // pattern.
-    let write_stream = stream.try_clone().ok();
-    if let Some(ref ws) = write_stream {
-        ws.set_write_timeout(Some(WS_READ_TIMEOUT)).ok();
-    }
+    let write_stream: Option<Box<dyn WsStream>> = stream.try_clone().ok().map(|cloned| {
+        cloned.set_write_timeout(Some(WS_READ_TIMEOUT)).ok();
+        Box::new(cloned) as Box<dyn WsStream>
+    });
 
     // Extract the bearer token from the handshake, preferring the
     // Authorization header (native clients) and falling back to the
@@ -1730,13 +1736,14 @@ fn run_authenticated_session(
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
-    // When `Some`, this caller has a `try_clone`'d TcpStream for the
-    // write half and wants the dual-thread design — a dedicated writer
-    // thread blocks on `outbound_rx.recv()` and sends every broadcast
-    // immediately, no ping-bounded latency. When `None`, the reader
-    // drains outbound between reads (single-thread fallback for the
-    // HTTP-upgrade path that can't split its stream).
-    dual_write_stream: Option<TcpStream>,
+    // When `Some`, the caller supplies an independent WRITE half (a
+    // try_clone'd TcpStream on the dedicated listener, the split write
+    // half on the HTTP-upgrade path) and gets the dual-thread design —
+    // a dedicated writer thread blocks on `outbound_rx.recv()` and
+    // sends every broadcast immediately, no ping-bounded latency.
+    // When `None`, the reader drains outbound between reads
+    // (single-thread fallback; no remaining production caller).
+    dual_write_stream: Option<Box<dyn WsStream>>,
 ) {
     // Use the shared bearer resolver so WS sees the same identities
     // HTTP does — admin token / API key / JWT / session — not only
@@ -1803,9 +1810,8 @@ fn run_authenticated_session(
                 max_frame_size: Some(max_frame),
                 ..Default::default()
             };
-            let writer_stream_boxed: Box<dyn WsStream> = Box::new(write_stream);
             let mut writer_ws =
-                WebSocket::from_raw_socket(writer_stream_boxed, Role::Server, Some(ws_config));
+                WebSocket::from_raw_socket(write_stream, Role::Server, Some(ws_config));
             let hub_for_writer = Arc::clone(&hub);
             let writer_client_id = client_id;
             let _ = std::thread::Builder::new()
@@ -2567,11 +2573,11 @@ pub fn handle_http_upgrade(
             response = response.with_header(h);
         }
     }
-    let stream = request.upgrade("websocket", response);
-    // tiny_http hands back `Box<dyn ReadWrite + Send>`; that satisfies
-    // our `WsStream` blanket impl. Tungstenite never sees a raw socket
-    // here — we already wrote the 101 above.
-    let stream: Box<dyn WsStream> = Box::new(WsStreamAdapter(stream));
+    // Vendored tiny_http: take the connection's halves SEPARATELY so
+    // the reader can block in read() forever while the writer thread
+    // delivers broadcasts instantly (see WriteHalfStream below).
+    let (reader, writer) = request.upgrade_split("websocket", response);
+    let stream: Box<dyn WsStream> = Box::new(ReadHalfStream(reader));
     let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -2582,10 +2588,14 @@ pub fn handle_http_upgrade(
         ..Default::default()
     };
     let ws = WebSocket::from_raw_socket(stream, Role::Server, Some(ws_config));
-    // HTTP-upgrade path can't try_clone the underlying stream — tiny_http's
-    // CustomStream hides the TcpStream behind trait objects. Fall back to
-    // single-thread mode (reader drains outbound between reads, bounded
-    // by client keepalive ping interval).
+    // Dual-thread delivery, same as the standalone listener: the
+    // vendored tiny_http exposes the connection's WRITE half
+    // separately (`upgrade_split`), so the per-client writer thread
+    // flushes broadcasts the instant they're queued. The previous
+    // fused-stream fallback drained outbound only between reads — a
+    // quiet client (browser sync engines only ping every 25 s) saw
+    // realtime events arrive in 25-second batches. Symptom that
+    // caught it: world3d players "teleporting" instead of moving.
     run_authenticated_session(
         ws,
         hub,
@@ -2594,28 +2604,51 @@ pub fn handle_http_upgrade(
         snapshot_fetcher,
         reactive,
         rooms,
-        None,
+        Some(Box::new(WriteHalfStream(writer))),
     );
 }
 
-/// Adapter so a `Box<dyn tiny_http::ReadWrite + Send>` satisfies our
-/// `WsStream` bound. tiny_http's ReadWrite is just `Read + Write`
-/// without the `+ Send` part exposed in the trait, so we wrap with
-/// a thin newtype to forward the I/O.
-struct WsStreamAdapter(Box<dyn tiny_http::ReadWrite + Send>);
+/// The write half of an upgraded connection shaped as a full
+/// `WsStream`. The writer-side tungstenite socket only ever sends, so
+/// `Read` answers `WouldBlock` defensively.
+struct WriteHalfStream(Box<dyn Write + Send>);
 
-impl Read for WsStreamAdapter {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
+impl Read for WriteHalfStream {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "write-half stream is not readable",
+        ))
     }
 }
-
-impl Write for WsStreamAdapter {
+impl Write for WriteHalfStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.0.flush()
+    }
+}
+
+/// The read half shaped as a full `WsStream`. Tungstenite's reader
+/// may try to flush protocol replies (pong/close) through its own
+/// socket; those are swallowed here — the writer thread owns the real
+/// outbound half, and the sync protocol's keepalive is an app-level
+/// text frame that rides it. Erroring instead would kill the
+/// connection on the first protocol ping.
+struct ReadHalfStream(Box<dyn Read + Send>);
+
+impl Read for ReadHalfStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+impl Write for ReadHalfStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

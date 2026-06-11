@@ -194,6 +194,76 @@ fn http_insert_appears_in_sync_pull() {
     );
 }
 
+/// Regression: a MULTIPLEXED WebSocket subscriber (`/api/sync/ws` on
+/// the main HTTP port — the path every browser sync engine uses by
+/// default) must receive change events IMMEDIATELY, without sending
+/// any traffic of its own.
+///
+/// The bug this pins: the HTTP-upgrade path used tiny_http's fused
+/// `upgrade()` stream, which can't be split or given read timeouts —
+/// so the per-client outbound queue only drained when the CLIENT sent
+/// something (the sync engine's 25 s keepalive ping). Realtime events
+/// arrived in 25-second batches; world3d players "teleported" instead
+/// of moving. Fixed by the vendored `upgrade_split` + a dedicated
+/// writer thread. A quiet subscriber receiving an event within 2 s is
+/// exactly what the old code could not do.
+#[test]
+fn multiplexed_ws_delivers_changes_to_quiet_subscriber() {
+    let (port, _rt) = start_server();
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Mint a guest session for the WS bearer handshake.
+    let (status, body) = http_request("POST", &format!("{base}/api/auth/guest"), Some("{}"));
+    assert_eq!(status, 201, "guest: {body}");
+    let guest: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let token = guest["token"].as_str().expect("guest token");
+
+    // Connect through the MAIN port's HTTP-upgrade path (not :port+1).
+    let ws_url = format!("ws://127.0.0.1:{port}/api/sync/ws");
+    let mut req = ws_url.into_client_request().expect("client request");
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {token}").parse().expect("bearer header"),
+    );
+    let (mut socket, _resp) = client::connect(req).expect("multiplexed ws connect");
+    // Bound the read so a broken fan-out fails the test instead of
+    // hanging it. 2 s is far below the old 25 s ping-bounded latency.
+    match socket.get_ref() {
+        tungstenite::stream::MaybeTlsStream::Plain(s) => {
+            s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        }
+        _ => panic!("expected plain TCP stream"),
+    }
+
+    // Write a row over HTTP — the quiet subscriber must see it live.
+    let (status, body) = http_request(
+        "POST",
+        &format!("{base}/api/entities/Todo"),
+        Some(r#"{"title": "ws-instant", "done": false}"#),
+    );
+    assert_eq!(status, 201, "insert: {body}");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_insert = false;
+    while std::time::Instant::now() < deadline {
+        match socket.read() {
+            Ok(Message::Text(text)) => {
+                if text.contains("\"entity\":\"Todo\"") && text.contains("\"kind\":\"insert\"") {
+                    saw_insert = true;
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break, // read timeout — fall through to the assert
+        }
+    }
+    assert!(
+        saw_insert,
+        "quiet multiplexed WS subscriber must receive the Todo insert within 2s \
+         (ping-bounded delivery regression)"
+    );
+}
+
 /// Defense-in-depth: an unauthenticated WS connection attempt is rejected.
 /// Regression test for the pentest fix that added bearer-token auth on /ws.
 #[test]
