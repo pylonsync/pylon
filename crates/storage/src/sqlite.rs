@@ -933,10 +933,7 @@ impl SqliteAdapter {
         let col_list = col_list.join(", ");
 
         self.conn
-            .execute(
-                &format!("DROP TABLE IF EXISTS {}", quote_ident(&tmp)),
-                [],
-            )
+            .execute(&format!("DROP TABLE IF EXISTS {}", quote_ident(&tmp)), [])
             .map_err(exec_err("drop stale rebuild table failed"))?;
         self.conn
             .execute(
@@ -1640,10 +1637,7 @@ mod tests {
             .unwrap();
         adapter
             .conn
-            .execute(
-                "CREATE INDEX \"User_by_email\" ON \"User\" (email)",
-                [],
-            )
+            .execute("CREATE INDEX \"User_by_email\" ON \"User\" (email)", [])
             .unwrap();
         adapter
             .conn
@@ -1695,7 +1689,10 @@ mod tests {
             "INSERT INTO \"User\" (id, email, \"displayName\") VALUES ('u3', 'a@b.c', 'Eve')",
             [],
         );
-        assert!(dup.is_err(), "unique constraint on email was lost in rebuild");
+        assert!(
+            dup.is_err(),
+            "unique constraint on email was lost in rebuild"
+        );
 
         // Explicit index survived the rebuild.
         let idx: i64 = adapter

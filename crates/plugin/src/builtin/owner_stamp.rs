@@ -133,9 +133,7 @@ impl OwnerStampPlugin {
         };
         for field in fields {
             let provided = obj.get(field);
-            let provided_str = provided
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
+            let provided_str = provided.and_then(|v| v.as_str()).filter(|s| !s.is_empty());
             match provided_str {
                 None => {
                     // Absent / empty / non-string → stamp from the session.
@@ -248,7 +246,10 @@ mod tests {
         let m = manifest_with_owner("Listing", "sellerId");
         let p = OwnerStampPlugin::from_manifest(&m);
         assert!(p.is_scoped("Listing"));
-        assert_eq!(p.fields_for("Listing"), Some(["sellerId".to_string()].as_slice()));
+        assert_eq!(
+            p.fields_for("Listing"),
+            Some(["sellerId".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -281,7 +282,10 @@ mod tests {
             encrypted: false,
         });
         let p = OwnerStampPlugin::from_manifest(&m);
-        assert_eq!(p.fields_for("Listing"), Some(["sellerId".to_string()].as_slice()));
+        assert_eq!(
+            p.fields_for("Listing"),
+            Some(["sellerId".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -351,8 +355,12 @@ mod tests {
         // (the marketplace is guest-driven). Stamp it like any other.
         let p = OwnerStampPlugin::from_manifest(&manifest_with_owner("Listing", "sellerId"));
         let mut data = json!({ "title": "Aeron" });
-        p.stamp_insert("Listing", &mut data, &AuthContext::guest("guest_abc".into()))
-            .unwrap();
+        p.stamp_insert(
+            "Listing",
+            &mut data,
+            &AuthContext::guest("guest_abc".into()),
+        )
+        .unwrap();
         assert_eq!(data["sellerId"], "guest_abc");
     }
 

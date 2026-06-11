@@ -3778,10 +3778,7 @@ fn apply_field_defaults(
 /// a one-line addition that automatically gets skipped at the storage
 /// layer.
 pub(crate) fn is_dynamic_default(default: &serde_json::Value) -> bool {
-    default
-        .as_object()
-        .and_then(|o| o.get("$auth"))
-        .is_some()
+    default.as_object().and_then(|o| o.get("$auth")).is_some()
 }
 
 fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeError> {
