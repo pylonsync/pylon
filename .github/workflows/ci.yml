@@ -33,6 +33,7 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
+              - 'vendor/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Dockerfile'
@@ -82,6 +83,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # samael's build.rs shells out to `xmlsec1-config` and `libxml`'s
+      # build.rs probes for libxml2 — both `panic!` (not a graceful error)
+      # when the headers are absent. pylon-auth depends on samael
+      # unconditionally on non-wasm targets, so EVERY rust job that compiles
+      # the workspace needs these. Mirrors the install step in the `test` job.
+      - name: Install xmlsec1 + libxml2 (SAML build deps)
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
       # pylon-studio-api's build.rs panics if web/dist/index.html is
       # missing — `dist/` is gitignored so every cargo invocation in CI
       # has to build it first. Same step as in the publish-crates job
@@ -152,6 +160,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install xmlsec1 + libxml2 (pylon-runtime build dep)
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      # pylon-runtime pulls pylon-studio-api transitively, whose build.rs
+      # panics if web/dist/index.html is missing. Build it first (same step
+      # as the clippy/test/build jobs).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.19"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
       - run: cargo test --release -p pylon-runtime --test perf_guard -- --nocapture
 
   build:
@@ -161,23 +178,28 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # Only the gnu target ships. The musl target was dropped here for
+        # the same reason release.yml dropped it: pylon-auth links samael →
+        # libxml2 + libxmlsec1 (system C libs) unconditionally, which can't
+        # be satisfied by a static musl build. Re-add musl only alongside a
+        # SAML-feature-gated build that excludes those libs.
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # libxml + samael build scripts panic without these headers (see clippy job).
+      - name: Install xmlsec1 + libxml2 (SAML build deps)
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.19"
       - name: Build Studio UI bundle
         working-directory: crates/studio_api/web
         run: bun install --frozen-lockfile && bun run build
-      - if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --bin pylon --target ${{ matrix.target }}
 
   # Workers target build check. pylon-workers + transitives
@@ -245,7 +267,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install --locked cargo-audit
-      - run: cargo audit
+      # RUSTSEC-2023-0071 (rsa "Marvin" timing sidechannel) has no fixed
+      # upstream version. It requires an RSA *decryption* oracle to recover
+      # a key. Pylon's `rsa` use is sign-only (crates/auth/src/oidc_provider.rs
+      # issues OIDC ID tokens); SAML/SSO signature *verification* uses `ring`,
+      # and the only payload decryption is ChaCha20. With no RSA decryption
+      # path, the attack is unreachable here. Justification reviewed
+      # 2026-06-11; revisit if a decrypting RSA code path is ever added or
+      # the `rsa` crate ships a fix (then drop this ignore).
+      - run: cargo audit --ignore RUSTSEC-2023-0071
 
   # -----------------------------------------------------------------
   # Terminal gate. Always runs (even when every real job is skipped),
