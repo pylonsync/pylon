@@ -2,10 +2,10 @@
 
 import React, { useState } from "react";
 import { db, useRouter } from "@pylonsync/react";
-import { Button } from "@pylonsync/example-ui/button";
-import { Input } from "@pylonsync/example-ui/input";
-import { Textarea } from "@pylonsync/example-ui/textarea";
-import { Label } from "@pylonsync/example-ui/label";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { Label } from "../ui/label";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 
 const CATEGORIES = [

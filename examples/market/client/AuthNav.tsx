@@ -2,7 +2,7 @@
 
 import React from "react";
 import { Link } from "@pylonsync/react";
-import { Button } from "@pylonsync/example-ui/button";
+import { Button } from "../ui/button";
 import { MarketProvider, useAuth } from "./MarketProvider";
 
 // Compact sign-in state for the header. Signed out → a link to /sell (which

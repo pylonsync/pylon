@@ -5,8 +5,8 @@ import {
   type PageProps,
   type ServerData,
 } from "@pylonsync/react";
-import { Card } from "@pylonsync/example-ui/card";
-import { Badge } from "@pylonsync/example-ui/badge";
+import { Card } from "../ui/card";
+import { Badge } from "../ui/badge";
 import { LiveTicker } from "../client/LiveTicker";
 import { SeedOnEmpty } from "../client/SeedOnEmpty";
 import { CategoryIcon } from "./_components/CategoryIcon";

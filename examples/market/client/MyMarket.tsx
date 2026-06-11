@@ -2,8 +2,8 @@
 
 import React from "react";
 import { Link, db } from "@pylonsync/react";
-import { Badge } from "@pylonsync/example-ui/badge";
-import { Button } from "@pylonsync/example-ui/button";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { Heart } from "lucide-react";
 import { money, timeAgo, type Listing, type Offer, type Watch } from "./market";

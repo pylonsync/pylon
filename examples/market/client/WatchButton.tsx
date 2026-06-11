@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
 import { Heart } from "lucide-react";
-import { cn } from "@pylonsync/example-ui/utils";
+import { cn } from "../ui/utils";
 import { bootClient, readIdentity, type Watch } from "./market";
 
 // Heart toggle that saves a listing to your private watchlist. Self-contained

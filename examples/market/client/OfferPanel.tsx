@@ -2,10 +2,10 @@
 
 import React, { useState } from "react";
 import { db } from "@pylonsync/react";
-import { Button } from "@pylonsync/example-ui/button";
-import { Input } from "@pylonsync/example-ui/input";
-import { Textarea } from "@pylonsync/example-ui/textarea";
-import { Badge } from "@pylonsync/example-ui/badge";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { Badge } from "../ui/badge";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { money, timeAgo, type Offer } from "./market";
 

@@ -7,7 +7,7 @@ import {
   type ServerData,
   type SsrResponse,
 } from "@pylonsync/react";
-import { Badge } from "@pylonsync/example-ui/badge";
+import { Badge } from "../../../ui/badge";
 import { OfferPanel } from "../../../client/OfferPanel";
 import { CategoryIcon } from "../../_components/CategoryIcon";
 import { WatchButton } from "../../../client/WatchButton";

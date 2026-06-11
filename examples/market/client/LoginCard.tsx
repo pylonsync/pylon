@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useState } from "react";
-import { Button } from "@pylonsync/example-ui/button";
-import { Input } from "@pylonsync/example-ui/input";
-import { Label } from "@pylonsync/example-ui/label";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
 import { useAuth } from "./MarketProvider";
 import { DEMO } from "./market";
 

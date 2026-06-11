@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@pylonsync/example-ui/tokens.css";
+@import "../ui/tokens.css";
 
 /* Tailwind v4 scans these for class names (relative to this file). */
 @source "./";
