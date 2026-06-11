@@ -79,6 +79,72 @@ export function usePathname(): string {
   return useSyncExternalStore(subscribe, pathClientSnapshot, pathServerSnapshot);
 }
 
+// The current route's dynamic params, stashed on `window.__pylon.params` by the
+// SSR client runtime at hydration + on every nav. A stable object reference
+// between navs (the runtime mints a fresh one per route), which
+// useSyncExternalStore requires.
+const EMPTY_OBJ: Record<string, string> = {};
+function paramsClientSnapshot(): Record<string, string> {
+  return (
+    (typeof window !== "undefined" && window.__pylon?.params) || EMPTY_OBJ
+  );
+}
+function paramsServerSnapshot(): Record<string, string> {
+  return EMPTY_OBJ;
+}
+
+/**
+ * The current route's dynamic params — e.g. `/dashboard/[projectId]` →
+ * `{ projectId: "p_1" }`. Reactive to client navigation, so a deep child gets
+ * the new params after a `<Link>` click without prop-drilling. Returns `{}`
+ * during SSR / first hydration — use the `params` page prop for server-side
+ * values. Drop-in for Next's `useParams`.
+ *
+ * ```tsx
+ * const { projectId } = useParams<{ projectId: string }>();
+ * ```
+ */
+export function useParams<
+  T extends Record<string, string> = Record<string, string>,
+>(): T {
+  return useSyncExternalStore(
+    subscribe,
+    paramsClientSnapshot,
+    paramsServerSnapshot,
+  ) as T;
+}
+
+/**
+ * Client-side redirect — replaces the current history entry with `href`.
+ * Drop-in for Next's `redirect` when called from a client component
+ * (effect/handler). For a redirect decided during a server render, use the
+ * `response.redirect()` API on the page's `PageProps` instead.
+ */
+export function redirect(href: string): void {
+  if (typeof window !== "undefined") {
+    void window.__pylon?.navigate(href, { replace: true });
+  }
+}
+
+/** Error thrown by {@link notFound}; the SSR not-found boundary renders it. */
+export class NotFoundError extends Error {
+  readonly digest = "PYLON_NOT_FOUND";
+  constructor() {
+    super("PYLON_NOT_FOUND");
+    this.name = "NotFoundError";
+  }
+}
+
+/**
+ * Render the nearest `not-found.tsx` boundary from a client component by
+ * throwing — drop-in for Next's `notFound`. For a 404 decided during a server
+ * render, prefer `response.notFound()` on the page's `PageProps` so the
+ * response carries a real 404 status.
+ */
+export function notFound(): never {
+  throw new NotFoundError();
+}
+
 /** Imperative navigation handle (Next-style `useRouter`). */
 export interface PylonRouter {
   /** Navigate to `href`, pushing a new history entry. */

@@ -30,7 +30,15 @@ export type {
 } from "./ssr";
 
 // Client navigation hooks for SSR pages (Next-style).
-export { useRouter, useSearchParams, usePathname } from "./useRouter";
+export {
+  useRouter,
+  useSearchParams,
+  usePathname,
+  useParams,
+  redirect,
+  notFound,
+  NotFoundError,
+} from "./useRouter";
 export type { PylonRouter } from "./useRouter";
 
 import {

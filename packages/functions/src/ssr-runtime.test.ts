@@ -11,6 +11,8 @@ import {
   buildHydrationTail,
   errorDigest,
   resolveOrigin,
+  asRouteControl,
+  PylonRouteControl,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -389,5 +391,43 @@ describe("buildHydrationTail — boundary hydration (#279) + strip (#270)", () =
     expect(d1).toMatch(/^[0-9a-f]{8}$/);
     // A different error yields a different digest.
     expect(errorDigest(new Error("other"))).not.toBe(d1);
+  });
+});
+
+describe("asRouteControl — route-control normalization (redirect/notFound)", () => {
+  test("passes the framework's own PylonRouteControl straight through", () => {
+    const redirect = new PylonRouteControl("redirect");
+    redirect.url = "/login";
+    redirect.redirectStatus = 302;
+    expect(asRouteControl(redirect)).toBe(redirect);
+
+    const nf = new PylonRouteControl("notFound");
+    expect(asRouteControl(nf)).toBe(nf);
+  });
+
+  test("recognizes @pylonsync/react's branded notFound() error by digest", () => {
+    // The cross-package contract: `notFound()` from @pylonsync/react throws an
+    // error stamped `digest === "PYLON_NOT_FOUND"`. The runtime duck-types on
+    // that brand (no import of the React class) and turns it into a notFound
+    // control → a real 404 + nearest not-found.tsx. If this regresses, a
+    // server page calling notFound() would 500 instead of 404.
+    const reactNotFound = Object.assign(new Error("PYLON_NOT_FOUND"), {
+      digest: "PYLON_NOT_FOUND",
+    });
+    const ctrl = asRouteControl(reactNotFound);
+    expect(ctrl).not.toBeNull();
+    expect(ctrl?.kind).toBe("notFound");
+  });
+
+  test("does NOT swallow ordinary errors as a 404 (fails open is forbidden)", () => {
+    // The critical safety property: a real render error must fall through to
+    // the error.tsx / 500 path, never be silently masked as a not-found.
+    expect(asRouteControl(new Error("boom"))).toBeNull();
+    expect(asRouteControl(new TypeError("nope"))).toBeNull();
+    expect(asRouteControl({ digest: "SOME_OTHER_DIGEST" })).toBeNull();
+    expect(asRouteControl({ digest: 42 })).toBeNull();
+    expect(asRouteControl(null)).toBeNull();
+    expect(asRouteControl(undefined)).toBeNull();
+    expect(asRouteControl("PYLON_NOT_FOUND")).toBeNull(); // a bare string, not an error
   });
 });

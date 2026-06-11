@@ -99,6 +99,34 @@ export class PylonRouteControl extends Error {
   }
 }
 
+/**
+ * Digest brand that `@pylonsync/react`'s `notFound()` stamps on the error it
+ * throws. We recognize it here by string instead of importing the class so the
+ * runtime stays decoupled from the React package (which doesn't depend on
+ * functions). Keep in sync with `NotFoundError.digest` in
+ * `packages/react/src/useRouter.ts`.
+ */
+const REACT_NOT_FOUND_DIGEST = "PYLON_NOT_FOUND";
+
+/**
+ * Normalize a thrown value into a route-control signal: either the framework's
+ * own `PylonRouteControl` (`response.redirect()` / `response.notFound()`) or a
+ * branded `NotFoundError` thrown by `@pylonsync/react`'s `notFound()` from a
+ * page/layout render. Returns `null` for an ordinary error so the caller falls
+ * through to its real error-handling path.
+ */
+export function asRouteControl(err: unknown): PylonRouteControl | null {
+  if (err instanceof PylonRouteControl) return err;
+  if (
+    err != null &&
+    typeof err === "object" &&
+    (err as { digest?: unknown }).digest === REACT_NOT_FOUND_DIGEST
+  ) {
+    return new PylonRouteControl("notFound");
+  }
+  return null;
+}
+
 export interface SsrCookieOptions {
   path?: string;
   domain?: string;
@@ -1481,7 +1509,8 @@ export async function handleRenderRoute(
           // (partial HTML); the dev overlay (#275) only covers failures BEFORE
           // response_start (host-side err channel). Buffered renders surface
           // their error through the catch/boundary path below.
-          if (err instanceof PylonRouteControl) {
+          const ctrl = asRouteControl(err);
+          if (ctrl) {
             // A redirect()/notFound() thrown from BELOW a <Suspense> boundary:
             // the shell already committed the head, so React swallowed it and
             // it can't change the response. This is a known limitation on BOTH
@@ -1489,9 +1518,10 @@ export async function handleRenderRoute(
             // synchronous shell). Surface it loudly instead of silently losing.
             // eslint-disable-next-line no-console
             console.error(
-              `[ssr] response.${err.kind}() called below a <Suspense> boundary was ignored — ` +
-                `the HTTP head was already sent. Call response.redirect()/notFound() in the ` +
-                `synchronous shell render, before any await/<Suspense>.`,
+              `[ssr] ${ctrl.kind}() called below a <Suspense> boundary was ignored — ` +
+                `the HTTP head was already sent. Call response.redirect()/notFound() (or ` +
+                `notFound() from @pylonsync/react) in the synchronous shell render, before ` +
+                `any await/<Suspense>.`,
             );
             return;
           }
@@ -1736,16 +1766,20 @@ export async function handleRenderRoute(
 
     send({ type: "render_done", call_id: msg.call_id });
   } catch (err: any) {
-    // A page/layout called response.redirect() or response.notFound()
-    // during render → short-circuit to a 3xx + Location or a 404 instead
-    // of a body. Page-set cookies/headers still ride along.
-    if (err instanceof PylonRouteControl) {
-      if (err.kind === "redirect") {
+    // A page/layout called response.redirect()/response.notFound(), or
+    // `notFound()` from @pylonsync/react, during render → short-circuit to a
+    // 3xx + Location or a 404 instead of a body. Page-set cookies/headers
+    // still ride along.
+    const ctrl = asRouteControl(err);
+    if (ctrl) {
+      if (ctrl.kind === "redirect") {
         send({
           type: "response_start",
           call_id: msg.call_id,
-          status: err.redirectStatus ?? 307,
-          headers: finalizeHeaders(responseState, { location: err.url ?? "/" }),
+          status: ctrl.redirectStatus ?? 307,
+          headers: finalizeHeaders(responseState, {
+            location: ctrl.url ?? "/",
+          }),
         });
         send({ type: "render_done", call_id: msg.call_id });
         return;

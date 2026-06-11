@@ -34,6 +34,9 @@ declare global {
         href: string,
         opts?: { push?: boolean; replace?: boolean },
       ) => Promise<void>;
+      /** Current route's dynamic params (read by useParams). A getter on the
+       *  runtime side, so it always reflects the latest navigation. */
+      readonly params?: Record<string, string>;
     };
   }
 }

@@ -290,6 +290,15 @@ function makeNoopResponse() {
 // For a hydrated error boundary (#279), synthesize the reset() the server
 // rendered as a no-op: re-fetch + re-render the current URL (a transient
 // error clears to the page; a deterministic one re-shows the boundary).
+// The current route's dynamic params (e.g. { projectId: "p_1" }). Lives here,
+// not in the DOM __PYLON_DATA__ (which navigate() never rewrites), so useParams()
+// in a deep client child has a reactive source. A fresh object per nav → stable
+// reference between navs (useSyncExternalStore needs that).
+let currentParams = {};
+function setNavParams(data) {
+  currentParams = (data && data.props && data.props.params) || {};
+}
+
 function withClientProps(data) {
   const props = { ...(data.props || {}) };
   props.serverData = makeClientServerData(data.ssrData);
@@ -396,6 +405,7 @@ export function hydrate(component, Page, Layouts) {
       );
       return;
     }
+    setNavParams(data);
     const tree = buildTree(Page, Layouts, withClientProps(data));
     activeRoot = hydrateRoot(document, tree);
     installNavHandlers();
@@ -472,6 +482,7 @@ async function navigate(href, opts) {
   }
   document.title = doc.title || document.title;
   syncHeadMeta(doc);
+  setNavParams(data);
   const tree = buildTree(route.Page, route.Layouts, withClientProps(data));
   activeRoot.render(tree);
   const target = url.pathname + url.search;
@@ -559,7 +570,14 @@ function installNavHandlers() {
 }
 
 // Expose for <Link> component prefetch.
-const pylonGlobal = { prefetch, navigate };
+const pylonGlobal = {
+  prefetch,
+  navigate,
+  // Read by useParams(); a getter so it always reflects the latest nav.
+  get params() {
+    return currentParams;
+  },
+};
 if (typeof window !== "undefined") {
   window.__pylon = pylonGlobal;
 }
