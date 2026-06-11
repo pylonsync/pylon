@@ -1,3 +1,4 @@
+"use client";
 /**
  * Catalog — faceted full-text search across the Product table.
  *
@@ -12,10 +13,10 @@
  */
 import { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
-import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Card } from "@pylonsync/example-ui/card";
+import { Input } from "@pylonsync/example-ui/input";
+import { Button } from "@pylonsync/example-ui/button";
+import { Badge } from "@pylonsync/example-ui/badge";
 import { Star, X } from "lucide-react";
 import type { Product } from "./lib/types";
 import { gradient, initials, navigate } from "./lib/util";

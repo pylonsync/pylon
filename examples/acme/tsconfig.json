@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "esModuleInterop": true,
     "strict": true,
@@ -10,7 +10,38 @@
     "allowImportingTsExtensions": false,
     "noEmit": true,
     "isolatedModules": true,
-    "types": ["bun-types"]
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "typeRoots": [
+      "./node_modules",
+      "../../node_modules",
+      "./../_shared/node_modules/@types"
+    ],
+    "types": ["bun-types", "react", "react-dom"],
+    "paths": {
+      "@pylonsync/example-ui": ["../_shared/src/index.ts"],
+      "@pylonsync/example-ui/button": ["../_shared/src/components/button.tsx"],
+      "@pylonsync/example-ui/input": ["../_shared/src/components/input.tsx"],
+      "@pylonsync/example-ui/label": ["../_shared/src/components/label.tsx"],
+      "@pylonsync/example-ui/textarea": ["../_shared/src/components/textarea.tsx"],
+      "@pylonsync/example-ui/card": ["../_shared/src/components/card.tsx"],
+      "@pylonsync/example-ui/badge": ["../_shared/src/components/badge.tsx"],
+      "@pylonsync/example-ui/separator": ["../_shared/src/components/separator.tsx"],
+      "@pylonsync/example-ui/dialog": ["../_shared/src/components/dialog.tsx"],
+      "@pylonsync/example-ui/sheet": ["../_shared/src/components/sheet.tsx"],
+      "@pylonsync/example-ui/dropdown-menu": ["../_shared/src/components/dropdown-menu.tsx"],
+      "@pylonsync/example-ui/tabs": ["../_shared/src/components/tabs.tsx"],
+      "@pylonsync/example-ui/avatar": ["../_shared/src/components/avatar.tsx"],
+      "@pylonsync/example-ui/tooltip": ["../_shared/src/components/tooltip.tsx"],
+      "@pylonsync/example-ui/switch": ["../_shared/src/components/switch.tsx"],
+      "@pylonsync/example-ui/select": ["../_shared/src/components/select.tsx"],
+      "@pylonsync/example-ui/progress": ["../_shared/src/components/progress.tsx"],
+      "@pylonsync/example-ui/skeleton": ["../_shared/src/components/skeleton.tsx"],
+      "@pylonsync/example-ui/scroll-area": ["../_shared/src/components/scroll-area.tsx"],
+      "@pylonsync/example-ui/checkbox": ["../_shared/src/components/checkbox.tsx"],
+      "@pylonsync/example-ui/toggle-group": ["../_shared/src/components/toggle-group.tsx"],
+      "@pylonsync/example-ui/table": ["../_shared/src/components/table.tsx"],
+      "@pylonsync/example-ui/utils": ["../_shared/src/utils.ts"]
+    }
   },
-  "include": ["app/**/*", "app.ts"]
+  "include": ["app/**/*", "app.ts", "client/**/*", "functions/**/*"]
 }

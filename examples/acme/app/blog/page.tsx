@@ -1,5 +1,11 @@
 import React from "react";
 import { Link, Image } from "@pylonsync/react";
+import type { Metadata } from "@pylonsync/react";
+
+export const metadata: Metadata = {
+  title: "Blog — Acme",
+  description: "Writing, shipping, and the occasional tangent.",
+};
 
 const POSTS = [
   {
@@ -41,13 +47,13 @@ export default function BlogPage() {
       <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
         Blog
       </span>
-      <h1 className="display mt-3 text-4xl text-[var(--color-ink)] sm:text-6xl">
+      <h1 className="display mt-3 text-4xl text-foreground sm:text-6xl">
         Writing, shipping, and the occasional tangent.
       </h1>
 
       <Link
         href={`/blog/${feature.slug}`}
-        className="group mt-16 block overflow-hidden rounded-3xl border border-[var(--color-line)] bg-white transition hover:-translate-y-0.5 hover:shadow-md md:grid md:grid-cols-2"
+        className="group mt-16 block overflow-hidden rounded-3xl border border-border bg-card transition hover:-translate-y-0.5 hover:shadow-md md:grid md:grid-cols-2"
       >
         <Image
           src={feature.cover}
@@ -62,14 +68,14 @@ export default function BlogPage() {
             <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
               {feature.tag} · {feature.date}
             </span>
-            <h2 className="mt-4 text-3xl font-semibold tracking-tight text-[var(--color-ink)] md:text-4xl">
+            <h2 className="mt-4 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
               {feature.title}
             </h2>
-            <p className="mt-4 text-base leading-relaxed text-[var(--color-stone)]">
+            <p className="mt-4 text-base leading-relaxed text-muted-foreground">
               {feature.excerpt}
             </p>
           </div>
-          <p className="mt-8 inline-flex items-center gap-2 text-sm font-medium text-[var(--color-ink)]">
+          <p className="mt-8 inline-flex items-center gap-2 text-sm font-medium text-foreground">
             By {feature.author}
             <span aria-hidden className="transition group-hover:translate-x-0.5">
               →
@@ -83,7 +89,7 @@ export default function BlogPage() {
           <Link
             key={p.slug}
             href={`/blog/${p.slug}`}
-            className="group block overflow-hidden rounded-2xl border border-[var(--color-line)] bg-white transition hover:-translate-y-0.5 hover:shadow-md"
+            className="group block overflow-hidden rounded-2xl border border-border bg-card transition hover:-translate-y-0.5 hover:shadow-md"
           >
             <Image
               src={p.cover}
@@ -97,13 +103,13 @@ export default function BlogPage() {
               <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
                 {p.tag} · {p.date}
               </span>
-              <h3 className="mt-3 text-xl font-semibold tracking-tight text-[var(--color-ink)]">
+              <h3 className="mt-3 text-xl font-semibold tracking-tight text-foreground">
                 {p.title}
               </h3>
-              <p className="mt-3 text-sm leading-relaxed text-[var(--color-stone)]">
+              <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
                 {p.excerpt}
               </p>
-              <p className="mt-6 text-xs text-[var(--color-stone)]">
+              <p className="mt-6 text-xs text-muted-foreground">
                 By {p.author}
               </p>
             </div>

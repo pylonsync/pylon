@@ -41,14 +41,14 @@ function seeded(i: number, n: number) {
 }
 
 export default mutation({
+  auth: "guest",
   args: {
     count: v.optional(v.int()),
   },
   async handler(ctx, args) {
-    if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
     const target = args.count ?? 10_000;
 
-    const existing = await ctx.db.query("Product");
+    const existing = await ctx.db.query("Product", {});
     if (existing.length >= target) {
       return { inserted: 0, existing: existing.length };
     }

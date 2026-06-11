@@ -1,30 +1,30 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "@pylonsync/example-ui/tokens.css";
 
-@source "../app/**/*.{tsx,ts,jsx,js}";
+@source "./";
+@source "../client";
+@source "../../_shared/src";
 
 @theme {
   /* Acme-inspired palette: near-white surfaces, warm near-black ink,
      soft neutral cards. Color shows up only as an inline highlight. */
   --color-page: #fbfaf7;
-  --color-card: #f3f1ec;
   --color-card-soft: #f7f5f1;
   --color-ink: #1a1a19;
   --color-ink-soft: #2c2c2b;
-  --color-muted: #696460;
+  --color-muted-acme: #696460;
   --color-muted-soft: #a8a39c;
   --color-line: #e6e1d6;
 
-  /* Highlight accent — used only behind a single word in a section
-     title. Subdued coral, not vivid orange. */
+  /* Highlight accent — used only behind a single word in a section title. */
   --color-highlight: #ffdacc;
   --color-highlight-ink: #c44a1f;
 
-  /* Subtle blue accent used inline (the mark / icon use a soft blue).
-     Used sparingly. */
+  /* Subtle blue accent used inline (the mark / icon use a soft blue). */
   --color-blue: #5b8cf5;
 
-  /* Aliases used by the pricing / about / blog pages. Mapped onto the
-     same palette so every route resolves to one consistent style. */
+  /* Aliases consumed by pricing / about / blog pages. */
   --color-brand: #5b8cf5;
   --color-brand-deep: #3b6fd4;
   --color-stone: #696460;
@@ -35,11 +35,36 @@
   --font-sans: "Inter", "Inter Placeholder", ui-sans-serif, -apple-system,
     "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
   --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* Semantic tokens consumed by @pylonsync/example-ui components. */
+  --color-background: #fbfaf7;
+  --color-foreground: #1a1a19;
+  --color-card: #f3f1ec;
+  --color-card-foreground: #1a1a19;
+  --color-popover: #fbfaf7;
+  --color-popover-foreground: #1a1a19;
+  --color-primary: #1a1a19;
+  --color-primary-foreground: #fbfaf7;
+  --color-secondary: #f3f1ec;
+  --color-secondary-foreground: #2c2c2b;
+  --color-muted: #f3f1ec;
+  --color-muted-foreground: #696460;
+  --color-accent: #f3f1ec;
+  --color-accent-foreground: #2c2c2b;
+  --color-destructive: #c44a1f;
+  --color-destructive-foreground: #fbfaf7;
+  --color-border: #e6e1d6;
+  --color-input: #e6e1d6;
+  --color-ring: #a8a39c;
+
+  --radius-lg: 0.625rem;
+  --radius-md: calc(0.625rem - 2px);
+  --radius-sm: calc(0.625rem - 4px);
 }
 
 body {
-  background: var(--color-page);
-  color: var(--color-ink-soft);
+  background: var(--color-background);
+  color: var(--color-foreground);
   font-feature-settings: "ss01", "cv11";
 }
 
@@ -63,7 +88,7 @@ body {
 /* Product mockup chrome — soft rounded card with subtle inner border. */
 .mock {
   background: white;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--color-border);
   border-radius: 1.25rem;
   box-shadow:
     0 1px 0 0 rgb(0 0 0 / 0.02),

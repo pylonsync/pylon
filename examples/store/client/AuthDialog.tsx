@@ -1,3 +1,4 @@
+"use client";
 /**
  * Auth dialog — combined login + signup form.
  *
@@ -14,10 +15,10 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@pylonsync/example-ui/dialog";
+import { Button } from "@pylonsync/example-ui/button";
+import { Input } from "@pylonsync/example-ui/input";
+import { Label } from "@pylonsync/example-ui/label";
 import { login, register } from "./lib/auth";
 
 type Mode = "login" | "register";

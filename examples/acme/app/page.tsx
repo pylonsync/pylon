@@ -1,5 +1,13 @@
 import React from "react";
 import { Link, Image } from "@pylonsync/react";
+import type { Metadata } from "@pylonsync/react";
+import { EarlyAccessForm } from "../client/ContactForm";
+
+export const metadata: Metadata = {
+  title: "Acme — Where the work comes together",
+  description:
+    "Acme keeps your team's projects, docs, and updates in one place — so work stops slipping between tools.",
+};
 
 export default function HomePage() {
   return (
@@ -18,27 +26,24 @@ export default function HomePage() {
 function Hero() {
   return (
     <section className="pt-24 pb-20 text-center md:pt-32 md:pb-28">
-      <h1 className="display mx-auto max-w-5xl text-[56px] text-[var(--color-ink)] sm:text-[80px] md:text-[96px]">
+      <h1 className="display mx-auto max-w-5xl text-[56px] text-foreground sm:text-[80px] md:text-[96px]">
         Where the work comes together.
       </h1>
-      <p className="mx-auto mt-8 max-w-xl text-lg text-[var(--color-muted)]">
+      <p className="mx-auto mt-8 max-w-xl text-lg text-muted-foreground">
         Acme keeps your team's projects, docs, and updates in one place — so
         work stops slipping between tools and everyone sees where things stand.
       </p>
-      <div className="mt-10">
-        <Link
-          href="/sign-up"
-          className="inline-flex items-center justify-center rounded-lg bg-[var(--color-ink)] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[var(--color-ink-soft)]"
-        >
-          Get Started
-        </Link>
+      <div className="mt-10 flex justify-center">
+        <EarlyAccessForm buttonLabel="Get started free" source="hero" />
       </div>
+      <p className="mt-4 text-xs text-muted-foreground">
+        Free for your first three projects. No credit card.
+      </p>
     </section>
   );
 }
 
 function ProductShowcase() {
-  // Soft gradient background card framing the product mockup.
   return (
     <section className="pb-24">
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#a5c3ff] via-[#dabffb] to-[#ffc09f] p-6 sm:p-10">
@@ -58,39 +63,38 @@ function ProductShowcase() {
   );
 }
 
+const FEATURES = [
+  {
+    icon: "✺",
+    title: "Projects",
+    desc: "Boards, lists, and timelines that stay in sync for everyone the moment anything changes.",
+    expanded: true,
+  },
+  { icon: "✱", title: "Docs in context", expanded: false },
+  { icon: "▤", title: "Automations", expanded: false },
+  { icon: "⟨/⟩", title: "Search across everything", expanded: false },
+];
+
 function FeatureExplorer() {
-  // Bold title + accordion feature list on the left, large product mockup
-  // on the right.
-  const features = [
-    {
-      icon: "✺",
-      title: "Projects",
-      desc: "Boards, lists, and timelines that stay in sync for everyone the moment anything changes.",
-      expanded: true,
-    },
-    { icon: "✱", title: "Docs in context" },
-    { icon: "▤", title: "Automations" },
-    { icon: "⟨/⟩", title: "Search across everything" },
-  ];
   return (
     <section className="grid grid-cols-1 gap-12 pb-32 md:grid-cols-[1fr_1.2fr] md:gap-20">
       <div className="md:pt-12">
-        <h2 className="display text-[44px] text-[var(--color-ink)] sm:text-[56px]">
+        <h2 className="display text-[44px] text-foreground sm:text-[56px]">
           Everything,
           <br />
           in one place.
         </h2>
-        <ul className="mt-12 divide-y divide-[var(--color-line)] border-y border-[var(--color-line)]">
-          {features.map((f, i) => (
+        <ul className="mt-12 divide-y divide-border border-y border-border">
+          {FEATURES.map((f, i) => (
             <li key={i} className="py-5">
               <div className="flex items-start gap-3">
                 <span className="text-[var(--color-blue)]">{f.icon}</span>
                 <div className="flex-1">
-                  <h3 className="text-base font-semibold text-[var(--color-ink)]">
+                  <h3 className="text-base font-semibold text-foreground">
                     {f.title}
                   </h3>
                   {f.expanded && f.desc && (
-                    <p className="mt-2 text-sm leading-relaxed text-[var(--color-muted)]">
+                    <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                       {f.desc}
                     </p>
                   )}
@@ -117,27 +121,25 @@ function FeatureExplorer() {
 function Testimonial() {
   return (
     <section className="pb-32">
-      <h2 className="display text-[44px] text-[var(--color-ink)] sm:text-[56px]">
+      <h2 className="display text-[44px] text-foreground sm:text-[56px]">
         Loved by teams that ship.
       </h2>
-      <div className="mt-12 rounded-3xl bg-[var(--color-card)] p-8 sm:p-12">
+      <div className="mt-12 rounded-3xl bg-card p-8 sm:p-12">
         <div className="grid grid-cols-1 items-center gap-8 md:grid-cols-[1fr_auto]">
           <div>
-            <p className="text-sm font-medium text-[var(--color-ink)]">
-              Priscilla
-            </p>
-            <p className="mt-1 text-xs text-[var(--color-muted)]">
+            <p className="text-sm font-medium text-foreground">Priscilla</p>
+            <p className="mt-1 text-xs text-muted-foreground">
               Head of Operations, Northwind
             </p>
-            <blockquote className="mt-6 text-2xl leading-snug text-[var(--color-ink)] sm:text-3xl">
+            <blockquote className="mt-6 text-2xl leading-snug text-foreground sm:text-3xl">
               "We replaced four tools with Acme and stopped losing track of
               work between them. The whole team finally sees the same thing."
             </blockquote>
             <Link
-              href="/"
-              className="mt-8 inline-flex items-center gap-1 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-ink-soft)] shadow-sm transition hover:bg-[var(--color-page)]"
+              href="/contact"
+              className="mt-8 inline-flex items-center gap-1 rounded-md bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-sm transition hover:bg-secondary"
             >
-              View case study
+              Talk to us
               <span aria-hidden>›</span>
             </Link>
           </div>
@@ -151,10 +153,10 @@ function Testimonial() {
           />
         </div>
         <div className="mt-8 flex justify-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
-          <span className="h-1.5 w-4 rounded-full bg-[var(--color-ink)]" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-muted-soft)]/50" />
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" />
+          <span className="h-1.5 w-4 rounded-full bg-foreground" />
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" />
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" />
         </div>
       </div>
     </section>
@@ -164,7 +166,7 @@ function Testimonial() {
 function SectionWithHighlight() {
   return (
     <section className="pb-16 text-center">
-      <h2 className="display mx-auto max-w-3xl text-[44px] text-[var(--color-ink)] sm:text-[64px]">
+      <h2 className="display mx-auto max-w-3xl text-[44px] text-foreground sm:text-[64px]">
         One source of truth, not <span className="hl">twelve tabs</span>.
       </h2>
     </section>
@@ -172,7 +174,6 @@ function SectionWithHighlight() {
 }
 
 function ProductGrid() {
-  // 2-up product showcase below the inline-highlight title.
   return (
     <section className="pb-32">
       <div className="mock overflow-hidden">
@@ -222,10 +223,8 @@ function ProductCard({
           className="w-full"
         />
       </div>
-      <h3 className="mt-6 text-base font-semibold text-[var(--color-ink)]">
-        {title}
-      </h3>
-      <p className="mt-2 max-w-sm text-sm leading-relaxed text-[var(--color-muted)]">
+      <h3 className="mt-6 text-base font-semibold text-foreground">{title}</h3>
+      <p className="mt-2 max-w-sm text-sm leading-relaxed text-muted-foreground">
         {body}
       </p>
     </div>
@@ -235,22 +234,17 @@ function ProductCard({
 function Cta() {
   return (
     <section className="pb-32 text-center">
-      <h2 className="display mx-auto max-w-3xl text-[48px] text-[var(--color-ink)] sm:text-[72px]">
+      <h2 className="display mx-auto max-w-3xl text-[48px] text-foreground sm:text-[72px]">
         Get your team
         <br />
         on the <span className="hl">same page</span>.
       </h2>
-      <p className="mx-auto mt-8 max-w-lg text-lg text-[var(--color-muted)]">
+      <p className="mx-auto mt-8 max-w-lg text-lg text-muted-foreground">
         Acme sets up in about twelve minutes. Free for your first three
         projects — no credit card.
       </p>
-      <div className="mt-10">
-        <Link
-          href="/sign-up"
-          className="inline-flex items-center justify-center rounded-lg bg-[var(--color-ink)] px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-[var(--color-ink-soft)]"
-        >
-          Get Started
-        </Link>
+      <div className="mt-10 flex justify-center">
+        <EarlyAccessForm buttonLabel="Get started free" source="cta" />
       </div>
     </section>
   );

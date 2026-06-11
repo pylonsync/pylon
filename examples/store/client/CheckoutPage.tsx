@@ -1,3 +1,4 @@
+"use client";
 /**
  * Checkout — pick an address, confirm the cart, and place the order.
  *
@@ -10,9 +11,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@pylonsync/react";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/card";
+import { Separator } from "@pylonsync/example-ui/separator";
 import { AddressList } from "./AccountPage";
 import type { Address } from "./lib/types";
 import type { UseCartReturn } from "./lib/cart";

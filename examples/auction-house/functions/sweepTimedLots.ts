@@ -18,7 +18,7 @@ export default mutation({
   args: {
     auctionId: v.string(),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { auctionId: string }) {
     const auction = (await ctx.db.get("Auction", args.auctionId)) as
       | { kind: string; status: string }
       | null;
@@ -33,7 +33,7 @@ export default mutation({
       await ctx.db.update("Auction", args.auctionId, { status: "running" });
     }
 
-    const allLots = (await ctx.db.query("Lot")) as Array<{
+    const lots = (await ctx.db.query("Lot", { auctionId: args.auctionId })) as Array<{
       id: string;
       auctionId: string;
       status: string;
@@ -41,7 +41,6 @@ export default mutation({
       bidCount: number;
       currentCents: number;
     }>;
-    const lots = allLots.filter((l) => l.auctionId === args.auctionId);
     const now = Date.now();
     let opened = 0;
     let closed = 0;
@@ -70,15 +69,13 @@ export default mutation({
           stillActive++;
         } else {
           // Time's up — close it.
-          const bids = (await ctx.db.query("Bid")) as Array<{
+          const bids = (await ctx.db.query("Bid", { lotId: lot.id })) as Array<{
             id: string;
             lotId: string;
             bidderId: string;
             amountCents: number;
           }>;
-          const highest = bids
-            .filter((b) => b.lotId === lot.id)
-            .sort((a, b) => b.amountCents - a.amountCents)[0];
+          const highest = bids.sort((a, b) => b.amountCents - a.amountCents)[0];
           if (highest) {
             await ctx.db.update("Lot", lot.id, {
               status: "sold",

@@ -14,6 +14,7 @@ const ORDER: Record<string, number> = {
 };
 
 export default mutation({
+  auth: "guest",
   args: {
     orderId: v.string(),
     to: v.string(),

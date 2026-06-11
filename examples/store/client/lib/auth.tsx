@@ -1,3 +1,4 @@
+"use client";
 /**
  * Auth client for the store demo.
  *
@@ -13,7 +14,11 @@ import { useCallback, useEffect, useState } from "react";
 import { configureClient, db, storageKey } from "@pylonsync/react";
 import type { AuthUser } from "./types";
 
-const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
+// Same-origin under native SSR; fall back to localhost for standalone dev.
+const BASE_URL =
+  typeof window !== "undefined"
+    ? window.location.origin
+    : "http://localhost:4321";
 
 type StoredAuth = {
   token: string | null;

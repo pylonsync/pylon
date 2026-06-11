@@ -12,7 +12,7 @@ export default mutation({
   args: {
     auctionId: v.string(),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { auctionId: string }) {
     const auction = (await ctx.db.get("Auction", args.auctionId)) as
       | { status: string; kind: string }
       | null;
@@ -20,7 +20,7 @@ export default mutation({
     if (auction.status !== "scheduled") {
       return { started: false, reason: `already_${auction.status}` };
     }
-    await ctx.db.update("Auction", args.auctionId, { status: "running" });
+    await ctx.db.update("Auction", args.auctionId as string, { status: "running" });
     return { started: true };
   },
 });

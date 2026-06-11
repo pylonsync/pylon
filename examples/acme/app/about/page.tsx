@@ -1,5 +1,11 @@
 import React from "react";
 import { Link, Image } from "@pylonsync/react";
+import type { Metadata } from "@pylonsync/react";
+
+export const metadata: Metadata = {
+  title: "About — Acme",
+  description: "Software for the work you actually do.",
+};
 
 export default function AboutPage() {
   return (
@@ -8,16 +14,16 @@ export default function AboutPage() {
         <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
           About
         </span>
-        <h1 className="display mt-3 text-4xl text-[var(--color-ink)] sm:text-6xl">
+        <h1 className="display mt-3 text-4xl text-foreground sm:text-6xl">
           Software for the work you actually do.
         </h1>
-        <p className="mt-8 max-w-2xl text-lg leading-relaxed text-[var(--color-stone)]">
+        <p className="mt-8 max-w-2xl text-lg leading-relaxed text-muted-foreground">
           We started Acme in 2024 because we kept opening the same six tabs
           every morning and closing them every evening, and nothing in between
           felt like it was on our side. The category we wanted didn't exist, so
           we wrote it.
         </p>
-        <p className="mt-6 max-w-2xl text-lg leading-relaxed text-[var(--color-stone)]">
+        <p className="mt-6 max-w-2xl text-lg leading-relaxed text-muted-foreground">
           Acme is a team of twelve in Dallas, Austin, and the Pacific Northwest.
           We ship every Friday, dogfood everything, and pay the mortgage on
           quiet competence — no growth hacks, no demo-day theatrics, no fake
@@ -26,7 +32,7 @@ export default function AboutPage() {
       </section>
 
       <section className="mx-auto max-w-6xl px-6 py-24">
-        <h2 className="display text-3xl text-[var(--color-ink)] sm:text-4xl">
+        <h2 className="display text-3xl text-foreground sm:text-4xl">
           What we believe.
         </h2>
         <div className="mt-12 grid grid-cols-1 gap-12 md:grid-cols-3">
@@ -35,10 +41,10 @@ export default function AboutPage() {
               <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-brand-deep)]">
                 {b.eyebrow}
               </span>
-              <h3 className="mt-3 text-lg font-semibold text-[var(--color-ink)]">
+              <h3 className="mt-3 text-lg font-semibold text-foreground">
                 {b.title}
               </h3>
-              <p className="mt-3 text-sm leading-relaxed text-[var(--color-stone)]">
+              <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
                 {b.body}
               </p>
             </div>
@@ -46,12 +52,12 @@ export default function AboutPage() {
         </div>
       </section>
 
-      <section className="bg-[var(--color-cream-deep)]/40">
+      <section className="bg-secondary/40">
         <div className="mx-auto max-w-6xl px-6 py-24">
-          <h2 className="display text-3xl text-[var(--color-ink)] sm:text-4xl">
+          <h2 className="display text-3xl text-foreground sm:text-4xl">
             The team.
           </h2>
-          <p className="mt-4 max-w-xl text-[var(--color-stone)]">
+          <p className="mt-4 max-w-xl text-muted-foreground">
             Twelve people, no managers of managers. Hire the best you can find,
             give them the room to ship.
           </p>
@@ -66,10 +72,10 @@ export default function AboutPage() {
                   sizes="(max-width: 768px) 50vw, 240px"
                   className="aspect-square w-full rounded-2xl object-cover"
                 />
-                <p className="mt-4 text-sm font-medium text-[var(--color-ink)]">
+                <p className="mt-4 text-sm font-medium text-foreground">
                   {p.name}
                 </p>
-                <p className="text-xs text-[var(--color-stone)]">{p.role}</p>
+                <p className="text-xs text-muted-foreground">{p.role}</p>
               </div>
             ))}
           </div>
@@ -77,16 +83,16 @@ export default function AboutPage() {
       </section>
 
       <section className="mx-auto max-w-3xl px-6 py-24 text-center">
-        <h2 className="display text-3xl text-[var(--color-ink)] sm:text-4xl">
+        <h2 className="display text-3xl text-foreground sm:text-4xl">
           We're hiring.
         </h2>
-        <p className="mt-6 text-lg text-[var(--color-stone)]">
+        <p className="mt-6 text-lg text-muted-foreground">
           Designers and senior engineers who'd rather ship five things and
           delete two than ship a hundred and own none of them.
         </p>
         <Link
-          href="/careers"
-          className="mt-10 inline-flex items-center gap-2 rounded-full bg-[var(--color-ink)] px-6 py-3 text-sm font-medium text-[var(--color-cream)] transition hover:bg-[var(--color-ink-soft)]"
+          href="/contact"
+          className="mt-10 inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition hover:opacity-90"
         >
           Open roles →
         </Link>

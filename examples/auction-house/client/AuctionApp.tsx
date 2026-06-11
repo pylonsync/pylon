@@ -25,7 +25,7 @@ import { Account } from "./Account";
 import { CreateAuctionDialog } from "./CreateAuctionDialog";
 import { AuthDialog } from "./AuthDialog";
 import { UserMenu } from "./UserMenu";
-import { ensureGuestSession, useAuth } from "./lib/auth";
+import { useAuth } from "./lib/auth";
 import { navigate } from "./lib/util";
 
 // Same-origin under native SSR: the Pylon binary serves this app and its API
@@ -73,12 +73,10 @@ export function AuctionApp() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [createOpen, setCreateOpen] = useState(false);
 
-  // Bootstrap a guest session and seed sample auctions on first load.
+  // Seed sample auctions on first load. The guest session is already
+  // established by AuctionIsland before this component mounts.
   useEffect(() => {
-    (async () => {
-      await ensureGuestSession();
-      callFn("seedAuctionHouse", {}).catch(() => {});
-    })();
+    callFn("seedAuctionHouse", {}).catch(() => {});
   }, []);
 
   const requiresAuth = route.name === "account";

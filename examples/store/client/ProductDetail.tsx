@@ -1,3 +1,4 @@
+"use client";
 /**
  * Product detail — single-product page reached via #/p/<id>.
  *
@@ -8,10 +9,10 @@
 import { useState } from "react";
 import { db } from "@pylonsync/react";
 import { ArrowLeft, Check, Star } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card, CardContent } from "@pylonsync/example-ui/card";
+import { Badge } from "@pylonsync/example-ui/badge";
+import { Separator } from "@pylonsync/example-ui/separator";
 import type { Product } from "./lib/types";
 import { gradient, initials, navigate } from "./lib/util";
 

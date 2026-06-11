@@ -19,7 +19,7 @@ export default mutation({
     lotId: v.string(),
     amountCents: v.int(),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { lotId: string; amountCents: number }) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in to bid");
     if (args.amountCents <= 0) {
       throw ctx.error("BAD_AMOUNT", "bid must be positive");
@@ -101,7 +101,7 @@ export default mutation({
       }
     }
 
-    await ctx.db.update("Lot", args.lotId, {
+    await ctx.db.update("Lot", args.lotId as string, {
       currentCents: args.amountCents,
       bidCount: lot.bidCount + 1,
       endsAt: nextEndsAt,

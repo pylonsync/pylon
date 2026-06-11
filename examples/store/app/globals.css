@@ -3,15 +3,14 @@
 @import "@pylonsync/example-ui/tokens.css";
 
 /* Tailwind v4 scans these for class names. Paths are relative to this file
-   (examples/auction-house/app/globals.css): the SSR app dir, the client app,
-   and the shared example-ui component source. */
+   (examples/store/app/globals.css): the SSR app dir, the client app, and the
+   shared example-ui component source. */
 @source "./";
 @source "../client";
 @source "../../_shared/src";
 
 @theme {
   --font-sans: "Inter", -apple-system, system-ui, sans-serif;
-  --font-display: "Inter", -apple-system, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
 
   --color-background: oklch(0.985 0 0);
@@ -39,6 +38,7 @@
   --radius-sm: calc(0.625rem - 4px);
 }
 
-html, body {
+html,
+body {
   height: 100%;
 }

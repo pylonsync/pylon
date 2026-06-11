@@ -1,3 +1,4 @@
+"use client";
 /**
  * Cart hook — sync-backed, scoped to the current user.
  *

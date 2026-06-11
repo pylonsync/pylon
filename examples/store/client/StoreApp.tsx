@@ -1,3 +1,4 @@
+"use client";
 /**
  * Pylon Store — full e-commerce showcase.
  *
@@ -14,11 +15,11 @@
  * route shares the same singletons (one cart drawer, one auth
  * dialog, one header).
  */
-import { useEffect, useState } from "react";
-import { init, callFn } from "@pylonsync/react";
+import React, { useEffect, useState } from "react";
+import { callFn } from "@pylonsync/react";
 import { ShoppingCart, User as UserIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@pylonsync/example-ui/button";
+import { Badge } from "@pylonsync/example-ui/badge";
 import { Catalog } from "./Catalog";
 import { ProductDetail } from "./ProductDetail";
 import { AccountPage } from "./AccountPage";
@@ -27,18 +28,9 @@ import { OrderDetail } from "./OrderDetail";
 import { CartSheet } from "./CartSheet";
 import { AuthDialog } from "./AuthDialog";
 import { UserMenu } from "./UserMenu";
-import { ensureGuestSession, useAuth } from "./lib/auth";
+import { useAuth } from "./lib/auth";
 import { useCart } from "./lib/cart";
 import { navigate } from "./lib/util";
-
-const BASE_URL = process.env.NEXT_PUBLIC_PYLON_URL ?? "http://localhost:4321";
-const WS_URL =
-  process.env.NEXT_PUBLIC_PYLON_WS_URL ??
-  (BASE_URL.startsWith("https://")
-    ? `${BASE_URL.replace(/^https:/, "wss:").replace(/\/$/, "")}:4322`
-    : undefined);
-
-init({ baseUrl: BASE_URL, appName: "store", wsUrl: WS_URL });
 
 // ---------------------------------------------------------------------------
 // Hash routing
@@ -84,14 +76,10 @@ export function StoreApp() {
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
 
-  // Bootstrap a guest session if the user isn't logged in. The seed
-  // function needs `auth.userId`, and per-user CartItem policies
-  // need a stable id even for anonymous browsing.
+  // Seed the catalog in the background after initial mount. The function
+  // is idempotent — it skips if ≥ target rows already exist.
   useEffect(() => {
-    (async () => {
-      await ensureGuestSession();
-      callFn("seedCatalog", { count: 10_000 }).catch(() => {});
-    })();
+    callFn("seedCatalog", { count: 10_000 }).catch(() => {});
   }, []);
 
   // Routes that require a real (non-guest) account. If a guest hits
@@ -177,9 +165,9 @@ function Header({
   const { user, isAuthenticated } = useAuth();
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80 md:px-6">
+    <header className="sticky top-0 z-30 h-14 border-b bg-background px-5 flex items-center gap-4">
       <button
-        className="flex items-center gap-2 font-semibold text-primary"
+        className="flex items-center gap-2 font-medium text-sm text-foreground hover:text-primary transition-colors"
         onClick={() => navigate("#/")}
       >
         <BrandMark />

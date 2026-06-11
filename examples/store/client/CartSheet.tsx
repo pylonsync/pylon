@@ -1,11 +1,12 @@
+"use client";
 /**
  * Cart drawer — slides in from the right, lists every CartItem the
  * current user has, lets them adjust quantities or remove items, and
  * sends them to the checkout flow.
  */
 import { Minus, Plus, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@pylonsync/example-ui/button";
+import { Separator } from "@pylonsync/example-ui/separator";
 import {
   Sheet,
   SheetClose,
@@ -14,7 +15,7 @@ import {
   SheetFooter,
   SheetHeader,
   SheetTitle,
-} from "@/components/ui/sheet";
+} from "@pylonsync/example-ui/sheet";
 import type { UseCartReturn } from "./lib/cart";
 import { gradient, initials, navigate } from "./lib/util";
 

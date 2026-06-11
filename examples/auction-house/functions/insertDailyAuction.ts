@@ -33,7 +33,23 @@ export default mutation({
 		),
 	},
 	internal: true,
-	async handler(ctx, args) {
+	async handler(ctx, args: {
+		title: string;
+		description: string;
+		creatorId: string;
+		startsAt: string;
+		endsAt: string;
+		bannerColor: string;
+		dedupTag: string;
+		lots: Array<{
+			title: string;
+			description: string;
+			imageColor: string;
+			startingCents: number;
+			minIncrementCents: number;
+			endsAt: string;
+		}>;
+	}) {
 		const now = new Date().toISOString();
 		const auctionId = await ctx.db.insert("Auction", {
 			title: args.title,

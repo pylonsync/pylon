@@ -16,7 +16,7 @@ export default mutation({
   args: {
     lotId: v.string(),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { lotId: string }) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
 
     const lot = (await ctx.db.get("Lot", args.lotId)) as

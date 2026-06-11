@@ -13,6 +13,7 @@ import { ArrowRight, Clock, Hammer, Radio } from "lucide-react";
 import { Card } from "@pylonsync/example-ui/card";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Button } from "@pylonsync/example-ui/button";
+import { Skeleton } from "@pylonsync/example-ui/skeleton";
 import { cn } from "@pylonsync/example-ui/utils";
 import type { Auction, Lot } from "./lib/types";
 import { navigate, timeLeft } from "./lib/util";
@@ -46,7 +47,26 @@ export function AuctionList() {
   }, [auctions]);
 
   if (loading) {
-    return <div className="p-12 text-center text-muted-foreground">Loading…</div>;
+    return (
+      <div className="mx-auto max-w-6xl space-y-12 px-4 py-10 md:px-6">
+        <div className="space-y-4">
+          <Skeleton className="h-7 w-32" />
+          <div className="grid gap-4 md:grid-cols-2">
+            {[1, 2].map((i) => (
+              <Skeleton key={i} className="h-64 rounded-xl" />
+            ))}
+          </div>
+        </div>
+        <div className="space-y-4">
+          <Skeleton className="h-7 w-28" />
+          <div className="grid gap-4 md:grid-cols-3">
+            {[1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-52 rounded-xl" />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if ((auctions ?? []).length === 0) {

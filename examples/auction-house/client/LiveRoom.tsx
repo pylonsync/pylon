@@ -6,7 +6,7 @@
  * (auction.creatorId) gets controls to advance lots; everyone else
  * can bid on the open lot.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import {
   ArrowLeft,
@@ -15,6 +15,7 @@ import {
   Clock,
   Gavel,
   Radio,
+  Square,
   XCircle,
 } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
@@ -22,8 +23,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Separator } from "@pylonsync/example-ui/separator";
 import { Input } from "@pylonsync/example-ui/input";
+import { Skeleton } from "@pylonsync/example-ui/skeleton";
 import { cn } from "@pylonsync/example-ui/utils";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { Auction, Bid, Lot } from "./lib/types";
 import { formatCents, navigate, timeLeft } from "./lib/util";
 import { useAuth } from "./lib/auth";
@@ -53,7 +55,12 @@ export function LiveRoom({ id }: { id: string }) {
 
   if (loading) {
     return (
-      <div className="p-12 text-center text-muted-foreground">Loading live auction…</div>
+      <div className="grid h-[calc(100vh-3.5rem)] place-items-center">
+        <div className="flex flex-col items-center gap-3">
+          <Skeleton className="h-6 w-48" />
+          <Skeleton className="h-4 w-32" />
+        </div>
+      </div>
     );
   }
   if (!auction) {
@@ -156,7 +163,7 @@ function LotQueue({
                 className={cn(
                   "size-4",
                   lot.status === "sold"
-                    ? "text-emerald-400"
+                    ? "text-primary"
                     : lot.status === "passed"
                     ? "text-muted-foreground"
                     : active
@@ -236,6 +243,18 @@ function Spotlight({
           >
             <Gavel className="size-4" />
             Open Lot {upcoming[0].position + 1}
+          </Button>
+        )}
+        {isAuctioneer && auction.status !== "ended" && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              callFn("endAuction", { auctionId: auction.id }).catch(() => {})
+            }
+          >
+            <Square className="size-4" />
+            End auction
           </Button>
         )}
       </main>

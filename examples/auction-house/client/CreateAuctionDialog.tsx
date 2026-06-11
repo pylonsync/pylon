@@ -71,18 +71,16 @@ export function CreateAuctionDialog({
         })),
     };
     if (!payload.title || payload.lots.length === 0) return;
-    try {
-      const res = await create.mutate(payload);
-      if (res?.auctionId) {
-        const target =
-          kind === "live"
-            ? `#/a/${encodeURIComponent(res.auctionId)}/live`
-            : `#/a/${encodeURIComponent(res.auctionId)}`;
-        navigate(target);
-        reset();
-        onClose();
-      }
-    } catch {}
+    const res = await create.mutate(payload).catch(() => null);
+    if (res?.auctionId) {
+      const target =
+        kind === "live"
+          ? `#/a/${encodeURIComponent(res.auctionId)}/live`
+          : `#/a/${encodeURIComponent(res.auctionId)}`;
+      navigate(target);
+      reset();
+      onClose();
+    }
   };
 
   return (

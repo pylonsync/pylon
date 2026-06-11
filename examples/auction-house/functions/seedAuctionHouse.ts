@@ -33,10 +33,10 @@ export default mutation({
   args: {
     force: v.optional(v.boolean()),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { force?: boolean }) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
 
-    const existing = await ctx.db.query("Auction");
+    const existing = await ctx.db.query("Auction", {});
     if (existing.length > 0 && !args.force) {
       return { seeded: 0, existing: existing.length };
     }

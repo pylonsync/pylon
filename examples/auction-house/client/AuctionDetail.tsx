@@ -11,6 +11,7 @@ import { ArrowLeft, ArrowRight, Clock, Radio } from "lucide-react";
 import { Card } from "@pylonsync/example-ui/card";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Button } from "@pylonsync/example-ui/button";
+import { Skeleton } from "@pylonsync/example-ui/skeleton";
 import { cn } from "@pylonsync/example-ui/utils";
 import type { Auction, Lot } from "./lib/types";
 import { formatCents, navigate, timeLeft } from "./lib/util";
@@ -27,7 +28,16 @@ export function AuctionDetail({ id }: { id: string }) {
   const sortedLots = useMemo(() => [...(lots ?? [])].sort((a, b) => a.position - b.position), [lots]);
 
   if (loading) {
-    return <div className="p-12 text-center text-muted-foreground">Loading auction…</div>;
+    return (
+      <div className="mx-auto max-w-6xl px-4 py-8 md:px-6">
+        <Skeleton className="mb-8 h-32 w-full rounded-none" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <Skeleton key={i} className="h-64 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
   }
   if (!auction) {
     return (

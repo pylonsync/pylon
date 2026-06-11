@@ -1,3 +1,4 @@
+"use client";
 /**
  * Order detail — line items + shipping timeline.
  *
@@ -8,9 +9,9 @@
  */
 import { db } from "@pylonsync/react";
 import { ArrowLeft, Check, Package, Truck, Home } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/card";
+import { Separator } from "@pylonsync/example-ui/separator";
 import type { Order, OrderItem, OrderStatus } from "./lib/types";
 import { STATUS_STEPS, STATUS_LABELS } from "./lib/types";
 import { gradient, initials, navigate } from "./lib/util";

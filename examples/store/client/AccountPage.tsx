@@ -1,3 +1,4 @@
+"use client";
 /**
  * Account page — orders list + addresses CRUD.
  *
@@ -9,18 +10,18 @@
 import { useState } from "react";
 import { db } from "@pylonsync/react";
 import { ArrowRight, MapPin, Plus, Star, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@pylonsync/example-ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/card";
+import { Input } from "@pylonsync/example-ui/input";
+import { Label } from "@pylonsync/example-ui/label";
+import { Badge } from "@pylonsync/example-ui/badge";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog";
+} from "@pylonsync/example-ui/dialog";
 import type { Address, Order } from "./lib/types";
 import { STATUS_LABELS } from "./lib/types";
 import { useAuth } from "./lib/auth";

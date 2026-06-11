@@ -2,18 +2,20 @@
 
 /**
  * Lot detail — bidding interface for a timed lot. Live bid history,
- * countdown timer, and a bid form. Closing-soon state pulses red.
+ * countdown timer, bid form, and watchlist toggle. Closing-soon
+ * state pulses red.
  */
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@pylonsync/react";
-import { ArrowLeft, Clock, Gavel } from "lucide-react";
+import { ArrowLeft, Bookmark, BookmarkCheck, Clock, Gavel } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@pylonsync/example-ui/card";
 import { Input } from "@pylonsync/example-ui/input";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Separator } from "@pylonsync/example-ui/separator";
+import { Skeleton } from "@pylonsync/example-ui/skeleton";
 import { cn } from "@pylonsync/example-ui/utils";
-import type { Auction, Bid, Lot } from "./lib/types";
+import type { Auction, Bid, Lot, Watch } from "./lib/types";
 import { formatCents, navigate, timeLeft } from "./lib/util";
 import { useAuth } from "./lib/auth";
 import { useTick } from "./hooks/useTick";
@@ -31,10 +33,45 @@ export function LotDetail({
     lot?.auctionId ?? "",
   );
   const { data: bids } = db.useQuery<Bid>("Bid", { where: { lotId: id } });
+  const { user, isAuthenticated } = useAuth();
+  const { data: watches } = db.useQuery<Watch>("Watch", {
+    where: user?.id ? { userId: user.id, lotId: id } : undefined,
+  });
   useTick(1000);
 
+  const isWatched = (watches ?? []).length > 0;
+  const watchId = watches?.[0]?.id;
+
+  const toggleWatch = async () => {
+    if (!isAuthenticated) {
+      onPromptAuth();
+      return;
+    }
+    if (isWatched && watchId) {
+      await db.delete("Watch", watchId);
+    } else if (user?.id) {
+      await db.insert("Watch", {
+        userId: user.id,
+        lotId: id,
+        addedAt: new Date().toISOString(),
+      });
+    }
+  };
+
   if (loading) {
-    return <div className="p-12 text-center text-muted-foreground">Loading lot…</div>;
+    return (
+      <div className="mx-auto max-w-5xl px-4 py-8 md:px-6">
+        <Skeleton className="mb-4 h-8 w-32" />
+        <div className="grid gap-6 md:grid-cols-[1.2fr_1fr]">
+          <Skeleton className="aspect-square rounded-xl" />
+          <div className="flex flex-col gap-4">
+            <Skeleton className="h-6 w-3/4" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-32 w-full rounded-lg" />
+          </div>
+        </div>
+      </div>
+    );
   }
   if (!lot || !auction) {
     return (
@@ -46,15 +83,31 @@ export function LotDetail({
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 md:px-6">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="mb-4"
-        onClick={() => navigate(`#/a/${encodeURIComponent(lot.auctionId)}`)}
-      >
-        <ArrowLeft className="size-4" />
-        Back to {auction.title}
-      </Button>
+      <div className="mb-4 flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => navigate(`#/a/${encodeURIComponent(lot.auctionId)}`)}
+        >
+          <ArrowLeft className="size-4" />
+          Back to {auction.title}
+        </Button>
+        <div className="flex-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={toggleWatch}
+          className={cn(isWatched && "text-primary")}
+          title={isWatched ? "Remove from watchlist" : "Add to watchlist"}
+        >
+          {isWatched ? (
+            <BookmarkCheck className="size-4" />
+          ) : (
+            <Bookmark className="size-4" />
+          )}
+          {isWatched ? "Watching" : "Watch"}
+        </Button>
+      </div>
 
       <div className="grid gap-6 md:grid-cols-[1.2fr_1fr]">
         <div
@@ -71,7 +124,7 @@ export function LotDetail({
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Lot {lot.position + 1} · {auction.title}
             </div>
-            <h1 className="mt-1 font-display text-2xl font-semibold leading-tight">
+            <h1 className="mt-1 text-2xl font-semibold leading-tight">
               {lot.title}
             </h1>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
@@ -172,18 +225,36 @@ function BidPanel({
     }
     const cents = Math.round(Number(amount) * 100);
     if (!Number.isFinite(cents) || cents <= 0) return;
-    try {
-      await placeBid.mutate({ lotId: lot.id, amountCents: cents });
-    } catch {}
+    await placeBid.mutate({ lotId: lot.id, amountCents: cents }).catch(() => {
+      // error surfaces in placeBid.error below
+    });
+  };
+
+  const quickBid = (mult: number) => {
+    const c = lot.bidCount === 0
+      ? lot.startingCents
+      : lot.currentCents + lot.minIncrementCents * mult;
+    if (!isAuthenticated) {
+      onPromptAuth();
+      return;
+    }
+    placeBid.mutate({ lotId: lot.id, amountCents: c }).catch(() => {});
   };
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-xs text-muted-foreground">
-        Min next bid:{" "}
-        <span className="font-mono text-foreground">
-          {formatCents(minNext)}
-        </span>
+      <div className="grid grid-cols-3 gap-1.5">
+        {[1, 2, 5].map((m) => (
+          <Button
+            key={m}
+            variant="outline"
+            size="sm"
+            onClick={() => quickBid(m)}
+            disabled={placeBid.loading}
+          >
+            +{formatCents(lot.minIncrementCents * m)}
+          </Button>
+        ))}
       </div>
       <div className="flex gap-2">
         <div className="relative flex-1">
@@ -197,7 +268,7 @@ function BidPanel({
             onChange={(e) => setAmount(e.target.value)}
             min={minNext / 100}
             step="0.01"
-            className="pl-7"
+            className="pl-7 font-mono"
           />
         </div>
         <Button onClick={handleBid} disabled={placeBid.loading}>
@@ -228,7 +299,7 @@ function BidHistory({ bids }: { bids: Bid[] }) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Bid history</CardTitle>
+        <CardTitle className="text-sm font-medium">Bid history</CardTitle>
       </CardHeader>
       <CardContent className="px-0 pb-0">
         {sorted.length === 0 ? (

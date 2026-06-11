@@ -15,6 +15,7 @@ import { mutation, v } from "@pylonsync/functions";
  * if the server restarts, the scheduler picks it back up.
  */
 export default mutation({
+  auth: "user",
   args: {
     addressId: v.string(),
   },
@@ -27,7 +28,7 @@ export default mutation({
       throw ctx.error("ADDRESS_NOT_FOUND", "shipping address not found");
     }
 
-    const cart = await ctx.db.query("CartItem");
+    const cart = await ctx.db.query("CartItem", {});
     const mine = cart.filter((c) => (c as { userId: string }).userId === userId);
     if (mine.length === 0) {
       throw ctx.error("EMPTY_CART", "cart is empty");

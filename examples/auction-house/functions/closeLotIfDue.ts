@@ -13,7 +13,7 @@ export default mutation({
   args: {
     lotId: v.string(),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: { lotId: string }) {
     const lot = (await ctx.db.get("Lot", args.lotId)) as
       | {
           auctionId: string;
@@ -38,14 +38,13 @@ export default mutation({
     }
 
     // Find the highest bid for this lot.
-    const bids = (await ctx.db.query("Bid")) as Array<{
+    const bids = (await ctx.db.query("Bid", { lotId: args.lotId })) as Array<{
       id: string;
       lotId: string;
       bidderId: string;
       amountCents: number;
     }>;
     const highest = bids
-      .filter((b) => b.lotId === args.lotId)
       .sort((a, b) => b.amountCents - a.amountCents)[0];
 
     if (highest) {

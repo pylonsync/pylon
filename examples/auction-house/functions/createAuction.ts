@@ -44,7 +44,14 @@ export default mutation({
       }),
     ),
   },
-  async handler(ctx, args) {
+  async handler(ctx, args: {
+    title: string;
+    description: string;
+    kind: string;
+    startsAt: string;
+    durationSecs: number;
+    lots: Array<{ title: string; description: string; startingCents: number }>;
+  }) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
     if (args.lots.length === 0)
       throw ctx.error("EMPTY_AUCTION", "add at least one lot");
