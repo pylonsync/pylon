@@ -170,6 +170,10 @@ pub struct ColumnSnapshot {
     pub column_type: String,
     pub notnull: bool,
     pub primary_key: bool,
+    /// Whether the live column carries a DEFAULT expression. A NOT NULL
+    /// column without one rejects inserts that omit it — the planner
+    /// uses this to heal columns orphaned by manifest edits.
+    pub has_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -321,6 +325,43 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                         }
                     }
                 }
+                // Columns that exist in the DB but are no longer in the
+                // manifest. We never DROP them automatically (data
+                // preservation), but a leftover NOT NULL column with no
+                // DEFAULT rejects every future insert — the runtime
+                // stopped supplying the field the moment it left the
+                // manifest. Heal by relaxing to nullable: non-destructive,
+                // prod-safe, and inserts work again. (Real-world driver:
+                // world3d removed `isBot` and every spawn failed with
+                // "NOT NULL constraint failed: Avatar.isBot".)
+                let manifest_fields: HashSet<&str> =
+                    entity.fields.iter().map(|f| f.name.as_str()).collect();
+                for col in &table.columns {
+                    if manifest_fields.contains(col.name.as_str()) {
+                        continue;
+                    }
+                    if col.primary_key || col.name == "id" {
+                        continue;
+                    }
+                    if col.notnull && !col.has_default {
+                        operations.push(SchemaOperation::AlterField {
+                            entity: entity.name.clone(),
+                            previous: FieldSpec {
+                                name: col.name.clone(),
+                                field_type: col.column_type.clone(),
+                                optional: false,
+                                unique: false,
+                            },
+                            target: FieldSpec {
+                                name: col.name.clone(),
+                                field_type: col.column_type.clone(),
+                                optional: true,
+                                unique: false,
+                            },
+                        });
+                    }
+                }
+
                 // Index names in DB are prefixed: {entity}_{index_name}.
                 // Build a lookup keyed by the prefixed name so we can
                 // detect: missing → AddIndex, drifted shape → drop +
@@ -1180,12 +1221,14 @@ mod tests {
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: true,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "email".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                 ],
                 indexes: vec![],
@@ -1251,12 +1294,14 @@ mod tests {
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: true,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "email".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                 ],
                 indexes: vec![], // no indexes
@@ -1327,18 +1372,21 @@ mod tests {
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: true,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "createdBy".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "plan".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                 ],
                 // Live DB has a regular unique index — no WHERE clause.
@@ -1441,12 +1489,14 @@ mod tests {
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: true,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "email".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                 ],
                 indexes: vec![IndexSnapshot {
@@ -1515,6 +1565,7 @@ mod tests {
                     column_type: "TEXT".into(),
                     notnull: true,
                     primary_key: true,
+                    has_default: false,
                 }],
                 indexes: vec![IndexSnapshot {
                     name: "User_pkey".into(),
@@ -1644,12 +1695,14 @@ mod tests {
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: true,
+                            has_default: false,
                         },
                         ColumnSnapshot {
                             name: "title".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                     ],
                     indexes: vec![],
@@ -1686,12 +1739,14 @@ mod tests {
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: true,
+                        has_default: false,
                     },
                     ColumnSnapshot {
                         name: "title".into(),
                         column_type: "TEXT".into(),
                         notnull: true,
                         primary_key: false,
+                        has_default: false,
                     },
                 ],
                 indexes: vec![],

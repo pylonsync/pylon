@@ -284,15 +284,21 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         // DATABASE_URL takes precedence — local dev against a real Postgres
         // (e.g. `pylon dev` against the SST docker-compose stack) just sets
         // DATABASE_URL=postgres://... and the runtime opens that instead of
-        // the hidden SQLite file.
+        // the hidden SQLite file. PYLON_DB_PATH (documented in `pylon dev
+        // --help`) comes next so two dev instances of the same app can run
+        // against isolated databases; the hidden `.pylon/dev.db` is the
+        // default.
         let (db_str, is_pg) = match std::env::var("DATABASE_URL") {
             Ok(url) if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
                 (url, true)
             }
-            _ => {
-                let db_path = data_dir.join("dev.db");
-                (db_path.to_string_lossy().to_string(), false)
-            }
+            _ => match std::env::var("PYLON_DB_PATH") {
+                Ok(path) if !path.is_empty() => (path, false),
+                _ => {
+                    let db_path = data_dir.join("dev.db");
+                    (db_path.to_string_lossy().to_string(), false)
+                }
+            },
         };
 
         // Default uploads into the hidden data dir too so `examples/*/uploads/`

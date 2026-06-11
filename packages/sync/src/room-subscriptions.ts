@@ -66,6 +66,16 @@ export interface RoomError {
  *  React hooks can re-render. */
 export type RoomSubscriber = () => void;
 
+/** A broadcast message relayed through a room. `from` is the sender's
+ *  user id (the server stamps it — clients can't spoof each other). */
+export interface RoomMessage {
+  topic: string;
+  payload: unknown;
+  from: string;
+}
+
+export type RoomMessageSubscriber = (message: RoomMessage) => void;
+
 interface RoomEntry {
   roomId: string;
   /** Current members snapshot (post-snapshot/update). `null` until the
@@ -77,10 +87,14 @@ interface RoomEntry {
   error: RoomError | null;
   /** Number of `register()` calls that haven't been balanced by
    *  `unregister()`. The first add ships `room-subscribe`; the last
-   *  remove ships `room-unsubscribe`. */
+   *  remove ships `room-unsubscribe`. Message subscribers count too —
+   *  a tab that only listens for broadcasts still needs the wire sub. */
   refs: number;
   /** Subscriber callbacks — one per mounted React hook. */
   subs: Set<RoomSubscriber>;
+  /** Broadcast-message callbacks. Unlike `subs` (membership pulses),
+   *  these receive the actual relayed payloads. */
+  messageSubs: Set<RoomMessageSubscriber>;
 }
 
 export class RoomSubscriptions {
@@ -107,18 +121,7 @@ export class RoomSubscriptions {
    *  Idempotent w.r.t. wire frames: a re-subscribe with no intervening
    *  full unsubscribe doesn't re-send `room-subscribe` to the server. */
   register(roomId: string, subscriber: RoomSubscriber): () => void {
-    let entry = this.rooms.get(roomId);
-    const isFirst = !entry;
-    if (!entry) {
-      entry = {
-        roomId,
-        members: null,
-        error: null,
-        refs: 0,
-        subs: new Set(),
-      };
-      this.rooms.set(roomId, entry);
-    }
+    const { entry, isFirst } = this.ensureEntry(roomId);
     entry.refs += 1;
     entry.subs.add(subscriber);
 
@@ -142,13 +145,57 @@ export class RoomSubscriptions {
     return () => this.unregisterOne(roomId, subscriber);
   }
 
+  /** Get-or-create the entry for a room. `isFirst` means this call
+   *  created it, i.e. the caller must ship the wire `room-subscribe`. */
+  private ensureEntry(roomId: string): { entry: RoomEntry; isFirst: boolean } {
+    let entry = this.rooms.get(roomId);
+    const isFirst = !entry;
+    if (!entry) {
+      entry = {
+        roomId,
+        members: null,
+        error: null,
+        refs: 0,
+        subs: new Set(),
+        messageSubs: new Set(),
+      };
+      this.rooms.set(roomId, entry);
+    }
+    return { entry, isFirst };
+  }
+
+  /**
+   * Register a BROADCAST-MESSAGE listener for `roomId`. Counts toward
+   * the same refcount as membership subscribers (a tab that only
+   * listens for broadcasts still needs the wire `room-subscribe`).
+   * The callback receives every `action: "broadcast"` relay for the
+   * room — including the caller's own broadcasts echoed back; filter
+   * on `message.from` if self-echo is unwanted.
+   */
+  registerMessages(roomId: string, subscriber: RoomMessageSubscriber): () => void {
+    const { entry, isFirst } = this.ensureEntry(roomId);
+    entry.refs += 1;
+    entry.messageSubs.add(subscriber);
+    if (isFirst) {
+      this.sendWs({ type: "room-subscribe", room: roomId });
+    }
+    return () => {
+      const e = this.rooms.get(roomId);
+      if (!e || !e.messageSubs.delete(subscriber)) return;
+      e.refs -= 1;
+      if (e.refs > 0) return;
+      this.rooms.delete(roomId);
+      this.sendWs({ type: "room-unsubscribe", room: roomId });
+    };
+  }
+
   /** Decrement the refcount for one subscriber. Internal — the
    *  `register()` returned unsubscribe routes here. Last out ships
    *  `room-unsubscribe`. */
   private unregisterOne(roomId: string, subscriber: RoomSubscriber): void {
     const entry = this.rooms.get(roomId);
     if (!entry) return;
-    entry.subs.delete(subscriber);
+    if (!entry.subs.delete(subscriber)) return;
     entry.refs -= 1;
     if (entry.refs > 0) return;
     this.rooms.delete(roomId);
@@ -178,13 +225,12 @@ export class RoomSubscriptions {
   }
 
   /** Incremental update from the server. `action` mirrors the server's
-   *  RoomEvent variants — join / leave / presence / broadcast. The
-   *  registry mutates the cached `members` snapshot in-place so a
-   *  re-render after the update sees the right shape without waiting
-   *  for the next snapshot. `broadcast` updates don't touch members
-   *  (no peer joined/left) but still fan out to listeners — Future
-   *  work: expose a separate broadcast channel. For now the React
-   *  hook only needs the membership delta. */
+   *  RoomEvent variants — join / leave / presence / broadcast.
+   *  Membership actions mutate the cached `members` snapshot in-place
+   *  and pulse the membership subscribers; `broadcast` actions route
+   *  the relayed payload to the message subscribers instead (and do
+   *  NOT pulse membership — fire-rate broadcasts would otherwise
+   *  re-render every useRoom consumer per message). */
   applyUpdate(
     roomId: string,
     action: "join" | "leave" | "presence" | "broadcast",
@@ -224,10 +270,24 @@ export class RoomSubscriptions {
         break;
       }
       case "broadcast": {
-        // No membership delta. Still pulse subscribers so apps that
-        // want to react to broadcast traffic can read it via a future
-        // dedicated callback. The current React hook ignores this.
-        break;
+        // No membership delta — route the payload to the message
+        // listeners and return WITHOUT pulsing membership subscribers
+        // (game fire events broadcast at ~10 Hz; pulsing would
+        // re-render every useRoom consumer per message).
+        const raw = (_data ?? {}) as { topic?: unknown; payload?: unknown };
+        const message: RoomMessage = {
+          topic: typeof raw.topic === "string" ? raw.topic : "",
+          payload: raw.payload,
+          from: member?.user_id ?? "",
+        };
+        for (const cb of entry.messageSubs) {
+          try {
+            cb(message);
+          } catch (err) {
+            console.warn("[sync] room message subscriber threw:", err);
+          }
+        }
+        return;
       }
     }
     entry.error = null;

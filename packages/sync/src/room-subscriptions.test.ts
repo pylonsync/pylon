@@ -34,6 +34,66 @@ function makeHarness() {
   };
 }
 
+describe("RoomSubscriptions: broadcast message channel", () => {
+  test("registerMessages receives relayed broadcast payloads with sender", () => {
+    const h = makeHarness();
+    const received: unknown[] = [];
+    h.rooms.registerMessages("battle", (m) => received.push(m));
+    // First message-subscriber ships the wire subscribe — broadcasts
+    // arrive on the same room-subscribe as membership.
+    expect(h.sent).toEqual([{ type: "room-subscribe", room: "battle" }]);
+
+    h.rooms.applyUpdate(
+      "battle",
+      "broadcast",
+      { user_id: "u_42", joined_at: "", data: {} },
+      { topic: "fire", payload: { k: "s" } },
+    );
+    expect(received).toEqual([{ topic: "fire", payload: { k: "s" }, from: "u_42" }]);
+  });
+
+  test("broadcasts do NOT pulse membership subscribers (fire-rate traffic)", () => {
+    const h = makeHarness();
+    let membershipPulses = 0;
+    h.rooms.register("battle", () => membershipPulses++);
+    h.rooms.applySnapshot("battle", []);
+    const after = membershipPulses;
+    h.rooms.applyUpdate("battle", "broadcast", { user_id: "u", joined_at: "", data: {} }, {
+      topic: "fire",
+      payload: 1,
+    });
+    expect(membershipPulses).toBe(after);
+  });
+
+  test("message-only subscriber refcounts the wire sub like membership", () => {
+    const h = makeHarness();
+    const off = h.rooms.registerMessages("battle", () => {});
+    expect(h.sent).toEqual([{ type: "room-subscribe", room: "battle" }]);
+    off();
+    expect(h.sent).toEqual([
+      { type: "room-subscribe", room: "battle" },
+      { type: "room-unsubscribe", room: "battle" },
+    ]);
+    // Double-unsubscribe is harmless.
+    off();
+    expect(h.sent.length).toBe(2);
+  });
+
+  test("mixed membership + message subscribers share one wire sub", () => {
+    const h = makeHarness();
+    const offMembers = h.rooms.register("battle", () => {});
+    const offMessages = h.rooms.registerMessages("battle", () => {});
+    expect(h.sent.length).toBe(1); // one subscribe for both
+    offMembers();
+    expect(h.sent.length).toBe(1); // message sub still holds the room
+    offMessages();
+    expect(h.sent).toEqual([
+      { type: "room-subscribe", room: "battle" },
+      { type: "room-unsubscribe", room: "battle" },
+    ]);
+  });
+});
+
 describe("RoomSubscriptions: refcount + wire frames", () => {
   test("first register ships room-subscribe; second is a no-op", () => {
     const h = makeHarness();

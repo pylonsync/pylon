@@ -281,6 +281,11 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("ttf") => "font/ttf",
         Some("otf") => "font/otf",
         Some("wasm") => "application/wasm",
+        Some("glb") => "model/gltf-binary",
+        Some("gltf") => "model/gltf+json",
+        Some("hdr") => "image/vnd.radiance",
+        Some("mp3") => "audio/mpeg",
+        Some("ogg") => "audio/ogg",
         Some("txt") => "text/plain; charset=utf-8",
         Some("xml") => "application/xml",
         Some("pdf") => "application/pdf",
@@ -697,6 +702,43 @@ pub fn try_handle(
     // the operator would never see the build-error page — they'd
     // only notice when the new feature didn't appear.
     //
+    // Static assets: `<app>/public/<path>` served verbatim at the
+    // site root (Next-style). Sits BELOW the SSR branch — explicit
+    // pages win — and ABOVE the dist/SPA fallback so a public file
+    // can't be shadowed by index.html. Misses fall through. The same
+    // resolve_safe traversal guard as dist serving applies (`..`,
+    // symlink escapes, and non-files all return None).
+    {
+        let public_dir = std::env::current_dir()
+            .ok()
+            .unwrap_or_default()
+            .join("public");
+        if let Some(file_path) = resolve_safe(&public_dir, path_only) {
+            if let Ok(bytes) = std::fs::read(&file_path) {
+                let ct = content_type_for(&file_path);
+                let cache = if is_dev_mode() {
+                    // Dev: always revalidate so edits show up.
+                    "no-cache, must-revalidate"
+                } else {
+                    "public, max-age=3600"
+                };
+                let response = Response::from_data(bytes)
+                    .with_status_code(200)
+                    .with_header(Header::from_bytes("Content-Type", ct).unwrap())
+                    .with_header(
+                        Header::from_bytes(
+                            "Access-Control-Allow-Origin",
+                            cors_origin.as_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                    )
+                    .with_header(Header::from_bytes("Cache-Control", cache).unwrap());
+                let _ = request.respond(response);
+                return Ok(());
+            }
+        }
+    }
+
     // InProgress similarly takes precedence so the user sees the
     // Building... shell instead of momentarily-stale SPA flashes
     // during a re-build triggered by a config edit.
@@ -2731,6 +2773,24 @@ mod tests {
         assert!(is_spa_eligible("/channels/general"));
         assert!(is_spa_eligible("/assets/index-abc123.js"));
         assert!(is_spa_eligible("/favicon.ico"));
+    }
+
+    #[test]
+    fn public_dir_assets_resolve_with_model_mime() {
+        // Regression for the `public/` static convention: files under
+        // <app>/public resolve through the same traversal guard as
+        // dist serving, and 3D model assets carry real mime types.
+        let tmp = TempDir::new().unwrap();
+        let public = tmp.path().join("public");
+        fs::create_dir_all(public.join("models")).unwrap();
+        fs::write(public.join("models/character.glb"), b"glTF").unwrap();
+
+        let hit = resolve_safe(&public, "/models/character.glb").expect("public file resolves");
+        assert_eq!(content_type_for(&hit), "model/gltf-binary");
+        assert_eq!(content_type_for(Path::new("scene.gltf")), "model/gltf+json");
+
+        // Traversal out of public/ stays rejected.
+        assert!(resolve_safe(&public, "/models/../../secrets.txt").is_none());
     }
 
     #[test]

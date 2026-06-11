@@ -576,35 +576,20 @@ impl SqliteAdapter {
                 }
                 SchemaOperation::AlterField {
                     entity,
-                    previous,
+                    previous: _,
                     target,
                 } => {
-                    // SQLite has no DROP NOT NULL — nullability lives in
-                    // the CREATE TABLE definition and the only way to
-                    // change it is the documented "rename + recreate +
-                    // copy" dance from the SQLite docs:
+                    // SQLite has no ALTER COLUMN — nullability lives in
+                    // the CREATE TABLE definition, so we run the
+                    // documented "create new + copy + drop + rename"
+                    // dance from the SQLite docs:
                     // <https://www.sqlite.org/lang_altertable.html#otheralter>.
-                    //
-                    // For pylon's typical case (single column going
-                    // optional), the simplest workable approach is to
-                    // skip emitting SQL on SQLite — the column already
-                    // exists and inserts that omit the field will fail
-                    // only if NOT NULL is enforced. The downstream
-                    // runtime always supplies every required field, so
-                    // a "stale NOT NULL" doesn't bite in practice the
-                    // way it does on Postgres.
-                    //
-                    // Going required → optional on SQLite when there's
-                    // no live workload pain isn't worth the table-
-                    // rebuild risk. Operators who hit a real case can
-                    // run the rebuild manually. Document and move on.
-                    let _ = (entity, previous, target);
-                    tracing::warn!(
-                        "[sqlite] AlterField on {entity}.{} requested but SQLite has no DROP/SET NOT NULL — \
-                         skipping. Manual table rebuild needed if existing data is incompatible. \
-                         (Postgres backend applies the ALTER cleanly; this is an SQLite limitation.)",
-                        target.name
-                    );
+                    // We're already inside apply_schema's transaction,
+                    // so a failure at any step rolls the whole thing
+                    // back. This used to be a warn-and-skip, which left
+                    // columns removed from the manifest stuck at NOT
+                    // NULL — and every subsequent insert failing.
+                    self.rebuild_table_with_nullability(entity, &target.name, target.optional)?;
                 }
                 SchemaOperation::AddIndex {
                     entity,
@@ -775,6 +760,226 @@ impl SqliteAdapter {
         Ok(SchemaSnapshot { tables })
     }
 
+    /// Rebuild `table` with `column`'s NOT NULL flipped to match
+    /// `optional`, preserving all data, defaults, primary keys, unique
+    /// constraints, and explicit indexes. SQLite's documented path for
+    /// any column alteration it has no ALTER syntax for:
+    /// create-new → copy → drop-old → rename → recreate indexes.
+    ///
+    /// Caller must hold an open transaction (apply_schema does).
+    fn rebuild_table_with_nullability(
+        &self,
+        table: &str,
+        column: &str,
+        optional: bool,
+    ) -> Result<(), StorageError> {
+        let exec_err = |what: &str| {
+            let what = what.to_string();
+            move |e: rusqlite::Error| StorageError {
+                code: "SQLITE_EXEC_FAILED".into(),
+                message: format!("{what}: {e}"),
+            }
+        };
+
+        // Tightening (optional → required) must not strand NULL rows.
+        if !optional {
+            let nulls: i64 = self
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {} WHERE {} IS NULL",
+                        quote_ident(table),
+                        quote_ident(column)
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(exec_err("null-count probe failed"))?;
+            if nulls > 0 {
+                return Err(StorageError {
+                    code: "SQLITE_ALTER_WOULD_VIOLATE".into(),
+                    message: format!(
+                        "cannot make {table}.{column} required: {nulls} existing row(s) are NULL — backfill first"
+                    ),
+                });
+            }
+        }
+
+        // Live column shapes, including DEFAULT expressions (returned
+        // verbatim as SQL text by PRAGMA table_info column 4).
+        struct LiveCol {
+            name: String,
+            col_type: String,
+            notnull: bool,
+            dflt: Option<String>,
+            pk: bool,
+        }
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({})", quote_ident(table)))
+            .map_err(sqlite_err)?;
+        let live_cols: Vec<LiveCol> = stmt
+            .query_map([], |row| {
+                Ok(LiveCol {
+                    name: row.get(1)?,
+                    col_type: row.get(2)?,
+                    notnull: row.get::<_, i32>(3)? != 0,
+                    dflt: row.get(4)?,
+                    pk: row.get::<_, i32>(5)? != 0,
+                })
+            })
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+        drop(stmt);
+        if !live_cols.iter().any(|c| c.name == column) {
+            // Column already gone (e.g. plan replayed) — nothing to do.
+            return Ok(());
+        }
+
+        // Unique constraints baked into the original CREATE TABLE show
+        // up as `origin = 'u'` autoindexes (PRAGMA index_list). They
+        // die with the old table, so collect their column sets and bake
+        // them into the new DDL. Explicit indexes (`origin = 'c'`) are
+        // recreated from their sqlite_master SQL after the rename.
+        let mut unique_sets: Vec<Vec<String>> = Vec::new();
+        {
+            let mut list = self
+                .conn
+                .prepare(&format!("PRAGMA index_list({})", quote_ident(table)))
+                .map_err(sqlite_err)?;
+            let entries: Vec<(String, String)> = list
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, String>(3)?))
+                })
+                .map_err(sqlite_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_err)?;
+            for (idx_name, origin) in entries {
+                if origin != "u" {
+                    continue;
+                }
+                let mut info = self
+                    .conn
+                    .prepare(&format!("PRAGMA index_info({})", quote_ident(&idx_name)))
+                    .map_err(sqlite_err)?;
+                let cols: Vec<String> = info
+                    .query_map([], |row| row.get::<_, String>(2))
+                    .map_err(sqlite_err)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(sqlite_err)?;
+                if !cols.is_empty() {
+                    unique_sets.push(cols);
+                }
+            }
+        }
+        let explicit_index_sql: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT sql FROM sqlite_master \
+                     WHERE type='index' AND tbl_name = ?1 AND sql IS NOT NULL",
+                )
+                .map_err(sqlite_err)?;
+            let sqls = stmt
+                .query_map([table], |row| row.get::<_, String>(0))
+                .map_err(sqlite_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_err)?;
+            sqls
+        };
+
+        // New table DDL: same shape, target column's NOT NULL flipped.
+        let single_col_uniques: Vec<&str> = unique_sets
+            .iter()
+            .filter(|s| s.len() == 1)
+            .map(|s| s[0].as_str())
+            .collect();
+        let pk_cols: Vec<&LiveCol> = live_cols.iter().filter(|c| c.pk).collect();
+        let composite_pk = pk_cols.len() > 1;
+        let mut defs: Vec<String> = Vec::with_capacity(live_cols.len());
+        for col in &live_cols {
+            let notnull = if col.name == column {
+                !optional
+            } else {
+                col.notnull
+            };
+            let mut def = format!("{} {}", quote_ident(&col.name), col.col_type);
+            if col.pk && !composite_pk {
+                def.push_str(" PRIMARY KEY");
+            }
+            if notnull {
+                def.push_str(" NOT NULL");
+            }
+            if let Some(d) = &col.dflt {
+                def.push_str(&format!(" DEFAULT {d}"));
+            }
+            if single_col_uniques.contains(&col.name.as_str()) {
+                def.push_str(" UNIQUE");
+            }
+            defs.push(def);
+        }
+        if composite_pk {
+            let cols: Vec<String> = pk_cols.iter().map(|c| quote_ident(&c.name)).collect();
+            defs.push(format!("PRIMARY KEY ({})", cols.join(", ")));
+        }
+        for set in unique_sets.iter().filter(|s| s.len() > 1) {
+            let cols: Vec<String> = set.iter().map(|c| quote_ident(c)).collect();
+            defs.push(format!("UNIQUE ({})", cols.join(", ")));
+        }
+
+        let tmp = format!("{table}__pylon_rebuild");
+        let col_list: Vec<String> = live_cols.iter().map(|c| quote_ident(&c.name)).collect();
+        let col_list = col_list.join(", ");
+
+        self.conn
+            .execute(
+                &format!("DROP TABLE IF EXISTS {}", quote_ident(&tmp)),
+                [],
+            )
+            .map_err(exec_err("drop stale rebuild table failed"))?;
+        self.conn
+            .execute(
+                &format!("CREATE TABLE {} ({})", quote_ident(&tmp), defs.join(", ")),
+                [],
+            )
+            .map_err(exec_err("create rebuild table failed"))?;
+        self.conn
+            .execute(
+                &format!(
+                    "INSERT INTO {} ({col_list}) SELECT {col_list} FROM {}",
+                    quote_ident(&tmp),
+                    quote_ident(table)
+                ),
+                [],
+            )
+            .map_err(exec_err("copy rows into rebuild table failed"))?;
+        self.conn
+            .execute(&format!("DROP TABLE {}", quote_ident(table)), [])
+            .map_err(exec_err("drop original table failed"))?;
+        self.conn
+            .execute(
+                &format!(
+                    "ALTER TABLE {} RENAME TO {}",
+                    quote_ident(&tmp),
+                    quote_ident(table)
+                ),
+                [],
+            )
+            .map_err(exec_err("rename rebuild table failed"))?;
+        for sql in &explicit_index_sql {
+            self.conn
+                .execute(sql, [])
+                .map_err(exec_err("recreate index after rebuild failed"))?;
+        }
+
+        tracing::info!(
+            "[sqlite] rebuilt {table}: {column} is now {}",
+            if optional { "NULLABLE" } else { "NOT NULL" }
+        );
+        Ok(())
+    }
+
     fn read_columns(&self, table: &str) -> Result<Vec<ColumnSnapshot>, StorageError> {
         let mut stmt = self
             .conn
@@ -788,6 +993,9 @@ impl SqliteAdapter {
                     column_type: row.get(2)?,
                     notnull: row.get::<_, i32>(3)? != 0,
                     primary_key: row.get::<_, i32>(5)? != 0,
+                    // PRAGMA table_info column 4 = dflt_value (NULL when
+                    // the column has no DEFAULT expression).
+                    has_default: row.get::<_, Option<String>>(4)?.is_some(),
                 })
             })
             .map_err(sqlite_err)?
@@ -1412,6 +1620,165 @@ mod tests {
             .filter(|op| matches!(op, SchemaOperation::AddField { .. }))
             .collect();
         assert_eq!(add_fields.len(), 2);
+    }
+
+    #[test]
+    fn orphaned_not_null_column_heals_and_inserts_work() {
+        // Regression: a column REMOVED from the manifest but still NOT
+        // NULL in the live table rejected every insert ("NOT NULL
+        // constraint failed"). The planner must emit an AlterField
+        // relax and the SQLite rebuild must apply it without losing
+        // data, indexes, or unique constraints.
+        let adapter = SqliteAdapter::in_memory().unwrap();
+        adapter
+            .conn
+            .execute(
+                "CREATE TABLE \"User\" (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL UNIQUE, \
+                 \"displayName\" TEXT NOT NULL, age INTEGER, \"isBot\" INTEGER NOT NULL)",
+                [],
+            )
+            .unwrap();
+        adapter
+            .conn
+            .execute(
+                "CREATE INDEX \"User_by_email\" ON \"User\" (email)",
+                [],
+            )
+            .unwrap();
+        adapter
+            .conn
+            .execute(
+                "INSERT INTO \"User\" (id, email, \"displayName\", age, \"isBot\") \
+                 VALUES ('u1', 'a@b.c', 'Alice', 30, 1)",
+                [],
+            )
+            .unwrap();
+
+        // Manifest has no isBot field → planner must heal the orphan.
+        let manifest = test_manifest();
+        let plan = adapter.plan_from_live(&manifest).unwrap();
+        assert!(
+            plan.operations.iter().any(|op| matches!(
+                op,
+                SchemaOperation::AlterField { entity, target, .. }
+                    if entity == "User" && target.name == "isBot" && target.optional
+            )),
+            "expected AlterField relaxing isBot, got: {:?}",
+            plan.operations
+        );
+        adapter.apply_schema(&plan).unwrap();
+
+        // The insert-breaking case: omit isBot entirely.
+        adapter
+            .conn
+            .execute(
+                "INSERT INTO \"User\" (id, email, \"displayName\", age) \
+                 VALUES ('u2', 'x@y.z', 'Bob', 25)",
+                [],
+            )
+            .unwrap();
+
+        // Existing data survived the rebuild.
+        let (email, is_bot): (String, i64) = adapter
+            .conn
+            .query_row(
+                "SELECT email, \"isBot\" FROM \"User\" WHERE id = 'u1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(email, "a@b.c");
+        assert_eq!(is_bot, 1);
+
+        // UNIQUE on email survived the rebuild.
+        let dup = adapter.conn.execute(
+            "INSERT INTO \"User\" (id, email, \"displayName\") VALUES ('u3', 'a@b.c', 'Eve')",
+            [],
+        );
+        assert!(dup.is_err(), "unique constraint on email was lost in rebuild");
+
+        // Explicit index survived the rebuild.
+        let idx: i64 = adapter
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='User_by_email'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "explicit index was lost in rebuild");
+
+        // Healed plan is stable: planning again is a no-op (no rebuild loop).
+        let again = adapter.plan_from_live(&manifest).unwrap();
+        assert!(
+            again.is_empty(),
+            "healed schema must plan as noop, got: {:?}",
+            again.operations
+        );
+    }
+
+    #[test]
+    fn orphaned_nullable_or_defaulted_columns_are_left_alone() {
+        let adapter = SqliteAdapter::in_memory().unwrap();
+        // Orphans that can't break inserts: nullable, or NOT NULL with
+        // a DEFAULT. Neither should trigger a table rebuild.
+        adapter
+            .conn
+            .execute(
+                "CREATE TABLE \"User\" (id TEXT PRIMARY KEY NOT NULL, email TEXT NOT NULL UNIQUE, \
+                 \"displayName\" TEXT NOT NULL, age INTEGER, \
+                 legacy TEXT, flagged INTEGER NOT NULL DEFAULT 0)",
+                [],
+            )
+            .unwrap();
+
+        let manifest = test_manifest();
+        let plan = adapter.plan_from_live(&manifest).unwrap();
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| matches!(op, SchemaOperation::AlterField { .. })),
+            "harmless orphans must not trigger rebuilds, got: {:?}",
+            plan.operations
+        );
+    }
+
+    #[test]
+    fn tightening_to_required_refuses_when_nulls_exist() {
+        let adapter = SqliteAdapter::in_memory().unwrap();
+        adapter
+            .conn
+            .execute(
+                "CREATE TABLE \"User\" (id TEXT PRIMARY KEY NOT NULL, email TEXT)",
+                [],
+            )
+            .unwrap();
+        adapter
+            .conn
+            .execute("INSERT INTO \"User\" (id, email) VALUES ('u1', NULL)", [])
+            .unwrap();
+
+        let err = adapter
+            .rebuild_table_with_nullability("User", "email", false)
+            .unwrap_err();
+        assert_eq!(err.code, "SQLITE_ALTER_WOULD_VIOLATE");
+
+        // And with the NULL backfilled, tightening succeeds.
+        adapter
+            .conn
+            .execute("UPDATE \"User\" SET email = 'a@b.c' WHERE id = 'u1'", [])
+            .unwrap();
+        adapter
+            .rebuild_table_with_nullability("User", "email", false)
+            .unwrap();
+        let nullable_insert = adapter
+            .conn
+            .execute("INSERT INTO \"User\" (id) VALUES ('u2')", []);
+        assert!(
+            nullable_insert.is_err(),
+            "email should now be NOT NULL after tightening"
+        );
     }
 
     #[test]

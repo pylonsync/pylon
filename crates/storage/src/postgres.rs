@@ -437,7 +437,8 @@ pub const INTROSPECT_COLUMNS_SQL: &str = "\
               ON tc.constraint_name = kcu.constraint_name \
             WHERE tc.table_name = c.table_name \
               AND kcu.column_name = c.column_name \
-              AND tc.constraint_type = 'PRIMARY KEY') as is_pk \
+              AND tc.constraint_type = 'PRIMARY KEY') as is_pk, \
+           (column_default IS NOT NULL) as has_default \
     FROM information_schema.columns c \
     WHERE table_schema = 'public' AND table_name = $1 \
     ORDER BY ordinal_position";
@@ -1144,11 +1145,13 @@ pub mod live {
                 let data_type: String = row.get(1);
                 let is_nullable: String = row.get(2);
                 let is_pk: i64 = row.get(3);
+                let has_default: bool = row.get(4);
                 columns.push(ColumnSnapshot {
                     name,
                     column_type: data_type,
                     notnull: is_nullable == "NO",
                     primary_key: is_pk > 0,
+                    has_default,
                 });
             }
             Ok(columns)
@@ -2533,24 +2536,28 @@ mod tests {
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: true,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "email".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "displayName".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "createdAt".into(),
                             column_type: "TIMESTAMPTZ".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                     ],
                     indexes: vec![],
@@ -2563,30 +2570,35 @@ mod tests {
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: true,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "title".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "done".into(),
                             column_type: "BOOLEAN".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "userId".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "createdAt".into(),
                             column_type: "TIMESTAMPTZ".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                     ],
                     indexes: vec![crate::IndexSnapshot {
@@ -2615,12 +2627,14 @@ mod tests {
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: true,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "email".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         // missing displayName and createdAt
                     ],
@@ -2634,30 +2648,35 @@ mod tests {
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: true,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "title".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "done".into(),
                             column_type: "BOOLEAN".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "userId".into(),
                             column_type: "TEXT".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                         crate::ColumnSnapshot {
                             name: "createdAt".into(),
                             column_type: "TIMESTAMPTZ".into(),
                             notnull: true,
                             primary_key: false,
+                            has_default: false,
                         },
                     ],
                     indexes: vec![crate::IndexSnapshot {

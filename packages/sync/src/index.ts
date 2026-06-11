@@ -38,6 +38,8 @@ export {
   type RoomError,
   type RoomErrorCode,
   type RoomMember,
+  type RoomMessage,
+  type RoomMessageSubscriber,
   type RoomSubscriber,
 } from "./room-subscriptions";
 export { IndexedDBPersistence, persistChange } from "./persistence";
@@ -2734,6 +2736,39 @@ export class SyncEngine {
           type: "room-sub-unregister",
           room: roomId,
         });
+      }
+    };
+  }
+
+  /**
+   * Subscribe to BROADCAST MESSAGES relayed through a room (the
+   * payloads sent via `POST /api/rooms/broadcast` / `useRoom`'s
+   * `broadcast()`). Same refcounted wire-subscription and leader /
+   * follower routing as `subscribeRoom` — the two channels share one
+   * `room-subscribe` per room per origin.
+   *
+   * The callback receives `{ topic, payload, from }` where `from` is
+   * the server-stamped sender user id (own broadcasts echo back —
+   * filter on `from` if unwanted). Returns an unsubscribe function.
+   */
+  subscribeRoomMessages(
+    roomId: string,
+    callback: (message: import("./room-subscriptions").RoomMessage) => void,
+  ): () => void {
+    if (this.isMultiTabLeader) {
+      return this.rooms.registerMessages(roomId, callback);
+    }
+    // Follower path mirrors subscribeRoom: register locally for
+    // routing, ask the leader to hold the wire sub on first add.
+    const hadRoomBefore = this.rooms.has(roomId);
+    const unsubscribe = this.rooms.registerMessages(roomId, callback);
+    if (!hadRoomBefore) {
+      this.broadcastToTabs({ type: "room-sub-register", room: roomId });
+    }
+    return () => {
+      unsubscribe();
+      if (!this.rooms.has(roomId)) {
+        this.broadcastToTabs({ type: "room-sub-unregister", room: roomId });
       }
     };
   }
