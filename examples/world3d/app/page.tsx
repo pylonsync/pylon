@@ -82,7 +82,7 @@ function SyncBridge({ game, userId }: { game: Game; userId: string }) {
     const off = getSync().subscribeRoomMessages("battle", (message) => {
       // Own broadcasts echo back — peers only.
       if (message.topic !== "fire" || message.from === userId) return;
-      game.applyRemoteFire(message.payload as FireEvent);
+      game.applyRemoteFire(message.payload as FireEvent, message.from);
     });
     return () => {
       game.onLocalFire(() => {});
@@ -121,6 +121,9 @@ export default function IslandPage() {
       if (disposed) return;
       const g = new Game(mount);
       gameRef.current = g;
+      // Dev console handle — lets you (or an agent) poke the live
+      // scene: __world3d.game, .three (the module), etc.
+      (window as unknown as Record<string, unknown>).__world3d = { game: g };
       g.onStats(setStats);
       g.start();
       setGame(g);

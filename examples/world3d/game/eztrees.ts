@@ -75,10 +75,6 @@ export function buildSpecies(
 
   const leafGeo = tree.leavesMesh.geometry as unknown as THREE.BufferGeometry;
   const leafVerts = leafGeo.attributes.position?.count ?? 0;
-  console.log(
-    `[world3d] EZ species "${preset}": leafVerts=${leafVerts}`,
-    `leafSize=${(tree.options as { leaves?: { size?: number } }).leaves?.size}`,
-  );
   if (leafVerts === 0) {
     // A species with no leaf billboards renders as bare branches —
     // surface it instead of silently shipping dead trees.

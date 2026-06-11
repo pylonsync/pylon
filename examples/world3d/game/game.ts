@@ -223,6 +223,7 @@ export class Game {
           ? origin.clone().addScaledVector(direction, 1.2).add(new THREE.Vector3(0, -0.12, 0))
           : this.selfRig.muzzle.getWorldPosition(this.muzzleWorld).clone();
       this.particles.tracer(muzzle, origin.clone().addScaledVector(direction, dist));
+      this.selfRig.fire();
       this.fireCb?.({
         k: "s",
         o: [origin.x, origin.y, origin.z],
@@ -397,11 +398,47 @@ export class Game {
     this.fireCb = cb;
   }
 
+  /** Dev-console: drop a character 3 m ahead, facing the camera. */
+  debugSpawnDummy(): void {
+    const dummy = buildCharacter("#e0b13d");
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    dummy.group.position
+      .setFromMatrixPosition(this.camera.matrixWorld)
+      .addScaledVector(dir, 3.2);
+    dummy.group.position.y =
+      this.terrain.heightAt(dummy.group.position.x, dummy.group.position.z) + 1.62;
+    dummy.group.rotation.y = Math.atan2(dir.x, dir.z); // face the camera
+    this.scene.add(dummy.group);
+    const tick = () => {
+      dummy.animate(performance.now() / 1000, 0);
+      if (this.running) requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  /** Dev-console introspection (see window.__world3d). */
+  debugRig(): Record<string, unknown> {
+    const rifleWorldPos = new THREE.Vector3();
+    const rifleWorldScale = new THREE.Vector3();
+    const rifle = this.selfRig.muzzle.parent;
+    rifle?.getWorldPosition(rifleWorldPos);
+    rifle?.getWorldScale(rifleWorldScale);
+    return {
+      player: this.player.position.toArray().map((n) => +n.toFixed(2)),
+      rifleParent: rifle?.parent?.name || rifle?.parent?.type,
+      rifleChildren: rifle?.children.map((c) => c.name || c.type),
+      rifleWorldPos: rifleWorldPos.toArray().map((n) => +n.toFixed(2)),
+      rifleWorldScale: +rifleWorldScale.x.toFixed(4),
+    };
+  }
+
   /**
    * Play a peer's fire event. Purely cosmetic — any destruction it
    * caused arrives separately as Destruction rows from the shooter.
    */
-  applyRemoteFire(ev: FireEvent) {
+  applyRemoteFire(ev: FireEvent, fromUserId?: string) {
+    if (fromUserId) this.remote.fireCharacter(fromUserId);
     const origin = new THREE.Vector3(ev.o[0], ev.o[1], ev.o[2]);
     const d = new THREE.Vector3(ev.d[0], ev.d[1], ev.d[2]);
     if (ev.k === "g") {

@@ -68,6 +68,15 @@ export class RemotePlayers implements GameSystem {
     this.group.name = "remote-players";
   }
 
+  /** Kick a remote player's weapon (their shot just arrived). */
+  fireCharacter(userId: string) {
+    for (const row of this.latest) {
+      if (row.userId !== userId) continue;
+      this.entries.get(row.id)?.character.fire();
+      return;
+    }
+  }
+
   /** Latest known pose for a user — anchors remote-fire VFX. */
   poseOf(userId: string): { x: number; y: number; z: number } | null {
     for (const row of this.latest) {

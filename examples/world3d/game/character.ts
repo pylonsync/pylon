@@ -36,6 +36,49 @@ interface CharacterTemplate {
 }
 
 let templatePromise: Promise<CharacterTemplate | null> | null = null;
+let gunPromise: Promise<THREE.Object3D | null> | null = null;
+
+/**
+ * The hand weapon — Quaternius' submachine gun (CC0, vendored at
+ * public/models/rifle.glb). Normalized once here: longest bbox axis
+ * becomes the barrel, pointing -Z, ~0.62 m long, origin at the grip.
+ */
+function loadGunTemplate(): Promise<THREE.Object3D | null> {
+  if (gunPromise) return gunPromise;
+  gunPromise = new GLTFLoader()
+    .loadAsync("/models/rifle.glb")
+    .then((gltf) => {
+      const gun = gltf.scene;
+      const bbox = new THREE.Box3().setFromObject(gun);
+      const size = bbox.getSize(new THREE.Vector3());
+      // Rotate the longest axis onto Z.
+      if (size.x >= size.y && size.x >= size.z) gun.rotation.y = Math.PI / 2;
+      else if (size.y >= size.x && size.y >= size.z) gun.rotation.x = Math.PI / 2;
+      const wrapper = new THREE.Group();
+      wrapper.add(gun);
+      const oriented = new THREE.Box3().setFromObject(wrapper);
+      const length = Math.max(0.01, oriented.max.z - oriented.min.z);
+      // Oversized relative to a real SMG on purpose — the character is
+      // a chunky 1.7 m critter and a to-scale gun reads like a toy.
+      const s = 0.9 / length;
+      wrapper.scale.setScalar(s);
+      // Recenter: grip near origin, barrel toward -Z.
+      const center = oriented.getCenter(new THREE.Vector3()).multiplyScalar(s);
+      wrapper.position.sub(center);
+      const root = new THREE.Group();
+      root.add(wrapper);
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) mesh.castShadow = true;
+      });
+      return root as THREE.Object3D;
+    })
+    .catch((err) => {
+      console.warn("[world3d] rifle model failed to load — keeping the box rifle", err);
+      return null;
+    });
+  return gunPromise;
+}
 
 function loadTemplate(): Promise<CharacterTemplate | null> {
   if (templatePromise) return templatePromise;
@@ -148,6 +191,8 @@ export interface Character {
   bodyMat: THREE.MeshStandardMaterial;
   /** Drive animation: t = seconds, speed = m/s ground speed. */
   animate(t: number, speed: number): void;
+  /** Kick the weapon (recoil) — call on every shot. */
+  fire(): void;
   dispose(): void;
 }
 
@@ -170,6 +215,24 @@ export function buildCharacter(color: string): Character {
   const { rifle, muzzle } = buildRifle();
   rifle.position.set(0.16, -0.1, -0.2);
   aimPivot.add(rifle);
+  let recoil = 0;
+  // Mount baseline — recoil offsets relative to wherever the rifle is
+  // currently parented (aim pivot now, fist bone once the model lands).
+  let rifleBaseZ = rifle.position.z;
+  let rifleBaseRotX = rifle.rotation.x;
+  let recoilStroke = 0.07; // shrinks with the bone-mount scale
+
+  // Swap the box rifle for the modeled gun the moment it loads: the
+  // `rifle` group (transform + muzzle anchor) stays, its box children
+  // get replaced by a clone of the gun model.
+  void loadGunTemplate().then((gun) => {
+    if (!gun || disposed) return;
+    for (const child of [...rifle.children]) {
+      if (child !== muzzle) rifle.remove(child);
+    }
+    rifle.add(gun.clone(true));
+    muzzle.position.set(0, 0.03, -0.34);
+  });
 
   // Model state, populated when the template resolves.
   let mixer: THREE.AnimationMixer | null = null;
@@ -212,36 +275,21 @@ export function buildCharacter(color: string): Character {
       }
     });
 
-    // Rifle moves from the placeholder pivot to the right fist bone.
-    // (GLTFLoader sanitizes track-illegal characters, so "Fist.R" may
-    // import as "FistR" — probe the variants.)
-    const byName = (...names: string[]) => {
-      for (const n of names) {
-        const hit = model.getObjectByName(n);
-        if (hit) return hit;
-      }
-      return null;
-    };
-    const fist = byName("FistR", "Fist_R", "Fist.R");
-    torsoBone = byName("Torso", "Spine", "Abdomen");
+    // The rifle stays on the aim pivot, repositioned to where the
+    // model's right hand sits. We deliberately do NOT parent it to the
+    // fist bone: this rig's bones carry a ~49× scale, every offset and
+    // spring stroke would need countering in bone-local units, and the
+    // hand path through the gun clips differ per animation — three
+    // rounds of invisible-gun debugging bought us that lesson. The
+    // pivot mount is meter-scaled, always visible, and pitches exactly
+    // with the aim; at this character's chunky proportions the hand
+    // reads as gripping it.
+    torsoBone = model.getObjectByName("Torso") ?? model.getObjectByName("Spine") ?? null;
     // Seed the post-mixer snapshot with the REST pose so the first
     // frame's restore doesn't zero an un-animated bone.
     if (torsoBone) torsoPostMixer.copy(torsoBone.quaternion);
-    if (fist) {
-      aimPivot.remove(rifle);
-      fist.add(rifle);
-      // Converted rigs carry arbitrary bone world scale — measure it
-      // and counter exactly so the rifle stays meter-sized.
-      group.updateMatrixWorld(true);
-      const ws = new THREE.Vector3();
-      fist.getWorldScale(ws);
-      console.log(
-        `[world3d] rifle mount: templateScale=${template.scale.toFixed(4)} fistWorldScale=${ws.x.toFixed(4)}`,
-      );
-      rifle.scale.setScalar(1 / Math.max(1e-4, ws.x));
-      rifle.position.set(0, 0.15, -0.1);
-      rifle.rotation.set(Math.PI / 2, 0, 0);
-    }
+    rifle.position.set(0.34, -0.52, -0.32);
+    rifleBaseZ = rifle.position.z;
 
     // Animations: gun-ready gait set, crossfaded by speed.
     mixer = new THREE.AnimationMixer(model);
@@ -279,6 +327,12 @@ export function buildCharacter(color: string): Character {
     animate(t: number, speed: number) {
       const dt = Math.min(0.05, Math.max(0, t - lastT));
       lastT = t;
+
+      // Recoil spring: the rifle kicks back along its local +Z on
+      // fire() and eases home.
+      recoil *= Math.exp(-dt * 16);
+      rifle.position.z = rifleBaseZ + recoil * recoilStroke;
+      rifle.rotation.x = rifleBaseRotX + recoil * -0.1;
 
       if (mixer) {
         // Gait selection with hysteresis-free thresholds + crossfade.
@@ -318,13 +372,16 @@ export function buildCharacter(color: string): Character {
         if (legs[1]) legs[1].rotation.x = -swing;
       }
     },
+    fire() {
+      recoil = 1;
+    },
     dispose() {
       disposed = true;
       mixer?.stopAllAction();
       bodyMat.dispose();
       modelMainMat?.dispose();
       // Template scene/geometries and the shared rifle/placeholder
-      // geos stay alive for other soldiers.
+      // geos stay alive for other characters.
     },
   };
 }
