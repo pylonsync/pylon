@@ -186,7 +186,7 @@
     },
     {
       "name": "watch_ownership",
-      "allowRead": "auth.userId != null",
+      "allowRead": "auth.userId == data.userId",
       "allowInsert": "auth.userId == data.userId",
       "allowDelete": "auth.userId == data.userId",
       "entity": "Watch"

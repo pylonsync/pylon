@@ -99,7 +99,8 @@ const tradePolicy = policy({
 const watchPolicy = policy({
   name: "watch_ownership",
   entity: "Watch",
-  allowRead: "auth.userId != null",
+  // Per-user watchlist — every verb scopes to the owner.
+  allowRead: "auth.userId == data.userId",
   allowInsert: "auth.userId == data.userId",
   allowDelete: "auth.userId == data.userId",
 });
