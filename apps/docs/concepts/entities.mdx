@@ -119,6 +119,33 @@ Admin contexts bypass both gates — ops scripts and migrations still rewrite th
 
 Server-side writes via `ctx.db.update` inside a mutation/action are **not** blocked by `.readonly()`. Server code is trusted to enforce its own invariants; readonly is an HTTP-boundary defense, not a hard write-lock.
 
+## Owned writes: `field.owner()`
+
+<Info>Requires pylon **0.3.261+**.</Info>
+
+`.owner()` marks a field as **the row's owner**, stamped from the session and unspoofable. It's what lets *optimistic, local-first writes be the default* for owned data — without a server function.
+
+```ts
+const Offer = entity("Offer", {
+  buyerId: field.string().owner(),   // stamped from auth.userId on insert
+  amount: field.float(),
+  // …
+});
+```
+
+The problem it solves: an owned create (`authorId`, `buyerId`, `sellerId`, `createdBy`) used to force a choice — a plain optimistic `db.insert` that *trusts* a client-supplied owner id (spoofable), or a server function that's secure but gives no optimistic feedback unless you hand-write an `optimistic` callback. `field.owner()` removes the trade-off: the client `db.insert`s with its own session id (instant local paint, no round-trip) and the server stamps + verifies the owner, so a forged id is rejected before the row lands.
+
+On **insert**, the framework:
+
+- fills the field from `auth.userId` when it's omitted;
+- passes a value through unchanged when it equals the caller's own id — this is the common path: the client sends its own id so the optimistic ghost and the canonical row match, no flash;
+- rejects a non-admin caller who supplies a *different* non-empty value with **`403 OWNER_MISMATCH`** — closing the IDOR shape where a policy gates on `data.ownerId == auth.userId` but the attacker just sends someone else's id;
+- rejects an anonymous caller (no session at all) with **`401 OWNER_REQUIRED`** — you can't own a row anonymously. Guests count: their stable guest id is stamped like any other.
+
+On **update**, `.owner()` behaves like [`.readonly()`](#field-gates-serveronly--readonly) — the owner can't be reassigned through the HTTP entity routes. Admin contexts may set an explicit value (migrations, tooling).
+
+Reach for `field.owner()` instead of writing a function whenever the only server-authoritative part of a create is *who made it*. Mechanically it's a dynamic default: `.owner()` serializes to a `{"$auth":"userId"}` marker that the auth-aware mutation pipeline fills — the storage layer never stamps it without a session, so there's no way to end up with a row "owned" by no one.
+
 ## Indexes
 
 Declare composite or non-unique indexes in the options block:
