@@ -147,6 +147,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    // `3.14` is arbitrary float test data for the number-coercion path, not an
+    // attempt to spell π — silence clippy::approx_constant for this fixture.
+    #[allow(clippy::approx_constant)]
     fn coerces_strings_numbers_bools() {
         assert_eq!(coerce_value("hello").unwrap(), json!("hello"));
         assert_eq!(coerce_value("42").unwrap(), json!(42));
