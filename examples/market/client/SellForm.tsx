@@ -45,20 +45,23 @@ function Form() {
     // is declared `field.owner()` in app.ts, so the server stamps and
     // verifies it from the session — we send our own id only so the
     // optimistic row is complete; a forged seller id would be rejected.
+    const seed = Math.random().toString(36).slice(2, 8);
+    const slug = makeSlug(title.trim(), seed);
     try {
-      const id = await db.insert("Listing", {
+      await db.insert("Listing", {
         sellerId: userId,
         sellerName: name,
         title: title.trim(),
+        slug,
         description: description.trim(),
         price: Math.max(0, Math.round(value * 100) / 100),
         category,
         condition,
         status: "active",
-        seed: Math.random().toString(36).slice(2, 8),
+        seed,
         createdAt: new Date().toISOString(),
       });
-      router.push(`/listing/${id}`);
+      router.push(`/listing/${slug}`);
     } catch (e) {
       setErr((e as Error).message ?? "Could not post your listing.");
       setBusy(false);

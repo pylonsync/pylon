@@ -56,6 +56,9 @@ const Listing = entity(
     sellerId: field.string().owner(),
     sellerName: field.string(),
     title: field.string(),
+    // Human-readable URL key: "herman-miller-aeron-size-b-a1f3". Unique so it
+    // addresses exactly one listing; the detail route resolves by it.
+    slug: field.string().unique(),
     description: field.string(),
     price: field.float(),
     category: field.string(),
@@ -69,6 +72,7 @@ const Listing = entity(
       { name: "by_status", fields: ["status"], unique: false },
       { name: "by_seller", fields: ["sellerId"], unique: false },
       { name: "by_created", fields: ["createdAt"], unique: false },
+      { name: "by_slug", fields: ["slug"], unique: true },
     ],
   },
 );
@@ -101,6 +105,27 @@ const Offer = entity(
   },
 );
 
+// A buyer's saved listing. Private to the watcher (owner-scoped read), so
+// your watchlist is yours alone. `listingTitle` is denormalized so the
+// "Watching" list renders without a join.
+const Watch = entity(
+  "Watch",
+  {
+    userId: field.string().owner(),
+    listingId: field.string(),
+    listingTitle: field.string(),
+    createdAt: field.datetime().defaultNow(),
+  },
+  {
+    indexes: [
+      { name: "by_user", fields: ["userId"], unique: false },
+      // One watch per (user, listing) — toggling the heart inserts/deletes
+      // this row.
+      { name: "by_user_listing", fields: ["userId", "listingId"], unique: true },
+    ],
+  },
+);
+
 // Public marketplace: everyone can read listings + offers (so buyers and
 // sellers both see the live state). Writes require a session and are
 // owner-scoped; the heavy lifting (accept = mark sold + decline siblings)
@@ -116,6 +141,16 @@ const userPolicy = policy({
   allowInsert: "false",
   allowUpdate: "false",
   allowDelete: "false",
+});
+
+// Watchlists are private: you can only read, add to, or remove from your own.
+const watchPolicy = policy({
+  name: "watch_access",
+  entity: "Watch",
+  allowRead: "auth.userId == data.userId",
+  allowInsert: "auth.userId != null",
+  allowUpdate: "false",
+  allowDelete: "auth.userId == data.userId",
 });
 
 const listingPolicy = policy({
@@ -141,10 +176,10 @@ const offerPolicy = policy({
 const manifest = buildManifest({
   name: "market",
   version: "0.1.0",
-  entities: [User, Listing, Offer],
+  entities: [User, Listing, Offer, Watch],
   queries: [],
   actions: [],
-  policies: [userPolicy, listingPolicy, offerPolicy],
+  policies: [userPolicy, listingPolicy, offerPolicy, watchPolicy],
   // File-based SSR routing: app/**/page.tsx. One binary serves the frontend
   // and the API on one port.
   routes: await discoverAppRoutes(),

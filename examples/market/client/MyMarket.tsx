@@ -5,7 +5,8 @@ import { Link, db } from "@pylonsync/react";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Button } from "@pylonsync/example-ui/button";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
-import { money, timeAgo, type Listing, type Offer } from "./market";
+import { Heart } from "lucide-react";
+import { money, timeAgo, type Listing, type Offer, type Watch } from "./market";
 
 const statusBadge: Record<string, string> = {
   pending: "bg-amber-100 text-amber-800 border-amber-200",
@@ -29,6 +30,10 @@ function Dashboard() {
     where: { sellerId: userId },
     orderBy: { createdAt: "desc" },
   });
+  const { data: watching } = db.useQuery<Watch>("Watch", {
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+  });
   const { data: sent } = db.useQuery<Offer>("Offer", {
     where: { buyerId: userId },
     orderBy: { createdAt: "desc" },
@@ -36,6 +41,7 @@ function Dashboard() {
 
   const myListings = listings ?? [];
   const myOffers = sent ?? [];
+  const watchlist = watching ?? [];
   const inbound = received ?? [];
   const pendingFor = (listingId: string) =>
     inbound.filter((o) => o.listingId === listingId && o.status === "pending")
@@ -69,7 +75,7 @@ function Dashboard() {
           <ul className="divide-y rounded-lg border">
             {myListings.map((l) => (
               <li key={l.id} className="flex items-center justify-between gap-3 p-3">
-                <Link href={`/listing/${l.id}`} className="min-w-0 hover:underline">
+                <Link href={`/listing/${l.slug || l.id}`} className="min-w-0 hover:underline">
                   <span className="truncate font-medium">{l.title}</span>
                 </Link>
                 <div className="flex shrink-0 items-center gap-2 text-sm">
@@ -121,6 +127,36 @@ function Dashboard() {
                     {o.status}
                   </span>
                 </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="flex items-center gap-2 font-semibold">
+          <Heart className="size-4 text-rose-500" />
+          Watching ({watchlist.length})
+        </h2>
+        {watchlist.length === 0 ? (
+          <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+            Nothing saved yet. Tap the{" "}
+            <Heart className="inline size-3.5 align-text-bottom" /> on any
+            listing to watch it — your watchlist is private and syncs live.
+          </p>
+        ) : (
+          <ul className="divide-y rounded-lg border">
+            {watchlist.map((w) => (
+              <li key={w.id} className="flex items-center justify-between gap-3 p-3">
+                <Link
+                  href={`/listing/${w.listingId}`}
+                  className="min-w-0 truncate font-medium hover:underline"
+                >
+                  {w.listingTitle}
+                </Link>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  saved {timeAgo(w.createdAt)}
+                </span>
               </li>
             ))}
           </ul>

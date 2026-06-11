@@ -75,6 +75,12 @@
           "unique": false
         },
         {
+          "name": "slug",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
           "name": "description",
           "type": "string",
           "optional": false,
@@ -140,6 +146,13 @@
             "createdAt"
           ],
           "unique": false
+        },
+        {
+          "name": "by_slug",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
         }
       ]
     },
@@ -230,6 +243,57 @@
           "unique": false
         }
       ]
+    },
+    {
+      "name": "Watch",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false,
+          "readonly": true,
+          "default": {
+            "$auth": "userId"
+          }
+        },
+        {
+          "name": "listingId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "listingTitle",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false,
+          "default": "now"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_user",
+          "fields": [
+            "userId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_user_listing",
+          "fields": [
+            "userId",
+            "listingId"
+          ],
+          "unique": true
+        }
+      ]
     }
   ],
   "routes": [
@@ -292,6 +356,14 @@
       "allowUpdate": "auth.userId == data.buyerId || auth.userId == data.sellerId",
       "allowDelete": "auth.userId == data.buyerId",
       "entity": "Offer"
+    },
+    {
+      "name": "watch_access",
+      "allowRead": "auth.userId == data.userId",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "false",
+      "allowDelete": "auth.userId == data.userId",
+      "entity": "Watch"
     }
   ],
   "auth": {

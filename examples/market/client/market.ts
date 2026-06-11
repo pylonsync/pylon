@@ -32,6 +32,7 @@ export interface Listing {
   sellerId: string;
   sellerName: string;
   title: string;
+  slug: string;
   description: string;
   price: number;
   category: string;
@@ -51,6 +52,14 @@ export interface Offer {
   amount: number;
   message?: string;
   status: "pending" | "accepted" | "declined";
+  createdAt: string;
+}
+
+export interface Watch {
+  id: string;
+  userId: string;
+  listingId: string;
+  listingTitle: string;
   createdAt: string;
 }
 
@@ -117,6 +126,22 @@ export function conditionLabel(c: string): string {
   return (
     { "like-new": "Like new", new: "New", good: "Good", fair: "Fair" }[c] ?? c
   );
+}
+
+/** Title → URL-safe slug stem. */
+export function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+/** A listing's URL key: slugified title + a short unique suffix. */
+export function makeSlug(title: string, suffix: string): string {
+  const stem = slugify(title) || "item";
+  return `${stem}-${suffix}`;
 }
 
 // ---------------------------------------------------------------------------

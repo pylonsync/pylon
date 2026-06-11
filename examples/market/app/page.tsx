@@ -9,7 +9,9 @@ import { Card } from "@pylonsync/example-ui/card";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { LiveTicker } from "../client/LiveTicker";
 import { SeedOnEmpty } from "../client/SeedOnEmpty";
-import { gradient, initials, money, conditionLabel, type Listing } from "../client/market";
+import { CategoryIcon } from "./_components/CategoryIcon";
+import { WatchButton } from "../client/WatchButton";
+import { gradient, money, conditionLabel, type Listing } from "../client/market";
 
 export const metadata: Metadata = {
   title: "Pylon Market — buy & sell locally, live",
@@ -64,13 +66,18 @@ function Grid({
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
       {listings.map((l) => (
-        <Link key={l.id} href={`/listing/${l.id}`} className="group">
+        <Link key={l.id} href={`/listing/${l.slug || l.id}`} className="group">
           <Card className="flex flex-col overflow-hidden p-0 transition group-hover:-translate-y-0.5 group-hover:shadow-md">
             <div
-              className="relative flex aspect-square items-center justify-center text-3xl font-semibold text-white/90"
+              className="relative flex aspect-square items-center justify-center text-white/90"
               style={{ background: gradient(l.seed || l.id) }}
             >
-              {initials(l.title)}
+              <CategoryIcon category={l.category} className="size-14" />
+              <WatchButton
+                listingId={l.id}
+                listingTitle={l.title}
+                className="absolute right-2 top-2 size-8"
+              />
               {l.status === "sold" ? (
                 <span className="absolute inset-0 grid place-items-center bg-black/55 text-sm font-bold uppercase tracking-wide">
                   Sold

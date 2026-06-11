@@ -9,9 +9,10 @@ import {
 } from "@pylonsync/react";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { OfferPanel } from "../../../client/OfferPanel";
+import { CategoryIcon } from "../../_components/CategoryIcon";
+import { WatchButton } from "../../../client/WatchButton";
 import {
   gradient,
-  initials,
   money,
   conditionLabel,
   type Listing,
@@ -20,11 +21,24 @@ import {
 // Data-driven SEO: the title + description come from the listing itself,
 // fetched on the server. `generateMetadata` is handed the same PageProps as
 // the page (params + serverData), so it reads the row directly.
+// Resolve a listing from the URL segment, which is its slug
+// ("herman-miller-aeron-a1f3"). Falls back to a raw id lookup so older
+// id-shaped links keep working.
+async function resolveListing(
+  serverData: ServerData,
+  key: string,
+): Promise<Listing | null> {
+  return (
+    (await serverData.lookup<Listing>("Listing", "slug", key)) ??
+    (await serverData.get<Listing>("Listing", key))
+  );
+}
+
 export const generateMetadata: GenerateMetadata = async ({
   params,
   serverData,
 }): Promise<Metadata> => {
-  const l = await serverData.get<Listing>("Listing", params.id);
+  const l = await resolveListing(serverData, params.id);
   if (!l) return { title: "Listing not found · Pylon Market" };
   return {
     title: `${l.title} — ${money(l.price)} · Pylon Market`,
@@ -43,7 +57,7 @@ function Detail({
   response: SsrResponse;
   id: string;
 }) {
-  const listing = use(serverData.get<Listing>("Listing", id));
+  const listing = use(resolveListing(serverData, id));
 
   if (!listing) {
     response.setStatus(404);
@@ -68,10 +82,15 @@ function Detail({
 
       <div className="grid gap-8 md:grid-cols-2">
         <div
-          className="relative flex aspect-square items-center justify-center rounded-2xl text-6xl font-semibold text-white/90"
+          className="relative flex aspect-square items-center justify-center rounded-2xl text-white/90"
           style={{ background: gradient(listing.seed || listing.id) }}
         >
-          {initials(listing.title)}
+          <CategoryIcon category={listing.category} className="size-28" />
+          <WatchButton
+            listingId={listing.id}
+            listingTitle={listing.title}
+            className="absolute right-3 top-3"
+          />
           {listing.status === "sold" ? (
             <span className="absolute inset-0 grid place-items-center rounded-2xl bg-black/55 text-2xl font-bold uppercase tracking-wide">
               Sold

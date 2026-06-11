@@ -50,6 +50,14 @@ export default mutation({
     // Stagger createdAt so the grid + ticker have a believable order. The
     // seller id is the caller — `Listing.sellerId` is `field.owner()`, so the
     // framework would reject any other value. `seller` stays a display name.
+    const slugify = (s: string) =>
+      s
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 60);
+
     const now = Date.now();
     let n = 0;
     for (const d of slice) {
@@ -57,6 +65,7 @@ export default mutation({
         sellerId: ctx.auth.userId,
         sellerName: d.seller,
         title: d.title,
+        slug: `${slugify(d.title) || "item"}-${d.seed}`,
         description: d.description,
         price: d.price,
         category: d.category,
