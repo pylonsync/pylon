@@ -915,6 +915,85 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
     change_log
 }
 
+#[cfg(test)]
+mod change_log_wiring_tests {
+    use super::build_persistent_change_log;
+    use crate::Runtime;
+    use pylon_sync::ChangeKind;
+    use std::sync::Arc;
+
+    fn minimal_manifest() -> pylon_kernel::AppManifest {
+        use pylon_kernel::*;
+        AppManifest {
+            manifest_version: 1,
+            name: "t".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "T".into(),
+                fields: vec![ManifestField {
+                    name: "x".into(),
+                    field_type: "string".into(),
+                    optional: false,
+                    unique: false,
+                    crdt: None,
+                    server_only: false,
+                    readonly: false,
+                    default: None,
+                    enum_values: None,
+                    encrypted: false,
+                }],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        }
+    }
+
+    /// The end-to-end regression the SQLite seq-floor bug needed and didn't
+    /// have. It exercises the REAL `serve()` wiring — `build_persistent_change_log`
+    /// — not a hand-rolled copy, so reverting `server.rs` back to seeding the
+    /// snapshot cursor from the post-reservation `_pylon_change_seq` value trips
+    /// it. Invariant: a freshly-connecting client adopts `current_seq()` as its
+    /// cursor on the first pull; the next write MUST land ABOVE that cursor, or
+    /// every live-query delta in the first reservation chunk (1000 writes) is
+    /// silently dropped as "already seen" — the bug that made realtime never
+    /// update on `pylon dev` and on SQLite-backed Pylon Cloud apps.
+    #[test]
+    fn sqlite_change_log_first_delta_lands_above_the_client_snapshot_cursor() {
+        let tmp = std::env::temp_dir().join("pylon-changelog-wiring.sqlite");
+        let _ = std::fs::remove_file(&tmp);
+        let rt = Arc::new(Runtime::open(tmp.to_str().unwrap(), minimal_manifest()).unwrap());
+
+        // Wire the change log exactly as the server does at boot.
+        let change_log = build_persistent_change_log(&rt);
+
+        // The cursor a client adopts from its initial snapshot pull.
+        let snapshot_cursor = change_log.current_seq();
+        let first_seq = change_log.append(
+            "T",
+            "row-1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({ "x": 1 })),
+        );
+
+        assert!(
+            first_seq > snapshot_cursor,
+            "first SQLite change-log delta seq ({first_seq}) must be ABOVE the client \
+             snapshot cursor ({snapshot_cursor}); below it, live-query deltas in the \
+             first reservation chunk are dropped and realtime silently never updates"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 fn start_server(
     runtime: Arc<Runtime>,
     port: u16,
