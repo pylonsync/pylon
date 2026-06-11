@@ -3,7 +3,21 @@ import { mutation, v } from "@pylonsync/functions";
 /**
  * Create a customer record scoped to the caller's active org.
  */
-export default mutation({
+export default mutation<
+  {
+    name: string;
+    email?: string;
+    phone?: string;
+    company?: string;
+    addressLine1?: string;
+    addressLine2?: string;
+    city?: string;
+    state?: string;
+    postal?: string;
+    notes?: string;
+  },
+  { customerId: string }
+>({
   auth: "guest",
   args: {
     name: v.string(),

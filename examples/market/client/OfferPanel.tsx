@@ -18,10 +18,12 @@ interface Props {
   status: "active" | "sold";
 }
 
-const statusBadge: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800 border-amber-200",
-  accepted: "bg-emerald-100 text-emerald-800 border-emerald-200",
-  declined: "bg-zinc-100 text-zinc-500 border-zinc-200",
+type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
+
+const statusVariant: Record<string, BadgeVariant> = {
+  pending: "warning",
+  accepted: "success",
+  declined: "outline",
 };
 
 function Panel(props: Props) {
@@ -43,7 +45,7 @@ function Panel(props: Props) {
     : undefined;
 
   if (isSeller) {
-    return <SellerView offers={offers} title={props.title} />;
+    return <SellerView offers={offers} />;
   }
   // Making an offer needs a real account — gate it (prefilled demo login).
   return (
@@ -61,8 +63,9 @@ function Panel(props: Props) {
   );
 }
 
-function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
+function SellerView({ offers }: { offers: Offer[] }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const pending = offers.filter((o) => o.status === "pending");
 
   // Optimistic accept/decline: flip the offer's status in the local store
@@ -88,10 +91,11 @@ function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
 
   async function respond(offerId: string, accept: boolean) {
     setBusy(offerId);
+    setErr(null);
     try {
       await respondMutation.mutate({ offerId, accept });
     } catch (e) {
-      console.error("respondToOffer failed", e);
+      setErr((e as Error).message ?? "Could not respond to offer.");
     } finally {
       setBusy(null);
     }
@@ -103,6 +107,7 @@ function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
         <h2 className="font-semibold">Offers on your listing</h2>
         <Badge variant="outline">{pending.length} pending</Badge>
       </div>
+      {err ? <p className="text-sm text-destructive">{err}</p> : null}
       {offers.length === 0 ? (
         <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
           No offers yet. They'll show up here the moment a buyer makes one —
@@ -117,14 +122,12 @@ function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-lg font-semibold">
+                  <span className="text-lg font-semibold tabular-nums">
                     {money(o.amount)}
                   </span>
-                  <span
-                    className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase ${statusBadge[o.status]}`}
-                  >
+                  <Badge variant={statusVariant[o.status] ?? "outline"}>
                     {o.status}
-                  </span>
+                  </Badge>
                 </div>
                 <p className="truncate text-sm text-muted-foreground">
                   {o.buyerName} · {timeAgo(o.createdAt)}
@@ -242,12 +245,10 @@ function BuyerView({
       <div className="space-y-2 rounded-lg border bg-card p-4">
         <h2 className="font-semibold">Your offer</h2>
         <div className="flex items-center gap-2">
-          <span className="text-2xl font-semibold">{money(myOffer.amount)}</span>
-          <span
-            className={`rounded-full border px-2 py-0.5 text-xs font-medium uppercase ${statusBadge[myOffer.status]}`}
-          >
+          <span className="text-2xl font-semibold tabular-nums">{money(myOffer.amount)}</span>
+          <Badge variant={statusVariant[myOffer.status] ?? "outline"}>
             {myOffer.status}
-          </span>
+          </Badge>
         </div>
         <p className="text-sm text-muted-foreground">
           {myOffer.status === "pending"

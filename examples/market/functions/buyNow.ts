@@ -7,7 +7,18 @@ import { mutation, v } from "@pylonsync/functions";
  * offers. The cross-entity, multi-row work is why this is a function rather
  * than a plain db.insert.
  */
-export default mutation({
+
+interface BuyNowArgs {
+  listingId: string;
+  buyerName: string;
+  _optimisticId?: string;
+}
+
+interface BuyNowResult {
+  id: string;
+}
+
+export default mutation<BuyNowArgs, BuyNowResult>({
   // Defaults to auth: "user" — only signed-in members can buy.
   args: {
     listingId: v.id("Listing"),
@@ -19,7 +30,13 @@ export default mutation({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
 
-    const listing = await ctx.db.get("Listing", args.listingId);
+    const listing = await ctx.db.get("Listing", args.listingId) as {
+      id: string;
+      title: string;
+      price: number;
+      status: string;
+      sellerId: string;
+    } | null;
     if (!listing) throw ctx.error("NOT_FOUND", "listing not found");
     if (listing.status !== "active")
       throw ctx.error("INVALID_ARGS", "this listing is no longer available");
@@ -42,14 +59,19 @@ export default mutation({
     // Mark sold and decline the rest — same reconciliation respondToOffer does
     // on an accept.
     await ctx.db.update("Listing", args.listingId, { status: "sold" });
-    const siblings = (await ctx.db.list("Offer")).filter(
-      (o) =>
+    const siblings = (await ctx.db.list("Offer")) as Array<{
+      id: string;
+      listingId: string;
+      status: string;
+    }>;
+    for (const o of siblings) {
+      if (
         o.listingId === args.listingId &&
         o.id !== id &&
-        o.status === "pending",
-    );
-    for (const o of siblings) {
-      await ctx.db.update("Offer", o.id, { status: "declined" });
+        o.status === "pending"
+      ) {
+        await ctx.db.update("Offer", o.id, { status: "declined" });
+      }
     }
     return { id };
   },

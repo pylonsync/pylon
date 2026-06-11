@@ -10,34 +10,32 @@ import { mutation, v } from "@pylonsync/functions";
  * terrain and staying under ~35 KB per update.
  */
 export default mutation({
-  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
-  // Without this the function defaults to auth: "user" and rejects guests.
   auth: "guest",
   args: {
     roomId: v.string(),
     size: v.optional(v.int()),
   },
   async handler(ctx, args) {
+    const a = args as { roomId: string; size?: number };
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
 
-    const existing = await ctx.db.query("Terrain", { roomId: args.roomId });
+    const existing = await ctx.db.query("Terrain", { roomId: a.roomId });
     if (existing.length > 0) return { id: existing[0].id as string, created: false };
 
-    const size = args.size ?? 64;
+    const size = a.size ?? 64;
 
     // Flat heightmap
     const heights: number[][] = Array.from({ length: size }, () =>
-      Array.from({ length: size }, () => 0),
+      Array.from({ length: size }, () => 0 as number),
     );
 
     // 4-layer splatmap: layer 0 = full (grass), rest zero.
-    // Stored as [size][size][4] so the client can sample per-vertex.
     const layers: number[][][] = Array.from({ length: size }, () =>
-      Array.from({ length: size }, () => [1, 0, 0, 0]),
+      Array.from({ length: size }, () => [1, 0, 0, 0] as number[]),
     );
 
     const id = await ctx.db.insert("Terrain", {
-      roomId: args.roomId,
+      roomId: a.roomId,
       size,
       heights: JSON.stringify(heights),
       layers: JSON.stringify(layers),

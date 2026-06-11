@@ -36,6 +36,10 @@
   --radius-lg: 0.625rem;
   --radius-md: calc(0.625rem - 2px);
   --radius-sm: calc(0.625rem - 4px);
+
+  /* Trade-specific semantic tokens */
+  --color-bull: oklch(0.627 0.194 142.5);
+  --color-bear: oklch(0.577 0.245 27.325);
 }
 
 html, body {

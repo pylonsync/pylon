@@ -8,10 +8,12 @@ import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { Heart } from "lucide-react";
 import { money, timeAgo, type Listing, type Offer, type Watch } from "./market";
 
-const statusBadge: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-800 border-amber-200",
-  accepted: "bg-emerald-100 text-emerald-800 border-emerald-200",
-  declined: "bg-zinc-100 text-zinc-500 border-zinc-200",
+type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
+
+const statusVariant: Record<string, BadgeVariant> = {
+  pending: "warning",
+  accepted: "success",
+  declined: "outline",
 };
 
 function Dashboard() {
@@ -81,9 +83,9 @@ function Dashboard() {
                 <div className="flex shrink-0 items-center gap-2 text-sm">
                   <span className="font-semibold">{money(l.price)}</span>
                   {l.status === "sold" ? (
-                    <Badge className="bg-emerald-600">Sold</Badge>
+                    <Badge variant="success">Sold</Badge>
                   ) : pendingFor(l.id) > 0 ? (
-                    <Badge className="bg-amber-500">
+                    <Badge variant="warning">
                       {pendingFor(l.id)} offer{pendingFor(l.id) > 1 ? "s" : ""}
                     </Badge>
                   ) : (
@@ -120,12 +122,10 @@ function Dashboard() {
                   </span>
                 </Link>
                 <div className="flex shrink-0 items-center gap-2 text-sm">
-                  <span className="font-semibold">{money(o.amount)}</span>
-                  <span
-                    className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase ${statusBadge[o.status]}`}
-                  >
+                  <span className="font-semibold tabular-nums">{money(o.amount)}</span>
+                  <Badge variant={statusVariant[o.status] ?? "outline"}>
                     {o.status}
-                  </span>
+                  </Badge>
                 </div>
               </li>
             ))}

@@ -92,7 +92,7 @@ function Grid({
                 {l.title}
               </span>
               <div className="mt-1 flex items-center justify-between">
-                <span className="font-semibold">{money(l.price)}</span>
+                <span className="font-semibold tabular-nums">{money(l.price)}</span>
                 <Badge variant="outline" className="text-[10px]">
                   {conditionLabel(l.condition)}
                 </Badge>

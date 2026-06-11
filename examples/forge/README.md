@@ -1,10 +1,10 @@
 # Forge — collaborative 3D scene editor
 
 Figma-for-3D. Users spawn primitives (box, sphere, cone, torus) from
-the toolbar, drag them around a shared grid, color them, delete them.
-Every change broadcasts through a live query; every other tab sees
-it instantly. Presence cursors show every collaborator's pointer in
-3D space.
+the toolbar, drag them around a shared heightmap terrain, color them,
+delete them. Every change broadcasts through a live query; every other
+tab sees it instantly. Presence cursors show every collaborator's
+pointer in 3D space.
 
 **What this example demonstrates:**
 
@@ -14,30 +14,27 @@ it instantly. Presence cursors show every collaborator's pointer in
   `useQuery` mechanism. No custom realtime protocol.
 - **Optimistic drag with throttled writes.** Mouse-drag snaps the
   local mesh immediately; `movePrim` fires every 100ms + on drag-end.
-  The live query reconciles the shared state when other clients see
-  it.
+  The live query reconciles the shared state when other clients see it.
+- **Heightmap terrain sculpting.** Four brush modes (raise, lower,
+  smooth, flatten) + a 4-layer splatmap paint tool. Strokes preview
+  locally at 60 fps; the authoritative state writes at 10 Hz.
 - **Presence cursors in 3D.** Each client writes its pointer's world
   position to `Cursor` at ~20 Hz; other clients render a small sphere
   + floating name label projected to screen space.
 - **Per-user policy enforcement.** Cursors are owned by their user
   (`auth.userId == data.userId`) so nobody can hijack your pointer.
+- **Native SSR.** One binary serves the frontend and API on a single
+  port — no separate Vite/Next app needed.
 
 ## Run
 
 ```bash
 cd examples/forge
 bun install
-bun run dev          # Pylon server on :4321
-
-# second terminal
-cd web
-bun install
-bun run dev          # UI on :5178
+bun run dev          # Pylon server on :4321, open http://localhost:4321
 ```
 
-Open <http://localhost:5178>. Spawn a box, drag it around. Open a
-second tab — you'll see your cursor in the first tab tracking the
-mouse in the second.
+Open a second tab to see your cursor appear in the first tab.
 
 ## Controls
 
@@ -48,23 +45,34 @@ mouse in the second.
 - **Delete / Backspace** — remove selected primitive
 - **Keys 1–6** — cycle color of selected primitive
 
+## Terrain tools
+
+- **Move** — default mode; left-click to select/drag primitives
+- **Raise / Lower / Smooth / Flatten** — sculpt the heightmap
+- **Paint** — blend grass / dirt / rock / snow layers
+
 ## Files
 
-- `app.ts` — `Prim` + `Cursor` entities, ownership policy on Cursor
+- `app.ts` — `Prim`, `Cursor`, `Terrain` entities + policies
+- `app/ForgeIsland.tsx` — client bootstrap island (guest auth + SSR shell)
+- `client/ForgeApp.tsx` — Three.js scene, prim mesh pool, cursor
+  projection, drag + orbit + zoom, terrain rendering, brush palette
 - `functions/spawnPrim.ts` — insert a primitive with random jitter
-- `functions/movePrim.ts` — position update (fired on drag tick +
-  drag-end)
+- `functions/movePrim.ts` — position update (fired on drag tick + drag-end)
 - `functions/colorPrim.ts` — color change
 - `functions/deletePrim.ts` — delete
 - `functions/updateCursor.ts` — upsert cursor at ~20 Hz
-- `client/ForgeApp.tsx` — three.js scene, prim mesh pool, cursor
-  projection, drag + orbit + zoom input
-- `web/` — Vite UI
+- `functions/initTerrain.ts` — idempotent terrain seed (first join)
+- `functions/sculptTerrain.ts` — apply a heightmap brush stroke
+- `functions/paintTerrain.ts` — blend splatmap layer weights
 
 ## Scaling story
 
 - A scene with 200 primitives across 10 concurrent editors stays at
   60 fps in the browser while producing ~60 cursor writes/sec total.
+- Terrain sculpting at 10 Hz sends ~35 KB per stroke for a 64×64 grid.
+  For MMO-scale tooling, chunk terrain into 8×8 tiles so each brush
+  stroke only rewrites the affected tiles.
 - Large scenes push on mesh-pool lifecycle more than sync — Pylon
-  delivers the changes in milliseconds; the three.js side is the
+  delivers the changes in milliseconds; the Three.js side is the
   dominant cost.

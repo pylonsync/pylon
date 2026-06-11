@@ -6,7 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * their session to it; this function returns the orgId so the client can
  * do that right after.
  */
-export default mutation({
+export default mutation<{ name: string; slug: string; billingEmail?: string }, { orgId: string; slug: string }>({
   auth: "guest",
   args: {
     name: v.string(),

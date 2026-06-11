@@ -4,7 +4,10 @@ import { mutation, v } from "@pylonsync/functions";
  * Create a product in the active org's catalog. Options are added separately
  * via createProductOption so a configurator can stream them in.
  */
-export default mutation({
+export default mutation<
+  { name: string; category: string; basePrice: number; unit: string; sku?: string; description?: string; leadTimeDays?: number },
+  { productId: string }
+>({
   auth: "guest",
   args: {
     name: v.string(),

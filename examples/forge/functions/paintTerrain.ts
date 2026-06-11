@@ -9,8 +9,6 @@ import { mutation, v } from "@pylonsync/functions";
  * close to 1 (we normalize at the end to avoid drift).
  */
 export default mutation({
-  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
-  // Without this the function defaults to auth: "user" and rejects guests.
   auth: "guest",
   args: {
     roomId: v.string(),
@@ -21,34 +19,42 @@ export default mutation({
     layer: v.int(), // 0..3
   },
   async handler(ctx, args) {
+    const a = args as {
+      roomId: string;
+      cx: number;
+      cz: number;
+      radius: number;
+      strength: number;
+      layer: number;
+    };
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-    if (args.layer < 0 || args.layer > 3) {
+    if (a.layer < 0 || a.layer > 3) {
       throw ctx.error("INVALID_ARGS", "layer must be 0..3");
     }
 
-    const rows = await ctx.db.query("Terrain", { roomId: args.roomId });
+    const rows = await ctx.db.query("Terrain", { roomId: a.roomId });
     if (rows.length === 0) throw ctx.error("NOT_FOUND", "terrain not initialized");
     const terrain = rows[0];
     const size = terrain.size as number;
     const layers: number[][][] = JSON.parse(terrain.layers as string);
 
-    const r = Math.max(1, args.radius);
-    const xMin = Math.max(0, Math.floor(args.cx - r));
-    const xMax = Math.min(size - 1, Math.ceil(args.cx + r));
-    const zMin = Math.max(0, Math.floor(args.cz - r));
-    const zMax = Math.min(size - 1, Math.ceil(args.cz + r));
+    const r = Math.max(1, a.radius);
+    const xMin = Math.max(0, Math.floor(a.cx - r));
+    const xMax = Math.min(size - 1, Math.ceil(a.cx + r));
+    const zMin = Math.max(0, Math.floor(a.cz - r));
+    const zMax = Math.min(size - 1, Math.ceil(a.cz + r));
 
     for (let z = zMin; z <= zMax; z++) {
       for (let x = xMin; x <= xMax; x++) {
-        const dx = x - args.cx;
-        const dz = z - args.cz;
+        const dx = x - a.cx;
+        const dz = z - a.cz;
         const d = Math.hypot(dx, dz);
         if (d > r) continue;
         const falloff = 0.5 * (1 + Math.cos((Math.PI * d) / r));
-        const add = args.strength * falloff;
+        const add = a.strength * falloff;
 
         const cell = layers[z][x];
-        cell[args.layer] = Math.min(1, cell[args.layer] + add);
+        cell[a.layer] = Math.min(1, cell[a.layer] + add);
 
         // Normalize so weights sum to 1.
         const sum = cell[0] + cell[1] + cell[2] + cell[3];

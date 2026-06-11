@@ -110,7 +110,7 @@ function Detail({
             <h1 className="text-2xl font-semibold tracking-tight">
               {listing.title}
             </h1>
-            <p className="text-3xl font-semibold">{money(listing.price)}</p>
+            <p className="text-3xl font-semibold tabular-nums">{money(listing.price)}</p>
             <p className="text-sm text-muted-foreground">
               Listed by <span className="font-medium">{listing.sellerName}</span>
             </p>

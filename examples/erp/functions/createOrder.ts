@@ -8,7 +8,12 @@ import { mutation, v } from "@pylonsync/functions";
  * Line input: { productId, description, configJson?, qty, unitPrice }
  * lineTotal is computed; productionStatus starts as "queued".
  */
-export default mutation({
+type OrderLine = { productId: string; description: string; configJson?: string; qty: number; unitPrice: number };
+
+export default mutation<
+  { customerId: string; notes?: string; dueDate?: string; taxRate?: number; lines: OrderLine[] },
+  { orderId: string; number: string }
+>({
   auth: "guest",
   args: {
     customerId: v.id("Customer"),
@@ -33,7 +38,7 @@ export default mutation({
     }
 
     const customer = await ctx.db.get("Customer", args.customerId);
-    if (!customer || customer.orgId !== ctx.auth.tenantId) {
+    if (!customer || (customer as { orgId: string }).orgId !== ctx.auth.tenantId) {
       throw ctx.error("CUSTOMER_NOT_FOUND", "customer does not belong to this org");
     }
 
@@ -42,7 +47,7 @@ export default mutation({
       if (line.qty <= 0) throw ctx.error("INVALID_QTY", "qty must be > 0");
       if (line.unitPrice < 0) throw ctx.error("INVALID_PRICE", "price must be ≥ 0");
       const product = await ctx.db.get("Product", line.productId);
-      if (!product || product.orgId !== ctx.auth.tenantId) {
+      if (!product || (product as { orgId: string }).orgId !== ctx.auth.tenantId) {
         throw ctx.error(
           "PRODUCT_NOT_FOUND",
           `product ${line.productId} does not belong to this org`,

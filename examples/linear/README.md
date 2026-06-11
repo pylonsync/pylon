@@ -1,52 +1,50 @@
 # Linear — issue tracker
 
-A Linear-style issue tracker. Multi-tenant via Organization → Team → Issue, with cycles, projects, labels, comments, and per-team monotonic issue numbers ("ENG-1", "DESIGN-42"). Built on Pylon's manifest + functions + live queries — no proprietary realtime SDK, no separate WebSocket layer.
+A Linear-style issue tracker. Multi-tenant via Organization → Team → Issue, with labels, comments, and per-team monotonic issue numbers ("ENG-1", "DESIGN-42"). Built on Pylon's manifest + functions + live queries — no proprietary realtime SDK, no separate WebSocket layer.
 
 **What this example demonstrates:**
 
 - **Multi-tenant org structure.** `Organization → OrgMember → User` with `tenantId` flowing through every scoped entity. Switch orgs via `/api/auth/select-org` and the entire UI re-renders against the new tenant — policies enforce isolation, no app code asks "is this row in my org?"
-- **Per-team monotonic counters.** `Team.issueSequence` bumps inside `createIssue.ts`'s transaction so issue IDs (`ENG-1`, `ENG-2`, `ENG-3`) are gapless and conflict-free even under concurrent creates. The sequence read + bump + insert all roll back together if anything fails.
-- **Live queries everywhere.** Every issue list, every comment thread, every cycle board re-renders within a tick of any other client's mutation. No polling, no manual refresh button.
-- **Optimistic mutations with rollback.** Drag an issue to a new status; the UI updates instantly; the sync engine reconciles when the server confirms. Reject on server error and the row snaps back.
-- **Composite policies.** Issue read = "you're in this org AND on this team OR the issue is unassigned." Expressed declaratively in `pylon.manifest.json` rather than scattered through handler code.
-- **Comments, labels, projects, cycles** — the full mid-size SaaS data model. Useful as a reference for how to structure a non-trivial multi-tenant app.
+- **Per-team monotonic counters.** `Team.issueSequence` bumps inside `createIssue.ts`'s transaction so issue IDs (`ENG-1`, `ENG-2`, `ENG-3`) are gapless and conflict-free even under concurrent creates.
+- **Live queries everywhere.** Every issue list, every comment thread re-renders within a tick of any other client's mutation. No polling, no manual refresh button.
+- **Labels end-to-end.** Team-scoped labels created inline, toggled per-issue via `toggleIssueLabel`, live-synced to all clients.
+- **Inline editing.** Title and description are click-to-edit in the issue drawer. Estimate commits on blur — no per-keystroke server calls.
+- **Keyboard-first.** J/K navigate, C creates, ⌘K opens the command palette, Enter opens the focused issue.
+- **Composite policies.** Expressed declaratively in `app.ts` — no scattered `if (userId !== row.userId)` guards in handler code.
 
 ## Run
 
 ```bash
 cd examples/linear
 bun install
-
-# Terminal 1: Pylon server
 bun run dev          # → http://localhost:4321
-
-# Terminal 2: web UI
-cd web
-bun install
-bun dev              # → http://localhost:5173
 ```
 
-Open the web UI, sign up with any email (in dev mode the magic-link code prints to the Pylon server's stdout), create an organization, create a team, file your first issue.
+Open the browser, sign in with any email and display name (demo mode — no magic link required), create an organization, and start filing issues. Demo data is seeded automatically on first load.
 
 ## Architecture
 
 ```
 examples/linear/
-├── app.ts                    Schema, policies, manifest entry
-├── functions/                Server-side mutations
-│   ├── createOrganization.ts Bootstrap an org + auto-add the creator as owner
-│   ├── createTeam.ts         Provision a team with a key prefix
-│   ├── createIssue.ts        Atomic: bump Team.issueSequence + insert Issue
-│   ├── updateIssue.ts        Status / assignee / priority / labels
-│   ├── addComment.ts         Append to a thread
-│   └── upsertUser.ts         Ensure the auth'd user has a User row
+├── app.ts                      Schema, policies, manifest entry
+├── functions/                  Server-side mutations
+│   ├── createOrganization.ts   Bootstrap an org + auto-add the creator as owner
+│   ├── createTeam.ts           Provision a team with a key prefix
+│   ├── createIssue.ts          Atomic: bump Team.issueSequence + insert Issue
+│   ├── updateIssue.ts          Status / assignee / priority / estimate / title / description
+│   ├── addComment.ts           Append to a thread
+│   ├── createLabel.ts          Create a team-scoped label
+│   ├── toggleIssueLabel.ts     Idempotent add/remove of a label on an issue
+│   ├── seedLinear.ts           Seed demo data into a fresh workspace
+│   └── upsertUser.ts           Ensure the auth'd user has a User row
 ├── client/
-│   └── LinearApp.tsx         The React app — single-file (~1.8k LOC)
-├── web/
-│   ├── src/main.tsx          Vite entry; renders <LinearApp />
-│   ├── package.json
-│   └── vite.config.ts
-└── pylon.manifest.json       Generated by `bun run codegen`
+│   └── LinearApp.tsx           The React app (single-file)
+├── app/
+│   ├── page.tsx                SSR entry — renders the client island
+│   ├── layout.tsx              HTML shell
+│   ├── LinearIsland.tsx        Bootstraps Pylon session before mounting LinearApp
+│   └── globals.css             Tailwind v4 + design tokens
+└── pylon.manifest.json         Generated by bun run codegen
 ```
 
 ## Schema overview
@@ -54,36 +52,27 @@ examples/linear/
 ```
 User ─── OrgMember ─── Organization ─── Team ─── Issue
                                           │       ├── Comment
+                                          │       ├── IssueLabel ── Label
                                           │       └── (assignee → User)
-                                          ├── Cycle
-                                          ├── Project
                                           └── Label
 ```
 
-Every entity except `User` and `Organization` carries an `orgId`. The `tenant_scope` plugin (configured in the manifest) auto-injects `where orgId = auth.tenantId` into every query and rejects cross-tenant writes.
+Every entity except `User` and `Organization` carries an `orgId`. The `orgScoped` policy helper (in `app.ts`) auto-injects `where orgId = auth.tenantId` into every query and rejects cross-tenant writes.
 
-## Key patterns to copy
+## Key patterns
 
 ### 1. Atomic counter inside a mutation
 
-`functions/createIssue.ts` reads `Team.issueSequence`, increments it, writes the new issue, and updates the team — all in one transaction. The sync engine retries on conflict, so two simultaneous `createIssue` calls in the same team will produce `ENG-42` and `ENG-43` without collision.
+`functions/createIssue.ts` reads `Team.issueSequence`, increments it, writes the new issue, and updates the team — all in one transaction.
 
-### 2. Polymorphic comments
+### 2. Idempotent label toggle
 
-Comments attach to issues, but the same shape works for any commentable entity — add `targetType: string` and `targetId: id` and reuse the `addComment` mutation across documents, projects, etc.
+`functions/toggleIssueLabel.ts` checks the `IssueLabel` join table and either inserts or deletes, returning `{ action: "added" | "removed" }`. Safe to call from optimistic UI without a separate create/delete endpoint.
 
-### 3. Live status board
+### 3. Commit-on-blur for expensive fields
 
-The Kanban view uses one `useQuery("Issue", { where: { teamId, ... } })` and groups client-side by `status`. Drag-drop fires `updateIssue({ status: newStatus })`; every other tab sees the move within a tick.
+The estimate field calls `updateIssue` on blur, not on every keystroke. This is the right pattern for fields with server-side validation — the draft lives in local state while the user types.
 
-## What this example doesn't do
+### 4. Click-to-edit inline
 
-- **No external integrations** — Linear has GitHub / Slack / Figma. This example is the data + UI core; integrations would slot in via the `webhooks` plugin.
-- **No notifications** — Linear sends email / push when you're @-mentioned. Pylon's email + webhooks plugins are the foundation; the actual notification logic is left as an exercise.
-- **No real-time cursors / typing** — see [`forge`](../forge) for collaborative cursors and [`chat`](../chat) for typing indicators if you want to layer those in.
-
-## Pair with
-
-- **[`chat`](../chat)** — Slack-style messaging on the same multi-tenant model
-- **[`store`](../store)** — faceted search if you want filterable issue queries
-- **[`auction-house`](../auction-house)** — transactional + scheduled functions if you want SLA timers on issues
+Title and description use a `state → input` toggle pattern. The input starts with the current value as a draft; on blur/Enter it commits via `updateIssue`; on Escape it discards.

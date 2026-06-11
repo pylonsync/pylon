@@ -5,7 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * role or downgrade another owner; admins can manage estimators/production/
  * viewer/admin but can't touch owners. Users cannot edit their own role.
  */
-export default mutation({
+export default mutation<{ memberId: string; role: string }, { memberId: string; role: string }>({
   auth: "guest",
   args: {
     memberId: v.id("OrgMember"),
@@ -25,11 +25,12 @@ export default mutation({
 
     const target = await ctx.db.get("OrgMember", args.memberId);
     if (!target) throw ctx.error("NOT_FOUND", "member not found");
-    if (target.orgId !== ctx.auth.tenantId) {
+    const tgt = target as { orgId: string; userId: string; role: string };
+    if (tgt.orgId !== ctx.auth.tenantId) {
       throw ctx.error("FORBIDDEN", "member belongs to another org");
     }
 
-    if (target.userId === ctx.auth.userId) {
+    if (tgt.userId === ctx.auth.userId) {
       throw ctx.error("SELF_EDIT", "you cannot edit your own role");
     }
 
@@ -37,13 +38,13 @@ export default mutation({
       userId: ctx.auth.userId,
       orgId: ctx.auth.tenantId,
     });
-    const me = myMemberships[0];
+    const me = myMemberships[0] as { role: string } | undefined;
     if (!me) throw ctx.error("FORBIDDEN", "you are not a member of this org");
 
     if (me.role === "owner") {
       // Owner can do anything.
     } else if (me.role === "admin") {
-      if (target.role === "owner" || args.role === "owner") {
+      if (tgt.role === "owner" || args.role === "owner") {
         throw ctx.error("FORBIDDEN", "only owners can manage owner roles");
       }
     } else {

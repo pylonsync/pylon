@@ -10,31 +10,19 @@
  *
  * The interesting bit is the latency histogram — every outgoing
  * moveDot mutation is timed from send → "we observe our row update
- * bounce back in the live query" — a true end-to-end RTT.
+ * bounce back in the live query" — a true end-to-end RTT. P95 turns
+ * red when it exceeds 100ms, matching the README threshold.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  init,
-  db,
-  callFn,
-  configureClient,
-  storageKey,
-} from "@pylonsync/react";
+import { db, callFn } from "@pylonsync/react";
 import { Bot, MousePointerClick, Trash2 } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Switch } from "@pylonsync/example-ui/switch";
 import { Label } from "@pylonsync/example-ui/label";
 import { cn } from "@pylonsync/example-ui/utils";
 
-// Same-origin under native SSR: the Pylon binary serves this app and its API
-// on one port, so the client talks to its own origin. Falls back to the dev
-// port only during the (never-rendered) server import of this module.
-const BASE_URL =
-  typeof window !== "undefined"
-    ? window.location.origin
-    : "http://localhost:4321";
-init({ baseUrl: BASE_URL, appName: "arena" });
-configureClient({ baseUrl: BASE_URL, appName: "arena" });
+// ArenaIsland.tsx already called init() + configureClient() + bootstrapped the
+// guest session before mounting this component — do NOT repeat them here.
 
 type Dot = {
   id: string;
@@ -54,20 +42,6 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-async function ensureGuest(): Promise<string> {
-  let token = localStorage.getItem(storageKey("token"));
-  let userId = localStorage.getItem(storageKey("user"));
-  if (!token || !userId) {
-    const res = await fetch(`${BASE_URL}/api/auth/guest`, { method: "POST" });
-    const body = await res.json();
-    token = body.token as string;
-    userId = body.user_id as string;
-    localStorage.setItem(storageKey("token"), token);
-    localStorage.setItem(storageKey("user"), userId);
-  }
-  return userId!;
-}
-
 function pct(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -75,8 +49,7 @@ function pct(values: number[], p: number): number {
   return sorted[idx];
 }
 
-export function ArenaApp() {
-  const [userId, setUserId] = useState<string | null>(null);
+export function ArenaApp({ userId }: { userId: string }) {
   const [myDotId, setMyDotId] = useState<string | null>(null);
   const [hudStats, setHudStats] = useState({
     dots: 0,
@@ -87,6 +60,7 @@ export function ArenaApp() {
   });
   const [showRing, setShowRing] = useState(true);
   const [spawning, setSpawning] = useState(false);
+  const [spawnError, setSpawnError] = useState<string | null>(null);
 
   const { data: dots } = db.useQuery<Dot>("Dot");
 
@@ -95,25 +69,23 @@ export function ArenaApp() {
   const mutRateWindow = useRef<number[]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Spawn this browser's dot once after ArenaIsland confirms the session exists.
   useEffect(() => {
     let cancelled = false;
-    ensureGuest().then(async (id) => {
-      if (cancelled) return;
-      setUserId(id);
-      try {
-        const r = await callFn<{ id: string }>("spawnDot", {
-          userId: id,
-          label: "you",
-        });
-        setMyDotId(r.id);
-      } catch (e) {
-        console.error("spawn failed", e);
-      }
-    });
+    callFn<{ id: string }>("spawnDot", { userId, label: "you" })
+      .then((r) => {
+        if (!cancelled) setMyDotId(r.id);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setSpawnError(msg);
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -161,6 +133,7 @@ export function ArenaApp() {
       const H = r.height;
       ctx.clearRect(0, 0, W, H);
 
+      // Subtle grid
       ctx.strokeStyle = "rgba(255,255,255,0.035)";
       ctx.lineWidth = 1;
       const grid = 48;
@@ -222,6 +195,7 @@ export function ArenaApp() {
         }
       }
 
+      // Periodic position sync for our own dot
       if (myDotId && t - lastLocalSend > 150) {
         const myRow = all.find((d) => d.id === myDotId);
         const pos = localPositions.current.get(myDotId);
@@ -292,11 +266,12 @@ export function ArenaApp() {
     await callFn("removeBots", {}).catch(() => {});
   }
 
+  // Bot driver: each tab moves a random 10% of bots every 1.2s.
   useEffect(() => {
     if (!dots) return;
     const t = setInterval(() => {
-      const ourBots = dots.filter((d) => d.isBot && Math.random() < 0.12);
-      for (const b of ourBots.slice(0, 10)) {
+      const bots = dots.filter((d) => d.isBot && Math.random() < 0.12);
+      for (const b of bots.slice(0, 10)) {
         callFn("moveDot", {
           dotId: b.id,
           x: b.x,
@@ -310,12 +285,32 @@ export function ArenaApp() {
   }, [dots]);
 
   return (
-    <div className="fixed inset-0 bg-[#0a0a0c]">
+    <div className="fixed inset-0 bg-canvas">
       <canvas
         ref={canvasRef}
-        className="block h-full w-full cursor-crosshair"
+        className={cn(
+          "block h-full w-full",
+          myDotId ? "cursor-crosshair" : "cursor-wait",
+        )}
         onClick={onCanvasClick}
       />
+
+      {/* Joining overlay — visible until spawnDot returns */}
+      {!myDotId && !spawnError && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <span className="rounded-md border bg-card/80 px-4 py-2 text-sm text-muted-foreground backdrop-blur-sm">
+            Joining the arena…
+          </span>
+        </div>
+      )}
+
+      {spawnError && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <span className="rounded-md border border-destructive/40 bg-card/80 px-4 py-2 text-sm text-destructive backdrop-blur-sm">
+            Failed to spawn dot — is the server running?
+          </span>
+        </div>
+      )}
 
       <StatsHud stats={hudStats} />
       <ControlsHud
@@ -341,10 +336,19 @@ function StatsHud({
 }) {
   return (
     <div className="absolute left-4 top-4 flex flex-col gap-2 rounded-lg border bg-card/85 p-4 backdrop-blur-sm">
-      <Row label="DOTS" value={stats.dots.toLocaleString()} subtle={stats.bots > 0 ? `${stats.bots} bot` : undefined} />
+      <Row
+        label="DOTS"
+        value={stats.dots.toLocaleString()}
+        subtle={stats.bots > 0 ? `${stats.bots} bot` : undefined}
+      />
       <Row label="MUT/S" value={stats.mutPerSec.toString()} />
       <Row label="P50" value={`${stats.p50}`} unit="ms" />
-      <Row label="P95" value={`${stats.p95}`} unit="ms" />
+      <Row
+        label="P95"
+        value={`${stats.p95}`}
+        unit="ms"
+        warn={stats.p95 > 100}
+      />
     </div>
   );
 }
@@ -354,20 +358,36 @@ function Row({
   value,
   subtle,
   unit,
+  warn,
 }: {
   label: string;
   value: string;
   subtle?: string;
   unit?: string;
+  warn?: boolean;
 }) {
   return (
     <div className="flex items-baseline gap-2">
       <span className="w-12 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
-      <span className="font-mono text-base tabular-nums">
+      <span
+        className={cn(
+          "font-mono text-base tabular-nums",
+          warn && "text-destructive",
+        )}
+      >
         {value}
-        {unit && <span className="ml-0.5 text-xs text-muted-foreground">{unit}</span>}
+        {unit && (
+          <span
+            className={cn(
+              "ml-0.5 text-xs",
+              warn ? "text-destructive/70" : "text-muted-foreground",
+            )}
+          >
+            {unit}
+          </span>
+        )}
       </span>
       {subtle && <span className="text-xs text-muted-foreground">· {subtle}</span>}
     </div>
@@ -437,12 +457,7 @@ function ControlsHud({
         </Label>
         <Switch id="ring" checked={showRing} onCheckedChange={onShowRing} />
       </div>
-      <div
-        className={cn(
-          "flex items-center gap-1.5 text-xs",
-          "text-muted-foreground",
-        )}
-      >
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <MousePointerClick className="size-3" />
         Click anywhere to move.
       </div>

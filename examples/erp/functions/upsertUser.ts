@@ -5,7 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * example. Avatar color is seeded deterministically from the email hash so
  * the same person gets the same color across sessions.
  */
-export default mutation({
+export default mutation<{ email: string; displayName: string }, unknown>({
   auth: "guest",
   args: {
     email: v.string(),

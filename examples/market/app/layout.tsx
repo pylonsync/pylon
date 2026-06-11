@@ -18,10 +18,10 @@ export default function RootLayout({
         <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        <header className="sticky top-0 z-20 border-b bg-background/85 backdrop-blur">
-          <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
-            <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
-              <span className="grid size-7 place-items-center rounded-md bg-foreground text-background">
+        <header className="sticky top-0 z-20 h-14 border-b bg-background/90 backdrop-blur">
+          <div className="mx-auto flex h-full max-w-5xl items-center justify-between gap-4 px-5">
+            <Link href="/" className="flex items-center gap-2 font-medium text-sm">
+              <span className="grid size-7 place-items-center rounded-md bg-foreground text-sm font-semibold text-background">
                 M
               </span>
               Pylon Market
@@ -49,7 +49,7 @@ export default function RootLayout({
             </nav>
           </div>
         </header>
-        <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
+        <main className="mx-auto max-w-5xl px-5 py-6">{children}</main>
         <footer className="border-t py-6 text-center text-xs text-muted-foreground">
           Pylon Market · server-rendered listings + realtime offers from one
           binary

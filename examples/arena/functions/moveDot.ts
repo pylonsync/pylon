@@ -22,17 +22,17 @@ export default mutation({
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-    const dot = await ctx.db.get("Dot", args.dotId);
+    const dot = await ctx.db.get("Dot", args.dotId as string);
     if (!dot) throw ctx.error("NOT_FOUND", "dot not found");
 
     // Clamp to [0,1] so the client can't send nonsense.
-    const clamp = (v: number) => Math.max(0, Math.min(1, v));
+    const clamp = (n: number) => Math.max(0, Math.min(1, n));
 
-    await ctx.db.update("Dot", args.dotId, {
-      x: clamp(args.x),
-      y: clamp(args.y),
-      tx: clamp(args.tx),
-      ty: clamp(args.ty),
+    await ctx.db.update("Dot", args.dotId as string, {
+      x: clamp(args.x as number),
+      y: clamp(args.y as number),
+      tx: clamp(args.tx as number),
+      ty: clamp(args.ty as number),
       lastSeenAt: new Date().toISOString(),
     });
     return { ok: true };

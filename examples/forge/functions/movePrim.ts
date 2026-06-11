@@ -1,8 +1,6 @@
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
-  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
-  // Without this the function defaults to auth: "user" and rejects guests.
   auth: "guest",
   args: {
     primId: v.id("Prim"),
@@ -11,11 +9,12 @@ export default mutation({
     z: v.number(),
   },
   async handler(ctx, args) {
+    const a = args as { primId: string; x: number; y: number; z: number };
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-    const p = await ctx.db.get("Prim", args.primId);
+    const p = await ctx.db.get("Prim", a.primId);
     if (!p) throw ctx.error("NOT_FOUND", "primitive not found");
-    await ctx.db.update("Prim", args.primId, {
-      x: args.x, y: args.y, z: args.z,
+    await ctx.db.update("Prim", a.primId, {
+      x: a.x, y: a.y, z: a.z,
       updatedAt: new Date().toISOString(),
     });
     return { ok: true };

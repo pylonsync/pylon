@@ -26,7 +26,16 @@ const DEMO: Array<{
   { seller: "swift-otter", title: "Brooks Brothers wool overcoat, 40R", description: "Charcoal herringbone, fully lined. Dry-cleaned, ready to wear.", price: 90, category: "apparel", condition: "good", seed: "c2b5" },
 ];
 
-export default mutation({
+interface SeedMarketArgs {
+  start?: number;
+  end?: number;
+}
+
+interface SeedMarketResult {
+  seeded: number;
+}
+
+export default mutation<SeedMarketArgs, SeedMarketResult>({
   // Defaults to auth: "user" — seeds a slice of the catalog owned by the
   // caller. The bootstrap calls this twice: once as a "bazaar" seller for the
   // bulk of the catalog (so the demo buyer can bid on it), and once as the
@@ -40,7 +49,7 @@ export default mutation({
 
     // Per-caller idempotency: skip if THIS seller already has listings, so the
     // two seed calls (and any reloads) don't duplicate.
-    const all = await ctx.db.list("Listing");
+    const all = await ctx.db.list("Listing") as Array<{ sellerId: string }>;
     if (all.some((l) => l.sellerId === ctx.auth.userId)) return { seeded: 0 };
 
     const start = args.start ?? 0;

@@ -1,11 +1,10 @@
 "use client";
 
 /**
- * Pylon Linear clone — org → teams → issues + cycles + projects +
- * comments. Keyboard-driven: j/k navigate, c create, ⌘K command
- * palette, Esc close drawer.
+ * Pylon Linear clone — org → teams → issues + labels + comments.
+ * Keyboard-driven: j/k navigate, c create, ⌘K command palette, Esc close drawer.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   init,
   db,
@@ -26,11 +25,13 @@ import {
   LogOut,
   Plus,
   Search,
+  Tag,
+  X,
   XCircle,
 } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
-import { Label } from "@pylonsync/example-ui/label";
+import { Label as FormLabel } from "@pylonsync/example-ui/label";
 import { Textarea } from "@pylonsync/example-ui/textarea";
 import { Card } from "@pylonsync/example-ui/card";
 import { Badge } from "@pylonsync/example-ui/badge";
@@ -54,8 +55,7 @@ import { Sheet, SheetContent } from "@pylonsync/example-ui/sheet";
 import { cn } from "@pylonsync/example-ui/utils";
 
 // Same-origin under native SSR: the Pylon binary serves this app and its API
-// on one port, so the client talks to its own origin. Falls back to the dev
-// port only during the (never-rendered) server import of this module.
+// on one port, so the client talks to its own origin.
 const BASE_URL =
   typeof window !== "undefined"
     ? window.location.origin
@@ -67,7 +67,12 @@ configureClient({ baseUrl: BASE_URL, appName: "linear" });
 // Types
 // ---------------------------------------------------------------------------
 
-type User = { id: string; email: string; displayName: string; avatarColor: string };
+type UserRow = {
+  id: string;
+  email: string;
+  displayName: string;
+  avatarColor: string;
+};
 type Organization = { id: string; name: string; slug: string };
 type OrgMember = { id: string; userId: string; orgId: string; role: string };
 type Team = {
@@ -95,6 +100,19 @@ type Issue = {
   createdAt: string;
   updatedAt: string;
 };
+type LabelRow = {
+  id: string;
+  orgId: string;
+  teamId: string;
+  name: string;
+  color: string;
+};
+type IssueLabel = {
+  id: string;
+  orgId: string;
+  issueId: string;
+  labelId: string;
+};
 type Comment = {
   id: string;
   orgId: string;
@@ -118,15 +136,19 @@ type IssueActivity = {
 // ---------------------------------------------------------------------------
 
 const STATES = [
-  { id: "triage", label: "Triage", color: "#a3a3a3" },
-  { id: "backlog", label: "Backlog", color: "#737373" },
-  { id: "todo", label: "Todo", color: "#9ca3af" },
-  { id: "in_progress", label: "In Progress", color: "#eab308" },
-  { id: "in_review", label: "In Review", color: "#a855f7" },
-  { id: "done", label: "Done", color: "#10b981" },
-  { id: "cancelled", label: "Cancelled", color: "#525252" },
+  { id: "triage", label: "Triage" },
+  { id: "backlog", label: "Backlog" },
+  { id: "todo", label: "Todo" },
+  { id: "in_progress", label: "In Progress" },
+  { id: "in_review", label: "In Review" },
+  { id: "done", label: "Done" },
+  { id: "cancelled", label: "Cancelled" },
 ] as const;
-const STATE_BY_ID = Object.fromEntries(STATES.map((s) => [s.id, s]));
+const STATE_IDS = STATES.map((s) => s.id);
+type StateId = (typeof STATE_IDS)[number];
+const STATE_LABELS: Record<string, string> = Object.fromEntries(
+  STATES.map((s) => [s.id, s.label]),
+);
 
 const PRIORITIES = [
   { id: 0, label: "No priority" },
@@ -134,6 +156,19 @@ const PRIORITIES = [
   { id: 2, label: "High" },
   { id: 3, label: "Medium" },
   { id: 4, label: "Low" },
+];
+
+// Pre-set label palette for the creation UI.
+const LABEL_COLORS = [
+  "#ef4444",
+  "#f97316",
+  "#eab308",
+  "#22c55e",
+  "#06b6d4",
+  "#3b82f6",
+  "#8b5cf6",
+  "#ec4899",
+  "#6b7280",
 ];
 
 // ---------------------------------------------------------------------------
@@ -146,6 +181,7 @@ function initials(name: string | undefined | null): string {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
+
 function ago(iso: string): string {
   const d = new Date(iso);
   const diff = Date.now() - d.getTime();
@@ -168,11 +204,11 @@ type View =
   | { kind: "my" };
 
 export function LinearApp() {
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+  const [currentUser, setCurrentUser] = useState<UserRow | null>(() => {
     try {
       const token = localStorage.getItem(storageKey("token"));
       const cached = localStorage.getItem(storageKey("user"));
-      return token && cached ? (JSON.parse(cached) as User) : null;
+      return token && cached ? (JSON.parse(cached) as UserRow) : null;
     } catch {
       return null;
     }
@@ -192,9 +228,9 @@ export function LinearApp() {
     let cancelled = false;
     (async () => {
       try {
-        const me = await fetch(`${BASE_URL}/api/auth/me`, {
+        const me = (await fetch(`${BASE_URL}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
-        }).then((r) => r.json());
+        }).then((r) => r.json())) as { tenant_id?: string };
         if (cancelled || me.tenant_id === activeOrgId) return;
         await fetch(`${BASE_URL}/api/auth/select-org`, {
           method: "POST",
@@ -205,7 +241,9 @@ export function LinearApp() {
           body: JSON.stringify({ orgId: activeOrgId }),
         });
         if (!cancelled) await db.sync.pull();
-      } catch {}
+      } catch (err) {
+        console.warn("select-org sync failed:", err);
+      }
     })();
     return () => {
       cancelled = true;
@@ -225,7 +263,9 @@ export function LinearApp() {
     }
     try {
       indexedDB.deleteDatabase("pylon_sync_linear");
-    } catch {}
+    } catch {
+      // ignore
+    }
     setCurrentUser(null);
     setActiveOrgId(null);
   }
@@ -270,7 +310,7 @@ function Workspace({
   onSignOut,
 }: {
   org: Organization;
-  currentUser: User;
+  currentUser: UserRow;
   onSignOut: () => void;
 }) {
   const { data: teams } = db.useQuery<Team>("Team", {
@@ -283,10 +323,8 @@ function Workspace({
   const [newTeamOpen, setNewTeamOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  // Seed a demo backlog into a fresh workspace so the board isn't blank.
-  // createOrganization already makes a default team, so "empty" means that
-  // team has no issues yet (issueSequence 0). seedLinear is idempotent
-  // server-side (gates on issue count), so this is a safe optimistic fire.
+  // Seed demo data into a fresh workspace so the board isn't blank.
+  // seedLinear is idempotent server-side (gates on issue count).
   const seedTried = useRef(false);
   useEffect(() => {
     if (seedTried.current || teams === undefined || teams.length === 0) return;
@@ -299,6 +337,7 @@ function Workspace({
     if (view.kind === "my" && teams && teams.length > 0) {
       setView({ kind: "team", teamId: teams[0].id, filter: "active" });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teams?.length]);
 
   useEffect(() => {
@@ -416,7 +455,7 @@ function Sidebar({
   view: View;
   onViewChange: (v: View) => void;
   onNewTeam: () => void;
-  currentUser: User;
+  currentUser: UserRow;
   onSignOut: () => void;
 }) {
   return (
@@ -521,6 +560,7 @@ function Sidebar({
           size="icon"
           onClick={onSignOut}
           className="size-7 text-muted-foreground"
+          title="Sign out"
         >
           <LogOut className="size-3.5" />
         </Button>
@@ -579,7 +619,7 @@ function IssueList({
   org: Organization;
   teams: Team[];
   view: View;
-  currentUser: User;
+  currentUser: UserRow;
   onOpen: (id: string) => void;
   onNewIssue: () => void;
 }) {
@@ -597,15 +637,21 @@ function IssueList({
       list = list.filter((i) => i.teamId === view.teamId);
       if (view.filter === "active")
         list = list.filter((i) =>
-          ["todo", "in_progress", "in_review"].includes(i.state),
+          ["todo", "in_progress", "in_review", "triage"].includes(i.state),
         );
       else if (view.filter === "backlog")
-        list = list.filter((i) => ["backlog", "triage"].includes(i.state));
+        list = list.filter((i) => i.state === "backlog");
       else if (view.filter === "completed")
         list = list.filter((i) => ["done", "cancelled"].includes(i.state));
     }
     const stateRank: Record<string, number> = {
-      triage: 0, backlog: 1, todo: 2, in_progress: 3, in_review: 4, done: 5, cancelled: 6,
+      triage: 0,
+      backlog: 1,
+      todo: 2,
+      in_progress: 3,
+      in_review: 4,
+      done: 5,
+      cancelled: 6,
     };
     return [...list].sort((a, b) => {
       const sa = stateRank[a.state] ?? 99;
@@ -719,7 +765,7 @@ function IssueRow({
   onClick: () => void;
   onHover: () => void;
 }) {
-  const { data: assignee } = db.useQueryOne<User>(
+  const { data: assignee } = db.useQueryOne<UserRow>(
     "User",
     issue.assigneeId ?? "",
   );
@@ -739,7 +785,9 @@ function IssueRow({
       </span>
       <span className="flex-1 truncate">{issue.title}</span>
       <div className="flex items-center gap-3 text-xs text-muted-foreground">
-        {issue.estimate ? <span>{issue.estimate}</span> : null}
+        {issue.estimate ? (
+          <span className="tabular-nums">{issue.estimate}</span>
+        ) : null}
         <span>{ago(issue.updatedAt)}</span>
         {assignee ? (
           <Avatar
@@ -762,21 +810,30 @@ function IssueRow({
 }
 
 function StateIcon({ state }: { state: string }) {
-  const def = STATE_BY_ID[state];
-  const color = def?.color ?? "#737373";
+  // Use semantic CSS custom properties where possible. For states that
+  // need a distinct color we compose a Tailwind class from the design system
+  // rather than hard-coding hex values.
   if (state === "done") {
-    return <CheckCircle2 className="size-3.5" style={{ color }} />;
+    return <CheckCircle2 className="size-3.5 text-[color:var(--color-state-done,#10b981)]" />;
   }
   if (state === "cancelled") {
-    return <XCircle className="size-3.5" style={{ color }} />;
+    return <XCircle className="size-3.5 text-muted-foreground" />;
   }
   if (state === "in_progress" || state === "in_review") {
-    return <CircleDot className="size-3.5" style={{ color }} />;
+    return (
+      <CircleDot
+        className={cn(
+          "size-3.5",
+          state === "in_review" ? "text-[color:#a855f7]" : "text-[color:#eab308]",
+        )}
+      />
+    );
   }
   if (state === "todo") {
-    return <Circle className="size-3.5" style={{ color }} />;
+    return <Circle className="size-3.5 text-foreground/40" />;
   }
-  return <CircleDashed className="size-3.5" style={{ color }} />;
+  // triage, backlog
+  return <CircleDashed className="size-3.5 text-muted-foreground" />;
 }
 
 function PriorityBadge({ priority }: { priority: number }) {
@@ -786,7 +843,7 @@ function PriorityBadge({ priority }: { priority: number }) {
   if (priority === 1) {
     return (
       <div
-        className="grid size-3.5 place-items-center rounded-sm bg-rose-500 font-mono text-[8px] font-bold text-white"
+        className="grid size-3.5 place-items-center rounded-sm bg-destructive font-mono text-[8px] font-bold text-destructive-foreground"
         title="Urgent"
       >
         !
@@ -821,7 +878,7 @@ function IssueDrawer({
   onClose,
 }: {
   issueId: string;
-  currentUser: User;
+  currentUser: UserRow;
   teams: Team[];
   onClose: () => void;
 }) {
@@ -834,14 +891,56 @@ function IssueDrawer({
     where: { issueId },
     orderBy: { createdAt: "asc" },
   });
+  const { data: issueLabels } = db.useQuery<IssueLabel>("IssueLabel", {
+    where: { issueId },
+  });
   const team = issue ? teams.find((t) => t.id === issue.teamId) : undefined;
 
-  async function update(patch: Partial<Issue>) {
-    try {
-      await callFn("updateIssue", { issueId, ...patch });
-    } catch (e) {
-      alert((e as Error).message);
-    }
+  // Inline title editing
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  // Inline description editing
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [descDraft, setDescDraft] = useState("");
+
+  // Estimate is committed on blur to avoid calling the server on each keystroke.
+  const [estimateDraft, setEstimateDraft] = useState<string>("");
+  useEffect(() => {
+    if (issue) setEstimateDraft(issue.estimate != null ? String(issue.estimate) : "");
+  }, [issue?.estimate]);
+
+  useEffect(() => {
+    if (editingTitle && titleRef.current) titleRef.current.focus();
+  }, [editingTitle]);
+
+  const update = useCallback(
+    async (patch: Record<string, unknown>) => {
+      try {
+        await callFn("updateIssue", { issueId, ...patch });
+      } catch (e) {
+        alert((e as Error).message);
+      }
+    },
+    [issueId],
+  );
+
+  async function commitTitle() {
+    const t = titleDraft.trim();
+    if (t && t !== issue?.title) await update({ title: t });
+    setEditingTitle(false);
+  }
+
+  async function commitDesc() {
+    const d = descDraft.trim();
+    if (d !== (issue?.description ?? "").trim()) await update({ description: d || null });
+    setEditingDesc(false);
+  }
+
+  async function commitEstimate() {
+    const val = estimateDraft === "" ? null : parseFloat(estimateDraft);
+    if (val !== issue?.estimate) await update({ estimate: val });
   }
 
   if (!issue) return null;
@@ -853,23 +952,97 @@ function IssueDrawer({
           {team ? `${team.key}-${issue.number}` : `#${issue.number}`}
         </span>
         <div className="flex-1" />
-        <Button variant="ghost" size="icon" onClick={onClose} className="size-8">
-          ×
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          className="size-8"
+          title="Close"
+        >
+          <X className="size-4" />
         </Button>
       </header>
       <div className="grid flex-1 grid-cols-[1fr_220px] overflow-hidden">
         <div className="overflow-y-auto p-6">
-          <h2 className="text-2xl font-semibold leading-tight tracking-tight">
-            {issue.title}
-          </h2>
-          {issue.description ? (
-            <p className="mt-4 whitespace-pre-wrap text-sm leading-relaxed">
-              {issue.description}
-            </p>
+          {/* Title — click to edit inline */}
+          {editingTitle ? (
+            <Input
+              ref={titleRef}
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => void commitTitle()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitTitle();
+                if (e.key === "Escape") setEditingTitle(false);
+              }}
+              className="h-auto border-0 p-0 text-2xl font-semibold leading-tight tracking-tight ring-0 shadow-none focus-visible:ring-1"
+            />
           ) : (
-            <p className="mt-4 text-sm italic text-muted-foreground">
-              No description.
-            </p>
+            <h2
+              className="cursor-text text-2xl font-semibold leading-tight tracking-tight hover:opacity-70"
+              title="Click to edit"
+              onClick={() => {
+                setTitleDraft(issue.title);
+                setEditingTitle(true);
+              }}
+            >
+              {issue.title}
+            </h2>
+          )}
+
+          {/* Description — click to edit inline */}
+          <div className="mt-4">
+            {editingDesc ? (
+              <div className="flex flex-col gap-2">
+                <Textarea
+                  autoFocus
+                  value={descDraft}
+                  onChange={(e) => setDescDraft(e.target.value)}
+                  rows={6}
+                  placeholder="Describe this issue…"
+                />
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => void commitDesc()}>
+                    Save
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setEditingDesc(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="cursor-text rounded-md p-2 -mx-2 hover:bg-muted/40 transition-colors"
+                title="Click to edit"
+                onClick={() => {
+                  setDescDraft(issue.description ?? "");
+                  setEditingDesc(true);
+                }}
+              >
+                {issue.description ? (
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                    {issue.description}
+                  </p>
+                ) : (
+                  <p className="text-sm italic text-muted-foreground">
+                    No description. Click to add one.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Labels panel */}
+          {team && (
+            <LabelPanel
+              issueId={issueId}
+              teamId={team.id}
+              issueLabels={issueLabels ?? []}
+            />
           )}
 
           <div className="mt-8 mb-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -880,6 +1053,7 @@ function IssueDrawer({
           ))}
           <CommentComposer issueId={issueId} currentUser={currentUser} />
         </div>
+
         <aside className="flex flex-col gap-3 overflow-y-auto border-l bg-card/40 p-5">
           <SideField label="Status">
             <Select
@@ -933,12 +1107,9 @@ function IssueDrawer({
               min="0"
               step="1"
               className="h-8 text-xs"
-              value={issue.estimate ?? ""}
-              onChange={(e) =>
-                void update({
-                  estimate: e.target.value ? parseFloat(e.target.value) : null,
-                })
-              }
+              value={estimateDraft}
+              onChange={(e) => setEstimateDraft(e.target.value)}
+              onBlur={() => void commitEstimate()}
               placeholder="—"
             />
           </SideField>
@@ -957,6 +1128,178 @@ function IssueDrawer({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Label panel (inside issue drawer)
+// ---------------------------------------------------------------------------
+
+function LabelPanel({
+  issueId,
+  teamId,
+  issueLabels,
+}: {
+  issueId: string;
+  teamId: string;
+  issueLabels: IssueLabel[];
+}) {
+  const { data: teamLabels } = db.useQuery<LabelRow>("Label", {
+    where: { teamId },
+    orderBy: { name: "asc" },
+  });
+  const [showCreate, setShowCreate] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // labelId being toggled
+
+  const attachedIds = new Set(issueLabels.map((il) => il.labelId));
+  const labels = teamLabels ?? [];
+
+  async function toggleLabel(labelId: string) {
+    setBusy(labelId);
+    try {
+      await callFn("toggleIssueLabel", { issueId, labelId });
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="mt-6">
+      <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <Tag className="size-3" />
+          Labels
+        </span>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="flex items-center gap-0.5 text-muted-foreground hover:text-foreground transition-colors"
+          title="Create label"
+        >
+          <Plus className="size-3" />
+        </button>
+      </div>
+
+      {labels.length === 0 && !showCreate ? (
+        <p className="text-xs text-muted-foreground italic">
+          No labels yet.{" "}
+          <button
+            className="underline hover:text-foreground"
+            onClick={() => setShowCreate(true)}
+          >
+            Create one
+          </button>
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {labels.map((l) => {
+            const attached = attachedIds.has(l.id);
+            return (
+              <button
+                key={l.id}
+                onClick={() => void toggleLabel(l.id)}
+                disabled={busy === l.id}
+                title={attached ? `Remove "${l.name}"` : `Add "${l.name}"`}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-all",
+                  attached
+                    ? "border-transparent text-white opacity-90 hover:opacity-70"
+                    : "border-border bg-background text-muted-foreground hover:border-foreground/30 hover:text-foreground",
+                )}
+                style={attached ? { backgroundColor: l.color } : {}}
+              >
+                {!attached && (
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ backgroundColor: l.color }}
+                  />
+                )}
+                {l.name}
+                {busy === l.id && <Loader2 className="size-3 animate-spin" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {showCreate && (
+        <CreateLabelInline
+          teamId={teamId}
+          onClose={() => setShowCreate(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateLabelInline({
+  teamId,
+  onClose,
+}: {
+  teamId: string;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState(LABEL_COLORS[0]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    if (!name.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await callFn("createLabel", { teamId, name: name.trim(), color });
+      onClose();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-md border bg-card p-3">
+      <div className="mb-2 flex items-center gap-2">
+        {LABEL_COLORS.map((c) => (
+          <button
+            key={c}
+            onClick={() => setColor(c)}
+            className={cn(
+              "size-5 rounded-full transition-transform hover:scale-110",
+              color === c && "ring-2 ring-offset-1 ring-foreground",
+            )}
+            style={{ backgroundColor: c }}
+            title={c}
+          />
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <Input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+            if (e.key === "Escape") onClose();
+          }}
+          placeholder="Label name"
+          className="h-7 text-xs"
+        />
+        <Button size="sm" onClick={() => void save()} disabled={busy || !name.trim()} className="h-7 px-2">
+          {busy ? <Loader2 className="size-3 animate-spin" /> : "Add"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onClose} className="h-7 px-2">
+          <X className="size-3" />
+        </Button>
+      </div>
+      {err && <p className="mt-1 text-xs text-destructive">{err}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Side field (right column in issue drawer)
+// ---------------------------------------------------------------------------
+
 function SideField({
   label,
   children,
@@ -966,16 +1309,20 @@ function SideField({
 }) {
   return (
     <div className="grid gap-1.5">
-      <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <FormLabel className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
-      </Label>
+      </FormLabel>
       {children}
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
 function CommentRow({ comment }: { comment: Comment }) {
-  const { data: author } = db.useQueryOne<User>("User", comment.authorId);
+  const { data: author } = db.useQueryOne<UserRow>("User", comment.authorId);
   return (
     <div className="my-3 flex gap-3">
       <Avatar
@@ -1004,10 +1351,11 @@ function CommentComposer({
   currentUser,
 }: {
   issueId: string;
-  currentUser: User;
+  currentUser: UserRow;
 }) {
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
+
   async function send() {
     if (!body.trim()) return;
     setBusy(true);
@@ -1020,6 +1368,7 @@ function CommentComposer({
       setBusy(false);
     }
   }
+
   return (
     <div className="mt-5 flex gap-3">
       <Avatar
@@ -1034,7 +1383,10 @@ function CommentComposer({
         <Textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="Leave a comment…"
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void send();
+          }}
+          placeholder="Leave a comment… (⌘Enter to submit)"
           rows={2}
         />
         <div className="mt-2 flex justify-end">
@@ -1052,6 +1404,10 @@ function CommentComposer({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Assignee picker
+// ---------------------------------------------------------------------------
+
 function AssigneePicker({
   issue,
   onChange,
@@ -1059,7 +1415,8 @@ function AssigneePicker({
   issue: Issue;
   onChange: (id: string | null) => void;
 }) {
-  const { data: users } = db.useQuery<User>("User");
+  // Load all users — policy ensures only users visible to this tenant appear.
+  const { data: users } = db.useQuery<UserRow>("User");
   return (
     <Select
       value={issue.assigneeId ?? "__none__"}
@@ -1080,26 +1437,31 @@ function AssigneePicker({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Activity row
+// ---------------------------------------------------------------------------
+
 function ActivityRow({ activity }: { activity: IssueActivity }) {
-  const { data: actor } = db.useQueryOne<User>("User", activity.actorId);
+  const { data: actor } = db.useQueryOne<UserRow>("User", activity.actorId);
   let text = "";
   switch (activity.kind) {
     case "created":
       text = "created the issue";
       break;
-    case "state_changed":
+    case "state_changed": {
       try {
         const m = JSON.parse(activity.metaJson || "{}") as {
           from?: string;
           to?: string;
         };
-        text = `changed status ${
-          STATE_BY_ID[m.from ?? ""]?.label ?? m.from
-        } → ${STATE_BY_ID[m.to ?? ""]?.label ?? m.to}`;
+        const fromLabel = STATE_LABELS[m.from ?? ""] ?? m.from ?? "?";
+        const toLabel = STATE_LABELS[m.to ?? ""] ?? m.to ?? "?";
+        text = `changed status ${fromLabel} → ${toLabel}`;
       } catch {
         text = "changed status";
       }
       break;
+    }
     case "priority_changed":
       text = "changed priority";
       break;
@@ -1108,6 +1470,12 @@ function ActivityRow({ activity }: { activity: IssueActivity }) {
       break;
     case "commented":
       text = "commented";
+      break;
+    case "renamed":
+      text = "renamed the issue";
+      break;
+    case "estimated":
+      text = "changed estimate";
       break;
     default:
       text = activity.kind;
@@ -1121,7 +1489,7 @@ function ActivityRow({ activity }: { activity: IssueActivity }) {
 }
 
 // ---------------------------------------------------------------------------
-// Modals
+// New issue modal
 // ---------------------------------------------------------------------------
 
 function NewIssueModal({
@@ -1144,19 +1512,20 @@ function NewIssueModal({
     title: "",
     description: "",
     priority: 0,
-    state: "todo",
+    state: "todo" as StateId,
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
-      setForm((f) => ({ ...f, teamId: defaultTeamId }));
+      setForm((f) => ({ ...f, teamId: defaultTeamId, title: "", description: "" }));
       setErr(null);
     }
   }, [open, defaultTeamId]);
 
   async function save() {
+    if (!form.title.trim() || !form.teamId) return;
     setBusy(true);
     setErr(null);
     try {
@@ -1223,6 +1592,26 @@ function NewIssueModal({
             </Select>
           </FormField>
         </div>
+        <FormField label="Status">
+          <Select
+            value={form.state}
+            onValueChange={(v) => setForm({ ...form, state: v as StateId })}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {STATES.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  <div className="flex items-center gap-2">
+                    <StateIcon state={s.id} />
+                    {s.label}
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FormField>
         <FormField label="Title">
           <Input
             autoFocus
@@ -1260,6 +1649,10 @@ function NewIssueModal({
   );
 }
 
+// ---------------------------------------------------------------------------
+// New team modal
+// ---------------------------------------------------------------------------
+
 function NewTeamModal({
   open,
   onClose,
@@ -1287,6 +1680,7 @@ function NewTeamModal({
   }, [name]);
 
   async function save() {
+    if (!name.trim() || !key.trim()) return;
     setBusy(true);
     setErr(null);
     try {
@@ -1313,6 +1707,7 @@ function NewTeamModal({
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void save()}
             placeholder="Engineering"
           />
         </FormField>
@@ -1328,6 +1723,7 @@ function NewTeamModal({
               )
             }
             className="font-mono"
+            placeholder="ENG"
           />
         </FormField>
         {err && <ErrorBlock message={err} />}
@@ -1404,7 +1800,7 @@ function CommandPalette({
       ) {
         out.push({ kind: "issue", id: i.id, label: i.title, meta: ident });
       }
-      if (out.length > 50) break;
+      if (out.length >= 50) break;
     }
     return out;
   }, [issues, teams, query]);
@@ -1478,7 +1874,7 @@ function CommandPalette({
 }
 
 // ---------------------------------------------------------------------------
-// OrgGate + Login
+// OrgGate + onboarding
 // ---------------------------------------------------------------------------
 
 function OrgGate({
@@ -1488,7 +1884,7 @@ function OrgGate({
   onSignOut,
   children,
 }: {
-  currentUser: User;
+  currentUser: UserRow;
   activeOrgId: string | null;
   onSelectOrg: (orgId: string | null) => Promise<void>;
   onSignOut: () => void;
@@ -1513,7 +1909,8 @@ function OrgGate({
     if (!activeOrgId && myOrgs.length === 1) {
       void onSelectOrg(myOrgs[0].id);
     }
-  }, [activeOrgId, myOrgs]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrgId, myOrgs.length]);
 
   const active = myOrgs.find((o) => o.id === activeOrgId);
   if (active) return <>{children(active)}</>;
@@ -1534,7 +1931,7 @@ function OnboardingScreen({
   onSelectOrg,
   onSignOut,
 }: {
-  currentUser: User;
+  currentUser: UserRow;
   myOrgs: Organization[];
   onSelectOrg: (orgId: string) => Promise<void>;
   onSignOut: () => void;
@@ -1614,6 +2011,7 @@ function CreateOrgModal({
   }, [name]);
 
   async function save() {
+    if (!name.trim() || !slug.trim()) return;
     setBusy(true);
     setErr(null);
     try {
@@ -1640,6 +2038,7 @@ function CreateOrgModal({
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void save()}
             placeholder="Acme Eng"
           />
         </FormField>
@@ -1647,6 +2046,7 @@ function CreateOrgModal({
           <Input
             value={slug}
             onChange={(e) => setSlug(e.target.value.toLowerCase())}
+            placeholder="acme-eng"
           />
         </FormField>
         {err && <ErrorBlock message={err} />}
@@ -1667,23 +2067,28 @@ function CreateOrgModal({
   );
 }
 
-function Login({ onReady }: { onReady: (u: User) => void }) {
+// ---------------------------------------------------------------------------
+// Login
+// ---------------------------------------------------------------------------
+
+function Login({ onReady }: { onReady: (u: UserRow) => void }) {
   const [email, setEmail] = useState("eng@acme.example");
   const [name, setName] = useState("Engineer");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   async function go() {
+    if (!email.trim() || !name.trim()) return;
     setLoading(true);
     setErr(null);
     try {
-      const session = await fetch(`${BASE_URL}/api/auth/guest`, {
+      const session = (await fetch(`${BASE_URL}/api/auth/guest`, {
         method: "POST",
-      }).then((r) => r.json());
-      const token: string = session.token;
+      }).then((r) => r.json())) as { token: string };
+      const token = session.token;
       localStorage.setItem(storageKey("token"), token);
       configureClient({ baseUrl: BASE_URL, appName: "linear" });
-      const user = await callFn<User>("upsertUser", {
+      const user = await callFn<UserRow>("upsertUser", {
         email,
         displayName: name,
       });
@@ -1720,17 +2125,20 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                type="email"
+                placeholder="you@example.com"
               />
             </FormField>
             <FormField label="Display name">
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && go()}
+                onKeyDown={(e) => e.key === "Enter" && void go()}
+                placeholder="Your name"
               />
             </FormField>
             {err && <ErrorBlock message={err} />}
-            <Button onClick={go} disabled={loading} className="mt-2 w-full">
+            <Button onClick={() => void go()} disabled={loading} className="mt-2 w-full">
               {loading && <Loader2 className="size-4 animate-spin" />}
               Continue
             </Button>
@@ -1755,7 +2163,7 @@ function Login({ onReady }: { onReady: (u: User) => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// Bits
+// Shared primitives
 // ---------------------------------------------------------------------------
 
 function FormField({
@@ -1767,7 +2175,7 @@ function FormField({
 }) {
   return (
     <div className="grid gap-1.5">
-      <Label>{label}</Label>
+      <FormLabel>{label}</FormLabel>
       {children}
     </div>
   );

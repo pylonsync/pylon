@@ -23,19 +23,21 @@ export default mutation({
     if (rows.length === 0) throw ctx.error("NOT_FOUND", `ticker ${args.symbol}`);
     const t = rows[0];
 
+    const price = Number(args.price);
+    const qty = Number(args.qty);
     const now = new Date().toISOString();
     await ctx.db.update("Ticker", t.id as string, {
-      price: args.price,
-      volume: (t.volume as number) + args.qty,
-      dayHigh: Math.max(t.dayHigh as number, args.price),
-      dayLow: Math.min(t.dayLow as number, args.price),
+      price,
+      volume: (t.volume as number) + qty,
+      dayHigh: Math.max(t.dayHigh as number, price),
+      dayLow: Math.min(t.dayLow as number, price),
       updatedAt: now,
     });
 
     await ctx.db.insert("Trade", {
       symbol: args.symbol,
-      price: args.price,
-      qty: args.qty,
+      price,
+      qty,
       at: now,
     });
     return { ok: true };

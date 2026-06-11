@@ -20,8 +20,8 @@ export function LoginCard({
   const { signIn, signUp } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
   // Prefill the demo credentials so a reviewer can sign in instantly.
-  const [email, setEmail] = useState(DEMO.email);
-  const [password, setPassword] = useState(DEMO.password);
+  const [email, setEmail] = useState<string>(DEMO.email);
+  const [password, setPassword] = useState<string>(DEMO.password);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);

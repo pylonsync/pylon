@@ -4,7 +4,10 @@ import { mutation, v } from "@pylonsync/functions";
  * Add a material to inventory. Stock goes in empty by default; use
  * adjustStock to record receipts.
  */
-export default mutation({
+export default mutation<
+  { name: string; unit: string; costPerUnit: number; reorderPoint?: number; sku?: string; supplier?: string; notes?: string; initialStock?: number },
+  { materialId: string }
+>({
   auth: "guest",
   args: {
     name: v.string(),

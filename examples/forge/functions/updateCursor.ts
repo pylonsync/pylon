@@ -6,8 +6,6 @@ import { mutation, v } from "@pylonsync/functions";
  * the Cursor live query.
  */
 export default mutation({
-  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
-  // Without this the function defaults to auth: "user" and rejects guests.
   auth: "guest",
   args: {
     roomId: v.string(),
@@ -18,24 +16,32 @@ export default mutation({
     z: v.number(),
   },
   async handler(ctx, args) {
+    const a = args as {
+      roomId: string;
+      name: string;
+      color: string;
+      x: number;
+      y: number;
+      z: number;
+    };
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
 
     const rows = await ctx.db.query("Cursor", {
-      roomId: args.roomId, userId: ctx.auth.userId,
+      roomId: a.roomId, userId: ctx.auth.userId,
     });
     const now = new Date().toISOString();
     if (rows.length > 0) {
       await ctx.db.update("Cursor", rows[0].id as string, {
-        x: args.x, y: args.y, z: args.z,
-        name: args.name, color: args.color,
+        x: a.x, y: a.y, z: a.z,
+        name: a.name, color: a.color,
         updatedAt: now,
       });
     } else {
       await ctx.db.insert("Cursor", {
-        roomId: args.roomId,
+        roomId: a.roomId,
         userId: ctx.auth.userId,
-        name: args.name, color: args.color,
-        x: args.x, y: args.y, z: args.z,
+        name: a.name, color: a.color,
+        x: a.x, y: a.y, z: a.z,
         updatedAt: now,
       });
     }

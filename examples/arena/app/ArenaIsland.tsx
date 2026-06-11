@@ -13,39 +13,45 @@ import { ArenaApp } from "../client/ArenaApp";
 // no baseUrl is needed — init() resolves window.location.origin.
 const APP_NAME = "arena";
 
-async function bootstrap(): Promise<void> {
+async function bootstrap(): Promise<string> {
   init({ appName: APP_NAME });
   configureClient({ appName: APP_NAME });
 
-  // Already have a guest/user token? Nothing to do.
-  if (window.localStorage.getItem(storageKey("token"))) return;
+  // Already have a guest/user token? Reuse it.
+  const existing = window.localStorage.getItem(storageKey("token"));
+  const existingUser = window.localStorage.getItem(storageKey("user"));
+  if (existing && existingUser) return existingUser;
+
   try {
     const res = await fetch("/api/auth/guest", { method: "POST" });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`guest auth failed: ${res.status}`);
     const body = (await res.json()) as { token?: string; user_id?: string };
-    // ArenaApp reads storageKey("token") + storageKey("user").
     if (body.token) window.localStorage.setItem(storageKey("token"), body.token);
     if (body.user_id) window.localStorage.setItem(storageKey("user"), body.user_id);
     window.localStorage.setItem(storageKey("isGuest"), "1");
     // Re-point the typed client now that we hold a session.
     configureClient({ appName: APP_NAME });
+    return body.user_id ?? "";
   } catch {
-    // Pylon may not be reachable yet — ArenaApp's hooks retry.
+    // Pylon may not be reachable yet — ArenaApp's hooks retry via spawnDot.
+    return "";
   }
 }
 
 export default function ArenaIsland() {
-  const [ready, setReady] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+
   useEffect(() => {
-    void bootstrap().then(() => setReady(true));
+    void bootstrap().then((id) => setUserId(id || ""));
   }, []);
 
-  if (!ready) {
+  if (userId === null) {
     return (
-      <div className="grid min-h-[70vh] place-items-center text-sm text-muted-foreground">
+      <div className="grid min-h-screen place-items-center text-sm text-muted-foreground">
         Connecting to the arena…
       </div>
     );
   }
-  return <ArenaApp />;
+
+  return <ArenaApp userId={userId} />;
 }

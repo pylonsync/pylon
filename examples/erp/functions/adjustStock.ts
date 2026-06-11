@@ -9,7 +9,10 @@ import { mutation, v } from "@pylonsync/functions";
  * by default; pass `allowNegative: true` to explicitly accept it (e.g.
  * reconciling an undercount).
  */
-export default mutation({
+export default mutation<
+  { materialId: string; delta: number; reason: string; reference?: string; allowNegative?: boolean },
+  { materialId: string; stockQty: number }
+>({
   auth: "guest",
   args: {
     materialId: v.id("Material"),
@@ -35,15 +38,16 @@ export default mutation({
 
     const material = await ctx.db.get("Material", args.materialId);
     if (!material) throw ctx.error("NOT_FOUND", "material not found");
-    if (material.orgId !== ctx.auth.tenantId) {
+    const mat = material as { orgId: string; stockQty: number; unit: string };
+    if (mat.orgId !== ctx.auth.tenantId) {
       throw ctx.error("FORBIDDEN", "material belongs to another org");
     }
 
-    const nextQty = material.stockQty + args.delta;
+    const nextQty = mat.stockQty + args.delta;
     if (nextQty < 0 && !args.allowNegative) {
       throw ctx.error(
         "INSUFFICIENT_STOCK",
-        `only ${material.stockQty} ${material.unit} on hand`,
+        `only ${mat.stockQty} ${mat.unit} on hand`,
       );
     }
 

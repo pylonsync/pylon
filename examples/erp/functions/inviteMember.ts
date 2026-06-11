@@ -7,7 +7,7 @@ import { mutation, v } from "@pylonsync/functions";
  * This demo does NOT send email — the invite row is the source of truth
  * and the invited user sees it on next login via an "Invites" banner.
  */
-export default mutation({
+export default mutation<{ email: string; role: string }, { inviteId: string; reinvited: boolean }>({
   auth: "guest",
   args: {
     email: v.string(),
@@ -27,8 +27,8 @@ export default mutation({
     if (myMemberships.length === 0) {
       throw ctx.error("FORBIDDEN", "you are not a member of this org");
     }
-    const role = myMemberships[0].role;
-    if (role !== "owner" && role !== "admin") {
+    const myRole = (myMemberships[0] as { role: string }).role;
+    if (myRole !== "owner" && myRole !== "admin") {
       throw ctx.error("FORBIDDEN", "only owners/admins can invite members");
     }
 
@@ -49,13 +49,13 @@ export default mutation({
       orgId: ctx.auth.tenantId,
       email,
     });
-    const pending = existing.find((i) => !i.acceptedAt);
+    const pending = existing.find((i) => !(i as { acceptedAt?: string | null }).acceptedAt);
     if (pending) {
-      await ctx.db.update("OrgInvite", pending.id, {
+      await ctx.db.update("OrgInvite", (pending as { id: string }).id, {
         role: args.role,
         invitedBy: ctx.auth.userId,
       });
-      return { inviteId: pending.id, reinvited: true };
+      return { inviteId: (pending as { id: string }).id, reinvited: true };
     }
 
     const id = await ctx.db.insert("OrgInvite", {

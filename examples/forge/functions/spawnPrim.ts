@@ -3,8 +3,6 @@ import { mutation, v } from "@pylonsync/functions";
 const KINDS = ["box", "sphere", "cone", "torus"];
 
 export default mutation({
-  // Public demo: anyone with a guest session (POST /api/auth/guest) can call.
-  // Without this the function defaults to auth: "user" and rejects guests.
   auth: "guest",
   args: {
     roomId: v.string(),
@@ -15,18 +13,26 @@ export default mutation({
     color: v.optional(v.string()),
   },
   async handler(ctx, args) {
+    const a = args as {
+      roomId: string;
+      kind: string;
+      x?: number;
+      y?: number;
+      z?: number;
+      color?: string;
+    };
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-    if (!KINDS.includes(args.kind)) {
+    if (!KINDS.includes(a.kind)) {
       throw ctx.error("INVALID_KIND", `kind must be one of ${KINDS.join(", ")}`);
     }
     const id = await ctx.db.insert("Prim", {
-      roomId: args.roomId,
-      kind: args.kind,
-      x: args.x ?? 0,
-      y: args.y ?? 0.5,
-      z: args.z ?? 0,
+      roomId: a.roomId,
+      kind: a.kind,
+      x: a.x ?? 0,
+      y: a.y ?? 0.5,
+      z: a.z ?? 0,
       sx: 1, sy: 1, sz: 1,
-      color: args.color ?? "#8b5cf6",
+      color: a.color ?? "#8b5cf6",
       createdBy: ctx.auth.userId,
       updatedAt: new Date().toISOString(),
     });

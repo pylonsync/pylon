@@ -20,11 +20,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import {
-  init,
   db,
   callFn,
-  configureClient,
-  storageKey,
 } from "@pylonsync/react";
 import {
   Box,
@@ -37,20 +34,12 @@ import {
   Sparkles,
   Torus,
   Trash2,
+  X,
 } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Card } from "@pylonsync/example-ui/card";
+import { Badge } from "@pylonsync/example-ui/badge";
 import { cn } from "@pylonsync/example-ui/utils";
-
-// Same-origin under native SSR: the Pylon binary serves this app and its API
-// on one port, so the client talks to its own origin. Falls back to the dev
-// port only during the (never-rendered) server import of this module.
-const BASE_URL =
-  typeof window !== "undefined"
-    ? window.location.origin
-    : "http://localhost:4321";
-init({ baseUrl: BASE_URL, appName: "forge" });
-configureClient({ baseUrl: BASE_URL, appName: "forge" });
 
 const ROOM_ID = "main";
 const CURSOR_COLORS = [
@@ -65,7 +54,7 @@ const KINDS = [
   { id: "torus", label: "Torus" },
 ] as const;
 
-type Prim = {
+type PrimRow = {
   id: string;
   roomId: string;
   kind: "box" | "sphere" | "cone" | "torus";
@@ -76,7 +65,7 @@ type Prim = {
   updatedAt: string;
 };
 
-type Cursor = {
+type CursorRow = {
   id: string;
   roomId: string;
   userId: string;
@@ -86,7 +75,7 @@ type Cursor = {
   updatedAt: string;
 };
 
-type Terrain = {
+type TerrainRow = {
   id: string;
   roomId: string;
   size: number;
@@ -95,15 +84,9 @@ type Terrain = {
   updatedAt: string;
 };
 
-// Terrain → world-space. `TERRAIN_WORLD_SIZE` is the edge length of the
-// terrain mesh in world units; `TERRAIN_HEIGHT_SCALE` converts stored
-// height values into displayed Y offset. Cell coords map to world as:
-//   worldX = (cx / (size-1) - 0.5) * WORLD_SIZE
 const TERRAIN_WORLD_SIZE = 40;
 const TERRAIN_HEIGHT_SCALE = 1.0;
 
-// 4 layer colors — grass / dirt / rock / snow. These are baked into the
-// shader via vertex-attribute weights so the per-vertex blend is free.
 const LAYER_COLORS: [THREE.Color, THREE.Color, THREE.Color, THREE.Color] = [
   new THREE.Color("#4a6b3f"), // grass
   new THREE.Color("#6b4f3a"), // dirt
@@ -114,12 +97,6 @@ const LAYER_LABELS = ["Grass", "Dirt", "Rock", "Snow"] as const;
 
 type Tool = "orbit" | "raise" | "lower" | "smooth" | "flatten" | "paint";
 
-/**
- * Custom terrain material that blends 4 colors per-vertex using attributes
- * shipped from rebuildTerrainGeometry(). Using onBeforeCompile to extend
- * MeshStandardMaterial keeps all the standard lighting (hemisphere,
- * directional, shadows) and only adds the splatmap blend into the diffuse.
- */
 function buildTerrainMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -171,34 +148,15 @@ function buildTerrainMaterial(): THREE.MeshStandardMaterial {
   return mat;
 }
 
-// World <-> cell coord conversion for brush targeting.
 function worldToCell(wx: number, wz: number, size: number): { cx: number; cz: number } {
   const cx = ((wx / TERRAIN_WORLD_SIZE) + 0.5) * (size - 1);
   const cz = ((wz / TERRAIN_WORLD_SIZE) + 0.5) * (size - 1);
   return { cx, cz };
 }
 
-function uid() {
-  return Math.random().toString(36).slice(2, 8);
-}
-
 function randomName() {
   const names = ["nova", "onyx", "echo", "lyra", "atlas", "rhea", "orion", "vega"];
   return `${names[Math.floor(Math.random() * names.length)]}_${Math.floor(Math.random() * 900 + 100)}`;
-}
-
-async function ensureGuest(): Promise<string> {
-  let token = localStorage.getItem(storageKey("token"));
-  let userId = localStorage.getItem(storageKey("user"));
-  if (!token || !userId) {
-    const res = await fetch(`${BASE_URL}/api/auth/guest`, { method: "POST" });
-    const body = await res.json();
-    token = body.token as string;
-    userId = body.user_id as string;
-    localStorage.setItem(storageKey("token"), token);
-    localStorage.setItem(storageKey("user"), userId);
-  }
-  return userId!;
 }
 
 function hashColor(seed: string): string {
@@ -216,63 +174,50 @@ function geomFor(kind: string): THREE.BufferGeometry {
   }
 }
 
-export function ForgeApp() {
-  const [userId, setUserId] = useState<string | null>(null);
-  const [myName] = useState(() => randomName());
+export function ForgeApp({ userId, myName }: { userId: string; myName: string }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [presenceCount, setPresenceCount] = useState(0);
+  const [spawning, setSpawning] = useState(false);
 
-  // Terrain-editing tool state. Orbit = original camera behavior +
-  // prim-dragging. The sculpt modes run brush strokes against the
-  // heightmap; paint mutates the splatmap layer.
   const [tool, setTool] = useState<Tool>("orbit");
   const [paintLayer, setPaintLayer] = useState<0 | 1 | 2 | 3>(0);
   const [brushRadius, setBrushRadius] = useState(3);
   const [brushStrength, setBrushStrength] = useState(0.5);
 
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const primsLatest = useRef<Prim[]>([]);
-  const cursorsLatest = useRef<Cursor[]>([]);
-  const terrainLatest = useRef<Terrain | null>(null);
+  const primsLatest = useRef<PrimRow[]>([]);
+  const cursorsLatest = useRef<CursorRow[]>([]);
+  const terrainLatest = useRef<TerrainRow | null>(null);
   const selectedLatest = useRef<string | null>(null);
-  const userIdLatest = useRef<string | null>(null);
   const toolLatest = useRef<Tool>("orbit");
   const paintLayerLatest = useRef<0 | 1 | 2 | 3>(0);
   const brushRadiusLatest = useRef(3);
   const brushStrengthLatest = useRef(0.5);
 
-  const { data: prims } = db.useQuery<Prim>("Prim", { where: { roomId: ROOM_ID } });
-  const { data: cursors } = db.useQuery<Cursor>("Cursor", { where: { roomId: ROOM_ID } });
-  const { data: terrainRows } = db.useQuery<Terrain>("Terrain", { where: { roomId: ROOM_ID } });
+  const { data: prims } = db.useQuery<PrimRow>("Prim", { where: { roomId: ROOM_ID } });
+  const { data: cursors } = db.useQuery<CursorRow>("Cursor", { where: { roomId: ROOM_ID } });
+  const { data: terrainRows } = db.useQuery<TerrainRow>("Terrain", { where: { roomId: ROOM_ID } });
 
   useEffect(() => { primsLatest.current = prims ?? []; }, [prims]);
   useEffect(() => { cursorsLatest.current = cursors ?? []; }, [cursors]);
   useEffect(() => { terrainLatest.current = (terrainRows ?? [])[0] ?? null; }, [terrainRows]);
   useEffect(() => { selectedLatest.current = selected; }, [selected]);
-  useEffect(() => { userIdLatest.current = userId; }, [userId]);
   useEffect(() => { toolLatest.current = tool; }, [tool]);
   useEffect(() => { paintLayerLatest.current = paintLayer; }, [paintLayer]);
   useEffect(() => { brushRadiusLatest.current = brushRadius; }, [brushRadius]);
   useEffect(() => { brushStrengthLatest.current = brushStrength; }, [brushStrength]);
 
-  // Kick off terrain init once the user is authenticated. Idempotent —
-  // re-invocations return the existing row instead of creating a new one.
+  // Init terrain once on mount.
   useEffect(() => {
-    if (!userId) return;
-    callFn("initTerrain", { roomId: ROOM_ID, size: 64 })
-      .then((r) => console.log("[forge] initTerrain:", r))
-      .catch((e) => console.error("[forge] initTerrain failed:", e));
-  }, [userId]);
+    callFn("initTerrain", { roomId: ROOM_ID, size: 64 }).catch((e: unknown) => {
+      console.error("[forge] initTerrain failed:", e);
+    });
+  }, []);
 
   useEffect(() => {
     const others = (cursors ?? []).filter((c) => c.userId !== userId);
     setPresenceCount(others.length);
   }, [cursors, userId]);
-
-  // Auth.
-  useEffect(() => {
-    ensureGuest().then((id) => setUserId(id));
-  }, []);
 
   // three.js scene setup + main loop.
   useEffect(() => {
@@ -314,14 +259,6 @@ export function ForgeApp() {
     scene.add(dir);
 
     // ---- Terrain ----
-    // Heightmapped mesh replaces the old flat ground. Vertex positions
-    // are set from the Terrain.heights array; 4 vertex-attribute weights
-    // feed a fragment shader that blends between LAYER_COLORS.
-    //
-    // Geometry starts as a 2x2 placeholder; rebuildTerrainGeometry is
-    // called once we have a Terrain row from the live query, then on
-    // every update. We don't recreate the mesh — just swap the
-    // BufferGeometry inside it — so raycasts always have a valid target.
     const terrainMat = buildTerrainMaterial();
     const terrain = new THREE.Mesh(
       new THREE.PlaneGeometry(TERRAIN_WORLD_SIZE, TERRAIN_WORLD_SIZE, 1, 1),
@@ -332,8 +269,6 @@ export function ForgeApp() {
     terrain.name = "ground";
     scene.add(terrain);
 
-    // Brush cursor — a translucent disc that hovers at the mouse
-    // position on the terrain to preview where an edit would land.
     const brushCursor = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1.0, 32),
       new THREE.MeshBasicMaterial({
@@ -350,26 +285,16 @@ export function ForgeApp() {
     scene.add(brushCursor);
 
     let terrainSizeCache = 0;
-    // Locally cached, *mutable* copies of the heightmap + splatmap. The
-    // brush tools write to these synchronously so edits render at 60 fps
-    // without waiting for the server roundtrip. When the server-authored
-    // Terrain row arrives via the live query, rebuildTerrainGeometry
-    // replaces these with the authoritative state — if another editor
-    // touched the same area concurrently, their edits will briefly
-    // override ours, which is the correct MMO-world-editor behavior.
     let localHeights: number[][] | null = null;
     let localLayers: number[][][] | null = null;
 
-    function rebuildTerrainGeometry(t: Terrain) {
+    function rebuildTerrainGeometry(t: TerrainRow) {
       const size = t.size;
       const heights = JSON.parse(t.heights) as number[][];
       const layers = JSON.parse(t.layers) as number[][][];
       localHeights = heights;
       localLayers = layers;
 
-      // Only recreate the buffer attributes when the grid resolution
-      // changes. On every other update we just mutate the existing
-      // positions + layer weights in place.
       if (terrainSizeCache !== size) {
         const geom = new THREE.PlaneGeometry(
           TERRAIN_WORLD_SIZE,
@@ -377,7 +302,6 @@ export function ForgeApp() {
           size - 1,
           size - 1,
         );
-        // 4 layer weights per vertex, interleaved.
         const count = geom.attributes.position.count;
         const w0 = new Float32Array(count);
         const w1 = new Float32Array(count);
@@ -399,13 +323,9 @@ export function ForgeApp() {
       const w2 = geom.attributes.layerW2 as THREE.BufferAttribute;
       const w3 = geom.attributes.layerW3 as THREE.BufferAttribute;
 
-      // PlaneGeometry lays out vertices row-major, top-to-bottom. After
-      // rotation to XZ we iterate in the same order.
       for (let z = 0; z < size; z++) {
         for (let x = 0; x < size; x++) {
           const idx = z * size + x;
-          // PlaneGeometry is built in XY; its local Z becomes world Y
-          // after the rotation we did above. So we set attribute Z.
           pos.setZ(idx, (heights[z]?.[x] ?? 0) * TERRAIN_HEIGHT_SCALE);
           const l = layers[z]?.[x] ?? [1, 0, 0, 0];
           w0.setX(idx, l[0]);
@@ -420,11 +340,6 @@ export function ForgeApp() {
       geom.computeVertexNormals();
     }
 
-    // Apply a brush stroke to the local arrays + BufferGeometry in place.
-    // Mirrors the math in functions/sculptTerrain.ts so the preview
-    // matches what the server will ultimately persist. The server still
-    // runs the same math and streams the authoritative result back via
-    // the live query; that becomes the reconciliation step.
     function sculptLocal(
       cx: number, cz: number, radius: number, strength: number,
       mode: "raise" | "lower" | "smooth" | "flatten",
@@ -516,7 +431,7 @@ export function ForgeApp() {
     }
 
     const grid = new THREE.GridHelper(TERRAIN_WORLD_SIZE, 40, 0x2a2a3a, 0x1a1a25);
-    grid.position.y = 0.002; // hover slightly so it's visible on flat terrain
+    grid.position.y = 0.002;
     scene.add(grid);
 
     // Primitives — pooled by id.
@@ -559,7 +474,7 @@ export function ForgeApp() {
       return outline;
     }
 
-    function addPrim(p: Prim): PrimEntry {
+    function addPrim(p: PrimRow): PrimEntry {
       const group = new THREE.Group();
       const geom = geomFor(p.kind);
       const mat = new THREE.MeshStandardMaterial({
@@ -592,7 +507,7 @@ export function ForgeApp() {
       primMeshes.delete(id);
     }
 
-    function addCursor(c: Cursor): CursorEntry {
+    function addCursor(c: CursorRow): CursorEntry {
       const sphere = new THREE.Mesh(
         new THREE.SphereGeometry(0.12, 12, 12),
         new THREE.MeshBasicMaterial({ color: c.color }),
@@ -659,7 +574,6 @@ export function ForgeApp() {
     let orbiting: { x: number; y: number } | null = null;
     let lastCursorSend = 0;
 
-    // Track hover point on ground for cursor presence + drag.
     const groundHit = new THREE.Vector3();
 
     function intersectGround(event: MouseEvent): THREE.Vector3 | null {
@@ -685,9 +599,6 @@ export function ForgeApp() {
       return hits[0] ?? null;
     }
 
-    // Brush state — active while the user holds LMB in a sculpt/paint
-    // mode. The tick loop reads `brushStroke` and calls the appropriate
-    // mutation at ~10 Hz while the mouse moves.
     let brushStroke: {
       lastSend: number;
       lastGndX: number;
@@ -696,16 +607,12 @@ export function ForgeApp() {
 
     const onMouseDown = (event: MouseEvent) => {
       if (event.button === 2) {
-        // Right button — orbit camera regardless of current tool.
         orbiting = { x: event.clientX, y: event.clientY };
         return;
       }
 
       const currentTool = toolLatest.current;
 
-      // Sculpt + paint modes intercept left-click on terrain. Clicking
-      // on a primitive still selects it so the user can swap back to
-      // orbit to manipulate objects.
       if (currentTool !== "orbit") {
         const primHit = intersectPrim(event);
         if (primHit) {
@@ -744,10 +651,6 @@ export function ForgeApp() {
       }
     };
 
-    // Apply one brush tick at the supplied world hit point. Called
-    // on every mousemove during a drag — no throttle on the local
-    // preview so strokes feel immediate, while the server call is
-    // throttled to 10 Hz by the caller.
     function applyBrushAt(worldX: number, worldZ: number, sendServer: boolean) {
       const t = terrainLatest.current;
       if (!t) return;
@@ -765,7 +668,7 @@ export function ForgeApp() {
             radius,
             strength,
             layer: paintLayerLatest.current,
-          }).catch((e) => console.error("[forge] paintTerrain failed:", e));
+          }).catch((e: unknown) => { void e; });
         }
       } else if (tool !== "orbit") {
         sculptLocal(cx, cz, radius, strength, tool as "raise" | "lower" | "smooth" | "flatten");
@@ -776,29 +679,27 @@ export function ForgeApp() {
             radius,
             strength,
             mode: tool,
-          }).catch((e) => console.error("[forge] sculptTerrain failed:", e));
+          }).catch((e: unknown) => { void e; });
         }
       }
     }
 
     const onMouseMove = (event: MouseEvent) => {
-      // Presence cursor update (regardless of drag state).
       const gnd = intersectGround(event);
       if (gnd) {
         groundHit.copy(gnd);
         const now = performance.now();
-        if (userIdLatest.current && now - lastCursorSend > 50) {
+        if (now - lastCursorSend > 50) {
           lastCursorSend = now;
-          const color = hashColor(userIdLatest.current);
+          const color = hashColor(userId);
           callFn("updateCursor", {
             roomId: ROOM_ID,
             name: myName,
             color,
             x: gnd.x, y: 0, z: gnd.z,
-          }).catch(() => {});
+          }).catch((e: unknown) => { void e; });
         }
 
-        // Preview the brush footprint while a sculpt/paint tool is active.
         const curTool = toolLatest.current;
         if (curTool !== "orbit") {
           brushCursor.visible = true;
@@ -820,9 +721,6 @@ export function ForgeApp() {
           brushStroke.lastGndX = hit.x;
           brushStroke.lastGndZ = hit.z;
           const now = performance.now();
-          // Local preview every frame — the mesh deforms at 60 fps while
-          // the user drags. Server writes are throttled to 10 Hz so other
-          // clients (and persistence) pick up the stroke.
           const sendServer = now - brushStroke.lastSend > 100;
           if (sendServer) brushStroke.lastSend = now;
           applyBrushAt(hit.x, hit.z, sendServer);
@@ -848,7 +746,7 @@ export function ForgeApp() {
             callFn("movePrim", {
               primId: dragging.primId,
               x: nx, y: prim.y, z: nz,
-            }).catch(() => {});
+            }).catch((e: unknown) => { void e; });
           }
         }
       } else if (orbiting) {
@@ -863,7 +761,6 @@ export function ForgeApp() {
 
     const onMouseUp = () => {
       if (dragging) {
-        // Fire one final write with the final position.
         const entry = primMeshes.get(dragging.primId);
         const prim = primsLatest.current.find((p) => p.id === dragging!.primId);
         if (entry && prim) {
@@ -872,12 +769,10 @@ export function ForgeApp() {
             x: entry.group.position.x,
             y: prim.y,
             z: entry.group.position.z,
-          }).catch(() => {});
+          }).catch((e: unknown) => { void e; });
         }
       }
       if (brushStroke) {
-        // Flush one last brush tick at the final position so the stroke
-        // reaches exactly where the user released.
         applyBrushAt(brushStroke.lastGndX, brushStroke.lastGndZ, true);
       }
       dragging = null;
@@ -899,20 +794,21 @@ export function ForgeApp() {
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
     renderer.domElement.addEventListener("contextmenu", onContextMenu);
 
-    // Keyboard: Delete or Backspace removes selection; 1-6 cycle color.
     const onKeyDown = (e: KeyboardEvent) => {
       const tgt = e.target as HTMLElement;
       if (tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA")) return;
       if (!selectedLatest.current) return;
       if (e.key === "Delete" || e.key === "Backspace") {
-        callFn("deletePrim", { primId: selectedLatest.current }).catch(() => {});
+        callFn("deletePrim", { primId: selectedLatest.current })
+          .then(() => setSelected(null))
+          .catch((e: unknown) => { void e; });
       }
       const idx = Number(e.key) - 1;
       if (!Number.isNaN(idx) && idx >= 0 && idx < PRIM_COLORS.length) {
         callFn("colorPrim", {
           primId: selectedLatest.current,
           color: PRIM_COLORS[idx],
-        }).catch(() => {});
+        }).catch((e: unknown) => { void e; });
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -921,9 +817,6 @@ export function ForgeApp() {
     let raf = 0;
     let lastTerrainUpdatedAt = "";
     const tick = () => {
-      // Sync terrain — rebuild geometry only when the row's updatedAt
-      // actually changed, so the ~35KB JSON parse isn't burning every
-      // frame. Live query pushes a new Terrain row on every brush stroke.
       const t = terrainLatest.current;
       if (t && t.updatedAt !== lastTerrainUpdatedAt) {
         lastTerrainUpdatedAt = t.updatedAt;
@@ -938,8 +831,6 @@ export function ForgeApp() {
         if (!existing) {
           primMeshes.set(p.id, addPrim(p));
         } else {
-          // If kind changed (shouldn't normally) rebuild; otherwise
-          // update position/color/outline.
           if (existing.kind !== p.kind) {
             existing.mesh.geometry.dispose();
             existing.mesh.geometry = geomFor(p.kind);
@@ -951,7 +842,6 @@ export function ForgeApp() {
             (existing.mesh.material as THREE.MeshStandardMaterial).color.set(p.color);
             existing.color = p.color;
           }
-          // Don't override position while the user is dragging *this* prim.
           const isActivelyDragging = dragging && dragging.primId === p.id;
           if (!isActivelyDragging) {
             existing.group.position.set(p.x, p.y, p.z);
@@ -966,7 +856,7 @@ export function ForgeApp() {
       // Sync cursors (skip our own).
       const cseen = new Set<string>();
       for (const c of cursorsLatest.current) {
-        if (c.userId === userIdLatest.current) continue;
+        if (c.userId === userId) continue;
         cseen.add(c.id);
         let e = cursorMeshes.get(c.id);
         if (!e) {
@@ -974,7 +864,6 @@ export function ForgeApp() {
           cursorMeshes.set(c.id, e);
         }
         e.targetX = c.x; e.targetY = c.y; e.targetZ = c.z;
-        // Smooth toward target so presence doesn't jitter.
         e.sphere.position.lerp(
           new THREE.Vector3(e.targetX, e.targetY + 0.1, e.targetZ),
           0.25,
@@ -1015,35 +904,52 @@ export function ForgeApp() {
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
       if (mount.contains(cursorLayer)) mount.removeChild(cursorLayer);
     };
-  }, [myName]);
+  }, [userId, myName]);
 
   // ---- Toolbar actions ----
   const spawn = useCallback(async (kind: string) => {
-    const x = (Math.random() - 0.5) * 6;
-    const z = (Math.random() - 0.5) * 6;
-    const color = PRIM_COLORS[Math.floor(Math.random() * PRIM_COLORS.length)];
-    await callFn("spawnPrim", { roomId: ROOM_ID, kind, x, z, color }).catch(() => {});
+    setSpawning(true);
+    try {
+      const x = (Math.random() - 0.5) * 6;
+      const z = (Math.random() - 0.5) * 6;
+      const color = PRIM_COLORS[Math.floor(Math.random() * PRIM_COLORS.length)];
+      await callFn("spawnPrim", { roomId: ROOM_ID, kind, x, z, color });
+    } catch (_e) {
+      // spawn errors are non-fatal in the demo
+    } finally {
+      setSpawning(false);
+    }
   }, []);
 
-  const clearAll = useCallback(async () => {
-    const all = primsLatest.current;
-    await Promise.all(all.map((p) => callFn("deletePrim", { primId: p.id }).catch(() => {})));
-  }, []);
+  const deleteSelected = useCallback(async () => {
+    if (!selected) return;
+    const id = selected;
+    setSelected(null);
+    await callFn("deletePrim", { primId: id }).catch((e: unknown) => { void e; });
+  }, [selected]);
 
   const colorSelected = useCallback(async (color: string) => {
     if (!selected) return;
-    await callFn("colorPrim", { primId: selected, color }).catch(() => {});
+    await callFn("colorPrim", { primId: selected, color }).catch((e: unknown) => { void e; });
   }, [selected]);
 
+  const clearAll = useCallback(async () => {
+    if (!window.confirm(`Remove all ${primsLatest.current.length} primitives from the scene?`)) return;
+    const all = primsLatest.current;
+    setSelected(null);
+    await Promise.all(all.map((p) => callFn("deletePrim", { primId: p.id }).catch((e: unknown) => { void e; })));
+  }, []);
+
   const selectedPrim = selected ? (prims ?? []).find((p) => p.id === selected) : null;
+  const primCount = (prims ?? []).length;
 
   return (
     <div className="fixed inset-0 bg-[#0d0d12]">
       <div ref={mountRef} className="absolute inset-0" />
 
-      {/* Top toolbar: add primitives */}
+      {/* Top toolbar */}
       <Card className="absolute left-1/2 top-4 flex -translate-x-1/2 items-center gap-3 rounded-full border bg-card/85 px-3 py-1.5 backdrop-blur-sm">
-        <div className="flex items-center gap-2 px-2 text-sm font-semibold">
+        <div className="flex items-center gap-2 px-2 text-sm font-medium">
           <BrandMark />
           <span>Forge</span>
         </div>
@@ -1055,6 +961,7 @@ export function ForgeApp() {
               size="xs"
               variant="ghost"
               onClick={() => spawn(k.id)}
+              disabled={spawning}
             >
               <KindIcon kind={k.id} />
               {k.label}
@@ -1062,42 +969,64 @@ export function ForgeApp() {
           ))}
         </div>
         <div className="h-5 w-px bg-border" />
-        <span className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
-          <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />
-          {presenceCount + 1} online
-        </span>
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={clearAll}
-          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-        >
-          <Trash2 className="size-3" />
-          Clear
-        </Button>
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="size-1.5 animate-pulse rounded-full bg-emerald-400" />
+            {presenceCount + 1} online
+          </span>
+          {primCount > 0 && (
+            <Badge variant="secondary" className="tabular-nums text-[10px]">
+              {primCount} {primCount === 1 ? "prim" : "prims"}
+            </Badge>
+          )}
+        </div>
+        {primCount > 0 && (
+          <>
+            <div className="h-5 w-px bg-border" />
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={clearAll}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 className="size-3" />
+              Clear
+            </Button>
+          </>
+        )}
       </Card>
 
       {/* Selected-object inspector */}
       {selectedPrim && (
         <Card className="absolute right-4 top-20 w-64 border bg-card/85 p-4 backdrop-blur-sm">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold capitalize">
+            <span className="text-sm font-medium capitalize">
               {selectedPrim.kind}
             </span>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              #{selectedPrim.id.slice(0, 8)}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono text-[10px] text-muted-foreground">
+                #{selectedPrim.id.slice(0, 8)}
+              </span>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => setSelected(null)}
+                className="h-5 w-5 p-0"
+              >
+                <X className="size-3" />
+              </Button>
+            </div>
           </div>
-          <div className="mt-3 flex items-center justify-between text-xs">
-            <span className="text-muted-foreground">POSITION</span>
-            <span className="font-mono tabular-nums">
+          <div className="mt-2 flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Position</span>
+            <span className="font-mono tabular-nums text-[11px]">
               {selectedPrim.x.toFixed(1)}, {selectedPrim.y.toFixed(1)},{" "}
               {selectedPrim.z.toFixed(1)}
             </span>
           </div>
           <div className="mt-3 flex flex-col gap-1.5">
-            <span className="text-xs text-muted-foreground">COLOR</span>
-            <div className="flex flex-wrap gap-1">
+            <span className="text-xs text-muted-foreground">Color</span>
+            <div className="flex flex-wrap gap-1.5">
               {PRIM_COLORS.map((c) => (
                 <button
                   key={c}
@@ -1114,9 +1043,20 @@ export function ForgeApp() {
               ))}
             </div>
           </div>
-          <p className="mt-3 text-[11px] text-muted-foreground">
-            Drag to move · <strong className="text-foreground">Del</strong> to remove ·{" "}
-            <strong className="text-foreground">1-6</strong> to recolor
+          <div className="mt-3 flex gap-2">
+            <Button
+              size="xs"
+              variant="destructive"
+              onClick={deleteSelected}
+              className="flex-1"
+            >
+              <Trash2 className="size-3" />
+              Delete
+            </Button>
+          </div>
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            Drag to move · <strong className="text-foreground">Del</strong> removes ·{" "}
+            <strong className="text-foreground">1–6</strong> recolors
           </p>
         </Card>
       )}
@@ -1204,6 +1144,15 @@ export function ForgeApp() {
           </div>
         )}
       </Card>
+
+      {/* Name badge — shows your presence identity */}
+      <div className="absolute left-4 bottom-14 flex items-center gap-1.5 rounded-full border bg-card/85 px-3 py-1 backdrop-blur-sm text-xs">
+        <span
+          className="size-2 rounded-full"
+          style={{ background: hashColor(userId) }}
+        />
+        <span className="font-mono text-muted-foreground">{myName}</span>
+      </div>
 
       {/* Hint strip */}
       <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-4 rounded-full border bg-card/85 px-4 py-1.5 text-[11px] text-muted-foreground backdrop-blur-sm">

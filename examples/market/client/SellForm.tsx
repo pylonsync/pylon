@@ -7,6 +7,7 @@ import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Label } from "../ui/label";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
+import { makeSlug } from "./market";
 
 const CATEGORIES = [
   "furniture", "electronics", "cameras", "bikes", "audio", "kitchen",

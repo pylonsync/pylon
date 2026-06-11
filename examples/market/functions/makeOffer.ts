@@ -5,7 +5,20 @@ import { mutation, v } from "@pylonsync/functions";
  * onto the offer so the seller's inbox + the buyer's "my offers" list can
  * render without a join.
  */
-export default mutation({
+
+interface MakeOfferArgs {
+  listingId: string;
+  amount: number;
+  message?: string;
+  buyerName: string;
+  _optimisticId?: string;
+}
+
+interface MakeOfferResult {
+  id: string;
+}
+
+export default mutation<MakeOfferArgs, MakeOfferResult>({
   // Defaults to auth: "user" — only signed-in members can bid.
   args: {
     listingId: v.id("Listing"),
@@ -20,7 +33,12 @@ export default mutation({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
 
-    const listing = await ctx.db.get("Listing", args.listingId);
+    const listing = await ctx.db.get("Listing", args.listingId) as {
+      id: string;
+      title: string;
+      sellerId: string;
+      status: string;
+    } | null;
     if (!listing) throw ctx.error("NOT_FOUND", "listing not found");
     if (listing.status !== "active")
       throw ctx.error("INVALID_ARGS", "this listing is no longer available");

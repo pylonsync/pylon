@@ -1740,7 +1740,80 @@ function Dashboard({ org }: { org: Organization }) {
           </table>
         </div>
       )}
+      <DashboardRecentOrders org={org} orders={orders ?? []} customers={customers ?? []} />
     </>
+  );
+}
+
+function DashboardRecentOrders({
+  org: _org,
+  orders,
+  customers,
+}: {
+  org: Organization;
+  orders: Order[];
+  customers: Customer[];
+}) {
+  const customerMap = useMemo(() => {
+    const m = new Map<string, Customer>();
+    for (const c of customers) m.set(c.id, c);
+    return m;
+  }, [customers]);
+
+  const recent = useMemo(
+    () =>
+      [...orders]
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 8),
+    [orders],
+  );
+
+  if (recent.length === 0) return null;
+
+  return (
+    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+      <div
+        style={{
+          padding: "12px 16px",
+          borderBottom: "1px solid var(--color-border)",
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        Recent projects
+      </div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Number</th>
+            <th>Customer</th>
+            <th>Status</th>
+            <th style={{ textAlign: "right" }}>Total</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recent.map((o) => {
+            const style = ORDER_STATUS_STYLE[o.status] ?? { label: o.status, className: "pill-gray" };
+            const customer = customerMap.get(o.customerId);
+            return (
+              <tr key={o.id}>
+                <td style={{ fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>{o.number}</td>
+                <td>{customer?.name ?? "…"}</td>
+                <td>
+                  <span className={"pill " + style.className}>
+                    <span className="pill-dot" />
+                    {style.label}
+                  </span>
+                </td>
+                <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(o.total)}</td>
+                <td style={{ color: "var(--color-muted-foreground)" }}>{formatDate(o.createdAt)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -1772,6 +1845,7 @@ function CustomersPage({ org }: { org: Organization }) {
     [customers, filter],
   );
   const [addOpen, setAddOpen] = useState(false);
+  const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
 
   return (
     <>
@@ -1817,19 +1891,29 @@ function CustomersPage({ org }: { org: Organization }) {
               <th>Email</th>
               <th>Phone</th>
               <th>Added</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {filtered.map((c) => (
               <tr key={c.id}>
                 <td style={{ fontWeight: 500 }}>{c.name}</td>
-                <td style={{ color: "var(--text-muted)" }}>
+                <td style={{ color: "var(--color-muted-foreground)" }}>
                   {c.company || "—"}
                 </td>
-                <td style={{ color: "var(--text-muted)" }}>{c.email || "—"}</td>
-                <td style={{ color: "var(--text-muted)" }}>{c.phone || "—"}</td>
-                <td style={{ color: "var(--text-muted)" }}>
+                <td style={{ color: "var(--color-muted-foreground)" }}>{c.email || "—"}</td>
+                <td style={{ color: "var(--color-muted-foreground)" }}>{c.phone || "—"}</td>
+                <td style={{ color: "var(--color-muted-foreground)" }}>
                   {formatDate(c.createdAt)}
+                </td>
+                <td style={{ textAlign: "right" }}>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ padding: "4px 10px" }}
+                    onClick={() => setEditCustomer(c)}
+                  >
+                    Edit
+                  </button>
                 </td>
               </tr>
             ))}
@@ -1837,6 +1921,12 @@ function CustomersPage({ org }: { org: Organization }) {
         </table>
       )}
       {addOpen && <AddCustomerModal onClose={() => setAddOpen(false)} />}
+      {editCustomer && (
+        <EditCustomerModal
+          customer={editCustomer}
+          onClose={() => setEditCustomer(null)}
+        />
+      )}
     </>
   );
 }
@@ -1941,6 +2031,103 @@ function AddCustomerModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function EditCustomerModal({
+  customer,
+  onClose,
+}: {
+  customer: Customer;
+  onClose: () => void;
+}) {
+  const [form, setForm] = useState({
+    name: customer.name,
+    company: customer.company ?? "",
+    email: customer.email ?? "",
+    phone: customer.phone ?? "",
+    notes: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    if (!form.name.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      // Use optimistic db.update directly — no dedicated edit function needed
+      // since the entity policy allows updates scoped to the org.
+      await db.update("Customer", customer.id, {
+        name: form.name.trim(),
+        company: form.company || null,
+        email: form.email || null,
+        phone: form.phone || null,
+      });
+      onClose();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">Edit customer</div>
+        <div className="modal-subtitle">Update contact information.</div>
+        <div className="modal-body">
+          <label className="field">
+            <span className="field-label">Name</span>
+            <input
+              autoFocus
+              className="input"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">Company</span>
+            <input
+              className="input"
+              value={form.company}
+              onChange={(e) => setForm({ ...form, company: e.target.value })}
+            />
+          </label>
+          <div className="row-2">
+            <label className="field">
+              <span className="field-label">Email</span>
+              <input
+                className="input"
+                type="email"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Phone</span>
+              <input
+                className="input"
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              />
+            </label>
+          </div>
+          {err && <div className="error-text">{err}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            disabled={busy || !form.name.trim()}
+            onClick={() => void save()}
+          >
+            {busy ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
@@ -1951,6 +2138,20 @@ function ProductsPage({ org }: { org: Organization }) {
     orderBy: { name: "asc" },
   });
   const [addOpen, setAddOpen] = useState(false);
+  const [showInactive, setShowInactive] = useState(false);
+
+  const visible = useMemo(
+    () => (products ?? []).filter((p) => showInactive || p.active),
+    [products, showInactive],
+  );
+
+  async function toggleActive(product: Product) {
+    try {
+      await db.update("Product", product.id, { active: !product.active });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }
 
   return (
     <>
@@ -1961,12 +2162,22 @@ function ProductsPage({ org }: { org: Organization }) {
             Your door catalog — iron, wood, barn, pivot, and more.
           </div>
         </div>
-        <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
-          <IconPlus />
-          Add product
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--color-muted-foreground)", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showInactive}
+              onChange={(e) => setShowInactive(e.target.checked)}
+            />
+            Show inactive
+          </label>
+          <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
+            <IconPlus />
+            Add product
+          </button>
+        </div>
       </div>
-      {(products ?? []).length === 0 ? (
+      {visible.length === 0 ? (
         <div className="empty">
           <div className="empty-title">No products yet</div>
           <div className="empty-body">
@@ -1986,22 +2197,33 @@ function ProductsPage({ org }: { org: Organization }) {
               <th>Base price</th>
               <th>Unit</th>
               <th>Lead time</th>
+              <th>Active</th>
             </tr>
           </thead>
           <tbody>
-            {(products ?? []).map((p) => (
-              <tr key={p.id}>
+            {visible.map((p) => (
+              <tr key={p.id} style={{ opacity: p.active ? 1 : 0.55 }}>
                 <td style={{ fontWeight: 500 }}>{p.name}</td>
                 <td>
                   <span className="pill pill-gray">{p.category}</span>
                 </td>
-                <td style={{ color: "var(--text-muted)" }}>{p.sku || "—"}</td>
+                <td style={{ color: "var(--color-muted-foreground)" }}>{p.sku || "—"}</td>
                 <td style={{ fontVariantNumeric: "tabular-nums" }}>
                   {money(p.basePrice)}
                 </td>
-                <td style={{ color: "var(--text-muted)" }}>{p.unit}</td>
-                <td style={{ color: "var(--text-muted)" }}>
+                <td style={{ color: "var(--color-muted-foreground)" }}>{p.unit}</td>
+                <td style={{ color: "var(--color-muted-foreground)" }}>
                   {p.leadTimeDays ? `${p.leadTimeDays} days` : "—"}
+                </td>
+                <td>
+                  <button
+                    className={"btn btn-ghost"}
+                    style={{ padding: "4px 10px", fontSize: 12 }}
+                    onClick={() => void toggleActive(p)}
+                    title={p.active ? "Deactivate" : "Activate"}
+                  >
+                    {p.active ? "Active" : "Inactive"}
+                  </button>
                 </td>
               </tr>
             ))}
@@ -2638,32 +2860,23 @@ function OrderRow({ order }: { order: Order }) {
     order.customerId,
   );
   const [busy, setBusy] = useState(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const style = ORDER_STATUS_STYLE[order.status] ?? {
     label: order.status,
     className: "pill-gray",
   };
 
-  const next = (() => {
-    const order_ = [
-      "confirmed",
-      "in_production",
-      "ready",
-      "shipped",
-      "delivered",
-    ];
-    const i = order_.indexOf(order.status);
-    if (i < 0 || i >= order_.length - 1) return null;
-    return order_[i + 1];
-  })();
+  const PIPELINE = ["confirmed", "in_production", "ready", "shipped", "delivered"];
+  const curIdx = PIPELINE.indexOf(order.status);
+  const next = curIdx >= 0 && curIdx < PIPELINE.length - 1 ? PIPELINE[curIdx + 1] : null;
+  const isTerminal = order.status === "delivered" || order.status === "cancelled";
 
   async function advance() {
     if (!next) return;
     setBusy(true);
     try {
-      await callFn("advanceOrderStatus", {
-        orderId: order.id,
-        status: next,
-      });
+      await callFn("advanceOrderStatus", { orderId: order.id, status: next });
     } catch (e) {
       alert((e as Error).message);
     } finally {
@@ -2671,40 +2884,141 @@ function OrderRow({ order }: { order: Order }) {
     }
   }
 
+  async function cancel() {
+    if (!confirm(`Cancel project ${order.number}? This cannot be undone.`)) return;
+    setCancelBusy(true);
+    try {
+      await callFn("advanceOrderStatus", { orderId: order.id, status: "cancelled" });
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setCancelBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <tr
+        style={{ cursor: "pointer" }}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td style={{ fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              style={{
+                color: "var(--text-dim)",
+                transform: expanded ? "rotate(90deg)" : undefined,
+                transition: "transform 150ms ease",
+                flexShrink: 0,
+              }}
+            >
+              <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            {order.number}
+          </span>
+        </td>
+        <td>{customer?.name ?? "…"}</td>
+        <td>
+          <span className={"pill " + style.className}>
+            <span className="pill-dot" />
+            {style.label}
+          </span>
+        </td>
+        <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+          {money(order.total)}
+        </td>
+        <td style={{ color: "var(--text-muted)" }}>
+          {order.dueDate ? formatDate(order.dueDate) : "—"}
+        </td>
+        <td style={{ color: "var(--text-muted)" }}>
+          {formatDate(order.createdAt)}
+        </td>
+        <td style={{ textAlign: "right" }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+            {next && !isTerminal && (
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 10px" }}
+                onClick={() => void advance()}
+                disabled={busy || cancelBusy}
+              >
+                {busy ? "…" : `Mark ${ORDER_STATUS_STYLE[next]?.label || next}`}
+              </button>
+            )}
+            {!isTerminal && (
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "4px 8px", color: "var(--color-destructive)" }}
+                onClick={() => void cancel()}
+                disabled={busy || cancelBusy}
+                title="Cancel project"
+              >
+                {cancelBusy ? "…" : "Cancel"}
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+      {expanded && <OrderLinesRow orderId={order.id} colSpan={7} />}
+    </>
+  );
+}
+
+function OrderLinesRow({ orderId, colSpan }: { orderId: string; colSpan: number }) {
+  const { data: lines } = db.useQuery<OrderLine>("OrderLine", {
+    where: { orderId },
+    orderBy: { sortOrder: "asc" },
+  });
+
+  const PROD_STYLE: Record<string, { label: string; className: string }> = {
+    queued: { label: "Queued", className: "pill-gray" },
+    in_progress: { label: "In progress", className: "pill-warning" },
+    done: { label: "Done", className: "pill-success" },
+  };
+
   return (
     <tr>
-      <td style={{ fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
-        {order.number}
-      </td>
-      <td>{customer?.name ?? "…"}</td>
-      <td>
-        <span className={"pill " + style.className}>
-          <span className="pill-dot" />
-          {style.label}
-        </span>
-      </td>
-      <td
-        style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}
-      >
-        {money(order.total)}
-      </td>
-      <td style={{ color: "var(--text-muted)" }}>
-        {order.dueDate ? formatDate(order.dueDate) : "—"}
-      </td>
-      <td style={{ color: "var(--text-muted)" }}>
-        {formatDate(order.createdAt)}
-      </td>
-      <td style={{ textAlign: "right" }}>
-        {next && order.status !== "cancelled" && (
-          <button
-            className="btn btn-ghost"
-            style={{ padding: "4px 10px" }}
-            onClick={() => void advance()}
-            disabled={busy}
-          >
-            Mark {ORDER_STATUS_STYLE[next]?.label || next}
-          </button>
-        )}
+      <td colSpan={colSpan} style={{ padding: 0, background: "var(--color-muted)" }}>
+        <div style={{ padding: "10px 16px 14px 36px" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--color-muted-foreground)", marginBottom: 8 }}>
+            Line items
+          </div>
+          {(lines ?? []).length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--color-muted-foreground)" }}>Loading…</div>
+          ) : (
+            <table className="table" style={{ background: "var(--color-card)" }}>
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th style={{ textAlign: "right", width: 60 }}>Qty</th>
+                  <th style={{ textAlign: "right", width: 110 }}>Unit price</th>
+                  <th style={{ textAlign: "right", width: 110 }}>Total</th>
+                  <th style={{ width: 120 }}>Production</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(lines ?? []).map((l) => {
+                  const ps = PROD_STYLE[l.productionStatus] ?? { label: l.productionStatus, className: "pill-gray" };
+                  return (
+                    <tr key={l.id}>
+                      <td style={{ fontWeight: 500 }}>{l.description}</td>
+                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{l.qty}</td>
+                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(l.unitPrice)}</td>
+                      <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(l.lineTotal)}</td>
+                      <td>
+                        <span className={"pill " + ps.className}>{ps.label}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
       </td>
     </tr>
   );

@@ -9,7 +9,17 @@ import { mutation, v } from "@pylonsync/functions";
  * Ownership is enforced here (not in a policy expression) because the rule
  * spans two entities: "the caller must own the LISTING the OFFER points at."
  */
-export default mutation({
+
+interface RespondToOfferArgs {
+  offerId: string;
+  accept: boolean;
+}
+
+interface RespondToOfferResult {
+  accepted: boolean;
+}
+
+export default mutation<RespondToOfferArgs, RespondToOfferResult>({
   // Defaults to auth: "user" — only the signed-in seller responds.
   args: {
     offerId: v.id("Offer"),
@@ -18,7 +28,12 @@ export default mutation({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
 
-    const offer = await ctx.db.get("Offer", args.offerId);
+    const offer = await ctx.db.get("Offer", args.offerId) as {
+      id: string;
+      listingId: string;
+      sellerId: string;
+      status: string;
+    } | null;
     if (!offer) throw ctx.error("NOT_FOUND", "offer not found");
     if (offer.sellerId !== ctx.auth.userId)
       throw ctx.error("UNAUTHORIZED", "only the seller can answer this offer");
@@ -36,7 +51,7 @@ export default mutation({
     // Decline the losers.
     const siblings = await ctx.db.query("Offer", {
       listingId: offer.listingId,
-    });
+    }) as Array<{ id: string; status: string }>;
     for (const o of siblings) {
       if (o.id !== args.offerId && o.status === "pending") {
         await ctx.db.update("Offer", String(o.id), { status: "declined" });

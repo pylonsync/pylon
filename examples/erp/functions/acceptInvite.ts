@@ -5,7 +5,7 @@ import { mutation, v } from "@pylonsync/functions";
  * looking up an OrgInvite row with the user's email). Creates the OrgMember
  * row and stamps the invite's acceptedAt.
  */
-export default mutation({
+export default mutation<{ inviteId: string }, { orgId: string; alreadyMember: boolean }>({
   auth: "guest",
   args: {
     inviteId: v.id("OrgInvite"),
@@ -15,7 +15,7 @@ export default mutation({
 
     const invite = await ctx.db.get("OrgInvite", args.inviteId);
     if (!invite) throw ctx.error("INVITE_NOT_FOUND", "invite does not exist");
-    if (invite.acceptedAt) {
+    if ((invite as { acceptedAt?: string | null }).acceptedAt) {
       throw ctx.error("ALREADY_ACCEPTED", "this invite was already accepted");
     }
 
@@ -23,7 +23,11 @@ export default mutation({
     // a valid invite from being claimed by a different user just because
     // they saw the id somehow.
     const me = await ctx.db.get("User", ctx.auth.userId);
-    if (!me || me.email.toLowerCase() !== invite.email.toLowerCase()) {
+    const inviteEmail = (invite as { email: string }).email;
+    const inviteOrgId = (invite as { orgId: string }).orgId;
+    const inviteRole = (invite as { role: string }).role;
+    const inviteInvitedBy = (invite as { invitedBy: string | null }).invitedBy;
+    if (!me || (me as { email: string }).email.toLowerCase() !== inviteEmail.toLowerCase()) {
       throw ctx.error(
         "EMAIL_MISMATCH",
         "this invite is for a different email address",
@@ -33,25 +37,25 @@ export default mutation({
     // Already a member? Just consume the invite.
     const existing = await ctx.db.query("OrgMember", {
       userId: ctx.auth.userId,
-      orgId: invite.orgId,
+      orgId: inviteOrgId,
     });
     if (existing.length > 0) {
-      await ctx.db.update("OrgInvite", invite.id, {
+      await ctx.db.update("OrgInvite", args.inviteId, {
         acceptedAt: new Date().toISOString(),
       });
-      return { orgId: invite.orgId, alreadyMember: true };
+      return { orgId: inviteOrgId, alreadyMember: true };
     }
 
     const now = new Date().toISOString();
     await ctx.db.insert("OrgMember", {
       userId: ctx.auth.userId,
-      orgId: invite.orgId,
-      role: invite.role,
-      invitedBy: invite.invitedBy,
+      orgId: inviteOrgId,
+      role: inviteRole,
+      invitedBy: inviteInvitedBy,
       joinedAt: now,
     });
-    await ctx.db.update("OrgInvite", invite.id, { acceptedAt: now });
+    await ctx.db.update("OrgInvite", args.inviteId, { acceptedAt: now });
 
-    return { orgId: invite.orgId, alreadyMember: false };
+    return { orgId: inviteOrgId, alreadyMember: false };
   },
 });

@@ -4,6 +4,20 @@
    names (.btn, .table, .modal, .pill) — those names now resolve to
    stacks of Tailwind utilities instead of bespoke CSS. */
 
+/* Semantic alias vars for inline styles in ErpApp.tsx.
+   All values alias to the Tailwind @theme tokens in globals.css. */
+:root {
+  --text-muted: var(--color-muted-foreground);
+  --text-dim: color-mix(in oklch, var(--color-muted-foreground) 70%, transparent);
+  --border: var(--color-border);
+  --surface-hover: var(--color-accent);
+  --surface-raised: var(--color-secondary);
+  --warning: oklch(0.58 0.18 60);
+  --success: oklch(0.55 0.16 158);
+  --accent: var(--color-primary);
+  --accent-soft: color-mix(in oklch, var(--color-primary) 10%, transparent);
+}
+
 * {
   box-sizing: border-box;
 }

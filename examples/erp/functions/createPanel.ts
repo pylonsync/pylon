@@ -6,7 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * /api/aggregate endpoint is what actually evaluates it, so the usual
  * column-allowlist + policy gates apply at query time.
  */
-export default mutation({
+export default mutation<{ title: string; entity: string; chartKind: string; specJson: string }, { panelId: string }>({
   auth: "guest",
   args: {
     title: v.string(),
