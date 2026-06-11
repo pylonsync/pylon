@@ -83,7 +83,12 @@ fn build_assertion(
                 name_id: None,
                 subject_confirmation_data: Some(SubjectConfirmationData {
                     not_before: None,
-                    not_on_or_after: None,
+                    // A bearer SubjectConfirmation MUST carry an expiry — without
+                    // it the assertion is replayable forever, so SP verifiers
+                    // (including samael's own validate_assertion_subject_confirmation)
+                    // reject it. Mirror what real IdPs emit: a short window from
+                    // the issue instant.
+                    not_on_or_after: Some(Utc::now() + chrono::Duration::minutes(5)),
                     recipient: Some(recipient.to_owned()),
                     in_response_to: Some(request_id.to_owned()),
                     address: None,
