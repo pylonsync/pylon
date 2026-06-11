@@ -16,6 +16,8 @@
 //   PYLON_ARTIFACT_COMPLETE_PUT_URL signed PUT ← .complete JSON {sha256,size}
 //   PYLON_BUILD_ID                  for logs
 
+import { rm } from "node:fs/promises";
+
 const SRC = "/build/src";
 const SOURCE_TAR = "/build/source.tar.gz";
 const BUNDLE = "/build/bundle.tar.gz";
@@ -66,15 +68,65 @@ async function main() {
 	await Bun.write(SOURCE_TAR, srcResp);
 	await sh(["tar", "xzf", SOURCE_TAR, "-C", SRC]);
 
-	// 2. Install deps (frozen — the lockfile is the contract; a drift is a
-	//    real error the customer must resolve, not silently re-resolved).
+	// 2. Install deps.
+	//
+	//    First neutralize `workspace:*` protocol specifiers. A deploy source is
+	//    a single app carved out of a monorepo (an `examples/*` app, a customer
+	//    monorepo package, …), so its `package.json` can still reference sibling
+	//    workspace packages — most commonly `"@pylonsync/*": "workspace:*"`.
+	//    `bun install` cannot resolve `workspace:` without the workspace root,
+	//    so it ABORTS before installing the app's real npm deps (clsx,
+	//    lucide-react, …). The app then boots with a half-populated
+	//    node_modules and its SSR client bundle fails to resolve those modules.
+	//    Rewrite each `workspace:` spec to the published SDK version (passed by
+	//    the control plane as PYLON_SDK_VERSION, matching the runtime image;
+	//    falls back to "latest") so they resolve from npm like everything else.
+	const pkgPath = `${SRC}/package.json`;
+	let rewroteWorkspace = false;
+	try {
+		const pkg = (await Bun.file(pkgPath).json()) as Record<string, unknown>;
+		const sdkVersion = process.env.PYLON_SDK_VERSION || "latest";
+		for (const field of [
+			"dependencies",
+			"devDependencies",
+			"optionalDependencies",
+			"peerDependencies",
+		]) {
+			const deps = pkg[field] as Record<string, string> | undefined;
+			if (!deps) continue;
+			for (const [name, spec] of Object.entries(deps)) {
+				if (typeof spec === "string" && spec.startsWith("workspace:")) {
+					deps[name] = sdkVersion;
+					rewroteWorkspace = true;
+				}
+			}
+		}
+		if (rewroteWorkspace) {
+			await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
+			console.log(
+				`[builder] rewrote workspace:* deps → ${sdkVersion} (standalone install)`,
+			);
+		}
+	} catch (err) {
+		console.error(`[builder] could not pre-process package.json: ${err}`);
+	}
+
+	//    Install (frozen — the lockfile is the contract; a drift is a real error
+	//    the customer must resolve, not silently re-resolved). EXCEPT when we
+	//    rewrote workspace specifiers: the lockfile that rode along is the
+	//    monorepo's — it references sibling packages this single-app tree
+	//    doesn't contain, so a frozen install against it always fails. Drop it
+	//    so bun re-resolves cleanly from the rewritten package.json.
+	if (rewroteWorkspace) {
+		await rm(`${SRC}/bun.lock`, { force: true });
+		await rm(`${SRC}/bun.lockb`, { force: true });
+	}
 	const hasLock =
-		(await Bun.file(`${SRC}/bun.lock`).exists()) ||
-		(await Bun.file(`${SRC}/bun.lockb`).exists());
+		!rewroteWorkspace &&
+		((await Bun.file(`${SRC}/bun.lock`).exists()) ||
+			(await Bun.file(`${SRC}/bun.lockb`).exists()));
 	await sh(
-		hasLock
-			? ["bun", "install", "--frozen-lockfile"]
-			: ["bun", "install"],
+		hasLock ? ["bun", "install", "--frozen-lockfile"] : ["bun", "install"],
 		SRC,
 	);
 
