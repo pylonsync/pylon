@@ -1,6 +1,12 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "@pylonsync/example-ui/tokens.css";
+/* ERP's semantic component classes (.btn, .input, .card, .auth-panel,
+   .split-screen, .kpi, …) used throughout client/ErpApp.tsx. These resolve to
+   stacks of Tailwind utilities via @apply against the @theme below. Without
+   this import the whole client island renders unstyled — the file was dropped
+   when the example moved off the Vite `web/` layout to native SSR. */
+@import "./components.css";
 
 /* Tailwind v4 scans these for class names. Paths are relative to this file
    (examples/erp/app/globals.css): the SSR app dir, the client app, and the
