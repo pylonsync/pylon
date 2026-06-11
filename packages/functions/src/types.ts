@@ -99,10 +99,11 @@ export interface DbReader {
    * convention. A future `pylon lint` rule will flag bare
    * `ctx.db.unsafe.*` without a comment immediately above.
    *
-   * Optional on the type because old Pylon runtimes don't ship
-   * it; new code that targets v0.3.161+ can rely on the field.
+   * Required on the type (every runtime since v0.3.161 ships it) —
+   * but absent on the unsafe surface itself, so `ctx.db.unsafe.unsafe`
+   * is a compile error rather than a runtime undefined.
    */
-  unsafe?: DbReader;
+  unsafe: Omit<DbReader, "unsafe">;
 
   /** Get a single row by ID. Returns null if not found. */
   get(entity: string, id: string): Promise<Record<string, unknown> | null>;
@@ -201,7 +202,7 @@ export interface DbWriter extends DbReader {
    * write surface (insert/update/delete/link/unlink/advisoryLock).
    * Overrides the inherited read-only `unsafe` from DbReader.
    */
-  unsafe?: DbWriter;
+  unsafe: Omit<DbWriter, "unsafe">;
 
   /** Insert a new row. Returns the generated ID. */
   insert(entity: string, data: Record<string, unknown>): Promise<string>;

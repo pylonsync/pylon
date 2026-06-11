@@ -357,7 +357,11 @@ function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
 // `serverData` read handle that reuses this module's `send` + `pendingRpcs`
 // + reader loop. The render call_id ("r_<n>") correlates DB replies back
 // through the shared pendingRpcs map.
-export function buildDbReader(callId: string, unsafeOp = false): DbReader {
+export function buildDbReader(callId: string): DbReader {
+  return { ...buildReaderOps(callId, false), unsafe: buildReaderOps(callId, true) };
+}
+
+function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsafe"> {
   // All DB ops use rpcDb so Promise.all over ctx.db reads can run in
   // parallel without colliding on the outer call_id key.
   //
@@ -366,7 +370,7 @@ export function buildDbReader(callId: string, unsafeOp = false): DbReader {
   // caller-aware policy gate (in Phase 2 — see
   // pylon-functions/protocol.rs). Plain ctx.db.* leaves the flag
   // off (the safe default); ctx.db.unsafe.* sets it.
-  const reader: DbReader = {
+  return {
     async get(entity, id) {
       return (await rpcDb(callId, {
         type: "db",
@@ -435,23 +439,26 @@ export function buildDbReader(callId: string, unsafeOp = false): DbReader {
       })) as any;
     },
   };
-  if (!unsafeOp) {
-    (reader as DbReader & { unsafe: DbReader }).unsafe = buildDbReader(
-      callId,
-      true,
-    );
-  }
-  return reader;
 }
 
-export function buildDbWriter(callId: string, unsafeOp = false): DbWriter {
-  // Drop the reader's `unsafe` shortcut before spreading — the
-  // writer needs its own (which we attach below). Without this
-  // strip, `writer.unsafe` would be a DbReader and the type
-  // narrows incorrectly.
-  const { unsafe: _ignored, ...readerOps } = buildDbReader(callId, unsafeOp);
-  const writer: DbWriter = {
-    ...readerOps,
+export function buildDbWriter(callId: string): DbWriter {
+  // Top-level `ctx.db` is the safe path. `ctx.db.unsafe` is the
+  // escape hatch — same surface, every emitted op carries
+  // `unsafe_op: true` so the future caller-aware policy gate
+  // (PYLON_STRICT_FN_POLICIES) skips enforcement. Use sparingly,
+  // with a justifying comment, ideally in code that runs only
+  // from server-internal callers (webhooks, cron sweeps, admin
+  // tools).
+  //
+  // The unsafe surface carries no `.unsafe` of its own — chaining
+  // is a compile error AND a self-reference would loop on JSON
+  // serialization.
+  return { ...buildWriterOps(callId, false), unsafe: buildWriterOps(callId, true) };
+}
+
+function buildWriterOps(callId: string, unsafeOp: boolean): Omit<DbWriter, "unsafe"> {
+  return {
+    ...buildReaderOps(callId, unsafeOp),
     async insert(entity, data) {
       const r = (await rpcDb(callId, {
         type: "db",
@@ -518,23 +525,6 @@ export function buildDbWriter(callId: string, unsafeOp = false): DbWriter {
       });
     },
   };
-  // Top-level `ctx.db` is the safe path. `ctx.db.unsafe` is the
-  // escape hatch — same surface, every emitted op carries
-  // `unsafe_op: true` so the future caller-aware policy gate
-  // (PYLON_STRICT_FN_POLICIES) skips enforcement. Use sparingly,
-  // with a justifying comment, ideally in code that runs only
-  // from server-internal callers (webhooks, cron sweeps, admin
-  // tools).
-  //
-  // Self-reference would create an infinite loop on JSON
-  // serialization; only assign on the writer's `.unsafe` once.
-  if (!unsafeOp) {
-    (writer as DbWriter & { unsafe: DbWriter }).unsafe = buildDbWriter(
-      callId,
-      true,
-    );
-  }
-  return writer;
 }
 
 function buildStream(callId: string): Stream {
