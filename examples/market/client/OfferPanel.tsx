@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { db, callFn } from "@pylonsync/react";
+import { db } from "@pylonsync/react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Textarea } from "@pylonsync/example-ui/textarea";
@@ -56,10 +56,31 @@ function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   const pending = offers.filter((o) => o.status === "pending");
 
+  // Optimistic accept/decline: flip the offer's status in the local store
+  // immediately so the seller's list updates the instant they click. The
+  // server (respondToOffer) reconciles the rest — marking the listing sold and
+  // declining the sibling offers — when its broadcast lands.
+  const respondMutation = db.useMutation<{ offerId: string; accept: boolean }>(
+    "respondToOffer",
+    {
+      optimistic: (args) => {
+        const o = offers.find((x) => x.id === args.offerId);
+        return o
+          ? [
+              {
+                entity: "Offer",
+                data: { ...o, status: args.accept ? "accepted" : "declined" },
+              },
+            ]
+          : [];
+      },
+    },
+  );
+
   async function respond(offerId: string, accept: boolean) {
     setBusy(offerId);
     try {
-      await callFn("respondToOffer", { offerId, accept });
+      await respondMutation.mutate({ offerId, accept });
     } catch (e) {
       console.error("respondToOffer failed", e);
     } finally {
@@ -131,17 +152,46 @@ function SellerView({ offers, title }: { offers: Offer[]; title: string }) {
 function BuyerView({
   listingId,
   title,
+  sellerId,
   sellerName,
   myOffer,
   isSold,
   suggestedPrice,
 }: Props & { myOffer?: Offer; isSold: boolean; suggestedPrice: number }) {
-  const { name } = useIdentity();
+  const { userId, name } = useIdentity();
   const [amount, setAmount] = useState(String(suggestedPrice));
   const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Local-first optimism, baked in: db.useMutation paints the Offer into the
+  // local store the instant you click (the `optimistic` ghost), so the live
+  // query below renders "Your offer" immediately — no waiting on the server,
+  // no hand-rolled state. The server's makeOffer reuses the same id (threaded
+  // as _optimisticId), so its broadcast merges in place; on failure the engine
+  // rolls the ghost back on its own.
+  const makeOffer = db.useMutation<
+    { listingId: string; amount: number; message: string; buyerName: string },
+    { id: string }
+  >("makeOffer", {
+    optimistic: (args, ctx) => ({
+      entity: "Offer",
+      data: {
+        id: ctx.id,
+        listingId,
+        listingTitle: title,
+        sellerId,
+        buyerId: userId,
+        buyerName: name,
+        amount: args.amount,
+        message: args.message,
+        status: "pending",
+        createdAt: ctx.now,
+      },
+    }),
+  });
+
+  // `myOffer` now includes the optimistic ghost, so this flips the instant
+  // the offer is made.
   if (myOffer) {
     return (
       <div className="space-y-2 rounded-lg border bg-card p-4">
@@ -156,7 +206,7 @@ function BuyerView({
         </div>
         <p className="text-sm text-muted-foreground">
           {myOffer.status === "pending"
-            ? `Waiting on ${sellerName}. You'll see their answer here live.`
+            ? `Sent to ${sellerName} — you'll see their answer here live.`
             : myOffer.status === "accepted"
               ? "🎉 Accepted! Arrange pickup with the seller."
               : "This offer was declined."}
@@ -180,20 +230,13 @@ function BuyerView({
       setErr("Enter an offer amount.");
       return;
     }
-    setBusy(true);
     setErr(null);
     try {
-      await callFn("makeOffer", {
-        listingId,
-        amount: value,
-        message,
-        buyerName: name,
-      });
-      // The live query will render the result; no manual state needed.
+      // The ghost is painted synchronously here; the view has already flipped
+      // to "Your offer" by the time this awaits.
+      await makeOffer.mutate({ listingId, amount: value, message, buyerName: name });
     } catch (e) {
       setErr((e as Error).message ?? "Could not send offer.");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -219,8 +262,10 @@ function BuyerView({
         rows={2}
       />
       {err ? <p className="text-sm text-destructive">{err}</p> : null}
-      <Button type="submit" disabled={busy} className="w-full">
-        {busy ? "Sending…" : `Offer ${money(Number.parseFloat(amount) || 0)}`}
+      <Button type="submit" disabled={makeOffer.loading} className="w-full">
+        {makeOffer.loading
+          ? "Sending…"
+          : `Offer ${money(Number.parseFloat(amount) || 0)}`}
       </Button>
       <p className="text-center text-xs text-muted-foreground">
         You're bidding as <span className="font-medium">{name}</span>

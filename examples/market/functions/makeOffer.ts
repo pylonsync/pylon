@@ -12,6 +12,10 @@ export default mutation({
     amount: v.number(),
     message: v.optional(v.string()),
     buyerName: v.string(),
+    // Threaded by db.useMutation({ optimistic }) so the server row reuses the
+    // id of the optimistic ghost the client already painted — the broadcast
+    // merges in place instead of flashing a temp row.
+    _optimisticId: v.optional(v.string()),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
@@ -26,6 +30,8 @@ export default mutation({
       throw ctx.error("INVALID_ARGS", "offer must be greater than zero");
 
     const id = await ctx.db.insert("Offer", {
+      // Reuse the optimistic ghost's id so the broadcast merges in place.
+      id: args._optimisticId,
       listingId: args.listingId,
       listingTitle: listing.title,
       sellerId: listing.sellerId,
