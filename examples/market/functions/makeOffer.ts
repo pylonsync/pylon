@@ -6,7 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * render without a join.
  */
 export default mutation({
-  auth: "guest",
+  // Defaults to auth: "user" — only signed-in members can bid.
   args: {
     listingId: v.id("Listing"),
     amount: v.number(),

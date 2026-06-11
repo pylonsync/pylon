@@ -4,6 +4,52 @@
   "version": "0.1.0",
   "entities": [
     {
+      "name": "User",
+      "fields": [
+        {
+          "name": "email",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "displayName",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "avatarColor",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "passwordHash",
+          "type": "string",
+          "optional": true,
+          "unique": false,
+          "serverOnly": true
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false,
+          "default": "now"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_email",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
       "name": "Listing",
       "fields": [
         {
@@ -223,6 +269,14 @@
   "queries": [],
   "actions": [],
   "policies": [
+    {
+      "name": "user_access",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "User"
+    },
     {
       "name": "listing_access",
       "allowRead": "true",

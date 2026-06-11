@@ -27,19 +27,23 @@ const DEMO: Array<{
 ];
 
 export default mutation({
-  auth: "guest",
+  // Defaults to auth: "user" — seeds the catalog owned by the caller. The
+  // marketplace bootstrap calls this once as the demo account, so signing in
+  // as the demo user shows a real inventory to manage.
   args: {},
   async handler(ctx) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
     const existing = await ctx.db.list("Listing");
     if (existing.length > 0) return { seeded: 0 };
 
-    // Stagger createdAt so the grid + ticker have a believable order.
+    // Stagger createdAt so the grid + ticker have a believable order. The
+    // seller id is the caller — `Listing.sellerId` is `field.owner()`, so the
+    // framework would reject any other value. `seller` stays a display name.
     const now = Date.now();
     let n = 0;
     for (const d of DEMO) {
       await ctx.db.insert("Listing", {
-        sellerId: `seed:${d.seller}`,
+        sellerId: ctx.auth.userId,
         sellerName: d.seller,
         title: d.title,
         description: d.description,

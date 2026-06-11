@@ -1,5 +1,6 @@
 import React from "react";
 import { Link } from "@pylonsync/react";
+import { AuthNav } from "../client/AuthNav";
 
 // Root layout. Server-rendered shell; Pylon's SSR head adapter injects the
 // compiled Tailwind <link> from app/globals.css automatically.
@@ -44,6 +45,7 @@ export default function RootLayout({
               >
                 My Market
               </Link>
+              <AuthNav />
             </nav>
           </div>
         </header>

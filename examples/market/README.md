@@ -25,13 +25,25 @@ Next.js app, no separate realtime service.
 pylon dev
 ```
 
-Open <http://localhost:4321>. The first visit seeds a dozen demo listings.
-Open a second tab (or an incognito window for a second identity) and trade:
+Open <http://localhost:4321>. Browsing is public; **selling or making an
+offer needs an account** — real email/password auth, no verification email.
+A demo account is seeded and the login form is **prefilled** with it, so
+you're one click from a working session:
 
-1. Tab A: open a listing, **Make an offer**.
-2. Tab B (the seller): the offer appears live under **My Market** → **Accept**.
-3. Both tabs update instantly — the listing flips to *Sold*, the losing
-   offers are auto-declined.
+```
+demo@pylon.market  /  pylondemo123
+```
+
+The first visit also seeds a dozen listings under that demo account. To see
+the full two-sided loop:
+
+1. Tab A (the demo seller): you already own the catalog — open one of your
+   listings and you'll see its offer inbox.
+2. Tab B (incognito): **Sign up** for a second account, open a listing, and
+   **Make an offer**.
+3. Tab A: the offer appears live under **My Market** → **Accept**. Both tabs
+   update instantly — the listing flips to *Sold*, the losing offers are
+   auto-declined.
 
 ## How it's wired
 
@@ -42,6 +54,12 @@ Open a second tab (or an incognito window for a second identity) and trade:
 | `/sell` | client island | An optimistic `db.insert("Listing", …)` + client nav |
 | `/me` | client island (3 live queries) | Your listings + offers, all live |
 
+- **Auth** is built-in email/password — no verification email. `app.ts`
+  declares a `User` entity (the `by_email` unique index + `passwordHash`
+  serverOnly field is all the convention needs); registering through
+  `/api/auth/password/register` hashes the password and writes the row.
+  Browsing is public (`allowRead: "true"` on `Listing`/`Offer`); writing needs
+  a real session.
 - **Schema + policies** live in `app.ts`: `Listing` and `Offer`, public-read,
   owner-scoped writes.
 - **Optimism is the default.** Posting a listing is a plain
@@ -58,5 +76,5 @@ Open a second tab (or an incognito window for a second identity) and trade:
   active; `respondToOffer` marks the listing sold and declines the other
   offers in one mutation. Function calls (`db.useMutation`) take an
   `optimistic` builder when you want the same instant feedback for a
-  multi-row write. They're declared `auth: "guest"` so the public demo works
-  without a login (every visitor gets a guest session + a generated handle).
+  multi-row write. They default to `auth: "user"` — only signed-in members
+  can bid or respond.

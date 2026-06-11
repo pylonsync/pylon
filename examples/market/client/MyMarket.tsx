@@ -1,10 +1,10 @@
 "use client";
 
 import React from "react";
-import { Link, db, callFn } from "@pylonsync/react";
+import { Link, db } from "@pylonsync/react";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { Button } from "@pylonsync/example-ui/button";
-import { MarketProvider, useIdentity } from "./MarketProvider";
+import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { money, timeAgo, type Listing, type Offer } from "./market";
 
 const statusBadge: Record<string, string> = {
@@ -14,7 +14,10 @@ const statusBadge: Record<string, string> = {
 };
 
 function Dashboard() {
-  const { userId, name } = useIdentity();
+  // Rendered inside <AuthGate>, so identity is non-null here.
+  const identity = useIdentity();
+  const userId = identity?.userId ?? "";
+  const name = identity?.name ?? "you";
 
   // Three live queries, all scoped to me. Everything updates in place: a new
   // offer on my listing, a seller answering my bid — no refresh.
@@ -130,7 +133,12 @@ function Dashboard() {
 export function MyMarket() {
   return (
     <MarketProvider fallback={<p className="text-sm text-muted-foreground">Loading your market…</p>}>
-      <Dashboard />
+      <AuthGate
+        title="Sign in to see your market"
+        blurb="Your listings, offers received, and bids you've sent — all live. The demo account is prefilled; just hit Log in."
+      >
+        <Dashboard />
+      </AuthGate>
     </MarketProvider>
   );
 }

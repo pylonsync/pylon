@@ -22,6 +22,24 @@ import {
   discoverAppRoutes,
 } from "@pylonsync/sdk";
 
+// Accounts. Email/password auth is built in: registering through
+// /api/auth/password/register hashes the password and writes this row.
+// `passwordHash` is server-only — never serialized to clients.
+const User = entity(
+  "User",
+  {
+    email: field.string(),
+    displayName: field.string(),
+    // Set by the auth subsystem on register (a default avatar tint).
+    avatarColor: field.string().optional(),
+    passwordHash: field.string().serverOnly().optional(),
+    createdAt: field.datetime().defaultNow(),
+  },
+  {
+    indexes: [{ name: "by_email", fields: ["email"], unique: true }],
+  },
+);
+
 // A thing for sale. `seed` drives a deterministic gradient "photo" so the
 // demo needs no image hosting. `status` flips active → sold when an offer
 // is accepted.
@@ -87,6 +105,19 @@ const Offer = entity(
 // sellers both see the live state). Writes require a session and are
 // owner-scoped; the heavy lifting (accept = mark sold + decline siblings)
 // runs in functions where it can enforce "only the seller responds".
+// Signed-in users can read profiles (to render seller/buyer names). The
+// auth subsystem owns writes — registration/login go through
+// /api/auth/password/*, not the entity API, so direct inserts/updates are
+// closed off.
+const userPolicy = policy({
+  name: "user_access",
+  entity: "User",
+  allowRead: "auth.userId != null",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+
 const listingPolicy = policy({
   name: "listing_access",
   entity: "Listing",
@@ -110,10 +141,10 @@ const offerPolicy = policy({
 const manifest = buildManifest({
   name: "market",
   version: "0.1.0",
-  entities: [Listing, Offer],
+  entities: [User, Listing, Offer],
   queries: [],
   actions: [],
-  policies: [listingPolicy, offerPolicy],
+  policies: [userPolicy, listingPolicy, offerPolicy],
   // File-based SSR routing: app/**/page.tsx. One binary serves the frontend
   // and the API on one port.
   routes: await discoverAppRoutes(),

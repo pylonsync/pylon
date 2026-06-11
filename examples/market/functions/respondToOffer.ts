@@ -10,7 +10,7 @@ import { mutation, v } from "@pylonsync/functions";
  * spans two entities: "the caller must own the LISTING the OFFER points at."
  */
 export default mutation({
-  auth: "guest",
+  // Defaults to auth: "user" — only the signed-in seller responds.
   args: {
     offerId: v.id("Offer"),
     accept: v.boolean(),

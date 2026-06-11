@@ -6,7 +6,7 @@ import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Textarea } from "@pylonsync/example-ui/textarea";
 import { Label } from "@pylonsync/example-ui/label";
-import { MarketProvider, useIdentity } from "./MarketProvider";
+import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 
 const CATEGORIES = [
   "furniture", "electronics", "cameras", "bikes", "audio", "kitchen",
@@ -18,7 +18,10 @@ const selectClass =
   "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 function Form() {
-  const { userId, name } = useIdentity();
+  // Rendered inside <AuthGate>, so identity is guaranteed non-null here.
+  const identity = useIdentity();
+  const userId = identity?.userId ?? "";
+  const name = identity?.name ?? "you";
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -142,7 +145,12 @@ function Form() {
 export function SellForm() {
   return (
     <MarketProvider>
-      <Form />
+      <AuthGate
+        title="Sign in to list an item"
+        blurb="Selling needs an account so your listings are tied to you. The demo account is prefilled — just hit Log in."
+      >
+        <Form />
+      </AuthGate>
     </MarketProvider>
   );
 }

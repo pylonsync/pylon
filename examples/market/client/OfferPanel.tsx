@@ -6,7 +6,7 @@ import { Button } from "@pylonsync/example-ui/button";
 import { Input } from "@pylonsync/example-ui/input";
 import { Textarea } from "@pylonsync/example-ui/textarea";
 import { Badge } from "@pylonsync/example-ui/badge";
-import { MarketProvider, useIdentity } from "./MarketProvider";
+import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { money, timeAgo, type Offer } from "./market";
 
 interface Props {
@@ -26,29 +26,38 @@ const statusBadge: Record<string, string> = {
 
 function Panel(props: Props) {
   const { listingId, sellerId, price } = props;
-  const { userId } = useIdentity();
-  const isSeller = userId === sellerId;
+  const identity = useIdentity();
+  const isSeller = !!identity && identity.userId === sellerId;
   const isSold = props.status === "sold";
 
-  // The live query — every offer on this listing, newest first. When a buyer
-  // in another tab makes an offer, it appears here instantly.
+  // The live query — every offer on this listing, newest first. Reads are
+  // public, so this runs for signed-out visitors too; it just lights up the
+  // moment a buyer in another tab makes an offer.
   const { data } = db.useQuery<Offer>("Offer", {
     where: { listingId },
     orderBy: { createdAt: "desc" },
   });
   const offers = data ?? [];
-  const myOffer = offers.find((o) => o.buyerId === userId);
+  const myOffer = identity
+    ? offers.find((o) => o.buyerId === identity.userId)
+    : undefined;
 
   if (isSeller) {
     return <SellerView offers={offers} title={props.title} />;
   }
+  // Making an offer needs a real account — gate it (prefilled demo login).
   return (
-    <BuyerView
-      {...props}
-      myOffer={myOffer}
-      isSold={isSold}
-      suggestedPrice={price}
-    />
+    <AuthGate
+      title="Sign in to make an offer"
+      blurb="Offers are tied to a real account so the seller knows who's bidding. The demo account is prefilled — just hit Log in."
+    >
+      <BuyerView
+        {...props}
+        myOffer={myOffer}
+        isSold={isSold}
+        suggestedPrice={price}
+      />
+    </AuthGate>
   );
 }
 
@@ -158,7 +167,10 @@ function BuyerView({
   isSold,
   suggestedPrice,
 }: Props & { myOffer?: Offer; isSold: boolean; suggestedPrice: number }) {
-  const { userId, name } = useIdentity();
+  // Rendered inside <AuthGate>, so identity is non-null here.
+  const identity = useIdentity();
+  const userId = identity?.userId ?? "";
+  const name = identity?.name ?? "you";
   const [amount, setAmount] = useState(String(suggestedPrice));
   const [message, setMessage] = useState("");
   const [err, setErr] = useState<string | null>(null);
