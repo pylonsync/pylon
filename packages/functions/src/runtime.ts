@@ -989,7 +989,23 @@ async function main() {
   }));
   send({ type: "ready", functions });
 
+  // Belt-and-suspenders against orphaning: if the host dies in a way that
+  // somehow leaves our stdin open, we'll have been reparented to init
+  // (ppid === 1). Notice and exit. Unref'd so it never keeps us alive on its
+  // own.
+  const orphanWatch = setInterval(() => {
+    if (process.ppid === 1) process.exit(0);
+  }, 2000);
+  if (typeof orphanWatch.unref === "function") orphanWatch.unref();
+
   await readerLoop();
+
+  // readerLoop only returns when stdin hits EOF — i.e. the host (the pylon
+  // process that spawned us) is gone. Force-exit. We must NOT rely on the
+  // event loop draining on its own: the stdout writer, keep-alive sockets
+  // from `fetch`, and Bun's own handles keep the process alive, so every
+  // killed `pylon dev` would otherwise orphan its whole bun runner pool.
+  process.exit(0);
 }
 
 main().catch((err) => {
