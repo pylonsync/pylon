@@ -139,7 +139,7 @@
   "policies": [
     {
       "name": "user_self",
-      "allowRead": "auth.userId != null",
+      "allowRead": "auth.userId == data.id",
       "allowInsert": "false",
       "allowUpdate": "false",
       "allowDelete": "false",
@@ -147,10 +147,10 @@
     },
     {
       "name": "todo_owner",
-      "allowRead": "auth.userId != null",
+      "allowRead": "auth.userId == data.userId",
       "allowInsert": "auth.userId == data.userId",
-      "allowUpdate": "auth.userId != null",
-      "allowDelete": "auth.userId != null",
+      "allowUpdate": "auth.userId == data.userId",
+      "allowDelete": "auth.userId == data.userId",
       "entity": "Todo"
     }
   ],
