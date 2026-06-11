@@ -378,8 +378,12 @@ fn workspaces_patterns(pkg: &serde_json::Value) -> Vec<String> {
     } else {
         ws.get("packages").and_then(|p| p.as_array())
     };
-    arr.map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default()
+    arr.map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Expand every workspace pattern under `root` → map of package name → dir.
@@ -390,7 +394,9 @@ fn enumerate_members(
     let mut out = std::collections::HashMap::new();
     for pat in patterns {
         for dir in glob_dirs(root, pat) {
-            let Ok(dir) = dir.canonicalize() else { continue };
+            let Ok(dir) = dir.canonicalize() else {
+                continue;
+            };
             if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                     if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
@@ -611,13 +617,24 @@ mod workspace_deploy_tests {
     fn fake_workspace(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("pylon-ws-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        write(&root.join("package.json"), r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#);
-        write(&root.join("packages/app/package.json"),
-            r#"{"name":"@scope/app","dependencies":{"@scope/lib":"workspace:*","lodash":"^4"}}"#);
+        write(
+            &root.join("package.json"),
+            r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+        );
+        write(
+            &root.join("packages/app/package.json"),
+            r#"{"name":"@scope/app","dependencies":{"@scope/lib":"workspace:*","lodash":"^4"}}"#,
+        );
         write(&root.join("packages/app/app.ts"), "// app");
-        write(&root.join("packages/lib/package.json"), r#"{"name":"@scope/lib"}"#);
+        write(
+            &root.join("packages/lib/package.json"),
+            r#"{"name":"@scope/lib"}"#,
+        );
         write(&root.join("packages/lib/index.ts"), "// lib");
-        write(&root.join("packages/unused/package.json"), r#"{"name":"@scope/unused"}"#);
+        write(
+            &root.join("packages/unused/package.json"),
+            r#"{"name":"@scope/unused"}"#,
+        );
         write(&root.join("packages/unused/index.ts"), "// unused");
         root.canonicalize().unwrap()
     }
@@ -630,10 +647,19 @@ mod workspace_deploy_tests {
         let mut rels: Vec<String> = ws
             .member_dirs
             .iter()
-            .map(|d| d.strip_prefix(&ws.root).unwrap().to_string_lossy().replace('\\', "/"))
+            .map(|d| {
+                d.strip_prefix(&ws.root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
         rels.sort();
-        assert_eq!(rels, vec!["packages/app", "packages/lib"], "must include app + its workspace dep, not unused");
+        assert_eq!(
+            rels,
+            vec!["packages/app", "packages/lib"],
+            "must include app + its workspace dep, not unused"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -655,13 +681,33 @@ mod workspace_deploy_tests {
             }
             paths.push(p);
         }
-        assert!(paths.iter().any(|p| p == "packages/app/app.ts"), "app source packed");
-        assert!(paths.iter().any(|p| p == "packages/lib/index.ts"), "workspace dep packed");
-        assert!(!paths.iter().any(|p| p.starts_with("packages/unused")), "unused member pruned: {paths:?}");
+        assert!(
+            paths.iter().any(|p| p == "packages/app/app.ts"),
+            "app source packed"
+        );
+        assert!(
+            paths.iter().any(|p| p == "packages/lib/index.ts"),
+            "workspace dep packed"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with("packages/unused")),
+            "unused member pruned: {paths:?}"
+        );
         let v: serde_json::Value = serde_json::from_str(&root_pkg).unwrap();
-        let ws_field: Vec<String> = v["workspaces"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
-        assert!(ws_field.contains(&"packages/app".to_string()) && ws_field.contains(&"packages/lib".to_string()));
-        assert!(!ws_field.contains(&"packages/unused".to_string()), "root workspaces narrowed to packed members");
+        let ws_field: Vec<String> = v["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            ws_field.contains(&"packages/app".to_string())
+                && ws_field.contains(&"packages/lib".to_string())
+        );
+        assert!(
+            !ws_field.contains(&"packages/unused".to_string()),
+            "root workspaces narrowed to packed members"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }
