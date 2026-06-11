@@ -479,6 +479,8 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
     // mutations applied, were deduplicated, or failed.
     let mut op_results: Vec<serde_json::Value> = Vec::with_capacity(push_req.changes.len());
 
+    let manifest = ctx.store.manifest();
+
     for change in &push_req.changes {
         // SECURITY: gate framework-internal `_`-prefixed entities
         // (_Connection, _PylonJobs, _PylonWorkflows, _PylonSchemaVersion, …)
@@ -505,6 +507,37 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
                 "error": { "code": "NOT_FOUND", "message": "Entity not found" },
             }));
             continue;
+        }
+        // SECURITY: readonly fields — including the owner stamped by
+        // `field.owner()` and identity columns like orgId/tenantId/createdBy —
+        // are immutable from the client. The PATCH entity route enforces this
+        // via `reject_readonly_payload`; the sync-push surface is the path the
+        // SDK actually steers local-first apps to, so it must enforce it too.
+        // Without this gate a crafted Update could reassign ownership or flip a
+        // tenant scope (IDOR). Server code (function handlers) writes readonly
+        // fields through the mutation runtime, not this client route, so it is
+        // unaffected. Admins bypass inside `reject_readonly_payload`. Done
+        // BEFORE the op-id claim so a rejected op leaves no in-flight claim.
+        if matches!(change.kind, ChangeKind::Update) {
+            if let Some(data) = change.data.as_ref() {
+                if let Err((code, message)) =
+                    crate::reject_readonly_payload(manifest, &change.entity, data, ctx.auth_ctx)
+                {
+                    errors.push(format!(
+                        "update {}/{}: {message}",
+                        change.entity, change.row_id
+                    ));
+                    op_results.push(serde_json::json!({
+                        "op_id": change.op_id,
+                        "entity": change.entity,
+                        "row_id": change.row_id,
+                        "kind": change_kind_label(&change.kind),
+                        "status": "error",
+                        "error": { "code": code, "message": message },
+                    }));
+                    continue;
+                }
+            }
         }
         // Tristate op-id state machine:
         //   Proceed       → run the write; on failure forget

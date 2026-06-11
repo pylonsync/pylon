@@ -571,3 +571,116 @@ fn push_rejects_underscore_entities_for_non_admin() {
         "rejected underscore write must not have hit the store: {pull_resp}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Security: readonly fields — the owner stamped by `field.owner()` and
+// identity columns like orgId/tenantId/createdBy — are client-immutable on
+// every client write surface, including /api/sync/push (the path the SDK
+// steers local-first apps to). A push Update touching a readonly field by a
+// non-admin is rejected (READONLY_FIELD) so it can't reassign ownership or
+// flip a tenant scope (IDOR). Per-op: a legit non-readonly edit in the same
+// batch still applies — the gate must not over-block.
+// ---------------------------------------------------------------------------
+#[test]
+fn push_update_cannot_flip_readonly_field_for_non_admin() {
+    fn field(name: &str, readonly: bool, optional: bool) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }
+    }
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Owned".into(),
+        // `ownerId` stands in for a field.owner() stamp: readonly so a client
+        // can't reassign it after insert.
+        fields: vec![field("title", false, false), field("ownerId", true, true)],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: true,
+    });
+    manifest.policies.push(ManifestPolicy {
+        name: "owned_public".into(),
+        entity: Some("Owned".into()),
+        allow: "true".into(),
+        ..Default::default()
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port); // non-admin
+
+    // Insert a row the caller "owns". Insert is the owner-stamp's path and is
+    // not gated here; we just need a row carrying a readonly ownerId.
+    let insert = r#"{"changes":[
+        {"op_id":"op-ins","entity":"Owned","row_id":"r1","kind":"insert","data":{"title":"mine","ownerId":"me"}}
+    ]}"#;
+    let (s, b) = http(port, "POST", "/api/sync/push", Some(&token), Some(insert));
+    assert_eq!(s, 200, "insert push: {b}");
+    let r: Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(
+        r["results"][0]["status"], "applied",
+        "insert must apply: {b}"
+    );
+    // The server assigns the canonical row id (the wire row_id "r1" isn't a
+    // valid generated id, so it mints its own) — target that for the update.
+    let row_id = r["results"][0]["row_id"].as_str().expect("assigned row id");
+
+    // The attack (flip ownerId) + a legit title edit in the SAME batch.
+    let update = format!(
+        r#"{{"changes":[
+        {{"op_id":"op-evil","entity":"Owned","row_id":"{row_id}","kind":"update","data":{{"ownerId":"victim"}}}},
+        {{"op_id":"op-ok","entity":"Owned","row_id":"{row_id}","kind":"update","data":{{"title":"renamed"}}}}
+    ]}}"#
+    );
+    let (s2, b2) = http(port, "POST", "/api/sync/push", Some(&token), Some(&update));
+    assert_eq!(s2, 200, "update push returns 200: {b2}");
+    let r2: Value = serde_json::from_str(&b2).unwrap();
+    let results = r2["results"].as_array().expect("results");
+    let evil = results
+        .iter()
+        .find(|x| x["op_id"] == "op-evil")
+        .expect("evil result");
+    assert_eq!(
+        evil["status"], "error",
+        "readonly ownerId flip must be rejected: {b2}"
+    );
+    assert_eq!(
+        evil["error"]["code"], "READONLY_FIELD",
+        "rejection must be READONLY_FIELD: {b2}"
+    );
+    let ok = results
+        .iter()
+        .find(|x| x["op_id"] == "op-ok")
+        .expect("ok result");
+    assert_eq!(
+        ok["status"], "applied",
+        "legit non-readonly title edit must still apply: {b2}"
+    );
+
+    // Ownership really didn't change; the legit edit did.
+    let (_, pull_resp) = pull(port, &token, 0);
+    let owned = pull_resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity"] == "Owned")
+        .expect("Owned row in snapshot")
+        .clone();
+    assert_eq!(
+        owned["data"]["ownerId"], "me",
+        "ownerId must be unchanged after the rejected flip: {pull_resp}"
+    );
+    assert_eq!(
+        owned["data"]["title"], "renamed",
+        "legit title edit must have applied: {pull_resp}"
+    );
+}
