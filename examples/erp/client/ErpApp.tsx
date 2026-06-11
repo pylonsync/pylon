@@ -1628,6 +1628,19 @@ function Dashboard({ org }: { org: Organization }) {
     where: { orgId: org.id },
   });
 
+  // Seed a sample Dallas Door Designs dataset the first time an empty
+  // workspace is opened, so the dashboard shows real numbers instead of
+  // zeros. seedErp is idempotent server-side, so this is a no-op once the
+  // org has data — the optimistic fire below is safe even mid-load.
+  const seedTried = useRef(false);
+  useEffect(() => {
+    if (seedTried.current) return;
+    if (orders === undefined || customers === undefined) return;
+    if (orders.length > 0 || customers.length > 0) return;
+    seedTried.current = true;
+    void callFn("seedErp", {}).catch(() => {});
+  }, [orders, customers]);
+
   const openOrders = (orders ?? []).filter(
     (o) => o.status !== "delivered" && o.status !== "cancelled",
   );
