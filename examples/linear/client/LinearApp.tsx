@@ -5,7 +5,7 @@
  * comments. Keyboard-driven: j/k navigate, c create, ⌘K command
  * palette, Esc close drawer.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   init,
   db,
@@ -282,6 +282,18 @@ function Workspace({
   const [newIssueOpen, setNewIssueOpen] = useState(false);
   const [newTeamOpen, setNewTeamOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // Seed a demo backlog into a fresh workspace so the board isn't blank.
+  // createOrganization already makes a default team, so "empty" means that
+  // team has no issues yet (issueSequence 0). seedLinear is idempotent
+  // server-side (gates on issue count), so this is a safe optimistic fire.
+  const seedTried = useRef(false);
+  useEffect(() => {
+    if (seedTried.current || teams === undefined || teams.length === 0) return;
+    if (teams.some((t) => (t.issueSequence ?? 0) > 0)) return;
+    seedTried.current = true;
+    void callFn("seedLinear", {}).catch(() => {});
+  }, [teams]);
 
   useEffect(() => {
     if (view.kind === "my" && teams && teams.length > 0) {
