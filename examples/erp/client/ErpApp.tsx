@@ -3410,15 +3410,12 @@ function ChartRenderer({
   data: Record<string, unknown>[];
   spec: AggregateSpec;
 }) {
-  if (data.length === 0) {
-    return (
-      <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
-        No rows match this query.
-      </div>
-    );
-  }
-
   // Figure out which keys are group dimensions vs metrics based on the spec.
+  // NB: these hooks must run unconditionally, before any early return — an
+  // early `return` above a hook violates the Rules of Hooks and throws
+  // "Rendered more hooks than during the previous render" the moment `data`
+  // transitions empty <-> non-empty (e.g. an Analytics panel whose query
+  // starts empty and then loads).
   const groupKeys = useMemo(() => {
     return (spec.groupBy ?? []).map((g) =>
       typeof g === "string" ? g : `${g.field}_${g.bucket}`,
@@ -3429,6 +3426,14 @@ function ChartRenderer({
     for (const g of groupKeys) keys.delete(g);
     return Array.from(keys);
   }, [data, groupKeys]);
+
+  if (data.length === 0) {
+    return (
+      <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
+        No rows match this query.
+      </div>
+    );
+  }
 
   if (kind === "number") {
     const metric = metricKeys[0] ?? "count";
