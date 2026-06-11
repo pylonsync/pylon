@@ -164,6 +164,36 @@ interface FieldBuilder {
    * sitting in SQLite.
    */
   encrypted(): FieldBuilder;
+  /**
+   * Mark the field as the row's **owner** — the framework stamps it
+   * with `auth.userId` on every insert and refuses any client attempt
+   * to set it to a different user. This is what makes *optimistic,
+   * local-first writes the default* for owned data: the client can
+   * `db.insert("Offer", { buyerId, … })` directly (paints the row in
+   * the local store instantly, no server round-trip) and still be
+   * secure — the server overwrites/validates the owner from the
+   * session, so a forged `buyerId` is rejected before it ever lands.
+   *
+   * Concretely `.owner()`:
+   * - on **insert**, fills the field from `auth.userId` when omitted,
+   *   and rejects a non-admin caller who supplies a *different*
+   *   non-empty value (`OWNER_MISMATCH`, 403) — closing the IDOR
+   *   shape where a policy gates on `data.ownerId == auth.userId`
+   *   but the attacker just sends someone else's id;
+   * - on **update**, behaves like [`readonly`] — the owner can't be
+   *   reassigned through the HTTP entity routes.
+   *
+   * Reach for this instead of writing a server function whenever the
+   * only server-authoritative part of a create is "who made it":
+   * `authorId`, `buyerId`, `sellerId`, `createdBy`, `userId`. Guests
+   * count — their stable guest id is stamped. Admin contexts may set
+   * an explicit value (migrations, tooling).
+   *
+   * Example: `sellerId: field.string().owner()` lets a listing be
+   * created with a plain optimistic `db.insert` while the seller id
+   * stays unspoofable.
+   */
+  owner(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -190,6 +220,15 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     encrypted() {
       return buildField({ ...def, encrypted: true });
+    },
+    owner() {
+      // Dynamic default filled by the auth-aware pipeline; also lock
+      // the field on update so ownership can't be reassigned via PATCH.
+      return buildField({
+        ...def,
+        readonly: true,
+        default: { kind: "owner" },
+      } as FieldDefinition);
     },
   };
 }
@@ -440,6 +479,24 @@ export function definePlugin(def: PluginDefinition): PluginDefinition {
 // Manifest generation
 // ---------------------------------------------------------------------------
 
+/**
+ * Serialized form of `field.X().owner()`. Carried in a field's
+ * `default` slot as a *dynamic* default — the value isn't known until
+ * a request arrives, so the framework's auth-aware mutation pipeline
+ * (OwnerStampPlugin, Rust side) fills it from `auth.userId` on insert
+ * and rejects any client attempt to set it to a different user. The
+ * storage-layer default-filler (`apply_field_defaults`) deliberately
+ * skips this shape — it has no auth context, so it can't (and must
+ * not) stamp an owner.
+ *
+ * `$auth: "userId"` is the only kind today; the object shape leaves
+ * room for future auth-derived defaults (e.g. `{$auth:"tenantId"}`)
+ * without another manifest migration.
+ */
+export interface OwnerDefaultSentinel {
+  $auth: "userId";
+}
+
 export interface ManifestField {
   name: string;
   type: FieldType;
@@ -457,9 +514,14 @@ export interface ManifestField {
   readonly?: boolean;
   /** Default value to fill on insert when the row omits this field.
    *  - `"now"`     → runtime stamps the current UTC time
+   *  - `{$auth:…}` → a *dynamic* default the auth-aware mutation
+   *                  pipeline fills (see [`OwnerDefaultSentinel`]).
+   *                  Never stamped at the storage layer — the
+   *                  OwnerStampPlugin fills + enforces it.
    *  - any literal → runtime stamps that exact value
-   *  Maps to `field.X().defaultNow()` / `.default(value)`. */
-  default?: "now" | string | number | boolean | null;
+   *  Maps to `field.X().defaultNow()` / `.default(value)` /
+   *  `field.X().owner()`. */
+  default?: "now" | string | number | boolean | null | OwnerDefaultSentinel;
   /** Allowed values for `field.enum([...])` — recorded so codegen
    *  can emit a literal-union type and runtime validation can
    *  reject out-of-set inserts. Plain `field.string()` doesn't
@@ -595,14 +657,22 @@ export function entitiesToManifest(
         // using the procedural `field` exports get the same
         // ManifestField shape as fluent apps.
         const extra = fb._def as FieldDefinition & {
-          default?: { kind: "value"; value: unknown } | { kind: "now" };
+          default?:
+            | { kind: "value"; value: unknown }
+            | { kind: "now" }
+            | { kind: "owner" };
           enumValues?: readonly string[];
         };
         if (extra.default) {
           f.default =
             extra.default.kind === "now"
               ? "now"
-              : (extra.default.value as ManifestField["default"]);
+              : extra.default.kind === "owner"
+                ? // Dynamic, auth-derived default. Carried as a sentinel
+                  // object the Rust mutation pipeline recognizes; the
+                  // storage-layer default-filler skips it (no auth there).
+                  ({ $auth: "userId" } satisfies OwnerDefaultSentinel)
+                : (extra.default.value as ManifestField["default"]);
         }
         if (extra.enumValues && extra.enumValues.length > 0) {
           f.enumValues = extra.enumValues;
@@ -1416,7 +1486,10 @@ export const audit: Behavior = {
  * below; this is just the shape stored on the field definition for
  * the runtime to read.
  */
-type DefaultMarker = { kind: "value"; value: unknown } | { kind: "now" };
+type DefaultMarker =
+  | { kind: "value"; value: unknown }
+  | { kind: "now" }
+  | { kind: "owner" };
 
 /**
  * Augment FieldBuilder with the new `default()` / `defaultNow()`
@@ -1448,6 +1521,7 @@ function buildFieldWithDefaults(
 ): FieldBuilder & {
   default(value: unknown): ReturnType<typeof buildFieldWithDefaults>;
   defaultNow(): ReturnType<typeof buildFieldWithDefaults>;
+  owner(): ReturnType<typeof buildFieldWithDefaults>;
 } {
   return {
     _def: def,
@@ -1477,6 +1551,16 @@ function buildFieldWithDefaults(
     },
     defaultNow() {
       return buildFieldWithDefaults({ ...def, default: { kind: "now" } });
+    },
+    owner() {
+      // Server-stamped owner: a dynamic default the auth-aware
+      // pipeline fills + enforces, plus `readonly` so the owner can't
+      // be reassigned via a later PATCH. See FieldBuilder.owner().
+      return buildFieldWithDefaults({
+        ...def,
+        readonly: true,
+        default: { kind: "owner" },
+      });
     },
   };
 }
