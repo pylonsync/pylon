@@ -3411,11 +3411,8 @@ function ChartRenderer({
   spec: AggregateSpec;
 }) {
   // Figure out which keys are group dimensions vs metrics based on the spec.
-  // NB: these hooks must run unconditionally, before any early return — an
-  // early `return` above a hook violates the Rules of Hooks and throws
-  // "Rendered more hooks than during the previous render" the moment `data`
-  // transitions empty <-> non-empty (e.g. an Analytics panel whose query
-  // starts empty and then loads).
+  // These hooks run unconditionally, before the empty-data early return below,
+  // so the hook count stays stable across renders (Rules of Hooks).
   const groupKeys = useMemo(() => {
     return (spec.groupBy ?? []).map((g) =>
       typeof g === "string" ? g : `${g.field}_${g.bucket}`,

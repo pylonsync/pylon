@@ -59,9 +59,7 @@ const Todo = entity(
   },
 );
 
-// You can only read your own User row. Scoping read to `data.id` (the row's
-// primary key) keeps one user's email/profile from leaking to every other
-// logged-in user over `/api/entities/User`.
+// You can only read your own User row — `data.id` is the row's primary key.
 const userPolicy = policy({
   name: "user_self",
   entity: "User",
@@ -71,10 +69,8 @@ const userPolicy = policy({
   allowDelete: "false",
 });
 
-// Every Todo is private to its owner. ALL four verbs scope to
-// `auth.userId == data.userId` — `auth.userId != null` (any logged-in user)
-// would let any account read, edit, and delete everyone else's todos. The
-// read scope matters most: the list endpoint enforces it per row, so a peer's
+// Every Todo is private to its owner — all four verbs scope to the owner.
+// The list endpoint enforces allowRead per row, so a peer's
 // `GET /api/entities/Todo` returns only their own rows.
 const todoPolicy = policy({
   name: "todo_owner",
