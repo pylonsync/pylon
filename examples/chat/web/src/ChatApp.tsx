@@ -776,6 +776,19 @@ function Sidebar({
   const { data: myMemberships } = db.useQuery<Membership>("Membership", {
     where: { userId: currentUser.id },
   });
+
+  // Seed starter channels + opening messages the first time the workspace is
+  // empty, so a new user lands in a structured space instead of a blank
+  // sidebar. seedChat is idempotent server-side (gates on channel count).
+  const seedChat = db.useMutation<Record<string, never>, unknown>("seedChat");
+  const seedTried = useRef(false);
+  useEffect(() => {
+    if (seedTried.current || channels === undefined) return;
+    if (channels.length > 0) return;
+    seedTried.current = true;
+    void seedChat.mutate({}).catch(() => {});
+  }, [channels]);
+
   const { stars, toggle: toggleStar } = useStars(currentUser.id);
   const unread = useUnreadCounts(currentUser);
 
