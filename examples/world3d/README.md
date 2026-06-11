@@ -1,61 +1,78 @@
-# World3D — 3D multiplayer avatar world
+# World3D — multiplayer procedural-island FPS
 
-Every connected browser becomes an avatar cube in a shared three.js
-scene. WASD to move, click + drag for mouse-look, open tabs to spawn
-more players. A bot spawner drops autonomous avatars so you can
-stress-test a crowded world from a single machine.
+A fully procedural tropical island rendered in three.js and served by
+Pylon's native SSR — one binary, one port, no Next.js. Every browser
+tab is a player; buildings you demolish crumble for everyone, live.
 
 **What this example demonstrates:**
 
-- **3D realtime sync with zero special primitives.** Avatar positions
-  live in a single `Avatar` table. `db.useQuery("Avatar")` powers
-  both your own state and every other player's. No game-server
-  framework, no separate netcode.
-- **Client-side interpolation** absorbs the ~10 Hz server update rate
-  so motion stays smooth at 60 fps even with 200+ avatars.
-- **End-to-end latency HUD** — every outgoing `moveAvatar` mutation
-  is timed from send → own-row-bounces-back in the live query.
-  p50 / p95 shown live in the top-left.
-- **Screen-space name labels** — each avatar has a DOM label projected
-  from 3D world position to 2D screen every frame.
+- **Pylon SSR as a game shell.** `app/page.tsx` server-renders an
+  instant HUD shell, then dynamic-imports the engine — three.js ships
+  as its own async chunk and never loads during SSR.
+- **3D realtime sync with zero special primitives.** Player poses live
+  in an `Avatar` table updated at ~10 Hz through `callFn("moveAvatar")`;
+  `db.useQuery("Avatar")` powers every other player you see. No game
+  server, no netcode layer.
+- **Deterministic worldgen as a sync strategy.** The entire island —
+  terrain, water, sky, vegetation, buildings — generates from one
+  seed, so multiplayer only syncs *destroyed block keys* (a
+  `Destruction` row each). Structural collapse is a pure function of
+  that set: every client derives identical rubble.
+- **A small game-engine core** (`game/engine.ts`): ordered systems, a
+  typed event bus, and object pools, all on a fixed frame clock.
 
 ## Run
 
 ```bash
 cd examples/world3d
 bun install
-bun run dev          # Pylon server on :4321
-
-# second terminal
-cd web
-bun install
-bun run dev          # UI on :5177
+bun run dev          # pylon dev — everything on :4321
 ```
 
-Open <http://localhost:5177>. Click the scene to engage pointer lock
-(WASD + mouse). Open more tabs for real multiplayer. Hit **+200** to
-stress-test with bots.
+Open <http://localhost:4321>, click to deploy, and open more tabs for
+real multiplayer. WASD + mouse, shift to sprint, space to jump/swim,
+G or right-click for grenades, R to reload. "rebuild island" restores
+every demolished building (deletes all Destruction rows).
 
-## Stress knobs
+## The world
 
-- **+10 / +50 / +200 bots** — creates bot avatars that wander randomly.
-  Each tab that has the UI open drives its bots, so one tab with 200
-  bots running is writing ~200 × ~0.5 rps = 100 mut/sec broadcasts.
-- **Clear bots** — wipes all `isBot: true` rows.
+- `game/terrain.ts` — 257² heightfield: radial island falloff, fbm
+  hills, a ridged mountain spine, beach flattening. Doubles as the
+  collision query (`heightAt`) and placement oracle for everything else.
+- `game/water.ts` — single-quad ocean shader: depth-ramped tropical
+  color from the heightmap, scrolling-noise detail normals, sun
+  glints, animated breaker + foam bands at the shoreline.
+- `game/sky.ts` — gradient dome with analytic sun + forward-scatter
+  haze, drifting billboard clouds, and a shadow frustum that follows
+  the player snapped to texel steps.
+- `game/vegetation.ts` — instanced palms (procedural curved trunks +
+  alpha-cutout fronds), EZ Tree species (ash/oak/pine via the MIT
+  `@dgreenheck/ez-tree` generator), ferns, broadleaf plants, foliage-
+  card bushes, normal-mapped rocks, and a **streamed grass field**:
+  blade tufts are precomputed per 16 m cell and only the cells around
+  the player occupy the instance buffer — near-field density at a
+  fixed GPU cost, one draw call.
+- `game/buildings.ts` — block compounds in one InstancedMesh.
+  Shooting removes blocks; a flood fill from the ground layer detaches
+  anything unsupported into physics debris.
+- `game/textures.ts` — every texture is generated on a canvas at boot
+  (detail speckle, bark fiber, leaflets, foliage clusters, rock +
+  derived Sobel normal maps). No downloads, no asset folder.
+
+## Performance notes
+
+- Vegetation, buildings, debris, and particles are all instanced or
+  pooled — the whole world renders in ~50 draw calls.
+- Grass streams around the player instead of existing island-wide.
+- One shadow map, tight frustum, snapped to texels (no shimmer).
+- HUD stats flow through a 4 Hz callback so React renders stay off the
+  frame loop. The minimap base image renders once from the heightfield.
 
 ## Files
 
-- `app.ts` — `Avatar` entity with position + heading + bot flag
-- `functions/spawnAvatar.ts` — idempotent per-user avatar creation
-- `functions/moveAvatar.ts` — pose update, clamped to the 40×40 plane
-- `functions/clearBots.ts` — bulk delete for bot cleanup
-- `client/WorldApp.tsx` — three.js scene setup, input, interpolation,
-  HUD. One effect owns the scene; avatars are added/removed from
-  meshes Map as the live query changes.
-- `web/` — Vite UI mounting `WorldApp`
-
-## Dependencies
-
-- `three` + `@types/three` pinned in `web/package.json`. No orbit
-  controls / pointer-lock-controls helpers — we do the math inline
-  to keep the bundle small and the code readable.
+- `app.ts` — entities (`Avatar`, `Destruction`), policies, SSR routes
+- `functions/` — `spawnAvatar` (idempotent, prunes stale rows),
+  `moveAvatar`, `destroyBlocks` (idempotent batch), `resetIsland`
+- `app/page.tsx` — SSR shell, HUD, minimap, `<SyncBridge/>` feeding
+  live queries into the engine
+- `game/` — the engine: one system per file, composed in `game.ts`

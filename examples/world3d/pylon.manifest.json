@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "world3d",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entities": [
     {
       "name": "Avatar",
@@ -49,14 +49,8 @@
           "unique": false
         },
         {
-          "name": "emote",
-          "type": "string",
-          "optional": true,
-          "unique": false
-        },
-        {
-          "name": "isBot",
-          "type": "bool",
+          "name": "pitch",
+          "type": "float",
           "optional": false,
           "unique": false
         },
@@ -74,28 +68,95 @@
             "userId"
           ],
           "unique": true
+        }
+      ]
+    },
+    {
+      "name": "Destruction",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": false
         },
         {
-          "name": "by_bot",
-          "fields": [
-            "isBot"
-          ],
+          "name": "userId",
+          "type": "string",
+          "optional": false,
           "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_key",
+          "fields": [
+            "key"
+          ],
+          "unique": true
         }
       ]
     }
   ],
-  "routes": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
   "queries": [],
   "actions": [],
   "policies": [
     {
       "name": "avatar_ownership",
-      "allowRead": "true",
+      "allowRead": "auth.userId != null",
       "allowInsert": "auth.userId != null",
-      "allowUpdate": "auth.userId == data.userId || data.isBot == true",
+      "allowUpdate": "auth.userId == data.userId",
       "allowDelete": "auth.userId == data.userId",
       "entity": "Avatar"
+    },
+    {
+      "name": "destruction_append_only",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "false",
+      "allowDelete": "auth.userId != null",
+      "entity": "Destruction"
     }
-  ]
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
 }

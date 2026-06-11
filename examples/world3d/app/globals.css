@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #04070c;
+  /* The game canvas owns the cursor; HUD elements opt back in. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+canvas {
+  display: block;
+}
