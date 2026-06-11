@@ -40,14 +40,18 @@ export interface GameSystem {
 export interface GameEvents {
   /** A hitscan shot connected with the world. */
   impact: { point: THREE.Vector3; normal: THREE.Vector3; surface: "terrain" | "building" | "water" };
-  /** The local player fired (muzzle flash, tracer, recoil already applied). */
-  shot: { origin: THREE.Vector3; direction: THREE.Vector3 };
+  /** The local player fired. `dist` = true hit distance (tracer end). */
+  shot: { origin: THREE.Vector3; direction: THREE.Vector3; dist: number };
   /** A grenade detonated. */
   explosion: { point: THREE.Vector3; radius: number };
   /** The local player lobbed a grenade (broadcast to peers as VFX). */
   grenadeThrown: { origin: THREE.Vector3; velocity: THREE.Vector3 };
   /** Building blocks got destroyed locally (shooter side). Keys must sync. */
   blocksDestroyed: { keys: string[] };
+  /** Local player landed a hit on another player — report to server. */
+  playerHit: { avatarId: string; point: THREE.Vector3; damage: number };
+  /** Local player finished the death sequence; heal the row server-side. */
+  respawnRequested: Record<string, never>;
   /** Camera shake request, magnitude in radians-ish. */
   shake: { strength: number };
 }

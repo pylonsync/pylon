@@ -32,12 +32,27 @@ export interface WeaponState {
   reloading: boolean;
 }
 
+const RIFLE_DAMAGE = 18;
+const GRENADE_MAX_DAMAGE = 55;
+
+/** Hooks into the remote-player system (wired after construction —
+ *  RemotePlayers is built later in the composition order). */
+export interface PlayerTargets {
+  raycast(origin: THREE.Vector3, dir: THREE.Vector3, far: number):
+    { avatarId: string; point: THREE.Vector3; dist: number } | null;
+  inRadius(center: THREE.Vector3, radius: number): Array<{ avatarId: string; dist: number }>;
+}
+
 export class Weapon implements GameSystem {
   readonly name = "weapon";
   readonly viewmodel = new THREE.Group();
 
   ammo: number = WEAPON.magSize;
   reloading = false;
+  /** Set by the game once RemotePlayers exists; null = no PvP targets. */
+  playerTargets: PlayerTargets | null = null;
+  /** Death gate — a dead player can't fire or lob grenades. */
+  enabled = true;
 
   private firing = false;
   private lastShotAt = -Infinity;
@@ -155,13 +170,31 @@ export class Weapon implements GameSystem {
 
     this.camera.getWorldDirection(this.tmpDir);
     this.tmpOrigin.setFromMatrixPosition(this.camera.matrixWorld);
-    this.events.emit("shot", { origin: this.tmpOrigin, direction: this.tmpDir });
 
-    // 1) Buildings — precise instanced raycast.
+    // Nearest of: player capsule, building block, terrain.
+    const playerHit = this.playerTargets?.raycast(this.tmpOrigin, this.tmpDir, WEAPON.range) ?? null;
     const blockHit = this.buildings.raycastBlocks(this.tmpOrigin, this.tmpDir, WEAPON.range);
-    // 2) Terrain — coarse ray march (heightfield has no analytic ray test).
-    const terrainDist = this.marchTerrain(this.tmpOrigin, this.tmpDir, WEAPON.range);
+    const terrainDist = this.terrain.raycast(this.tmpOrigin, this.tmpDir, WEAPON.range);
     const blockDist = blockHit ? blockHit.center.distanceTo(this.tmpOrigin) : Infinity;
+    const playerDist = playerHit?.dist ?? Infinity;
+
+    // The shot event carries the TRUE hit distance so tracers stop at
+    // the impact point instead of streaking to max range.
+    const hitDist = Math.min(blockDist, terrainDist ?? Infinity, playerDist);
+    this.events.emit("shot", {
+      origin: this.tmpOrigin,
+      direction: this.tmpDir,
+      dist: Number.isFinite(hitDist) ? hitDist : WEAPON.range,
+    });
+
+    if (playerHit && playerDist <= Math.min(blockDist, terrainDist ?? Infinity)) {
+      this.events.emit("playerHit", {
+        avatarId: playerHit.avatarId,
+        point: playerHit.point,
+        damage: RIFLE_DAMAGE,
+      });
+      return;
+    }
 
     if (blockHit && blockDist <= (terrainDist ?? Infinity)) {
       this.events.emit("blocksDestroyed", { keys: [blockHit.key] });
@@ -182,39 +215,6 @@ export class Weapon implements GameSystem {
     }
   }
 
-  /**
-   * Step a ray against the heightfield; returns distance or null.
-   * Strictly bounded: the coarse march advances ≥ 0.4 m per iteration
-   * and the crossing is refined by a fixed 8-step bisection.
-   */
-  private marchTerrain(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number | null {
-    const p = this.tmpPoint;
-    const groundAt = (t: number) => {
-      p.copy(origin).addScaledVector(dir, t);
-      return p.y - Math.max(this.terrain.heightAt(p.x, p.z), WATER_LEVEL);
-    };
-
-    let prevT = 0;
-    let t = 0.5;
-    while (t < far) {
-      const clearance = groundAt(t);
-      if (clearance <= 0) {
-        // Crossed the surface in (prevT, t] — bisect to the hit point.
-        let lo = prevT;
-        let hi = t;
-        for (let i = 0; i < 8; i++) {
-          const mid = (lo + hi) / 2;
-          if (groundAt(mid) > 0) lo = mid;
-          else hi = mid;
-        }
-        return hi;
-      }
-      prevT = t;
-      // Bigger steps when far above the ground.
-      t += Math.max(0.4, Math.min(4, clearance * 0.6));
-    }
-    return null;
-  }
 
   private throwGrenade(ctx: FrameCtx) {
     const g = this.grenades.find((x) => !x.active);
@@ -255,6 +255,17 @@ export class Weapon implements GameSystem {
       // Only the thrower records destruction; peers receive the rows.
       const keys = this.buildings.keysInRadius(point, WEAPON.grenadeRadius);
       if (keys.length > 0) this.events.emit("blocksDestroyed", { keys });
+      // Splash damage with linear falloff — same authority model as
+      // destruction: the thrower reports, the server clamps.
+      const splash = this.playerTargets?.inRadius(point, WEAPON.grenadeRadius * 1.6) ?? [];
+      for (const target of splash) {
+        const falloff = 1 - target.dist / (WEAPON.grenadeRadius * 1.6);
+        this.events.emit("playerHit", {
+          avatarId: target.avatarId,
+          point: point.clone(),
+          damage: Math.max(10, Math.round(GRENADE_MAX_DAMAGE * falloff)),
+        });
+      }
     }
     this.events.emit("explosion", { point: point.clone(), radius: WEAPON.grenadeRadius });
     this.events.emit("shake", { strength: g.remote ? 0.18 : 0.35 });
@@ -270,8 +281,9 @@ export class Weapon implements GameSystem {
     }
     if (this.ammo === 0 && !this.reloading) this.startReload();
 
-    // Automatic fire.
+    // Automatic fire (suppressed while dead).
     if (
+      this.enabled &&
       this.firing &&
       !this.reloading &&
       this.ammo > 0 &&
@@ -280,10 +292,10 @@ export class Weapon implements GameSystem {
       this.fire(ctx);
     }
 
-    // Grenade throw (rate-limited).
+    // Grenade throw (rate-limited, suppressed while dead).
     if (this.queueGrenade) {
       this.queueGrenade = false;
-      if (ctx.time - this.lastGrenadeAt >= WEAPON.grenadeCooldownMs / 1000) {
+      if (this.enabled && ctx.time - this.lastGrenadeAt >= WEAPON.grenadeCooldownMs / 1000) {
         this.throwGrenade(ctx);
       }
     }

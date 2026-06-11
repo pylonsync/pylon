@@ -14,6 +14,7 @@ export interface Avatar {
   z: number;
   heading: number;
   pitch: number;
+  health?: number;
   lastSeenAt: string;
 }
 

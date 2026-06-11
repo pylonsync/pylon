@@ -25,6 +25,7 @@ export interface AvatarRow {
   z: number;
   heading: number;
   pitch: number;
+  health?: number | null;
   lastSeenAt: string;
 }
 
@@ -32,7 +33,57 @@ interface RemoteEntry {
   character: Character;
   cur: { x: number; y: number; z: number; heading: number; pitch: number };
   target: { x: number; y: number; z: number; heading: number; pitch: number };
+  healthBar: HealthBar;
   disposables: Array<{ dispose(): void }>;
+}
+
+/** Hit info from a ray-vs-player capsule test. */
+export interface PlayerHit {
+  avatarId: string;
+  userId: string;
+  point: THREE.Vector3;
+  dist: number;
+}
+
+/** Canvas-sprite health bar floating under the name tag. */
+class HealthBar {
+  readonly sprite: THREE.Sprite;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly tex: THREE.CanvasTexture;
+  private readonly mat: THREE.SpriteMaterial;
+  private shown = -1;
+
+  constructor() {
+    this.canvas = document.createElement("canvas");
+    this.canvas.width = 96;
+    this.canvas.height = 12;
+    this.tex = new THREE.CanvasTexture(this.canvas);
+    this.mat = new THREE.SpriteMaterial({ map: this.tex, depthWrite: false });
+    this.sprite = new THREE.Sprite(this.mat);
+    this.sprite.scale.set(0.9, 0.11, 1);
+    this.set(100);
+  }
+
+  /** Redraws only when the displayed value actually changes. */
+  set(health: number) {
+    const h = Math.round(Math.max(0, Math.min(100, health)));
+    if (h === this.shown) return;
+    this.shown = h;
+    const ctx = this.canvas.getContext("2d")!;
+    ctx.clearRect(0, 0, 96, 12);
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, 96, 12);
+    const pct = h / 100;
+    // Green → amber → red as health drains.
+    ctx.fillStyle = pct > 0.5 ? "#4ade5b" : pct > 0.25 ? "#eab308" : "#ef4444";
+    ctx.fillRect(2, 2, 92 * pct, 8);
+    this.tex.needsUpdate = true;
+  }
+
+  dispose() {
+    this.tex.dispose();
+    this.mat.dispose();
+  }
 }
 
 function makeNameSprite(name: string, color: string): { sprite: THREE.Sprite; disposables: Array<{ dispose(): void }> } {
@@ -66,6 +117,17 @@ export class RemotePlayers implements GameSystem {
 
   constructor(private readonly terrain: Terrain) {
     this.group.name = "remote-players";
+  }
+
+  /** World position of a remote player's gun muzzle (tracer anchor). */
+  muzzleWorldOf(userId: string): THREE.Vector3 | null {
+    for (const row of this.latest) {
+      if (row.userId !== userId) continue;
+      const entry = this.entries.get(row.id);
+      if (!entry) return null;
+      return entry.character.muzzle.getWorldPosition(new THREE.Vector3());
+    }
+    return null;
   }
 
   /** Kick a remote player's weapon (their shot just arrived). */
@@ -121,6 +183,11 @@ export class RemotePlayers implements GameSystem {
     character.group.add(tag.sprite);
     disposables.push(...tag.disposables);
 
+    const healthBar = new HealthBar();
+    healthBar.sprite.position.y = 0.42;
+    character.group.add(healthBar.sprite);
+    disposables.push(healthBar);
+
     character.group.position.set(row.x, row.y, row.z);
     this.group.add(character.group);
 
@@ -128,10 +195,75 @@ export class RemotePlayers implements GameSystem {
       character,
       cur: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
       target: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
+      healthBar,
       disposables,
     };
     this.entries.set(row.id, entry);
     return entry;
+  }
+
+  /**
+   * Ray vs every remote player's body capsule (eye at cur.y, soles
+   * ~1.62 below, radius 0.5 for the chunky build). Returns the nearest
+   * hit or null. Closest-approach math on the capsule's vertical
+   * segment — cheap enough to run per shot for dozens of players.
+   */
+  raycastPlayers(origin: THREE.Vector3, dir: THREE.Vector3, far: number): PlayerHit | null {
+    let best: PlayerHit | null = null;
+    const RADIUS = 0.5;
+    for (const [id, entry] of this.entries) {
+      const cx = entry.cur.x;
+      const cz = entry.cur.z;
+      const yLo = entry.cur.y - 1.62;
+      const yHi = entry.cur.y + 0.15;
+
+      // Parametrize: ray P(t) = O + tD; capsule axis Q(s) = (cx, yLo+s, cz).
+      // Solve closest approach between the two lines, clamp s to the
+      // segment, then check perpendicular distance.
+      const ox = origin.x - cx;
+      const oz = origin.z - cz;
+      // Horizontal quadratic: |(ox + t*dx, oz + t*dz)| = RADIUS.
+      const a = dir.x * dir.x + dir.z * dir.z;
+      const b = 2 * (ox * dir.x + oz * dir.z);
+      const c = ox * ox + oz * oz - RADIUS * RADIUS;
+      let t: number;
+      if (a < 1e-6) {
+        // Ray is vertical — inside the cylinder column or not.
+        if (c > 0) continue;
+        t = 0;
+      } else {
+        const disc = b * b - 4 * a * c;
+        if (disc < 0) continue;
+        t = (-b - Math.sqrt(disc)) / (2 * a);
+        if (t < 0 || t > far) continue;
+      }
+      const hitY = origin.y + dir.y * t;
+      if (hitY < yLo || hitY > yHi + RADIUS) continue;
+      if (!best || t < best.dist) {
+        const row = this.latest.find((r) => r.id === id);
+        best = {
+          avatarId: id,
+          userId: row?.userId ?? "",
+          point: new THREE.Vector3(origin.x + dir.x * t, hitY, origin.z + dir.z * t),
+          dist: t,
+        };
+      }
+    }
+    return best;
+  }
+
+  /** Remote players within `radius` of a point (grenade splash). */
+  playersInRadius(center: THREE.Vector3, radius: number): Array<{ avatarId: string; dist: number }> {
+    const out: Array<{ avatarId: string; dist: number }> = [];
+    for (const [id, entry] of this.entries) {
+      const d = Math.hypot(
+        entry.cur.x - center.x,
+        entry.cur.y - 0.8 - center.y, // body center, not eye
+        entry.cur.z - center.z,
+      );
+      if (d <= radius) out.push({ avatarId: id, dist: d });
+    }
+    return out;
   }
 
   private removeEntry(id: string) {
@@ -163,7 +295,7 @@ export class RemotePlayers implements GameSystem {
 
     // Interpolate toward targets.
     const lerp = 1 - Math.exp(-ctx.dt * 10);
-    for (const entry of this.entries.values()) {
+    for (const [id, entry] of this.entries) {
       const c = entry.cur;
       const t = entry.target;
       const prevX = c.x;
@@ -189,6 +321,9 @@ export class RemotePlayers implements GameSystem {
       // Interpolated velocity drives the walk cycle.
       const speed = ctx.dt > 0 ? Math.hypot(c.x - prevX, c.z - prevZ) / ctx.dt : 0;
       entry.character.animate(ctx.time, speed);
+      // Health bar follows the synced row.
+      const row = this.latest.find((r) => r.id === id);
+      if (row) entry.healthBar.set(row.health ?? 100);
     }
   }
 

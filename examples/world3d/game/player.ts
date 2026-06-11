@@ -26,6 +26,8 @@ export class Player implements GameSystem {
   sprinting = false;
   /** Over-the-shoulder by default; V toggles first-person. */
   viewMode: ViewMode = "third";
+  /** Death gate — movement input is ignored while down (look still works). */
+  controlsEnabled = true;
 
   private readonly velocity = new THREE.Vector3();
   private readonly tmpForward = new THREE.Vector3();
@@ -83,6 +85,13 @@ export class Player implements GameSystem {
     return Math.hypot(this.velocity.x, this.velocity.z);
   }
 
+  /** Hard relocate (respawn) — zeroes momentum so you don't carry
+   *  death-fall velocity into the new life. */
+  teleport(to: THREE.Vector3) {
+    this.position.copy(to);
+    this.velocity.set(0, 0, 0);
+  }
+
   isKeyDown(code: string): boolean {
     return this.keys.has(code);
   }
@@ -97,13 +106,15 @@ export class Player implements GameSystem {
     const waterEye = WATER_LEVEL + 0.55;
     this.swimming = feetTarget < waterEye;
 
-    // --- Movement input in view space ---
+    // --- Movement input in view space (zeroed while dead) ---
     let fwd = 0;
     let strafe = 0;
-    if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) fwd += 1;
-    if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) fwd -= 1;
-    if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) strafe += 1;
-    if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) strafe -= 1;
+    if (this.controlsEnabled) {
+      if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) fwd += 1;
+      if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) fwd -= 1;
+      if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) strafe += 1;
+      if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) strafe -= 1;
+    }
     const mag = Math.hypot(fwd, strafe);
     if (mag > 0) {
       fwd /= mag;

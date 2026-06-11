@@ -68,6 +68,12 @@ export interface GameStats {
   /** Player pose + remote dots for the minimap (world coords). */
   pose: { x: number; z: number; heading: number };
   remotes: Array<{ x: number; z: number; color: string }>;
+  /** Combat state for the HUD. */
+  health: number;
+  dead: boolean;
+  /** Monotonic counter — bumps every time the player takes damage, so
+   *  the HUD can flash without diffing health values. */
+  damageFlash: number;
 }
 
 /** Wire shape for fire-event broadcasts (kept terse — ~10 Hz/player). */
@@ -99,6 +105,11 @@ export class Game {
 
   private readonly selfRig: Character;
   private selfColorSet = false;
+  private selfHealth = 100;
+  private dead = false;
+  private respawnAt = 0;
+  private damageFlash = 0;
+  private readonly spawnPool: THREE.Vector3[] = [];
   private readonly aimTarget = new THREE.Vector3();
   private readonly camDir = new THREE.Vector3();
   private readonly muzzleWorld = new THREE.Vector3();
@@ -199,6 +210,14 @@ export class Game {
     this.remote = this.engine.add(new RemotePlayers(this.terrain));
     this.scene.add(this.remote.group);
 
+    // PvP wiring: the weapon resolves shots and grenade splash against
+    // remote player capsules (RemotePlayers is built after Weapon, so
+    // this hooks up post-construction).
+    this.weapon.playerTargets = {
+      raycast: (origin, dir, far) => this.remote.raycastPlayers(origin, dir, far),
+      inRadius: (center, radius) => this.remote.playersInRadius(center, radius),
+    };
+
     this.debris = this.engine.add(new Debris(this.terrain, this.textures.concrete));
     this.scene.add(this.debris.mesh);
 
@@ -212,12 +231,9 @@ export class Game {
     this.scene.add(this.selfRig.group);
 
     // --- Cross-system effects ---
-    const offShot = this.engine.events.on("shot", ({ origin, direction }) => {
-      const dist =
-        this.buildings.raycastDistance(origin, direction, 220) ?? 120;
-      // Tracer starts at the character's actual muzzle in third person
-      // (the camera sits 3.6 m behind the body), or just under the
-      // camera in first person.
+    const offShot = this.engine.events.on("shot", ({ origin, direction, dist }) => {
+      // Tracer runs muzzle → TRUE impact point (the weapon resolved
+      // dist against buildings + terrain before emitting).
       const muzzle =
         this.player.viewMode === "first"
           ? origin.clone().addScaledVector(direction, 1.2).add(new THREE.Vector3(0, -0.12, 0))
@@ -335,11 +351,12 @@ export class Game {
     return canvas;
   }
 
-  /** A dry, flattish, TREE-FREE spot — the third-person boom needs
-   *  ~4 m of clear air behind the player at spawn. */
+  /** Dry, flattish, TREE-FREE spots — the third-person boom needs
+   *  ~4 m of clear air behind the player. Collects a respawn pool;
+   *  returns the first as the initial spawn. */
   private pickSpawn(vegetation: Vegetation): THREE.Vector3 {
     const rng = makeRng(SEED ^ 0x5fa3);
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < 600 && this.spawnPool.length < 8; i++) {
       const x = rng.range(-120, 120);
       const z = rng.range(-120, 120);
       const h = this.terrain.heightAt(x, z);
@@ -349,10 +366,10 @@ export class Game {
         this.terrain.slopeAt(x, z) < 0.12 &&
         vegetation.clearOfTrees(x, z, 6)
       ) {
-        return new THREE.Vector3(x, h + 1.7, z);
+        this.spawnPool.push(new THREE.Vector3(x, h + 1.7, z));
       }
     }
-    return new THREE.Vector3(0, this.terrain.heightAt(0, 0) + 1.7, 0);
+    return this.spawnPool[0] ?? new THREE.Vector3(0, this.terrain.heightAt(0, 0) + 1.7, 0);
   }
 
   private spawnDestructionFx(removed: Array<{ key: string; center: THREE.Vector3 }>) {
@@ -383,14 +400,44 @@ export class Game {
 
   setAvatars(rows: AvatarRow[], selfUserId: string | null) {
     this.remote.setAvatars(rows, selfUserId);
+    if (!selfUserId) return;
+    const mine = rows.find((r) => r.userId === selfUserId);
+    if (!mine) return;
     // Tint the local body with our server-assigned color once known.
-    if (!this.selfColorSet && selfUserId) {
-      const mine = rows.find((r) => r.userId === selfUserId);
-      if (mine) {
-        this.selfRig.bodyMat.color.set(mine.color);
-        this.selfColorSet = true;
-      }
+    if (!this.selfColorSet) {
+      this.selfRig.bodyMat.color.set(mine.color);
+      this.selfColorSet = true;
     }
+    // Health is server-authoritative: damage lands on our row via
+    // other players' damageAvatar calls and arrives through the live
+    // query like any other change.
+    const health = mine.health ?? 100;
+    if (health < this.selfHealth) {
+      this.damageFlash++;
+      this.engine.events.emit("shake", { strength: 0.22 });
+    }
+    this.selfHealth = health;
+    if (health <= 0 && !this.dead) this.startDeath();
+  }
+
+  private startDeath() {
+    this.dead = true;
+    this.player.controlsEnabled = false;
+    this.weapon.enabled = false;
+    this.engine.events.emit("shake", { strength: 0.5 });
+    // Respawn handled in the frame loop 2.5 s from now.
+    this.respawnAt = performance.now() + 2500;
+  }
+
+  private finishRespawn() {
+    this.dead = false;
+    const spot =
+      this.spawnPool[Math.floor(Math.random() * this.spawnPool.length)] ?? this.spawnPoint;
+    this.player.teleport(spot);
+    this.player.controlsEnabled = true;
+    this.weapon.enabled = true;
+    this.selfHealth = 100; // optimistic; the server row confirms via sync
+    this.engine.events.emit("respawnRequested", {});
   }
 
   /** Register the outbound fire-event broadcaster (rooms WS relay). */
@@ -446,8 +493,19 @@ export class Game {
       return;
     }
     const direction = d.normalize();
-    const dist = this.buildings.raycastDistance(origin, direction, 220) ?? 120;
-    const muzzle = origin.clone().addScaledVector(direction, 0.9);
+    // The wire origin is the SHOOTER'S CAMERA (3.4 m behind their
+    // body in third person) — correct for the hit ray, wrong for the
+    // tracer start. Anchor the visual at their character's muzzle and
+    // clamp the end against buildings AND terrain so misses don't
+    // streak to the horizon.
+    const dist = Math.min(
+      this.buildings.raycastDistance(origin, direction, 220) ?? Infinity,
+      this.terrain.raycast(origin, direction, 220) ?? Infinity,
+      220,
+    );
+    const muzzle =
+      (fromUserId ? this.remote.muzzleWorldOf(fromUserId) : null) ??
+      origin.clone().addScaledVector(direction, 0.9);
     const hit = origin.clone().addScaledVector(direction, dist);
     this.particles.tracer(muzzle, hit);
     this.particles.spawn({
@@ -492,6 +550,9 @@ export class Game {
       this.lastFrameAt = now;
 
       const ctx = this.engine.tick(dt, this.camera, this.player.position);
+
+      // Death → respawn timer.
+      if (this.dead && now >= this.respawnAt) this.finishRespawn();
 
       // Third-person body follows the controller (origin at eye level,
       // same convention as remote characters). Hidden in first person.
@@ -567,6 +628,9 @@ export class Game {
             heading: this.player.yaw,
           },
           remotes: this.remote.minimapDots(),
+          health: this.selfHealth,
+          dead: this.dead,
+          damageFlash: this.damageFlash,
           ...netStats,
         });
       }

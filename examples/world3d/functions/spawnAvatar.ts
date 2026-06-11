@@ -60,6 +60,7 @@ export default mutation({
       z: clamp((args.z as number | undefined) ?? 0),
       heading: Math.random() * Math.PI * 2,
       pitch: 0,
+      health: 100,
       lastSeenAt: new Date().toISOString(),
     });
     return { id };

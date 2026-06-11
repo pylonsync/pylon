@@ -231,7 +231,9 @@ export function buildCharacter(color: string): Character {
       if (child !== muzzle) rifle.remove(child);
     }
     rifle.add(gun.clone(true));
-    muzzle.position.set(0, 0.03, -0.34);
+    // Gun model is normalized to 0.9 m centered on the grip — the
+    // nozzle sits at the far -Z end, where tracers must originate.
+    muzzle.position.set(0, 0.03, -0.48);
   });
 
   // Model state, populated when the template resolves.
@@ -275,21 +277,39 @@ export function buildCharacter(color: string): Character {
       }
     });
 
-    // The rifle stays on the aim pivot, repositioned to where the
-    // model's right hand sits. We deliberately do NOT parent it to the
-    // fist bone: this rig's bones carry a ~49× scale, every offset and
-    // spring stroke would need countering in bone-local units, and the
-    // hand path through the gun clips differ per animation — three
-    // rounds of invisible-gun debugging bought us that lesson. The
-    // pivot mount is meter-scaled, always visible, and pitches exactly
-    // with the aim; at this character's chunky proportions the hand
-    // reads as gripping it.
+    // Mount the rifle on the right fist BONE so it follows the hand
+    // through the walk/idle clips (a static pivot mount floats beside
+    // the body mid-stride). The rig's bones carry a ~49× scale, so
+    // both the rifle's scale AND its local offset are countered by the
+    // measured bone world scale — uncountered offsets put the gun 7 m
+    // away, which cost us a full debugging round.
     torsoBone = model.getObjectByName("Torso") ?? model.getObjectByName("Spine") ?? null;
     // Seed the post-mixer snapshot with the REST pose so the first
     // frame's restore doesn't zero an un-animated bone.
     if (torsoBone) torsoPostMixer.copy(torsoBone.quaternion);
-    rifle.position.set(0.34, -0.52, -0.32);
-    rifleBaseZ = rifle.position.z;
+    const fist =
+      model.getObjectByName("FistR") ??
+      model.getObjectByName("Fist_R") ??
+      model.getObjectByName("Fist.R");
+    if (fist) {
+      aimPivot.remove(rifle);
+      fist.add(rifle);
+      group.updateMatrixWorld(true);
+      const ws = new THREE.Vector3();
+      fist.getWorldScale(ws);
+      const inv = 1 / Math.max(1e-4, ws.x);
+      rifle.scale.setScalar(inv);
+      // Blender bones run +Y from joint to tip; a small slide along
+      // the bone seats the grip in the fist.
+      rifle.position.set(0, 0.12 * inv, 0);
+      rifle.rotation.set(Math.PI / 2, 0, 0);
+      rifleBaseZ = rifle.position.z;
+      rifleBaseRotX = rifle.rotation.x;
+      recoilStroke = 0.07 * inv;
+    } else {
+      rifle.position.set(0.3, -0.58, -0.28);
+      rifleBaseZ = rifle.position.z;
+    }
 
     // Animations: gun-ready gait set, crossfaded by speed.
     mixer = new THREE.AnimationMixer(model);

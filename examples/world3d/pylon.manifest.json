@@ -55,6 +55,12 @@
           "unique": false
         },
         {
+          "name": "health",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
           "name": "lastSeenAt",
           "type": "datetime",
           "optional": false,

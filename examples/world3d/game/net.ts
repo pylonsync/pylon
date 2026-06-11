@@ -24,7 +24,18 @@ export class Net implements GameSystem {
 
   private avatarId: string | null = null;
   private lastSentAt = 0;
-  private lastSent = { x: NaN, y: NaN, z: NaN, heading: NaN, pitch: NaN };
+  // Infinity, NOT NaN: the moved-gate compares |current - lastSent|,
+  // and every NaN comparison is false — a NaN seed made `moved` false
+  // FOREVER, so no client ever sent a single moveAvatar (the HUD's
+  // "sync 0/s" was telling us the whole time). Infinity makes the
+  // first comparison true and real deltas take over from there.
+  private lastSent = {
+    x: Infinity,
+    y: Infinity,
+    z: Infinity,
+    heading: Infinity,
+    pitch: Infinity,
+  };
   private readonly latencies: number[] = [];
   private mutationsInWindow: number[] = [];
   private pendingKeys: string[] = [];
@@ -38,6 +49,18 @@ export class Net implements GameSystem {
     // derived deterministically on every client (see buildings.ts).
     events.on("blocksDestroyed", ({ keys }) => {
       this.pendingKeys.push(...keys);
+    });
+    // Combat: the shooter reports hits; the server clamps damage and
+    // range-checks before touching the victim's row.
+    events.on("playerHit", ({ avatarId, damage }) => {
+      this.track(callFn("damageAvatar", { targetId: avatarId, amount: damage })).catch(() => {
+        // Out-of-range / target gone — the world view self-corrects.
+      });
+    });
+    // Death sequence finished locally → heal the row server-side.
+    events.on("respawnRequested", () => {
+      if (!this.avatarId) return;
+      this.track(callFn("respawnAvatar", { avatarId: this.avatarId })).catch(() => {});
     });
   }
 

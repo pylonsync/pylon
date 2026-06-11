@@ -25,6 +25,9 @@ const Avatar = entity(
     z: field.float(),
     heading: field.float(), // radians, y-axis rotation
     pitch: field.float(),   // radians, look up/down (drives remote aim pose)
+    // Optional so pre-combat rows don't break — clients treat null as
+    // full health. Written ONLY by server functions (damage/respawn).
+    health: field.float().optional(),
     lastSeenAt: field.datetime(),
   },
   {

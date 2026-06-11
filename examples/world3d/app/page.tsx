@@ -218,10 +218,11 @@ export default function IslandPage() {
         )}
       </div>
 
-      {/* Bottom-center: ammo + state */}
+      {/* Bottom-center: health + ammo + state */}
       {locked && stats && (
         <div className="pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 select-none text-center">
-          <div className="font-mono text-2xl font-semibold tracking-widest text-white/90">
+          <HealthBar health={stats.health} />
+          <div className="mt-2 font-mono text-2xl font-semibold tracking-widest text-white/90">
             {stats.reloading ? "RELOADING" : `${stats.ammo} / 30`}
           </div>
           {stats.swimming && (
@@ -229,6 +230,21 @@ export default function IslandPage() {
               swimming
             </div>
           )}
+        </div>
+      )}
+
+      {/* Red vignette pulse on incoming damage */}
+      {stats && <DamageFlash trigger={stats.damageFlash} />}
+
+      {/* Death overlay */}
+      {stats?.dead && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-red-950/40">
+          <div className="text-4xl font-bold uppercase tracking-[0.25em] text-red-200 drop-shadow-lg">
+            Eliminated
+          </div>
+          <div className="mt-3 font-mono text-sm tracking-widest text-red-200/70">
+            respawning…
+          </div>
         </div>
       )}
 
@@ -292,6 +308,53 @@ export default function IslandPage() {
 
       {game && userId && <SyncBridge game={game} userId={userId} />}
     </div>
+  );
+}
+
+/** Bottom-center health bar — green → amber → red as it drains. */
+function HealthBar({ health }: { health: number }) {
+  const pct = Math.max(0, Math.min(100, health));
+  const color = pct > 55 ? "#5ad05a" : pct > 25 ? "#e0b73c" : "#e04a3c";
+  return (
+    <div className="mx-auto w-56">
+      <div className="h-2.5 overflow-hidden rounded-full border border-white/25 bg-black/55">
+        <div
+          className="h-full rounded-full transition-[width] duration-200"
+          style={{ width: `${pct}%`, backgroundColor: color }}
+        />
+      </div>
+      <div className="mt-1 font-mono text-[11px] tabular-nums tracking-widest text-white/70">
+        {Math.round(pct)} HP
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Red vignette pulse keyed off the game's monotonic damage counter —
+ * every bump retriggers the fade regardless of the health value.
+ */
+function DamageFlash({ trigger }: { trigger: number }) {
+  const [visible, setVisible] = useState(false);
+  const lastRef = useRef(trigger);
+
+  useEffect(() => {
+    if (trigger === lastRef.current) return;
+    lastRef.current = trigger;
+    setVisible(true);
+    const t = setTimeout(() => setVisible(false), 350);
+    return () => clearTimeout(t);
+  }, [trigger]);
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 transition-opacity duration-300"
+      style={{
+        opacity: visible ? 1 : 0,
+        background:
+          "radial-gradient(ellipse at center, transparent 45%, rgba(190,20,20,0.45) 100%)",
+      }}
+    />
   );
 }
 

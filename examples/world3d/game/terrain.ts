@@ -176,6 +176,43 @@ export class Terrain {
     return 1 - this.normalAt(x, z).y;
   }
 
+  private readonly rayTmp = new THREE.Vector3();
+
+  /**
+   * Ray-march against the heightfield (clamped to sea level); returns
+   * the hit distance or null. Strictly bounded: the coarse march
+   * advances ≥ 0.4 m per iteration and the crossing is refined by a
+   * fixed 8-step bisection. Used by hitscan fire and tracer clamping.
+   */
+  raycast(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number | null {
+    const p = this.rayTmp;
+    const clearanceAt = (t: number) => {
+      p.copy(origin).addScaledVector(dir, t);
+      return p.y - Math.max(this.heightAt(p.x, p.z), WATER_LEVEL);
+    };
+
+    let prevT = 0;
+    let t = 0.5;
+    while (t < far) {
+      const clearance = clearanceAt(t);
+      if (clearance <= 0) {
+        // Crossed the surface in (prevT, t] — bisect to the hit point.
+        let lo = prevT;
+        let hi = t;
+        for (let i = 0; i < 8; i++) {
+          const mid = (lo + hi) / 2;
+          if (clearanceAt(mid) > 0) lo = mid;
+          else hi = mid;
+        }
+        return hi;
+      }
+      prevT = t;
+      // Bigger steps when far above the ground.
+      t += Math.max(0.4, Math.min(4, clearance * 0.6));
+    }
+    return null;
+  }
+
   /**
    * Heights packed for the water shader's shoreline foam: a single-
    * channel float texture sampled in world space.
