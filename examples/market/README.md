@@ -25,25 +25,27 @@ Next.js app, no separate realtime service.
 pylon dev
 ```
 
-Open <http://localhost:4321>. Browsing is public; **selling or making an
-offer needs an account** — real email/password auth, no verification email.
-A demo account is seeded and the login form is **prefilled** with it, so
-you're one click from a working session:
+Open <http://localhost:4321>. Browsing is public; **buying, selling, or
+making an offer needs an account** — real email/password auth, no
+verification email. A demo shopper is seeded and the login form is
+**prefilled** with it, so you're one click from a working session:
 
 ```
 demo@pylon.market  /  pylondemo123
 ```
 
-The first visit also seeds a dozen listings under that demo account. To see
-the full two-sided loop:
+The first visit seeds a catalog owned by a separate "Pylon Bazaar" seller
+(so the demo shopper has plenty of other people's listings to buy), plus a
+couple owned by the demo itself. Try it:
 
-1. Tab A (the demo seller): you already own the catalog — open one of your
-   listings and you'll see its offer inbox.
-2. Tab B (incognito): **Sign up** for a second account, open a listing, and
-   **Make an offer**.
-3. Tab A: the offer appears live under **My Market** → **Accept**. Both tabs
-   update instantly — the listing flips to *Sold*, the losing offers are
-   auto-declined.
+1. Sign in (prefilled) and open any Bazaar listing → **Buy now** for an
+   instant purchase, or **Make an offer** to negotiate. Either way the buyer
+   sees the result optimistically — no refresh.
+2. For the seller side: open a second tab (incognito) and **Sign up**, then
+   make an offer on one of the demo's own listings.
+3. Back in the first tab, the offer appears live under **My Market** →
+   **Accept**; the listing flips to *Sold* and the losing offers
+   auto-decline, in both tabs at once.
 
 ## How it's wired
 
