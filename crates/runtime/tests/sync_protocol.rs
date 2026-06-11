@@ -684,3 +684,97 @@ fn push_update_cannot_flip_readonly_field_for_non_admin() {
         "legit title edit must have applied: {pull_resp}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Robustness: a snapshot pull must bound rows SCANNED per request, not just
+// rows emitted. A data-dependent sparse policy (auth.userId == data.ownerId on
+// a large shared table where the caller owns few rows) passes the entity-scan
+// gate but drops most rows at the per-row read fence — so without a scan budget
+// the loop walks the entire table in one request (DB-egress / request-timeout
+// storm, then a never-converging since=0 re-snapshot). With the budget set
+// below the row count the pull paginates by scan progress and still converges.
+// ---------------------------------------------------------------------------
+#[test]
+fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
+    fn plain(name: &str) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }
+    }
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Shared".into(),
+        fields: vec![plain("ownerId"), plain("data")],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: true,
+    });
+    // Data-dependent per-row policy: not statically deniable, so the entity is
+    // scanned and filtered row-by-row — the path that scanned unboundedly.
+    manifest.policies.push(ManifestPolicy {
+        name: "shared_owner_read".into(),
+        entity: Some("Shared".into()),
+        allow_read: Some("auth.userId == data.ownerId".into()),
+        ..Default::default()
+    });
+
+    // Budget below the seeded row count forces the scan to paginate.
+    unsafe {
+        std::env::set_var("PYLON_SNAPSHOT_SCAN_BUDGET", "50");
+    }
+
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    // 60 rows owned by someone else — the guest matches none of them.
+    for i in 0..60 {
+        rt.insert(
+            "Shared",
+            &serde_json::json!({ "ownerId": "someone-else", "data": format!("d{i}") }),
+        )
+        .expect("seed shared");
+    }
+    let port = start_server(rt);
+    let token = mint_guest(port); // userId != "someone-else"
+
+    // Page 1: pre-fix this walks all 60 in one request → has_more=false. With
+    // the budget it stops at 50 scanned and returns a continuation token.
+    let (s1, b1) = http(port, "GET", "/api/sync/pull?since=0", Some(&token), None);
+    assert_eq!(s1, 200, "page1: {b1}");
+    let r1: Value = serde_json::from_str(&b1).unwrap();
+    assert_eq!(
+        r1["has_more"], true,
+        "scan budget must paginate a sparse scan, not walk the whole table: {b1}"
+    );
+    assert_eq!(
+        r1["cursor"]["last_seq"], 0,
+        "cursor stays 0 while paginating: {b1}"
+    );
+    let token_after = r1["snapshot_after"]
+        .as_str()
+        .expect("continuation token on page 1")
+        .to_string();
+
+    // Page 2: resume — scans the remaining 10 and converges.
+    let (s2, b2) = http(
+        port,
+        "GET",
+        &format!("/api/sync/pull?since=0&snapshot_after={token_after}"),
+        Some(&token),
+        None,
+    );
+    assert_eq!(s2, 200, "page2: {b2}");
+    let r2: Value = serde_json::from_str(&b2).unwrap();
+    assert_eq!(
+        r2["has_more"], false,
+        "snapshot must converge once the table is fully scanned: {b2}"
+    );
+}

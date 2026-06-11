@@ -143,9 +143,25 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         .and_then(|v| v.get("s").and_then(|s| s.as_u64()))
         .unwrap_or_else(|| ctx.change_log.current_seq());
 
+    // Per-request scanned-row budget. SNAPSHOT_BATCH_LIMIT bounds rows
+    // EMITTED, but a data-dependent sparse policy (e.g. `auth.userId ==
+    // data.ownerId` on a large shared table) passes `check_entity_scan` and is
+    // walked row-by-row, with most rows dropped at the per-row `check_entity_read`
+    // fence — so `changes.len()` never reaches the emit limit and the loop would
+    // scan the whole table in one request (DB-egress / request-timeout storm,
+    // then a never-converging since=0 re-snapshot). Bound rows TOUCHED, not just
+    // rows passed: break with a `snapshot_after` continuation once the budget is
+    // hit so pagination is bounded by scan progress. Env-tunable for ops.
+    let raw_scan_budget: usize = std::env::var("PYLON_SNAPSHOT_SCAN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50_000);
+
     let manifest = ctx.store.manifest();
     let auth_user = &manifest.auth.user;
     let mut changes: Vec<ChangeEvent> = Vec::new();
+    let mut scanned: usize = 0;
     let mut next_after: Option<(String, Option<String>)> = None;
     let resume_entity = snapshot_after.as_ref().map(|c| c.0.clone());
     let resume_after_id = snapshot_after.as_ref().and_then(|c| c.1.clone());
@@ -257,34 +273,42 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                     continue;
                 }
                 entity_after = Some(row_id.clone());
-                if !matches!(
+                scanned += 1;
+                if matches!(
                     ctx.policy_engine
                         .check_entity_read(&entity.name, ctx.auth_ctx, Some(&row)),
                     pylon_policy::PolicyResult::Allowed
                 ) {
-                    continue;
+                    // Apply both projections in one pass: User entity
+                    // allowlist + `serverOnly` field strip. Without the
+                    // second, fields like `Org.stripeCustomerId.serverOnly()`
+                    // leak through the snapshot path even though
+                    // `/api/entities` enforces them.
+                    let projected_data = Some(crate::project_row_for_wire(
+                        manifest,
+                        auth_user,
+                        &entity.name,
+                        row,
+                    ));
+                    changes.push(ChangeEvent {
+                        seq: snapshot_seq,
+                        entity: entity.name.clone(),
+                        row_id,
+                        kind: ChangeKind::Insert,
+                        data: projected_data,
+                        prev_data: None,
+                        timestamp: String::new(),
+                    });
+                    if changes.len() >= SNAPSHOT_BATCH_LIMIT {
+                        next_after = Some((entity.name.clone(), entity_after.clone()));
+                        break 'outer;
+                    }
                 }
-                // Apply both projections in one pass: User entity
-                // allowlist + `serverOnly` field strip. Without the
-                // second, fields like `Org.stripeCustomerId.serverOnly()`
-                // leak through the snapshot path even though
-                // `/api/entities` enforces them.
-                let projected_data = Some(crate::project_row_for_wire(
-                    manifest,
-                    auth_user,
-                    &entity.name,
-                    row,
-                ));
-                changes.push(ChangeEvent {
-                    seq: snapshot_seq,
-                    entity: entity.name.clone(),
-                    row_id,
-                    kind: ChangeKind::Insert,
-                    data: projected_data,
-                    prev_data: None,
-                    timestamp: String::new(),
-                });
-                if changes.len() >= SNAPSHOT_BATCH_LIMIT {
+                // Bound rows TOUCHED per request — checked after emitting the
+                // current row (so a passing row at the boundary is never
+                // skipped). A sparse data-dependent policy that drops most rows
+                // paginates by scan progress instead of walking the whole table.
+                if scanned >= raw_scan_budget {
                     next_after = Some((entity.name.clone(), entity_after.clone()));
                     break 'outer;
                 }
