@@ -1,4 +1,4 @@
-import { mutation } from "@pylonsync/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 // A handful of believable listings so the marketplace isn't empty on first
 // run. Idempotent: seeds only when the catalog is empty, so the browse page
@@ -27,21 +27,32 @@ const DEMO: Array<{
 ];
 
 export default mutation({
-  // Defaults to auth: "user" — seeds the catalog owned by the caller. The
-  // marketplace bootstrap calls this once as the demo account, so signing in
-  // as the demo user shows a real inventory to manage.
-  args: {},
-  async handler(ctx) {
+  // Defaults to auth: "user" — seeds a slice of the catalog owned by the
+  // caller. The bootstrap calls this twice: once as a "bazaar" seller for the
+  // bulk of the catalog (so the demo buyer can bid on it), and once as the
+  // demo account for a couple of its own listings.
+  args: {
+    start: v.optional(v.number()),
+    end: v.optional(v.number()),
+  },
+  async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
-    const existing = await ctx.db.list("Listing");
-    if (existing.length > 0) return { seeded: 0 };
+
+    // Per-caller idempotency: skip if THIS seller already has listings, so the
+    // two seed calls (and any reloads) don't duplicate.
+    const all = await ctx.db.list("Listing");
+    if (all.some((l) => l.sellerId === ctx.auth.userId)) return { seeded: 0 };
+
+    const start = args.start ?? 0;
+    const end = args.end ?? DEMO.length;
+    const slice = DEMO.slice(start, end);
 
     // Stagger createdAt so the grid + ticker have a believable order. The
     // seller id is the caller — `Listing.sellerId` is `field.owner()`, so the
     // framework would reject any other value. `seller` stays a display name.
     const now = Date.now();
     let n = 0;
-    for (const d of DEMO) {
+    for (const d of slice) {
       await ctx.db.insert("Listing", {
         sellerId: ctx.auth.userId,
         sellerName: d.seller,
@@ -52,7 +63,7 @@ export default mutation({
         condition: d.condition,
         status: "active",
         seed: d.seed,
-        createdAt: new Date(now - n * 7 * 60_000).toISOString(),
+        createdAt: new Date(now - (start + n) * 7 * 60_000).toISOString(),
       });
       n++;
     }

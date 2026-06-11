@@ -202,6 +202,39 @@ function BuyerView({
     }),
   });
 
+  // Buy now: same optimistic pattern, but the ghost is an *accepted* offer at
+  // the list price — the buyer sees "🎉 Accepted" instantly while the server
+  // marks the listing sold + declines other bids.
+  const buyNow = db.useMutation<{ listingId: string; buyerName: string }, { id: string }>(
+    "buyNow",
+    {
+      optimistic: (_args, ctx) => ({
+        entity: "Offer",
+        data: {
+          id: ctx.id,
+          listingId,
+          listingTitle: title,
+          sellerId,
+          buyerId: userId,
+          buyerName: name,
+          amount: suggestedPrice,
+          message: "Bought at list price",
+          status: "accepted",
+          createdAt: ctx.now,
+        },
+      }),
+    },
+  );
+
+  async function buy() {
+    setErr(null);
+    try {
+      await buyNow.mutate({ listingId, buyerName: name });
+    } catch (e) {
+      setErr((e as Error).message ?? "Could not complete the purchase.");
+    }
+  }
+
   // `myOffer` now includes the optimistic ghost, so this flips the instant
   // the offer is made.
   if (myOffer) {
@@ -253,36 +286,62 @@ function BuyerView({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-3 rounded-lg border bg-card p-4">
-      <h2 className="font-semibold">Make an offer</h2>
-      <div className="flex items-center gap-2">
-        <span className="text-muted-foreground">$</span>
-        <Input
-          type="number"
-          min="1"
-          step="1"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          className="w-32"
-          aria-label="Offer amount"
-        />
+    <div className="space-y-4 rounded-lg border bg-card p-4">
+      <div className="space-y-2">
+        <Button
+          type="button"
+          onClick={buy}
+          disabled={buyNow.loading}
+          className="w-full"
+        >
+          {buyNow.loading ? "Buying…" : `Buy now — ${money(suggestedPrice)}`}
+        </Button>
+        <p className="text-center text-xs text-muted-foreground">
+          Instant purchase at the asking price.
+        </p>
       </div>
-      <Textarea
-        placeholder="Add a note (optional)…"
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        rows={2}
-      />
-      {err ? <p className="text-sm text-destructive">{err}</p> : null}
-      <Button type="submit" disabled={makeOffer.loading} className="w-full">
-        {makeOffer.loading
-          ? "Sending…"
-          : `Offer ${money(Number.parseFloat(amount) || 0)}`}
-      </Button>
-      <p className="text-center text-xs text-muted-foreground">
-        You're bidding as <span className="font-medium">{name}</span>
-      </p>
-    </form>
+
+      <div className="flex items-center gap-3 text-xs uppercase tracking-wide text-muted-foreground">
+        <span className="h-px flex-1 bg-border" />
+        or make an offer
+        <span className="h-px flex-1 bg-border" />
+      </div>
+
+      <form onSubmit={submit} className="space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">$</span>
+          <Input
+            type="number"
+            min="1"
+            step="1"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="w-32"
+            aria-label="Offer amount"
+          />
+        </div>
+        <Textarea
+          placeholder="Add a note (optional)…"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          rows={2}
+        />
+        {err ? <p className="text-sm text-destructive">{err}</p> : null}
+        <Button
+          type="submit"
+          variant="outline"
+          disabled={makeOffer.loading}
+          className="w-full"
+        >
+          {makeOffer.loading
+            ? "Sending…"
+            : `Offer ${money(Number.parseFloat(amount) || 0)}`}
+        </Button>
+        <p className="text-center text-xs text-muted-foreground">
+          You're bidding as <span className="font-medium">{name}</span>
+        </p>
+      </form>
+    </div>
   );
 }
 

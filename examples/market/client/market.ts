@@ -7,14 +7,25 @@ import { init, configureClient, callFn, storageKey } from "@pylonsync/react";
 
 export const APP_NAME = "market";
 
-// Prefilled demo account. Seeded on first load (registered if missing) so the
-// login form is one click away from a working session — and so the browse
-// catalog has a real owner you can sign in as to manage offers.
+// Prefilled demo account — the shopper you sign in as. Owns a couple of its
+// own listings so "My Market" isn't empty, but NOT the bulk of the catalog,
+// so it can actually buy + bid on things.
 export const DEMO = {
   email: "demo@pylon.market",
   password: "pylondemo123",
-  name: "Demo Seller",
+  name: "Demo Shopper",
 } as const;
+
+// The seed seller that owns most of the catalog. Nobody logs in as this; it
+// exists so the demo shopper has plenty of other people's listings to buy.
+const BAZAAR = {
+  email: "bazaar@pylon.market",
+  password: "bazaarseed123",
+  name: "Pylon Bazaar",
+} as const;
+
+// How many of the seeded listings the bazaar owns; the rest go to the demo.
+const BAZAAR_COUNT = 10;
 
 export interface Listing {
   id: string;
@@ -221,49 +232,85 @@ export function cacheDisplayName(name: string): void {
   if (name) localStorage.setItem(DISPLAY_NAME, name);
 }
 
-/**
- * Make sure the demo account exists and the catalog is seeded under it — so
- * the prefilled login is one click from a working session, and signing in as
- * the demo seller shows a real inventory to manage. Idempotent and best-effort:
- * any failure (already registered, offline) is swallowed.
- *
- * The demo token is used transiently to seed and is then discarded — it does
- * NOT become the visitor's active session. They stay anonymous until they
- * choose to sign in.
- */
-export async function ensureDemoSeed(): Promise<void> {
-  let token: string | undefined;
+/** Register an account (or log in if it already exists). Returns its token,
+ *  or undefined on failure. Used transiently for seeding — the returned token
+ *  is NOT persisted as the visitor's session. */
+async function ensureAccount(
+  email: string,
+  password: string,
+  name: string,
+): Promise<string | undefined> {
   try {
     const reg = await fetch("/api/auth/password/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: DEMO.email,
-        password: DEMO.password,
-        displayName: DEMO.name,
-      }),
+      body: JSON.stringify({ email, password, displayName: name }),
     });
-    if (reg.ok) {
-      token = ((await reg.json()) as AuthResponse).token;
-    } else {
-      // Already registered (or other) — log in to get a token for seeding.
-      const login = await fetch("/api/auth/password/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: DEMO.email, password: DEMO.password }),
-      });
-      if (login.ok) token = ((await login.json()) as AuthResponse).token;
+    if (reg.ok) return ((await reg.json()) as AuthResponse).token;
+    const login = await fetch("/api/auth/password/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (login.ok) return ((await login.json()) as AuthResponse).token;
+  } catch {
+    /* offline — caller swallows */
+  }
+  return undefined;
+}
+
+/**
+ * Make sure the demo accounts exist and the catalog is seeded — so the
+ * prefilled login is one click from a working session that can actually buy
+ * and sell. Idempotent and best-effort: any failure is swallowed.
+ *
+ * Two accounts are seeded:
+ *   - **bazaar** owns the bulk of the catalog, so the demo shopper has other
+ *     people's listings to buy + bid on (you can't buy your own);
+ *   - **demo** (the prefilled login) owns a couple of its own listings so
+ *     "My Market" has something in it.
+ *
+ * Both tokens are used transiently to seed and then discarded — the visitor
+ * stays anonymous (read-only) until they choose to sign in.
+ */
+// Shared in-flight promise so the many islands that mount MarketProvider on
+// one page (ticker, header, SeedOnEmpty) all await the SAME seed run instead
+// of each firing their own — that flood was tripping the login rate limit,
+// and a premature reload could abort it mid-flight.
+let seedPromise: Promise<void> | null = null;
+
+export function ensureDemoSeed(): Promise<void> {
+  // Already seeded in a previous visit (accounts + catalog persist
+  // server-side) — nothing to do.
+  if (localStorage.getItem("market:demo-seeded") === "1") return Promise.resolve();
+  if (seedPromise) return seedPromise;
+
+  seedPromise = (async () => {
+    const bazaarToken = await ensureAccount(
+      BAZAAR.email,
+      BAZAAR.password,
+      BAZAAR.name,
+    );
+    if (bazaarToken) {
+      await callFn(
+        "seedMarket",
+        { start: 0, end: BAZAAR_COUNT },
+        { token: bazaarToken },
+      );
     }
-  } catch {
-    return;
-  }
-  if (!token) return;
-  try {
-    // Seeds the catalog owned by the demo user (seedMarket stamps sellerId
-    // from the caller). Idempotent server-side. Uses the demo token WITHOUT
-    // persisting it as the active session.
-    await callFn("seedMarket", {}, { token });
-  } catch {
-    // Catalog already seeded, or seeding raced — ignore.
-  }
+
+    const demoToken = await ensureAccount(DEMO.email, DEMO.password, DEMO.name);
+    if (demoToken) {
+      await callFn("seedMarket", { start: BAZAAR_COUNT }, { token: demoToken });
+    }
+
+    // Mark done only AFTER a successful pass, so a failed/partial run retries
+    // on the next load instead of being permanently skipped.
+    localStorage.setItem("market:demo-seeded", "1");
+  })().catch(() => {
+    // Allow a later attempt to retry from scratch.
+    seedPromise = null;
+  });
+
+  return seedPromise;
 }
