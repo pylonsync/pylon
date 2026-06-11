@@ -70,74 +70,93 @@ async function main() {
 
 	// 2. Install deps.
 	//
-	//    First neutralize `workspace:*` protocol specifiers. A deploy source is
-	//    a single app carved out of a monorepo (an `examples/*` app, a customer
-	//    monorepo package, …), so its `package.json` can still reference sibling
-	//    workspace packages — most commonly `"@pylonsync/*": "workspace:*"`.
-	//    `bun install` cannot resolve `workspace:` without the workspace root,
-	//    so it ABORTS before installing the app's real npm deps (clsx,
-	//    lucide-react, …). The app then boots with a half-populated
-	//    node_modules and its SSR client bundle fails to resolve those modules.
-	//    Rewrite each `workspace:` spec to the published SDK version (passed by
-	//    the control plane as PYLON_SDK_VERSION, matching the runtime image;
-	//    falls back to "latest") so they resolve from npm like everything else.
-	const pkgPath = `${SRC}/package.json`;
-	let rewroteWorkspace = false;
-	try {
-		const pkg = (await Bun.file(pkgPath).json()) as Record<string, unknown>;
-		const sdkVersion = process.env.PYLON_SDK_VERSION || "latest";
-		for (const field of [
-			"dependencies",
-			"devDependencies",
-			"optionalDependencies",
-			"peerDependencies",
-		]) {
-			const deps = pkg[field] as Record<string, string> | undefined;
-			if (!deps) continue;
-			for (const [name, spec] of Object.entries(deps)) {
-				if (typeof spec === "string" && spec.startsWith("workspace:")) {
-					deps[name] = sdkVersion;
-					rewroteWorkspace = true;
+	//    PYLON_APP_SUBDIR (set by the control plane) marks a MONOREPO deploy: the
+	//    source is the whole (pruned) workspace and the app lives in a subdir.
+	//    Two very different install strategies:
+	const appSubdir = (process.env.PYLON_APP_SUBDIR ?? "").replace(
+		/^\/+|\/+$/g,
+		"",
+	);
+	const isWorkspaceDeploy = appSubdir.length > 0;
+	// Directory the app's own build script (if any) runs in.
+	const appDir = isWorkspaceDeploy ? `${SRC}/${appSubdir}` : SRC;
+
+	if (isWorkspaceDeploy) {
+		// Workspace deploy: install ONCE at the workspace root. bun resolves every
+		// `workspace:*` specifier against the bundled sibling packages (no npm
+		// round-trip, no version skew — this is exactly how it works in local dev)
+		// and hoists them into the root node_modules. The app, built/booted from
+		// its subdir, resolves them by walking up. The lockfile that rode along
+		// matches the (rewritten) pruned workspace, but we don't force --frozen:
+		// the pruning may have trimmed members, so let bun re-resolve cleanly.
+		console.log(`[builder] monorepo workspace deploy — app subdir: ${appSubdir}`);
+		await sh(["bun", "install"], SRC);
+	} else {
+		// Single-app deploy: the source is one app carved out of a monorepo, so
+		// its package.json can still reference sibling workspace packages —
+		// `"@pylonsync/*": "workspace:*"`. With no workspace root, `bun install`
+		// can't resolve `workspace:` and ABORTS before installing the app's real
+		// npm deps (clsx, lucide-react, …), leaving a half-populated node_modules.
+		// Rewrite each `workspace:` spec to the published SDK version (PYLON_SDK_-
+		// VERSION, matching the runtime image; falls back to "latest") so they
+		// resolve from npm. NOTE: this only works for PUBLISHED workspace deps;
+		// an unpublished one (e.g. examples/_shared) needs the monorepo path above.
+		const pkgPath = `${SRC}/package.json`;
+		let rewroteWorkspace = false;
+		try {
+			const pkg = (await Bun.file(pkgPath).json()) as Record<string, unknown>;
+			const sdkVersion = process.env.PYLON_SDK_VERSION || "latest";
+			for (const field of [
+				"dependencies",
+				"devDependencies",
+				"optionalDependencies",
+				"peerDependencies",
+			]) {
+				const deps = pkg[field] as Record<string, string> | undefined;
+				if (!deps) continue;
+				for (const [name, spec] of Object.entries(deps)) {
+					if (typeof spec === "string" && spec.startsWith("workspace:")) {
+						deps[name] = sdkVersion;
+						rewroteWorkspace = true;
+					}
 				}
 			}
+			if (rewroteWorkspace) {
+				await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
+				console.log(
+					`[builder] rewrote workspace:* deps → ${sdkVersion} (standalone install)`,
+				);
+			}
+		} catch (err) {
+			console.error(`[builder] could not pre-process package.json: ${err}`);
 		}
-		if (rewroteWorkspace) {
-			await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
-			console.log(
-				`[builder] rewrote workspace:* deps → ${sdkVersion} (standalone install)`,
-			);
-		}
-	} catch (err) {
-		console.error(`[builder] could not pre-process package.json: ${err}`);
-	}
 
-	//    Install (frozen — the lockfile is the contract; a drift is a real error
-	//    the customer must resolve, not silently re-resolved). EXCEPT when we
-	//    rewrote workspace specifiers: the lockfile that rode along is the
-	//    monorepo's — it references sibling packages this single-app tree
-	//    doesn't contain, so a frozen install against it always fails. Drop it
-	//    so bun re-resolves cleanly from the rewritten package.json.
-	if (rewroteWorkspace) {
-		await rm(`${SRC}/bun.lock`, { force: true });
-		await rm(`${SRC}/bun.lockb`, { force: true });
+		// Install (frozen — the lockfile is the contract). EXCEPT when we rewrote
+		// workspace specifiers: the lockfile that rode along is the monorepo's, so
+		// a frozen install against it always fails. Drop it so bun re-resolves.
+		if (rewroteWorkspace) {
+			await rm(`${SRC}/bun.lock`, { force: true });
+			await rm(`${SRC}/bun.lockb`, { force: true });
+		}
+		const hasLock =
+			!rewroteWorkspace &&
+			((await Bun.file(`${SRC}/bun.lock`).exists()) ||
+				(await Bun.file(`${SRC}/bun.lockb`).exists()));
+		await sh(
+			hasLock ? ["bun", "install", "--frozen-lockfile"] : ["bun", "install"],
+			SRC,
+		);
 	}
-	const hasLock =
-		!rewroteWorkspace &&
-		((await Bun.file(`${SRC}/bun.lock`).exists()) ||
-			(await Bun.file(`${SRC}/bun.lockb`).exists()));
-	await sh(
-		hasLock ? ["bun", "install", "--frozen-lockfile"] : ["bun", "install"],
-		SRC,
-	);
 
 	// 3. Run the app's build script if it declares one (frontend build,
-	//    build:content hooks, etc.).
-	const pkg = await Bun.file(`${SRC}/package.json`)
+	//    build:content hooks, etc.). For a workspace deploy this is the app's
+	//    OWN package.json in its subdir, run from there.
+	const pkg = await Bun.file(`${appDir}/package.json`)
 		.json()
 		.catch(() => ({}) as Record<string, unknown>);
 	const scripts = (pkg as { scripts?: Record<string, string> }).scripts ?? {};
 	if (scripts.build) {
-		await sh(["bun", "run", "build"], SRC);
+		await sh(["bun", "run", "build"], appDir);
 	} else {
 		console.log("[builder] no build script — skipping");
 	}

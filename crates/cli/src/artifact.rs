@@ -129,7 +129,31 @@ pub fn prepare() -> Result<Option<PathBuf>, String> {
              (need 64 lowercase hex chars); refusing to boot an unverified bundle"
         ));
     }
-    ensure(&cfg).map(Some)
+    let root = ensure(&cfg)?;
+
+    // Monorepo deploy: the bundle is the whole workspace (so `workspace:*` deps
+    // resolve), and the app lives in a subdirectory. Chdir into it — node
+    // resolution then walks UP to the workspace-root `node_modules` for hoisted
+    // deps, and `app.ts` / `app/` are found relative to cwd. PYLON_APP_SUBDIR is
+    // set by the trusted control plane (the app's path relative to the workspace
+    // root); unset → single-app bundle, run at the extracted root.
+    let Some(subdir) = non_empty(std::env::var("PYLON_APP_SUBDIR").ok()) else {
+        return Ok(Some(root));
+    };
+    let subdir = subdir.trim_matches('/');
+    if subdir.is_empty() || subdir.split('/').any(|c| c == "..") {
+        return Err(format!(
+            "PYLON_APP_SUBDIR={subdir:?} is invalid (empty or contains '..')"
+        ));
+    }
+    let app_dir = root.join(subdir);
+    if !app_dir.is_dir() {
+        return Err(format!(
+            "PYLON_APP_SUBDIR={subdir:?} does not exist in the deployed bundle at {}",
+            root.display()
+        ));
+    }
+    Ok(Some(app_dir))
 }
 
 fn ensure(cfg: &Cfg) -> Result<PathBuf, String> {

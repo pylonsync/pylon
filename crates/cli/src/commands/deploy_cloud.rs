@@ -94,7 +94,25 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         println!("→ Packaging project source...");
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let tarball = match build_tarball(&cwd) {
+    let workspace = detect_workspace(&cwd);
+    if let Some(ws) = &workspace {
+        if !json_mode {
+            println!(
+                "  monorepo workspace — packing {} (app: {}) + {} workspace dep(s)",
+                ws.root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace"),
+                ws.app_subdir,
+                ws.member_dirs.len().saturating_sub(1),
+            );
+        }
+    }
+    let tarball = match workspace
+        .as_ref()
+        .map(build_workspace_tarball)
+        .unwrap_or_else(|| build_tarball(&cwd))
+    {
         Ok(t) => t,
         Err(e) => {
             output::print_error(&format!("Failed to package source: {e}"));
@@ -130,6 +148,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let body = UploadRequest {
         project_slug: project_slug.clone(),
         tarball_base64: STANDARD.encode(&tarball),
+        app_subdir: workspace.as_ref().map(|w| w.app_subdir.clone()),
     };
     let resp: UploadResponse = match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body)
     {
@@ -174,6 +193,11 @@ struct UploadRequest {
     /// Base64-encoded gzipped tar of the project source.
     #[serde(rename = "tarballBase64")]
     tarball_base64: String,
+    /// For a monorepo deploy: the app's path relative to the packed workspace
+    /// root (e.g. "examples/market"). Absent for a single-app deploy. The
+    /// builder installs at the workspace root and the runtime chdirs here.
+    #[serde(rename = "appSubdir", skip_serializing_if = "Option::is_none")]
+    app_subdir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -272,6 +296,198 @@ fn build_tarball(root: &Path) -> io::Result<Vec<u8>> {
         tar.into_inner()?.finish()?;
     }
     Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Monorepo deploy: pack the pruned workspace, not just the app dir.
+//
+// An app inside a bun/npm workspace can depend on sibling packages via
+// `workspace:*`. Carved out alone, those don't resolve — an UNPUBLISHED one
+// (e.g. examples/_shared) can't be recovered at all. The fix: ship the
+// workspace so `bun install` resolves `workspace:*` locally (the builder runs
+// the install at the workspace root and the runtime chdirs into the app
+// subdir). We pack only the app + its TRANSITIVE workspace-dep closure so a
+// giant monorepo's unrelated members don't bloat the upload.
+// ---------------------------------------------------------------------------
+
+/// The app at `app_subdir` inside the workspace rooted at `root`, plus
+/// `member_dirs` (the app + the workspace packages it transitively depends on).
+struct WorkspaceDeploy {
+    root: PathBuf,
+    app_subdir: String,
+    member_dirs: Vec<PathBuf>,
+}
+
+/// Resolve the workspace context for `app_dir`, or `None` if it's a standalone
+/// app (no ancestor declares `workspaces`, or it IS the workspace root).
+fn detect_workspace(app_dir: &Path) -> Option<WorkspaceDeploy> {
+    let app_dir = app_dir.canonicalize().ok()?;
+    let (root, patterns) = find_workspace_root(&app_dir)?;
+    let app_subdir = app_dir
+        .strip_prefix(&root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if app_subdir.is_empty() {
+        return None; // the app IS the workspace root — handled as standalone
+    }
+    let by_name = enumerate_members(&root, &patterns);
+    // BFS the transitive workspace-dep closure from the app.
+    let mut needed: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut queue = vec![app_dir.clone()];
+    needed.insert(app_dir.clone());
+    while let Some(dir) = queue.pop() {
+        for dep in read_dep_names(&dir.join("package.json")) {
+            if let Some(dep_dir) = by_name.get(&dep) {
+                if needed.insert(dep_dir.clone()) {
+                    queue.push(dep_dir.clone());
+                }
+            }
+        }
+    }
+    Some(WorkspaceDeploy {
+        root,
+        app_subdir,
+        member_dirs: needed.into_iter().collect(),
+    })
+}
+
+/// Walk up from `start` for the nearest package.json with a non-empty
+/// `workspaces`. Returns (canonical root dir, glob patterns).
+fn find_workspace_root(start: &Path) -> Option<(PathBuf, Vec<String>)> {
+    for dir in start.ancestors() {
+        let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let patterns = workspaces_patterns(&v);
+        if !patterns.is_empty() {
+            return Some((dir.to_path_buf(), patterns));
+        }
+    }
+    None
+}
+
+/// `workspaces` is either `["pkgs/*"]` or `{ "packages": ["pkgs/*"] }`.
+fn workspaces_patterns(pkg: &serde_json::Value) -> Vec<String> {
+    let ws = &pkg["workspaces"];
+    let arr = if ws.is_array() {
+        ws.as_array()
+    } else {
+        ws.get("packages").and_then(|p| p.as_array())
+    };
+    arr.map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Expand every workspace pattern under `root` → map of package name → dir.
+fn enumerate_members(
+    root: &Path,
+    patterns: &[String],
+) -> std::collections::HashMap<String, PathBuf> {
+    let mut out = std::collections::HashMap::new();
+    for pat in patterns {
+        for dir in glob_dirs(root, pat) {
+            let Ok(dir) = dir.canonicalize() else { continue };
+            if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                        out.insert(name.to_string(), dir);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Minimal workspace glob — expands `*` segments (the only wildcard bun
+/// workspaces use: `packages/*`, `examples/*/web`).
+fn glob_dirs(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let mut frontier = vec![root.to_path_buf()];
+    for seg in pattern.split('/').filter(|s| !s.is_empty()) {
+        let mut next = Vec::new();
+        for base in &frontier {
+            if seg == "*" {
+                if let Ok(rd) = std::fs::read_dir(base) {
+                    for e in rd.flatten() {
+                        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            next.push(e.path());
+                        }
+                    }
+                }
+            } else {
+                let p = base.join(seg);
+                if p.is_dir() {
+                    next.push(p);
+                }
+            }
+        }
+        frontier = next;
+    }
+    frontier
+}
+
+/// dependency + devDependency + optionalDependency names from a package.json.
+fn read_dep_names(pkg: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(pkg) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for field in ["dependencies", "devDependencies", "optionalDependencies"] {
+        if let Some(obj) = v.get(field).and_then(|f| f.as_object()) {
+            names.extend(obj.keys().cloned());
+        }
+    }
+    names
+}
+
+/// Pack the pruned workspace: the root package.json (with `workspaces` narrowed
+/// to the packed members, so `bun install` doesn't look for trimmed ones) + each
+/// member dir at its workspace-relative path. No lockfile — the builder
+/// fresh-resolves the pruned set (the monorepo lock references trimmed members).
+fn build_workspace_tarball(ws: &WorkspaceDeploy) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let gz = GzEncoder::new(&mut buf, Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let gitignore = load_gitignore(&ws.root);
+
+        let root_pkg = rewrite_root_workspaces(&ws.root, &ws.member_dirs)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(root_pkg.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "package.json", root_pkg.as_slice())?;
+
+        for dir in &ws.member_dirs {
+            walk_into_tar(&mut tar, &ws.root, dir, &gitignore)?;
+        }
+        tar.into_inner()?.finish()?;
+    }
+    Ok(buf)
+}
+
+/// Root package.json with `workspaces` rewritten to the packed members' paths.
+fn rewrite_root_workspaces(root: &Path, members: &[PathBuf]) -> io::Result<Vec<u8>> {
+    let text = std::fs::read_to_string(root.join("package.json"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let rels: Vec<String> = members
+        .iter()
+        .filter_map(|d| d.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    v["workspaces"] = serde_json::json!(rels);
+    let mut out =
+        serde_json::to_vec_pretty(&v).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    out.push(b'\n');
+    Ok(out)
 }
 
 fn walk_into_tar<W: Write>(
@@ -378,4 +594,74 @@ fn count_tar_entries(tarball: &[u8]) -> io::Result<usize> {
         // when we drop the entry — no manual seek needed.
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod workspace_deploy_tests {
+    use super::*;
+    use std::fs;
+
+    fn write(p: &Path, body: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+    }
+
+    // app → @scope/lib (workspace) → (nothing). @scope/unused is a member but
+    // NOT a dep of app, so it must be pruned out.
+    fn fake_workspace(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pylon-ws-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        write(&root.join("package.json"), r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#);
+        write(&root.join("packages/app/package.json"),
+            r#"{"name":"@scope/app","dependencies":{"@scope/lib":"workspace:*","lodash":"^4"}}"#);
+        write(&root.join("packages/app/app.ts"), "// app");
+        write(&root.join("packages/lib/package.json"), r#"{"name":"@scope/lib"}"#);
+        write(&root.join("packages/lib/index.ts"), "// lib");
+        write(&root.join("packages/unused/package.json"), r#"{"name":"@scope/unused"}"#);
+        write(&root.join("packages/unused/index.ts"), "// unused");
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn detect_computes_transitive_closure_and_prunes_unused() {
+        let root = fake_workspace("detect");
+        let ws = detect_workspace(&root.join("packages/app")).expect("workspace detected");
+        assert_eq!(ws.app_subdir, "packages/app");
+        let mut rels: Vec<String> = ws
+            .member_dirs
+            .iter()
+            .map(|d| d.strip_prefix(&ws.root).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        rels.sort();
+        assert_eq!(rels, vec!["packages/app", "packages/lib"], "must include app + its workspace dep, not unused");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tarball_packs_pruned_members_and_rewrites_workspaces() {
+        use flate2::read::GzDecoder;
+        let root = fake_workspace("tarball");
+        let ws = detect_workspace(&root.join("packages/app")).unwrap();
+        let tar_bytes = build_workspace_tarball(&ws).unwrap();
+        let mut ar = tar::Archive::new(GzDecoder::new(&tar_bytes[..]));
+        let mut paths = Vec::new();
+        let mut root_pkg = String::new();
+        for e in ar.entries().unwrap() {
+            let mut e = e.unwrap();
+            let p = e.path().unwrap().to_string_lossy().to_string();
+            if p == "package.json" {
+                use std::io::Read;
+                e.read_to_string(&mut root_pkg).unwrap();
+            }
+            paths.push(p);
+        }
+        assert!(paths.iter().any(|p| p == "packages/app/app.ts"), "app source packed");
+        assert!(paths.iter().any(|p| p == "packages/lib/index.ts"), "workspace dep packed");
+        assert!(!paths.iter().any(|p| p.starts_with("packages/unused")), "unused member pruned: {paths:?}");
+        let v: serde_json::Value = serde_json::from_str(&root_pkg).unwrap();
+        let ws_field: Vec<String> = v["workspaces"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect();
+        assert!(ws_field.contains(&"packages/app".to_string()) && ws_field.contains(&"packages/lib".to_string()));
+        assert!(!ws_field.contains(&"packages/unused".to_string()), "root workspaces narrowed to packed members");
+        let _ = fs::remove_dir_all(&root);
+    }
 }
