@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import wasm from "vite-plugin-wasm";
+import topLevelAwait from "vite-plugin-top-level-await";
 
 // Pylon hosts this app from `localhost:4321` in dev (and in prod with
 // CloudFlare in front). The Vite dev server still runs separately on
@@ -21,7 +23,9 @@ import tailwindcss from "@tailwindcss/vite";
 // needs, plus loro-crdt (which uses sync XHR for WASM init and
 // otherwise emits a "Synchronous XMLHttpRequest" console warning).
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // wasm + topLevelAwait let Vite 7 handle loro-crdt's ESM `.wasm` import
+  // (Vite 7 no longer transforms WebAssembly ESM imports out of the box).
+  plugins: [wasm(), topLevelAwait(), react(), tailwindcss()],
   server: {
     port: 5173,
     strictPort: true,
