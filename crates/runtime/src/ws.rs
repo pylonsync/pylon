@@ -1785,63 +1785,63 @@ fn run_authenticated_session(
     // cloned stream — no shared mutex with the reader, so broadcasts
     // wake the writer instantly via `recv()` instead of waiting for the
     // reader's drain block to run between blocking reads.
-    let outbound_rx_for_reader: Option<mpsc::Receiver<Message>> =
-        if let Some(write_stream) = dual_write_stream {
-            // Take the receiver out of WsClient and into the writer
-            // thread's exclusive ownership.
-            let outbound_rx = socket_handle
-                .outbound_rx
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take())
-                .expect("outbound_rx vacant before writer thread could claim it");
-            // Wrap the cloned stream in a Role::Server WebSocket. The
-            // original `ws` (now owned by the hub via `socket_handle`)
-            // has the inbound framing state; this fresh WebSocket has
-            // its own outbound state and writes through the cloned
-            // stream — TCP duplex semantics keep the two halves from
-            // interfering.
-            let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(16 * 1024 * 1024);
-            let ws_config = WebSocketConfig {
-                max_message_size: Some(max_frame),
-                max_frame_size: Some(max_frame),
-                ..Default::default()
-            };
-            let mut writer_ws =
-                WebSocket::from_raw_socket(write_stream, Role::Server, Some(ws_config));
-            let hub_for_writer = Arc::clone(&hub);
-            let writer_client_id = client_id;
-            let _ = std::thread::Builder::new()
-                .name(format!("ws-writer-{client_id}"))
-                .stack_size(64 * 1024)
-                .spawn(move || {
-                    // Block on the channel. Wakes instantly the moment a
-                    // broadcaster pushes via `try_send`. No mutex
-                    // contention; no ping-bounded latency; no polling.
-                    while let Ok(msg) = outbound_rx.recv() {
-                        if writer_ws.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    // Channel closed (client swept out of hub) or send
-                    // failed — sweep ourselves to be defensive. Cheap if
-                    // the reader already removed us.
-                    hub_for_writer.remove_client(writer_client_id);
-                });
-            None
-        } else {
-            // Single-thread mode: the reader takes outbound_rx and
-            // drains it between reads (HTTP-upgrade path that can't
-            // split its stream).
-            socket_handle
-                .outbound_rx
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take())
+    let outbound_rx_for_reader: Option<mpsc::Receiver<Message>> = if let Some(write_stream) =
+        dual_write_stream
+    {
+        // Take the receiver out of WsClient and into the writer
+        // thread's exclusive ownership.
+        let outbound_rx = socket_handle
+            .outbound_rx
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .expect("outbound_rx vacant before writer thread could claim it");
+        // Wrap the cloned stream in a Role::Server WebSocket. The
+        // original `ws` (now owned by the hub via `socket_handle`)
+        // has the inbound framing state; this fresh WebSocket has
+        // its own outbound state and writes through the cloned
+        // stream — TCP duplex semantics keep the two halves from
+        // interfering.
+        let max_frame: usize = std::env::var("PYLON_WS_MAX_FRAME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16 * 1024 * 1024);
+        let ws_config = WebSocketConfig {
+            max_message_size: Some(max_frame),
+            max_frame_size: Some(max_frame),
+            ..Default::default()
         };
+        let mut writer_ws = WebSocket::from_raw_socket(write_stream, Role::Server, Some(ws_config));
+        let hub_for_writer = Arc::clone(&hub);
+        let writer_client_id = client_id;
+        let _ = std::thread::Builder::new()
+            .name(format!("ws-writer-{client_id}"))
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                // Block on the channel. Wakes instantly the moment a
+                // broadcaster pushes via `try_send`. No mutex
+                // contention; no ping-bounded latency; no polling.
+                while let Ok(msg) = outbound_rx.recv() {
+                    if writer_ws.send(msg).is_err() {
+                        break;
+                    }
+                }
+                // Channel closed (client swept out of hub) or send
+                // failed — sweep ourselves to be defensive. Cheap if
+                // the reader already removed us.
+                hub_for_writer.remove_client(writer_client_id);
+            });
+        None
+    } else {
+        // Single-thread mode: the reader takes outbound_rx and
+        // drains it between reads (HTTP-upgrade path that can't
+        // split its stream).
+        socket_handle
+            .outbound_rx
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    };
 
     loop {
         // Drain queued outbound BEFORE blocking on read — but ONLY if
