@@ -1303,10 +1303,180 @@ export function diffCommittedResponse(
   return null;
 }
 
+// ===========================================================================
+// Data-route file conventions: app/sitemap.ts → /sitemap.xml,
+// app/robots.ts → /robots.txt (Next.js-style). @pylonsync/sdk discovers these
+// (routes with kind "sitemap"/"robots") so the host routes /sitemap.xml +
+// /robots.txt through the SSR RPC; here we detect them by the module basename,
+// call the default export (awaiting if async — so it can hit the DB / enumerate
+// dynamic pages), serialize the return to XML / plain text, and stream it with
+// the right content-type. No React render.
+// ===========================================================================
+
+/** One URL entry in a sitemap (mirrors Next's `MetadataRoute.Sitemap[number]`). */
+export interface SitemapEntry {
+  url: string;
+  lastModified?: string | Date;
+  changeFrequency?:
+    | "always"
+    | "hourly"
+    | "daily"
+    | "weekly"
+    | "monthly"
+    | "yearly"
+    | "never";
+  priority?: number;
+  /** hreflang alternates, e.g. `{ languages: { "en-US": "https://…/en" } }`. */
+  alternates?: { languages?: Record<string, string> };
+}
+
+/** Return type of a default export in `app/sitemap.ts`. */
+export type Sitemap = SitemapEntry[];
+
+export interface RobotsRule {
+  userAgent?: string | string[];
+  allow?: string | string[];
+  disallow?: string | string[];
+  crawlDelay?: number;
+}
+
+/** Return type of a default export in `app/robots.ts`. */
+export interface Robots {
+  rules: RobotsRule | RobotsRule[];
+  sitemap?: string | string[];
+  host?: string;
+}
+
+/** Serialize sitemap entries to a sitemaps.org 0.9 XML document. */
+export function serializeSitemap(entries: Sitemap | undefined): string {
+  const list = Array.isArray(entries) ? entries : [];
+  const esc = (s: unknown): string =>
+    String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  const iso = (d: string | Date): string =>
+    d instanceof Date ? d.toISOString() : String(d);
+  const needsXhtml = list.some(
+    (e) =>
+      e?.alternates?.languages &&
+      Object.keys(e.alternates.languages).length > 0,
+  );
+  const ns =
+    'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"' +
+    (needsXhtml ? ' xmlns:xhtml="http://www.w3.org/1999/xhtml"' : "");
+  const body = list
+    .filter((e) => e && typeof e.url === "string")
+    .map((e) => {
+      let u = `<url><loc>${esc(e.url)}</loc>`;
+      if (e.lastModified != null)
+        u += `<lastmod>${esc(iso(e.lastModified))}</lastmod>`;
+      if (e.changeFrequency) u += `<changefreq>${esc(e.changeFrequency)}</changefreq>`;
+      if (e.priority != null) u += `<priority>${esc(e.priority)}</priority>`;
+      const langs = e.alternates?.languages;
+      if (langs) {
+        for (const [lang, href] of Object.entries(langs)) {
+          u += `<xhtml:link rel="alternate" hreflang="${esc(lang)}" href="${esc(href)}"/>`;
+        }
+      }
+      return `${u}</url>`;
+    })
+    .join("");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset ${ns}>${body}</urlset>\n`;
+}
+
+/** Serialize a robots config to robots.txt text. */
+export function serializeRobots(robots: Robots | undefined): string {
+  const arr = (v: string | string[] | undefined): string[] =>
+    v == null ? [] : Array.isArray(v) ? v : [v];
+  const lines: string[] = [];
+  const rules = robots
+    ? Array.isArray(robots.rules)
+      ? robots.rules
+      : [robots.rules]
+    : [];
+  for (const rule of rules) {
+    if (!rule) continue;
+    const uas = arr(rule.userAgent);
+    for (const ua of uas.length ? uas : ["*"]) lines.push(`User-agent: ${ua}`);
+    for (const a of arr(rule.allow)) lines.push(`Allow: ${a}`);
+    for (const d of arr(rule.disallow)) lines.push(`Disallow: ${d}`);
+    if (rule.crawlDelay != null) lines.push(`Crawl-delay: ${rule.crawlDelay}`);
+    lines.push("");
+  }
+  for (const sm of arr(robots?.sitemap)) lines.push(`Sitemap: ${sm}`);
+  if (robots?.host) lines.push(`Host: ${robots.host}`);
+  return `${lines.join("\n").replace(/\n*$/, "")}\n`;
+}
+
+/**
+ * Import app/sitemap or app/robots, run its default export, serialize the
+ * result, and stream it back with the right content-type. Errors surface as a
+ * 500 with a short plain-text message (so a broken sitemap doesn't wedge the
+ * runner). 1-hour cache — sitemaps/robots change rarely; tune via a CDN.
+ */
+export async function handleDataRoute(
+  msg: RenderRouteMessage,
+  kind: "sitemap" | "robots",
+  send: Send,
+): Promise<void> {
+  const emit = (status: number, contentType: string, body: string): void => {
+    send({
+      type: "response_start",
+      call_id: msg.call_id,
+      status,
+      headers:
+        status === 200
+          ? { "content-type": contentType, "cache-control": "public, max-age=3600" }
+          : { "content-type": contentType },
+    });
+    send({
+      type: "render_chunk",
+      call_id: msg.call_id,
+      data: Buffer.from(body, "utf8").toString("base64"),
+    });
+    send({ type: "render_done", call_id: msg.call_id });
+  };
+  try {
+    const cwd = process.cwd();
+    const mod = await importModule(cwd, msg.component);
+    const exp = mod.default ?? mod[kind];
+    const data = typeof exp === "function" ? await exp() : exp;
+    if (kind === "sitemap") {
+      emit(200, "application/xml; charset=utf-8", serializeSitemap(data as Sitemap));
+    } else {
+      emit(200, "text/plain; charset=utf-8", serializeRobots(data as Robots));
+    }
+  } catch (e: any) {
+    emit(
+      500,
+      "text/plain; charset=utf-8",
+      `pylon: failed to generate ${kind} (${msg.component}): ${e?.message ?? String(e)}\n`,
+    );
+  }
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
 ): Promise<void> {
+  // Data-route conventions short-circuit the React render path: app/sitemap →
+  // /sitemap.xml (XML), app/robots → /robots.txt (text). Detected by the module
+  // basename — the SDK only registers these routes for app/sitemap.* /
+  // app/robots.*, so the basename is exactly "sitemap"/"robots" (a real page
+  // component always ends in "/page"). Mirrors the not-found/error basename
+  // check used for boundaries.
+  const dataKind: "sitemap" | "robots" | null = /(^|[\\/])sitemap$/.test(
+    msg.component,
+  )
+    ? "sitemap"
+    : /(^|[\\/])robots$/.test(msg.component)
+      ? "robots"
+      : null;
+  if (dataKind) return handleDataRoute(msg, dataKind, send);
+
   // Declared OUTSIDE the try so the catch can read page-set status/
   // cookies when turning a redirect()/notFound() throw into a response.
   const responseState: ResponseState = {

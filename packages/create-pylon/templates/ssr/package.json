@@ -12,6 +12,7 @@
     "@pylonsync/react": "^__PYLON_VERSION__",
     "@pylonsync/sdk": "^__PYLON_VERSION__",
     "@pylonsync/functions": "^__PYLON_VERSION__",
+    "@pylonsync/client": "^__PYLON_VERSION__",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.3.0",

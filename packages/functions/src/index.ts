@@ -25,7 +25,15 @@ export { slugifyName, availableSlug } from "./slugify";
 // SSR page response controller — pages/layouts receive `response` in
 // props (response.setStatus / redirect / notFound / setHeader / setCookie).
 // Type-only; the runtime instance is injected per-render by the SSR adapter.
-export type { SsrResponse, SsrCookieOptions, SsrMetadata } from "./ssr-runtime";
+export type {
+  SsrResponse,
+  SsrCookieOptions,
+  SsrMetadata,
+  Sitemap,
+  SitemapEntry,
+  Robots,
+  RobotsRule,
+} from "./ssr-runtime";
 export type {
   QueryCtx,
   MutationCtx,

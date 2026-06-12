@@ -417,9 +417,21 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
     // duplicate. Key the seen-set by (kind, path).
     let mut seen_paths = std::collections::HashSet::new();
     for route in &schema.routes {
+        // Uniqueness is per ROUTE KIND, not per path: a page (GET render), a
+        // route.ts form/method handler (non-GET), a not-found boundary, and an
+        // error boundary can all legitimately share a path — they're dispatched
+        // by method + role, not by path alone (the no-JS-form pattern puts a
+        // page.tsx + route.ts in the same dir). Only two routes of the SAME
+        // kind at one path is a real duplicate. (Before: "route" fell into the
+        // "page" class and collided with its own page → spurious
+        // ROUTE_PATH_DUPLICATE on every page+route.ts pair, e.g. the SSR
+        // scaffold's /notes.)
         let kind_class = match route.kind.as_deref() {
             Some("not-found") => "not-found",
             Some("error") => "error",
+            Some("route") => "route",
+            Some("sitemap") => "sitemap",
+            Some("robots") => "robots",
             _ => "page",
         };
         if route.path.is_empty() {
@@ -1200,6 +1212,35 @@ mod tests {
         assert!(
             !diags.iter().any(|d| d.code == "ROUTE_PATH_DUPLICATE"),
             "page + not-found + error at / should not be a duplicate: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn route_handler_shares_path_with_page() {
+        // No-JS form pattern: a page.tsx (GET render) + a route.ts handler
+        // (non-GET, dispatched by method) live in the same dir and share a
+        // path. NOT a duplicate. Regression for the SSR scaffold's /notes
+        // failing `pylon dev` codegen with ROUTE_PATH_DUPLICATE.
+        let mut s = base_schema();
+        s.routes = vec![
+            ManifestRoute {
+                path: "/notes".into(),
+                mode: "ssr".into(),
+                component: Some("app/notes/page".into()),
+                ..Default::default()
+            },
+            ManifestRoute {
+                path: "/notes".into(),
+                mode: "ssr".into(),
+                component: Some("app/notes/route".into()),
+                kind: Some("route".into()),
+                ..Default::default()
+            },
+        ];
+        let diags = validate(&s);
+        assert!(
+            !diags.iter().any(|d| d.code == "ROUTE_PATH_DUPLICATE"),
+            "page + route.ts handler at /notes must not be a duplicate: {diags:?}"
         );
     }
 

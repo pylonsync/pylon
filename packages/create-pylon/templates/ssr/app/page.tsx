@@ -16,83 +16,99 @@ import {
 export const metadata: Metadata = {
   title: "__APP_NAME__ — full-stack Pylon app",
   description:
-    "Server-rendered React, file-based routes, a synced database, and a typed client — one binary, one port.",
+    "A server-rendered homepage, email/password auth, and a live client dashboard over one synced backend — one binary, one port.",
 };
 
-// `app/page.tsx` → `/`. Every page receives `PageProps` from the SSR
-// runtime: `{ url, params, searchParams, auth, response, serverData }` —
-// the type is exported from @pylonsync/react, no hand-rolled interface.
-// This renders to HTML on the server; the per-route chunk hydrates it in
-// the browser so interactive pages (see /counter) just work. shadcn/ui is
-// pre-wired — `Button`/`Card` resolve through the `@/` alias; add more with
-// `npx shadcn@latest add <component>`.
-export default function IndexPage({ url }: PageProps) {
+// `app/page.tsx` → `/`. This page is server-rendered: view source and the copy
+// is in the HTML, not fetched later — good for SEO and first paint. It reads
+// `auth` (resolved from the session cookie during the render) to show the
+// right call to action. Every page receives `PageProps` from the SSR runtime:
+// `{ url, params, searchParams, auth, response, serverData }` — typed, no
+// hand-rolled interface.
+export default function IndexPage({ auth }: PageProps) {
+  const signedIn = Boolean(auth.user_id);
   return (
-    <div className="space-y-8">
-      <section>
-        <h1 className="text-3xl font-semibold tracking-tight">__APP_NAME__</h1>
-        <p className="mt-2 text-muted-foreground">
-          A full-stack Pylon app. Server-rendered React, file-based routes,
-          a synced database, and a typed client — served from one binary on
-          one port. No Next.js, no separate API server. Styled with Tailwind
-          v4 and shadcn/ui out of the box.
+    <div className="space-y-12">
+      <section className="space-y-5">
+        <span className="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">
+          Server-rendered · authenticated · synced · one port
+        </span>
+        <h1 className="text-4xl font-semibold tracking-tight">
+          Full-stack apps, one binary.
+        </h1>
+        <p className="max-w-xl text-lg text-muted-foreground">
+          This homepage is server-rendered React. Sign in and your dashboard
+          becomes a live, local-first view over the same Pylon backend — writes
+          appear instantly and sync across tabs. No Next.js, no separate API
+          server, no realtime sidecar.
         </p>
+        <div className="flex flex-wrap items-center gap-3">
+          {signedIn ? (
+            <Button asChild>
+              <Link href="/dashboard">Go to your dashboard →</Link>
+            </Button>
+          ) : (
+            <>
+              <Button asChild>
+                <Link href="/signup">Get started</Link>
+              </Button>
+              <Button asChild variant="outline">
+                <Link href="/login">Sign in</Link>
+              </Button>
+            </>
+          )}
+        </div>
       </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Next steps</CardTitle>
-          <CardDescription>
-            Everything below is already wired — just edit the files.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="space-y-2 text-sm text-foreground/80">
-            <li>
-              Add a route: drop a file at{" "}
-              <code className="rounded bg-muted px-1">app/about/page.tsx</code>{" "}
-              and visit <code className="rounded bg-muted px-1">/about</code>.
-            </li>
-            <li>
-              Add data: edit{" "}
-              <code className="rounded bg-muted px-1">app.ts</code> — every{" "}
-              <code className="rounded bg-muted px-1">entity()</code> gets a
-              REST + realtime API and a typed client automatically.
-            </li>
-            <li>
-              Add a component:{" "}
-              <code className="rounded bg-muted px-1">
-                npx shadcn@latest add dialog
-              </code>{" "}
-              drops it into{" "}
-              <code className="rounded bg-muted px-1">components/ui</code>.
-            </li>
-          </ul>
-        </CardContent>
-      </Card>
-
-      <div className="flex flex-wrap items-center gap-3">
-        <Button asChild>
-          <Link href="/counter">See hydration in action →</Link>
-        </Button>
-        <Button asChild variant="outline">
-          <Link href="/notes">Server data in the render →</Link>
-        </Button>
-        <Button asChild variant="ghost">
-          <a
-            href="https://docs.pylon.dev"
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            Read the docs
-          </a>
-        </Button>
-      </div>
+      <section className="grid gap-4 sm:grid-cols-3">
+        <Feature title="Server-rendered">
+          File-based routes under <Code>app/</Code>. Pages render to HTML on the
+          server with <Code>metadata</Code> in <Code>{"<head>"}</Code>, then
+          hydrate. Drop <Code>app/about/page.tsx</Code> to add{" "}
+          <Code>/about</Code>.
+        </Feature>
+        <Feature title="Auth included">
+          Email/password is built in. <Code>/login</Code> and{" "}
+          <Code>/signup</Code> hit <Code>/api/auth/password/*</Code>; the server
+          sets an HttpOnly session cookie. <Code>/dashboard</Code> gates on it
+          server-side.
+        </Feature>
+        <Feature title="Synced database">
+          Every <Code>entity()</Code> in <Code>app.ts</Code> gets a REST +
+          realtime API and a typed client. <Code>db.useQuery</Code> is live;{" "}
+          <Code>db.insert</Code> is optimistic.
+        </Feature>
+      </section>
 
       <p className="text-xs text-muted-foreground">
-        You're at <code>{url}</code>. Edit{" "}
-        <code>app/page.tsx</code> and save — the page reloads instantly.
+        Edit <Code>app/page.tsx</Code> and save — the page reloads instantly.
+        The data model and access policies live in <Code>app.ts</Code>.
       </p>
     </div>
   );
+}
+
+function Feature({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <CardDescription className="text-sm leading-relaxed">
+          {children}
+        </CardDescription>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Code({ children }: { children: React.ReactNode }) {
+  return <code className="rounded bg-muted px-1 text-xs">{children}</code>;
 }

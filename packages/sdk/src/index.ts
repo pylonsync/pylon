@@ -374,7 +374,7 @@ export interface RouteDefinition {
    * POST/PUT/PATCH/DELETE) — matched on its `path` for non-GET requests only,
    * never rendered as a page.
    */
-  kind?: "page" | "not-found" | "error" | "route";
+  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -572,7 +572,7 @@ export interface ManifestRoute {
   component?: string;
   layouts?: string[];
   /** "not-found" / "error" boundaries, or "route" form handlers; omitted for normal pages. */
-  kind?: "page" | "not-found" | "error" | "route";
+  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
 }
 
 export interface ManifestInputField {
@@ -933,7 +933,33 @@ export async function discoverAppRoutes(opts?: {
     kind: "route" as const,
   }));
 
-  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes];
+  // Root-level data conventions (Next-style): `app/sitemap.{ts,tsx,js,jsx}` →
+  // `/sitemap.xml`, `app/robots.{...}` → `/robots.txt`. Each exports a default
+  // (optionally async) function returning sitemap entries / a robots object;
+  // the SSR runtime detects these by component basename, calls the export, and
+  // serializes the return to XML / plain text (no React render). Root-level
+  // only for now (no route-group nesting / `generateSitemaps` id sharding).
+  const dataRoutes: RouteDefinition[] = [];
+  const sitemapMod = findModule(appDir, "sitemap");
+  if (sitemapMod) {
+    dataRoutes.push({
+      path: "/sitemap.xml",
+      mode: "ssr",
+      component: sitemapMod,
+      kind: "sitemap",
+    });
+  }
+  const robotsMod = findModule(appDir, "robots");
+  if (robotsMod) {
+    dataRoutes.push({
+      path: "/robots.txt",
+      mode: "ssr",
+      component: robotsMod,
+      kind: "robots",
+    });
+  }
+
+  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes, ...dataRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
