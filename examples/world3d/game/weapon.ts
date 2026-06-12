@@ -188,6 +188,9 @@ export class Weapon implements GameSystem {
     });
 
     if (playerHit && playerDist <= Math.min(blockDist, terrainDist ?? Infinity)) {
+      // Instant gore at the exact impact point — the synced
+      // health-drop splatter (remote.ts) lags a round trip behind.
+      this.events.emit("blood", { point: playerHit.point });
       this.events.emit("playerHit", {
         avatarId: playerHit.avatarId,
         point: playerHit.point,

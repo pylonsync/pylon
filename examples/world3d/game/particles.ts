@@ -144,6 +144,12 @@ export class Particles implements GameSystem {
       const p = origin.clone().addScaledVector(direction, 0.7);
       this.spawn({ position: p, count: 2, color: "#d8d2c4", speed: [0.4, 1.2], up: 0.6, size: [2, 4], life: [0.15, 0.3], gravity: -1 });
     });
+    events.on("blood", ({ point }) => {
+      // Dark droplets that arc and fall, plus a brief red mist that
+      // hangs at the wound.
+      this.spawn({ position: point, count: 12, color: "#7e1010", speed: [1.5, 4.5], up: 1.5, size: [2, 5], life: [0.35, 0.7], gravity: 12, drag: 0.5 });
+      this.spawn({ position: point, count: 6, color: "#b3261e", speed: [0.3, 1.2], up: 0.4, size: [5, 9], life: [0.2, 0.45], gravity: 1, drag: 3 });
+    });
   }
 
   /** Spawn a burst. Overwrites the oldest slots when the pool wraps. */

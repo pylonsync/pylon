@@ -108,6 +108,32 @@
           "unique": true
         }
       ]
+    },
+    {
+      "name": "World",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "nextRunAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_key",
+          "fields": [
+            "key"
+          ],
+          "unique": true
+        }
+      ]
     }
   ],
   "routes": [
@@ -138,6 +164,14 @@
       "allowUpdate": "false",
       "allowDelete": "auth.userId != null",
       "entity": "Destruction"
+    },
+    {
+      "name": "world_server_only",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "World"
     }
   ],
   "auth": {

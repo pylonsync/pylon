@@ -10,7 +10,7 @@
  * keep the synced y while swimming or falling.
  */
 import * as THREE from "three";
-import type { FrameCtx, GameSystem } from "./engine";
+import type { EventBus, FrameCtx, GameSystem } from "./engine";
 import { PLAYER } from "./config";
 import { buildCharacter, type Character } from "./character";
 import type { Terrain } from "./terrain";
@@ -34,6 +34,8 @@ interface RemoteEntry {
   cur: { x: number; y: number; z: number; heading: number; pitch: number };
   target: { x: number; y: number; z: number; heading: number; pitch: number };
   healthBar: HealthBar;
+  /** Last synced health — a drop between frames triggers blood VFX. */
+  lastHealth: number;
   disposables: Array<{ dispose(): void }>;
 }
 
@@ -115,7 +117,10 @@ export class RemotePlayers implements GameSystem {
   private latest: AvatarRow[] = [];
   private selfUserId: string | null = null;
 
-  constructor(private readonly terrain: Terrain) {
+  constructor(
+    private readonly terrain: Terrain,
+    private readonly events: EventBus,
+  ) {
     this.group.name = "remote-players";
   }
 
@@ -160,15 +165,14 @@ export class RemotePlayers implements GameSystem {
   }
 
   /** Current interpolated positions for the minimap. */
-  minimapDots(): Array<{ x: number; z: number; color: string }> {
-    const dots: Array<{ x: number; z: number; color: string }> = [];
+  minimapDots(): Array<{ x: number; z: number }> {
+    const dots: Array<{ x: number; z: number }> = [];
     for (const row of this.latest) {
       if (this.selfUserId && row.userId === this.selfUserId) continue;
       const entry = this.entries.get(row.id);
       dots.push({
         x: entry ? entry.cur.x : row.x,
         z: entry ? entry.cur.z : row.z,
-        color: row.color,
       });
     }
     return dots;
@@ -196,6 +200,9 @@ export class RemotePlayers implements GameSystem {
       cur: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
       target: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
       healthBar,
+      // Seed from the row so a player FIRST SEEN at low health doesn't
+      // splatter on arrival.
+      lastHealth: row.health ?? 100,
       disposables,
     };
     this.entries.set(row.id, entry);
@@ -321,9 +328,20 @@ export class RemotePlayers implements GameSystem {
       // Interpolated velocity drives the walk cycle.
       const speed = ctx.dt > 0 ? Math.hypot(c.x - prevX, c.z - prevZ) / ctx.dt : 0;
       entry.character.animate(ctx.time, speed);
-      // Health bar follows the synced row.
+      // Health bar follows the synced row; a drop means this player
+      // just took a hit — splatter at chest height so EVERY client
+      // sees the gore, not just the shooter.
       const row = this.latest.find((r) => r.id === id);
-      if (row) entry.healthBar.set(row.health ?? 100);
+      if (row) {
+        const health = row.health ?? 100;
+        if (health < entry.lastHealth) {
+          this.events.emit("blood", {
+            point: new THREE.Vector3(c.x, c.y - 0.55, c.z),
+          });
+        }
+        entry.lastHealth = health;
+        entry.healthBar.set(health);
+      }
     }
   }
 

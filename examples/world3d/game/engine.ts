@@ -54,6 +54,8 @@ export interface GameEvents {
   respawnRequested: Record<string, never>;
   /** Camera shake request, magnitude in radians-ish. */
   shake: { strength: number };
+  /** A player took damage at this world point — gore VFX only. */
+  blood: { point: THREE.Vector3 };
 }
 
 type Handler<T> = (payload: T) => void;

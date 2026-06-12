@@ -282,7 +282,8 @@ export default function IslandPage() {
           </div>
           <div className="mt-5 max-w-md text-xs leading-5 text-zinc-400">
             Procedural island, destructible buildings. Every browser tab is a
-            player — buildings you demolish crumble for everyone, live.
+            player — buildings you demolish crumble for everyone, live, and
+            the ruins rebuild themselves every 10 minutes.
           </div>
           {bootError && (
             <div className="mt-4 max-w-md rounded bg-red-950/70 px-3 py-2 font-mono text-xs text-red-300">
@@ -394,12 +395,16 @@ function Minimap({ game, stats }: { game: Game; stats: GameStats }) {
     ctx.clearRect(0, 0, size, size);
     ctx.drawImage(base, 0, 0, size, size);
 
-    // Remote players.
+    // Enemy players — red dots with a dark rim so they read against
+    // both the sand and the canopy.
     for (const dot of stats.remotes) {
-      ctx.fillStyle = dot.color;
+      ctx.fillStyle = "#ff3b30";
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(toPx(dot.x), toPx(dot.z), 3, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
     }
 
     // Self: white arrow pointing along the view heading. World yaw 0

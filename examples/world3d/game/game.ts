@@ -67,7 +67,8 @@ export interface GameStats {
   mutPerSec: number;
   /** Player pose + remote dots for the minimap (world coords). */
   pose: { x: number; z: number; heading: number };
-  remotes: Array<{ x: number; z: number; color: string }>;
+  /** Hostiles — everyone but you. Rendered as red dots on the minimap. */
+  remotes: Array<{ x: number; z: number }>;
   /** Combat state for the HUD. */
   health: number;
   dead: boolean;
@@ -207,7 +208,7 @@ export class Game {
     this.player.occluderTest = (origin, dir, far) =>
       this.buildings.raycastDistance(origin, dir, far);
 
-    this.remote = this.engine.add(new RemotePlayers(this.terrain));
+    this.remote = this.engine.add(new RemotePlayers(this.terrain, this.engine.events));
     this.scene.add(this.remote.group);
 
     // PvP wiring: the weapon resolves shots and grenade splash against
@@ -415,6 +416,15 @@ export class Game {
     if (health < this.selfHealth) {
       this.damageFlash++;
       this.engine.events.emit("shake", { strength: 0.22 });
+      // Bleed off your own body — visible in third person, and the
+      // outward spray reads as "I'm hit" even in first person.
+      this.engine.events.emit("blood", {
+        point: new THREE.Vector3(
+          this.player.position.x,
+          this.player.position.y - 0.55,
+          this.player.position.z,
+        ),
+      });
     }
     this.selfHealth = health;
     if (health <= 0 && !this.dead) this.startDeath();

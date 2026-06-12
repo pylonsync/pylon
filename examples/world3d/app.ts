@@ -47,6 +47,21 @@ const Destruction = entity(
   },
 );
 
+// Server-side singletons (scheduled-job heartbeats). One row per key.
+// The building sweep chain records when its next run is due; a value
+// in the past means the chain died (job store wiped, crash mid-window)
+// and spawnAvatar restarts it.
+const World = entity(
+  "World",
+  {
+    key: field.string(),
+    nextRunAt: field.datetime(),
+  },
+  {
+    indexes: [{ name: "by_key", fields: ["key"], unique: true }],
+  },
+);
+
 // World state is shared by design — every player sees every avatar and
 // every destroyed block. Reads still require a session (guests get a
 // userId from /api/auth/guest), so anonymous non-players can't scrape.
@@ -69,13 +84,24 @@ const destructionPolicy = policy({
   allowDelete: "auth.userId != null",
 });
 
+// Server functions own World rows outright (ctx.db.unsafe); clients
+// can read the heartbeat but never write it.
+const worldPolicy = policy({
+  name: "world_server_only",
+  entity: "World",
+  allowRead: "auth.userId != null",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+
 const manifest = buildManifest({
   name: "world3d",
   version: "0.2.0",
-  entities: [Avatar, Destruction],
+  entities: [Avatar, Destruction, World],
   queries: [],
   actions: [],
-  policies: [avatarPolicy, destructionPolicy],
+  policies: [avatarPolicy, destructionPolicy, worldPolicy],
   routes: await discoverAppRoutes(),
 });
 
