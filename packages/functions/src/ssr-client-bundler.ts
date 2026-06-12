@@ -81,6 +81,7 @@ declare const Bun: {
     format?: "esm" | "iife";
     minify?: boolean;
     sourcemap?: "none" | "inline" | "external";
+    define?: Record<string, string>;
     external?: string[];
     splitting?: boolean;
     naming?:
@@ -871,6 +872,20 @@ async function _doBuildInner(
       minify: true,
       sourcemap: "none",
       splitting: true,
+      // The browser has no `process`. React, next-themes, sonner, and most
+      // npm UI deps reference `process.env.NODE_ENV` (and migrated Next code
+      // may reference other `process.env.*`), so without this the very first
+      // such reference throws `ReferenceError: process is not defined` during
+      // hydration — React then unmounts the tree and the page renders blank.
+      // Statically replace `process.env.NODE_ENV` with the build mode and
+      // collapse any other `process.env.*` to an empty object (→ undefined),
+      // so no `process` reference survives into the browser bundle.
+      define: {
+        "process.env.NODE_ENV": JSON.stringify(
+          process.env.NODE_ENV === "development" ? "development" : "production",
+        ),
+        "process.env": "({})",
+      },
       naming: {
         entry: "[name]-[hash].js",
         chunk: "chunks/[name]-[hash].js",
