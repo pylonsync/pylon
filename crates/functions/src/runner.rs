@@ -895,12 +895,12 @@ impl FnRunner {
     /// entries + shared chunks, so the host needs both the manifest
     /// path (for SSR-side script-tag emission) and the output
     /// directory (for serving files at `/_pylon/build/<rel>`).
-    pub fn bundle_client(&self) -> Result<BundleClientPaths, FnCallError> {
+    pub fn bundle_client(&self, app_dir: &str) -> Result<BundleClientPaths, FnCallError> {
         let timeout = *self.call_timeout.lock().unwrap();
         let deadline = Instant::now() + timeout;
         let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         let (_route, rx) = self.register_call(&call_id)?;
-        let msg = crate::protocol::BundleClientMessage::new(call_id.clone());
+        let msg = crate::protocol::BundleClientMessage::new(call_id.clone(), app_dir.to_string());
         self.send(&msg)?;
         loop {
             // Recycle the runner if the client-bundle build wedges so a stuck

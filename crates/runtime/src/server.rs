@@ -1846,6 +1846,11 @@ fn start_server(
         // this reclaims the stale namespaces' disk). Cheap, synchronous, safe.
         crate::ssr_cache::wipe_stale_namespaces();
         if let Some(fn_ops_warm) = frontend_config.fn_ops.clone() {
+            // The route dir the manifest was built with (`app`, or a
+            // subdir like `web/app` for a namespaced full-stack app). The
+            // client bundler must walk the SAME dir or it finds no routes
+            // and ships no hydration bundle.
+            let warm_app_dir = crate::frontend::derive_app_dir(&frontend_config.ssr_routes);
             let _ = std::thread::Builder::new()
                 .name("ssr-bundle-warm".into())
                 .spawn(move || {
@@ -1853,7 +1858,7 @@ fn start_server(
                     // Populates the asset route's outdir cache + writes the
                     // manifest, so neither the first asset request nor the
                     // first render re-triggers the build (see warm_client_bundle).
-                    match crate::frontend::warm_client_bundle(&fn_ops_warm) {
+                    match crate::frontend::warm_client_bundle(&fn_ops_warm, &warm_app_dir) {
                         Ok(()) => tracing::info!(
                             "  SSR client bundle warmed in {:?}",
                             started.elapsed()

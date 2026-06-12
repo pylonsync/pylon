@@ -2287,18 +2287,81 @@ fn cached_bundle_outdir() -> &'static std::sync::Mutex<Option<std::path::PathBuf
 /// `getManifest` reads directly, so that path stays cheap too. Returns the
 /// bundler error (for logging) when the build fails; the lazy first-request
 /// path remains the fallback.
-pub fn warm_client_bundle(fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>) -> Result<(), String> {
+pub fn warm_client_bundle(
+    fn_ops: &std::sync::Arc<dyn pylon_router::FnOps>,
+    app_dir: &str,
+) -> Result<(), String> {
     let mut cache = cached_bundle_outdir().lock().unwrap();
     if cache.is_some() {
         // A real request already built it between boot and now — nothing to do.
         return Ok(());
     }
-    match fn_ops.bundle_client() {
+    match fn_ops.bundle_client(app_dir) {
         Ok(paths) => {
             *cache = Some(std::path::PathBuf::from(paths.outdir));
             Ok(())
         }
         Err(e) => Err(format!("{}: {}", e.code, e.message)),
+    }
+}
+
+/// Recover the project-relative route directory (the `appDir` the
+/// manifest was built with) from the SSR routes. Every page's
+/// `component` is `<appDir>/.../page`; the root route (`/`) is exactly
+/// `<appDir>/page`, so its parent is the appDir. Falls back to the
+/// shallowest component's parent, then `"app"` (the default layout) so
+/// a manifest without a literal `/` route still resolves.
+///
+/// The client bundler walks this same dir; without it, an app that
+/// namespaces its frontend under a subdir (e.g. `web/app`) renders SSR
+/// HTML but ships no hydration bundle — the bundler's old hardcoded
+/// `app/` found nothing.
+pub fn derive_app_dir(routes: &[pylon_kernel::ManifestRoute]) -> String {
+    fn parent_dir(module: &str) -> Option<&str> {
+        module.rfind('/').map(|i| &module[..i])
+    }
+    // Prefer the root page — unambiguous: `<appDir>/page`.
+    if let Some(root) = routes.iter().find(|r| r.path == "/") {
+        if let Some(dir) = root.component.as_deref().and_then(parent_dir) {
+            return dir.to_string();
+        }
+    }
+    // Fallback (no literal `/` route): the appDir is the longest common
+    // directory prefix across every module's parent dir. Every page is
+    // `<appDir>/.../page` and every layout `<appDir>/.../layout`, so two
+    // routes (or a route + its root layout) that diverge below the appDir
+    // pin the prefix to exactly `<appDir>`. The shallowest-parent
+    // heuristic was wrong — it returned the first route's own subdir.
+    let dirs: Vec<&str> = routes
+        .iter()
+        .flat_map(|r| {
+            r.component
+                .as_deref()
+                .and_then(parent_dir)
+                .into_iter()
+                .chain(r.layouts.iter().filter_map(|l| parent_dir(l)))
+        })
+        .collect();
+    let Some((first, rest)) = dirs.split_first() else {
+        return "app".to_string();
+    };
+    let mut common: Vec<&str> = first.split('/').collect();
+    for d in rest {
+        let segs: Vec<&str> = d.split('/').collect();
+        let n = common
+            .iter()
+            .zip(segs.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        common.truncate(n);
+        if common.is_empty() {
+            break;
+        }
+    }
+    if common.is_empty() {
+        "app".to_string()
+    } else {
+        common.join("/")
     }
 }
 
@@ -2346,7 +2409,8 @@ fn serve_pylon_client_bundle(
     // Acquire the outdir — build on first miss.
     let mut cache = cached_bundle_outdir().lock().unwrap();
     if cache.is_none() {
-        match fn_ops.bundle_client() {
+        let app_dir = derive_app_dir(&cfg.ssr_routes);
+        match fn_ops.bundle_client(&app_dir) {
             Ok(paths) => {
                 tracing::info!(
                     outdir = %paths.outdir,
@@ -2894,6 +2958,53 @@ mod tests {
             kind: kind.map(|k| k.into()),
             ..Default::default()
         }
+    }
+
+    /// Build a route whose component sits under an arbitrary appDir
+    /// (the `route` helper hardcodes `app`; this lets us simulate a
+    /// `web/app` subdir layout).
+    fn route_in(dir: &str, path: &str) -> pylon_kernel::ManifestRoute {
+        let suffix = if path == "/" {
+            "page".to_string()
+        } else {
+            format!("{}/page", path.trim_start_matches('/'))
+        };
+        pylon_kernel::ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(format!("{dir}/{suffix}")),
+            layouts: vec![format!("{dir}/layout")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn derive_app_dir_recovers_route_root() {
+        // Default single-`app/` layout.
+        let app = vec![route_in("app", "/"), route_in("app", "/login")];
+        assert_eq!(derive_app_dir(&app), "app");
+
+        // Namespaced subdir layout (the unified pylon-cloud dashboard).
+        // The root page is `web/app/page` → appDir `web/app`. This is the
+        // exact case the client bundler must honor or it ships no
+        // hydration bundle.
+        let web = vec![
+            route_in("web/app", "/"),
+            route_in("web/app", "/dashboard"),
+            route_in("web/app", "/dashboard/orgs/[slug]/settings"),
+        ];
+        assert_eq!(derive_app_dir(&web), "web/app");
+
+        // No literal "/" route → fall back to the shallowest component's
+        // parent (still resolves the subdir).
+        let no_root = vec![
+            route_in("web/app", "/login"),
+            route_in("web/app", "/dashboard/settings"),
+        ];
+        assert_eq!(derive_app_dir(&no_root), "web/app");
+
+        // Empty / componentless → safe default.
+        assert_eq!(derive_app_dir(&[]), "app");
     }
 
     #[test]

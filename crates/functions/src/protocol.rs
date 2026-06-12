@@ -656,13 +656,21 @@ pub struct BundleClientMessage {
     #[serde(rename = "type")]
     pub msg_type: &'static str, // always "bundle_client"
     pub call_id: String,
+    /// Project-relative directory holding the route tree
+    /// (`<app_dir>/**​/page.tsx`). Usually `"app"`; the full-stack app
+    /// that namespaces its frontend under a subdir (e.g. `web/app` via
+    /// `discoverAppRoutes({appDir:"web/app"})`) sends that here so the
+    /// client bundler walks the same dir the SSR manifest was built
+    /// from. Empty → the Bun side defaults to `"app"`.
+    pub app_dir: String,
 }
 
 impl BundleClientMessage {
-    pub fn new(call_id: String) -> Self {
+    pub fn new(call_id: String, app_dir: String) -> Self {
         Self {
             msg_type: "bundle_client",
             call_id,
+            app_dir,
         }
     }
 }

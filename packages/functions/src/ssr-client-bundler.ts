@@ -38,6 +38,16 @@ type Send = (msg: Record<string, unknown>) => void;
 interface BundleClientMessage {
   type: "bundle_client";
   call_id: string;
+  /**
+   * Project-relative directory holding the route tree
+   * (`<app_dir>/**​/page.tsx`). Defaults to `"app"` when the host
+   * doesn't send it (older hosts, or the default single-`app/`
+   * layout). The full-stack app that namespaces its frontend under a
+   * subdir — e.g. `web/app` via `discoverAppRoutes({appDir:"web/app"})`
+   * — sends the same dir here so the client bundler and the SSR
+   * manifest agree on where the routes live.
+   */
+  app_dir?: string;
 }
 
 interface DiscoveredRoute {
@@ -87,19 +97,22 @@ declare const Bun: {
 };
 
 /**
- * Synchronously walk `app/` under cwd. Returns one entry per
- * discovered page, each carrying its layout chain (root → leaf).
- * Mirrors the discovery logic in @pylonsync/sdk's
- * `discoverAppRoutes` exactly — same sort order, same group-strip,
- * so the in-browser map keys line up with the manifest's component
- * field.
+ * Synchronously walk the route dir (`<appDirRel>` under cwd, e.g.
+ * `app` or `web/app`) and return one entry per discovered page, each
+ * carrying its layout chain (root → leaf). `appDirRel` MUST match the
+ * `appDir` the manifest was built with (`discoverAppRoutes({appDir})`)
+ * so the component paths — `path.relative(cwd, file)` — line up with
+ * the manifest's `component` field byte-for-byte. Mirrors the
+ * discovery logic in @pylonsync/sdk's `discoverAppRoutes` exactly:
+ * same sort order, same group-strip.
  */
 function discoverRoutes(
   fs: any,
   path: any,
   cwd: string,
+  appDirRel: string,
 ): DiscoveredRoute[] {
-  const appDir = path.join(cwd, "app");
+  const appDir = path.join(cwd, appDirRel);
   if (!fs.existsSync(appDir) || !fs.statSync(appDir).isDirectory()) {
     return [];
   }
@@ -684,11 +697,13 @@ let _inflightBuild: Promise<BuildOutput> | null = null;
  * Used from `handleBundleClient` (protocol RPC path from Rust) AND
  * from `getManifest` (in-process SSR path).
  */
-export async function buildClientBundle(): Promise<BuildOutput> {
+export async function buildClientBundle(
+  appDirRel: string = "app",
+): Promise<BuildOutput> {
   if (_inflightBuild) return _inflightBuild;
   _inflightBuild = (async () => {
     try {
-      return await _doBuild();
+      return await _doBuild(appDirRel);
     } finally {
       _inflightBuild = null;
     }
@@ -696,7 +711,7 @@ export async function buildClientBundle(): Promise<BuildOutput> {
   return _inflightBuild;
 }
 
-async function _doBuild(): Promise<BuildOutput> {
+async function _doBuild(appDirRel: string): Promise<BuildOutput> {
   // node:* are available in Bun, but `globalThis.require` is
   // not defined in ESM. Use dynamic import; Bun fast-paths these.
   const fsMod: any = await import("node:fs");
@@ -704,7 +719,7 @@ async function _doBuild(): Promise<BuildOutput> {
   const fs = fsMod.default ?? fsMod;
   const path = pathMod.default ?? pathMod;
   const cwd = process.cwd();
-  return _doBuildInner(fs, path, cwd);
+  return _doBuildInner(fs, path, cwd, appDirRel);
 }
 
 /**
@@ -719,8 +734,9 @@ async function buildTailwind(
   path: any,
   cwd: string,
   outdir: string,
+  appDirRel: string,
 ): Promise<string | null> {
-  const globalsPath = path.join(cwd, "app", "globals.css");
+  const globalsPath = path.join(cwd, appDirRel, "globals.css");
   if (!fs.existsSync(globalsPath)) return null;
   // Resolve @tailwindcss/cli. The package only exports
   // `./package.json` in its `exports` map (it's a binary, not a
@@ -778,10 +794,17 @@ async function buildTailwind(
   return stylesName;
 }
 
-async function _doBuildInner(fs: any, path: any, cwd: string): Promise<BuildOutput> {
-  const routes = discoverRoutes(fs, path, cwd);
+async function _doBuildInner(
+  fs: any,
+  path: any,
+  cwd: string,
+  appDirRel: string,
+): Promise<BuildOutput> {
+  const routes = discoverRoutes(fs, path, cwd, appDirRel);
     if (routes.length === 0) {
-      throw new Error("no SSR routes discovered under app/ — nothing to bundle");
+      throw new Error(
+        `no SSR routes discovered under ${appDirRel}/ — nothing to bundle`,
+      );
     }
 
     const stageDir = path.join(cwd, ".pylon");
@@ -976,7 +999,7 @@ async function _doBuildInner(fs: any, path: any, cwd: string): Promise<BuildOutp
     // `app/globals.css`. Adds the stylesheet to every route's css
     // array so SSR head injection emits `<link rel="stylesheet">`.
     try {
-      const styles = await buildTailwind(fs, path, cwd, outdir);
+      const styles = await buildTailwind(fs, path, cwd, outdir, appDirRel);
       if (styles) {
         for (const r of Object.values(manifest.routes)) {
           r.css = [styles];
@@ -1054,7 +1077,9 @@ export async function handleBundleClient(
   send: Send,
 ): Promise<void> {
   try {
-    const { manifestPath, outdir } = await buildClientBundle();
+    const appDirRel =
+      msg.app_dir && msg.app_dir.length > 0 ? msg.app_dir : "app";
+    const { manifestPath, outdir } = await buildClientBundle(appDirRel);
     send({
       type: "bundle_client_result",
       call_id: msg.call_id,

@@ -572,6 +572,7 @@ pub trait FnOps: Send + Sync {
     /// bundling (test stubs) compile without no-op stubs.
     fn bundle_client(
         &self,
+        _app_dir: &str,
     ) -> Result<pylon_functions::runner::BundleClientPaths, pylon_functions::runner::FnCallError>
     {
         Err(pylon_functions::runner::FnCallError {

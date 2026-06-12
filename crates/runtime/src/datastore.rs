@@ -4162,9 +4162,12 @@ impl pylon_router::FnOps for FnOpsImpl {
         )
     }
 
-    fn bundle_client(&self) -> Result<pylon_functions::runner::BundleClientPaths, FnCallError> {
+    fn bundle_client(
+        &self,
+        app_dir: &str,
+    ) -> Result<pylon_functions::runner::BundleClientPaths, FnCallError> {
         let runner = self.pool.pick();
-        runner.bundle_client()
+        runner.bundle_client(app_dir)
     }
 
     fn recent_traces(&self, limit: usize) -> Vec<FnTrace> {
