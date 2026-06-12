@@ -1,11 +1,13 @@
 ---
 name: pylon
-description: Build realtime apps with Pylon — schema, policies, server functions, React client, and deployment. Use when the user is working in a Pylon project or asks to build with Pylon/Pylonsync.
+description: Build full-stack realtime apps with Pylon — schema, policies, server functions, server-rendered React (SSR), and deployment. Use when the user is working in a Pylon project or asks to build with Pylon/Pylonsync.
 ---
 
-# Pylon — Realtime backend framework
+# Pylon — the full-stack realtime framework
 
-You are helping a developer build an application on **Pylon** (pylonsync.com), a realtime backend framework written in Rust with a TypeScript SDK. Pylon collapses database + API + realtime pub/sub into one process. This skill gives you the shape, conventions, and gotchas needed to build Pylon apps correctly.
+You are helping a developer build an application on **Pylon** (pylonsync.com), a full-stack realtime framework written in Rust with a TypeScript SDK. **One binary renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. SQLite by default or Postgres. This skill gives you the shape, conventions, and gotchas needed to build Pylon apps correctly.
+
+Scaffold a new app with `npm create @pylonsync/pylon@latest` (the default template is a full-stack SSR app).
 
 ## Authoritative references
 
@@ -31,32 +33,38 @@ Use this skill whenever:
 
 ## Core mental model
 
-A Pylon app is four things, all in one process:
+A Pylon app is five things, all in one process (one binary, one port):
 
 1. **Entities** — typed tables declared in `app.ts` via the `@pylonsync/sdk` DSL. Pylon auto-migrates your database (SQLite by default, or Postgres via `DATABASE_URL`) to match.
 2. **Policies** — row-level access rules evaluated as string expressions. Live alongside entities.
 3. **Functions** — server TypeScript in `functions/*.ts`. Three flavors: `query`, `mutation`, `action`. RPC-called by the client.
 4. **Live queries** — `db.useQuery(...)` in React subscribes to results. Pylon restreams diffs on every relevant mutation.
+5. **SSR frontend** — your React app under `app/`, server-rendered by the SAME binary. Next-style file routing (`app/**/page.tsx`), `<Link>`/`<Image>`, `metadata`/`generateMetadata`, `loading.tsx`/`error.tsx`/`not-found.tsx`, `sitemap.ts`/`robots.ts`. No separate Next.js host, no `/api` proxy, one shared session on every request. (Headless/native-only apps can skip the frontend; the backend works on its own.)
 
-## Directory convention
+## Directory convention (full-stack SSR app — the default)
 
 ```
 my-app/
   app.ts                 # schema + policies + manifest — ENTRY POINT
   functions/             # server functions, one per file, default-exported
     createX.ts
-    updateY.ts
-  client/                # your React components that use @pylonsync/react
-  web/                   # Vite (or Next.js) app mounting client/
-    package.json
-    vite.config.ts
-    src/main.tsx
-  package.json           # deps: @pylonsync/sdk, @pylonsync/functions
+  app/                   # SSR frontend — Next-style file routing, server-rendered
+    layout.tsx           #   root layout (wraps every page)
+    page.tsx             #   route "/"
+    globals.css          #   Tailwind v4 entry; Pylon compiles + injects it
+    blog/
+      page.tsx           #   route "/blog"
+      [slug]/page.tsx    #   dynamic route "/blog/:slug"
+    sitemap.ts           #   served at /sitemap.xml (optional)
+    robots.ts            #   served at /robots.txt (optional)
+  public/                # static assets served verbatim at the root
+  package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, react, react-dom
   pylon.manifest.json    # GENERATED — never edit by hand
-  pylon.client.ts        # GENERATED — never edit by hand
 ```
 
-`pylon dev app.ts` watches `app.ts` + `functions/` and regenerates the manifest + typed client on every save.
+`pylon dev` watches `app.ts` + `functions/` + `app/` and regenerates the manifest, recompiles Tailwind, and live-reloads the browser on every save. The manifest's routes are discovered from `app/**` by `discoverAppRoutes()` in `app.ts` (see the scaffold). One server serves the SSR HTML, the hydration JS, the API, and the WebSocket — same origin.
+
+(A backend-only app omits `app/` and just ships `app.ts` + `functions/`. Older apps may pair a separate Vite/Next frontend with `@pylonsync/react` + `init()`/`configureClient()` against the Pylon URL — still supported, but native SSR is the default and avoids the second host + the `/api` proxy.)
 
 ## Schema (`app.ts`)
 
@@ -323,20 +331,11 @@ ctx.schedule(delayMs, fnName, args)    // enqueue delayed call
 Always throw via `ctx.error(code, message)`. Canonical codes:
 `UNAUTHENTICATED`, `POLICY_DENIED`, `NOT_FOUND`, `INVALID_ARGS`, `RATE_LIMITED`, `CONFLICT`, `INTERNAL`.
 
-## React client
+## React client (live data)
 
-Wire up the client once, per app. In your Vite/Next entry:
+In a **full-stack SSR app you do NOT call `init`/`configureClient`** — the runtime wires the client to its own origin and injects the session on every render. Just import `db` / `callFn` and use them. `db.useQuery` is a live WebSocket subscription that updates on every relevant write.
 
-```tsx
-// In your app's root component or mount file
-import { init, configureClient } from "@pylonsync/react";
-
-const BASE_URL = import.meta.env.VITE_PYLON_URL ?? "http://localhost:4321";
-init({ baseUrl: BASE_URL, appName: "my-app" });
-configureClient({ baseUrl: BASE_URL, appName: "my-app" });
-```
-
-`appName` must match `manifest.name` from `app.ts`.
+(Only a **standalone** Vite/Next frontend needs manual wiring: `init({ baseUrl, appName })` + `configureClient({ baseUrl, appName })` once at mount, where `appName` matches `manifest.name`.)
 
 ### Live query
 
@@ -388,17 +387,71 @@ async function ensureGuest(): Promise<string> {
 }
 ```
 
+## Server-side rendering (full-stack frontend)
+
+Pylon natively server-renders React from the same binary — Next-style, but no Next. Routes are files under `app/`.
+
+### Routing & components
+
+- `app/page.tsx` → `/`, `app/blog/page.tsx` → `/blog`, `app/blog/[slug]/page.tsx` → `/blog/:slug`, `app/docs/[...slug]/page.tsx` → catch-all, `[[...slug]]` → optional catch-all.
+- `app/layout.tsx` wraps every page (nest `layout.tsx` per segment for sub-layouts).
+- **A page is a server component by default** (runs only on the server — no JS shipped). Add `"use client"` at the top of a file to make it (and its tree) an interactive island that hydrates in the browser. Proven pattern: a thin server `page.tsx` (for metadata + auth) that renders one `"use client"` view containing the interactive UI.
+- The page receives props: `{ params, searchParams, auth, url, headers, cookies, response }`. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session.
+
+```tsx
+// app/blog/[slug]/page.tsx  (server component)
+import type { Metadata, PageAuth } from "@pylonsync/react";
+
+export function generateMetadata({ params }: { params: { slug: string } }): Metadata {
+  return { title: `Post: ${params.slug}`, description: "…" };
+}
+
+export default function PostPage({ params, auth }: { params: { slug: string }; auth?: PageAuth }) {
+  return <Article slug={params.slug} signedIn={Boolean(auth?.user_id)} />;
+}
+```
+
+### Navigation, images, metadata
+
+- `import { Link, Image } from "@pylonsync/react"` — `<Link href>` = client-side nav; `<Image src width height>` = a built-in optimizer (emits `srcset`; pass `priority` for LCP).
+- SEO: `export const metadata: Metadata = {…}` (static) or `export async function generateMetadata(props)` (dynamic — keep it cheap, e.g. params→title). Fields: `title`, `description`, `canonical`, `robots`, `openGraph`, `twitter`, `icons`. Colocate `opengraph-image.png` / `icon.png` / `favicon.ico` next to a route and they're auto-wired.
+
+### File conventions (all optional, walked up from the page dir)
+
+- `loading.tsx` → a Suspense fallback (set `export const streaming = true` on a page for progressive streaming).
+- `error.tsx` → error boundary; `not-found.tsx` → 404 boundary (call `notFound()` to trigger).
+- `sitemap.ts` → `/sitemap.xml`, `robots.ts` → `/robots.txt`. Default export, **may be async** (enumerate dynamic pages from the DB). Types `Sitemap` / `Robots` from `@pylonsync/react`:
+
+```ts
+// app/sitemap.ts
+import type { Sitemap } from "@pylonsync/react";
+export default async function sitemap(): Promise<Sitemap> {
+  const posts = await getPosts();
+  return [
+    { url: "https://x.com/", changeFrequency: "weekly", priority: 1 },
+    ...posts.map((p) => ({ url: `https://x.com/blog/${p.slug}`, lastModified: p.updatedAt })),
+  ];
+}
+// app/robots.ts → export default () => ({ rules: { userAgent: "*", allow: "/" }, sitemap: "https://x.com/sitemap.xml" })
+```
+
+### Client hooks & response control
+
+- `import { useRouter, useSearchParams, usePathname, useParams, redirect, notFound } from "@pylonsync/react"` — for `"use client"` components.
+- The `response` prop shapes the HTTP reply from a server component: `response.setStatus(404)`, `response.redirect("/login")`, `response.notFound()`, `response.setHeader(...)`, `response.setCookie(...)`.
+
+### Gotcha
+
+Reading `props.auth` in a page opts that render OUT of anonymous output caching (the render could differ by identity). For public, cacheable pages, resolve signed-in state client-side instead of reading `auth` server-side.
+
 ## Running the app
 
 ```bash
-# Terminal 1 — Pylon backend (schema watch + server on :4321)
-pylon dev app.ts
-
-# Terminal 2 — web UI
-cd web && bun run dev
+# ONE process — serves the SSR frontend, the API, and the WebSocket on one port.
+pylon dev
 ```
 
-The first `pylon dev` invocation creates `.pylon/dev.db` (SQLite) and runs auto-migration. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function code is identical either way.
+That's it — no second terminal for the UI. `pylon dev` watches `app.ts` + `functions/` + `app/`, recompiles Tailwind, and live-reloads the browser. (A backend-only app runs the same `pylon dev`.) The first run creates `.pylon/dev.db` (SQLite) and auto-migrates. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function/SSR code is identical either way.
 
 In production, use `pylon start app.ts` instead of `pylon dev`. Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
 
