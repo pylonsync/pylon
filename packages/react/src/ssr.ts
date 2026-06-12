@@ -207,6 +207,57 @@ export type GenerateMetadata<
 ) => Metadata | Promise<Metadata>;
 
 /**
+ * Return type for an `app/sitemap.ts` default export (Next-shaped). The runtime
+ * serializes it to `/sitemap.xml`. The export may be sync or async, so it can
+ * enumerate dynamic pages from the DB:
+ *
+ *   export default async function sitemap(): Promise<Sitemap> {
+ *     const posts = await getPosts();
+ *     return [{ url: "https://x.com/", priority: 1 }, ...posts.map(...)];
+ *   }
+ */
+export interface SitemapEntry {
+  url: string;
+  lastModified?: string | Date;
+  changeFrequency?:
+    | "always"
+    | "hourly"
+    | "daily"
+    | "weekly"
+    | "monthly"
+    | "yearly"
+    | "never";
+  priority?: number;
+  /** hreflang alternates, e.g. `{ languages: { "en-US": "https://…/en" } }`. */
+  alternates?: { languages?: Record<string, string> };
+}
+export type Sitemap = SitemapEntry[];
+
+export interface RobotsRule {
+  userAgent?: string | string[];
+  allow?: string | string[];
+  disallow?: string | string[];
+  crawlDelay?: number;
+}
+
+/**
+ * Return type for an `app/robots.ts` default export (Next-shaped). The runtime
+ * serializes it to `/robots.txt`.
+ *
+ *   export default function robots(): Robots {
+ *     return {
+ *       rules: { userAgent: "*", allow: "/", disallow: "/admin" },
+ *       sitemap: "https://x.com/sitemap.xml",
+ *     };
+ *   }
+ */
+export interface Robots {
+  rules: RobotsRule | RobotsRule[];
+  sitemap?: string | string[];
+  host?: string;
+}
+
+/**
  * Per-route configuration, declared as top-level `export const` in a
  * `page.tsx` (Next-shaped). All optional. The runtime reads these statically
  * before the render.

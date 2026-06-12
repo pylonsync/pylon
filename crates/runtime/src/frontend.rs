@@ -3053,6 +3053,25 @@ mod tests {
     }
 
     #[test]
+    fn match_ssr_route_accepts_data_routes() {
+        // Data-route conventions (app/sitemap.ts → /sitemap.xml,
+        // app/robots.ts → /robots.txt) are renderable SSR routes — unlike
+        // not-found/error/route, they must NOT be skipped by the matcher.
+        let routes = vec![
+            route("/", None),
+            route("/sitemap.xml", Some("sitemap")),
+            route("/robots.txt", Some("robots")),
+        ];
+        let sm = match_ssr_route("/sitemap.xml", &routes).expect("/sitemap.xml matches");
+        assert_eq!(sm.route.kind.as_deref(), Some("sitemap"));
+        let rb = match_ssr_route("/robots.txt", &routes).expect("/robots.txt matches");
+        assert_eq!(rb.route.kind.as_deref(), Some("robots"));
+        // The homepage still matches the page, not a data route.
+        let home = match_ssr_route("/", &routes).expect("/ matches");
+        assert_eq!(home.route.kind, None);
+    }
+
+    #[test]
     fn find_not_found_root_covers_unmatched() {
         let routes = vec![route("/", None), route("/", Some("not-found"))];
         let nf = find_not_found_route("/anything/here", &routes)
