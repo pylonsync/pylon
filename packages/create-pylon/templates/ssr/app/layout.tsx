@@ -2,18 +2,18 @@ import React from "react";
 import { Link, type PageAuth } from "@pylonsync/react";
 
 // A layout receives the page props plus `children`. `auth.user_id` is null
-// for anonymous visitors — wire a sign-in flow with @pylonsync/client when
-// you're ready; for now this just shows the session state. The `PageAuth`
-// type is exported from @pylonsync/react so you never hand-roll it.
+// for anonymous visitors and the signed-in user's id otherwise — resolved
+// server-side from the session cookie, before any HTML is sent, so the nav
+// renders the right links on the first byte (no flash, no client fetch). The
+// `PageAuth` type is exported from @pylonsync/react so you never hand-roll it.
 interface LayoutProps {
   children: React.ReactNode;
   url: string;
   auth: PageAuth;
 }
 
-// The root layout wraps every page. It receives `url` and `auth` from the
-// SSR runtime on every render — server-side, before the HTML is sent.
-export default function RootLayout({ children, url, auth }: LayoutProps) {
+// The root layout wraps every page.
+export default function RootLayout({ children, auth }: LayoutProps) {
   const signedIn = Boolean(auth?.user_id);
   // Add `className="dark"` to this <html> to flip every shadcn token to its
   // dark value. The classes below use semantic tokens (bg-background,
@@ -41,18 +41,23 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
               <Link href="/" className="hover:text-foreground">
                 Home
               </Link>
-              <Link href="/counter" className="hover:text-foreground">
-                Counter
-              </Link>
-              <Link href="/notes" className="hover:text-foreground">
-                Notes
-              </Link>
-              <span
-                className={signedIn ? "text-emerald-600" : "text-muted-foreground/60"}
-                title={url}
-              >
-                {signedIn ? `· ${auth.user_id}` : "· anon"}
-              </span>
+              {signedIn ? (
+                <Link href="/dashboard" className="hover:text-foreground">
+                  Dashboard
+                </Link>
+              ) : (
+                <>
+                  <Link href="/login" className="hover:text-foreground">
+                    Sign in
+                  </Link>
+                  <Link
+                    href="/signup"
+                    className="rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:opacity-90"
+                  >
+                    Sign up
+                  </Link>
+                </>
+              )}
             </nav>
           </div>
         </header>
