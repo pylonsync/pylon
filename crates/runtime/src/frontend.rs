@@ -596,7 +596,13 @@ pub fn try_handle(
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let pylon_dir = cwd.join(".pylon");
         let _ = std::fs::create_dir_all(&pylon_dir);
-        crate::image_optim::serve(request, &pylon_dir, cfg.dir.as_deref(), cors_origin);
+        let img_src_dir = local_image_source_dir(cfg.dir.as_deref(), &cwd);
+        crate::image_optim::serve(
+            request,
+            &pylon_dir,
+            Some(img_src_dir.as_path()),
+            cors_origin,
+        );
         return Ok(());
     }
 
@@ -2316,6 +2322,18 @@ pub fn warm_client_bundle(
 /// namespaces its frontend under a subdir (e.g. `web/app`) renders SSR
 /// HTML but ships no hydration bundle — the bundler's old hardcoded
 /// `app/` found nothing.
+/// Source dir for LOCAL `<Image src="/foo.png">` optimization: the legacy
+/// static build (`web/dist`, when present) else the native-SSR static dir
+/// `<cwd>/public` — the same dir the static-asset route serves from. Without
+/// the fallback an SSR app (no `web/dist`) can't optimize its own `public/`
+/// images: `<Image>` 400s with "no frontend dir configured for local images"
+/// even though `GET /foo.png` serves fine.
+fn local_image_source_dir(dist_dir: Option<&Path>, cwd: &Path) -> PathBuf {
+    dist_dir
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| cwd.join("public"))
+}
+
 pub fn derive_app_dir(routes: &[pylon_kernel::ManifestRoute]) -> String {
     fn parent_dir(module: &str) -> Option<&str> {
         module.rfind('/').map(|i| &module[..i])
@@ -2976,6 +2994,21 @@ mod tests {
             layouts: vec![format!("{dir}/layout")],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn local_image_source_dir_falls_back_to_public() {
+        let cwd = Path::new("/app");
+        // Native SSR app (no web/dist) → optimize images out of <cwd>/public.
+        assert_eq!(
+            local_image_source_dir(None, cwd),
+            PathBuf::from("/app/public")
+        );
+        // Legacy app with a built dist → unchanged.
+        assert_eq!(
+            local_image_source_dir(Some(Path::new("/app/web/dist")), cwd),
+            PathBuf::from("/app/web/dist")
+        );
     }
 
     #[test]
