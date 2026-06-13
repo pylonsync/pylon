@@ -264,17 +264,25 @@ export function makeBuilding(
   level: number,
   gx: number,
   gz: number,
+  faceRad?: number,
 ): THREE.Object3D {
   const lvl = Math.max(1, Math.min(3, Math.round(level)));
+  // Models front onto -Z; faceRad orients +Z toward the road, so add PI
+  // to turn the facade to the street. No road neighbour → deterministic
+  // random rotation.
+  const rotY =
+    faceRad !== undefined
+      ? faceRad + Math.PI
+      : (Math.floor(hash2(gx, gz, 7) * 4) * Math.PI) / 2;
   const proto = tintedProto(zone, lvl);
   const group = new THREE.Group();
   if (proto) {
     const inst = proto.clone(true);
-    inst.rotation.y = (Math.floor(hash2(gx, gz, 7) * 4) * Math.PI) / 2;
+    inst.rotation.y = rotY;
     group.add(inst);
     return group;
   }
-  proceduralMassing(group, zone, lvl, gx, gz);
+  proceduralMassing(group, zone, lvl, gx, gz, rotY);
   return group;
 }
 
@@ -289,6 +297,7 @@ function proceduralMassing(
   lvl: number,
   gx: number,
   gz: number,
+  rotY: number,
 ): void {
   const style = ZONE[zone];
   const body = style.body[Math.floor(hash2(gx, gz, 3) * style.body.length)];
@@ -326,7 +335,7 @@ function proceduralMassing(
     baseY += tierH;
     tierW *= 0.74;
   }
-  group.rotation.y = (Math.floor(hash2(gx, gz, 7) * 4) * Math.PI) / 2;
+  group.rotation.y = rotY;
 }
 
 function darken(hex: number, f: number): number {

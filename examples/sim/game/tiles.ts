@@ -94,8 +94,10 @@ export class TileMap implements GameSystem {
       this.rebuildRoads(roadCells);
     }
 
-    // --- Zone lots: rebuild on zone-set change ---
-    const zoneCells = [...next.entries()].filter(([, t]) => t.kind !== "road");
+    // --- Zone lots: a bright zone tint on tiles that are zoned but not
+    //     yet built. Rebuilds when a tile is zoned OR develops (the
+    //     tint vanishes once a building rises). ---
+    const zoneCells = [...next.entries()].filter(([, t]) => t.kind !== "road" && t.level < 1);
     const lotSig = zoneCells
       .map(([k, t]) => k + t.kind)
       .sort()
@@ -145,7 +147,13 @@ export class TileMap implements GameSystem {
       const existing = this.buildings.get(key);
       if (!existing || existing.level !== t.level) {
         if (existing) this.buildGroup.remove(existing.obj);
-        const obj = makeBuilding(t.kind as BuildingZone, t.level, gx, gz);
+        // Face the building toward an adjacent road (N/E/S/W priority).
+        let faceRad: number | undefined;
+        if (this.isRoadAt(gx, gz + 1)) faceRad = 0;
+        else if (this.isRoadAt(gx + 1, gz)) faceRad = Math.PI / 2;
+        else if (this.isRoadAt(gx, gz - 1)) faceRad = Math.PI;
+        else if (this.isRoadAt(gx - 1, gz)) faceRad = -Math.PI / 2;
+        const obj = makeBuilding(t.kind as BuildingZone, t.level, gx, gz, faceRad);
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
         obj.position.set(cx, heightAt(cx, cz), cz);
@@ -188,6 +196,12 @@ export class TileMap implements GameSystem {
   }
 
   private buildLots(cells: Array<[string, TileState]>): THREE.Mesh {
+    // Bright zoning colours (SimCity/CS style): green / blue / amber.
+    const TINT: Record<BuildingZone, [number, number, number]> = {
+      res: [0.35, 0.82, 0.35],
+      com: [0.33, 0.72, 0.9],
+      ind: [0.9, 0.72, 0.24],
+    };
     const pos: number[] = [];
     const col: number[] = [];
     for (const [key, t] of cells) {
@@ -195,17 +209,18 @@ export class TileMap implements GameSystem {
       const [gx, gz] = key.split(",").map(Number);
       const cx = cellCenterX(gx);
       const cz = cellCenterZ(gz);
-      const hex = ZONE[t.kind as BuildingZone].lot;
-      const c: [number, number, number] = [
-        ((hex >> 16) & 0xff) / 255,
-        ((hex >> 8) & 0xff) / 255,
-        (hex & 0xff) / 255,
-      ];
-      const s = TILE * 0.46;
-      const y = heightAt(cx, cz) + LOT_Y;
+      const c = TINT[t.kind as BuildingZone];
+      const s = TILE * 0.48;
+      // Conform to the terrain (sample each corner) and lift clear so the
+      // undulating mesh doesn't bury the flat overlay.
+      const L = 0.25;
+      const y00 = heightAt(cx - s, cz - s) + L;
+      const y10 = heightAt(cx + s, cz - s) + L;
+      const y11 = heightAt(cx + s, cz + s) + L;
+      const y01 = heightAt(cx - s, cz + s) + L;
       const v = [
-        cx - s, y, cz - s, cx + s, y, cz - s, cx + s, y, cz + s,
-        cx - s, y, cz - s, cx + s, y, cz + s, cx - s, y, cz + s,
+        cx - s, y00, cz - s, cx + s, y10, cz - s, cx + s, y11, cz + s,
+        cx - s, y00, cz - s, cx + s, y11, cz + s, cx - s, y01, cz + s,
       ];
       pos.push(...v);
       for (let i = 0; i < 6; i++) col.push(c[0], c[1], c[2]);
@@ -213,9 +228,18 @@ export class TileMap implements GameSystem {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
-    geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
-    mesh.receiveShadow = true;
+    // Unlit + translucent so it reads as a planning overlay on the grass.
+    const mesh = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.6,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    mesh.renderOrder = 1;
     return mesh;
   }
 
