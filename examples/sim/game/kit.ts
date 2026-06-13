@@ -76,7 +76,7 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
           loader.load(
             basePath + file,
             (gltf) => {
-              levelProtos.set(Number(lvl), normalizeToFootprint(gltf.scene));
+              levelProtos.set(Number(lvl), normalizeModel(gltf.scene));
               resolve();
             },
             undefined,
@@ -113,22 +113,22 @@ function tintedProto(zone: BuildingZone, lvl: number): THREE.Object3D | null {
   return tinted;
 }
 
-/** Scale + recentre a loaded model so its base is at y=0 and it fits. */
-function normalizeToFootprint(scene: THREE.Object3D): THREE.Object3D {
+/**
+ * Recentre a loaded model on the cell (base at y=0, centred in x/z) and
+ * apply the shared uniform KIT_SCALE so all models keep real-world
+ * proportions relative to each other.
+ */
+function normalizeModel(scene: THREE.Object3D): THREE.Object3D {
   scene.updateWorldMatrix(true, true);
   const box = new THREE.Box3().setFromObject(scene);
-  const size = new THREE.Vector3();
   const center = new THREE.Vector3();
-  box.getSize(size);
   box.getCenter(center);
-  const span = Math.max(size.x, size.z) || 1;
-  const scale = FOOTPRINT / span;
-  const holder = new THREE.Group();
   scene.position.set(-center.x, -box.min.y, -center.z);
   scene.scale.setScalar(1);
   const inner = new THREE.Group();
   inner.add(scene);
-  inner.scale.setScalar(scale);
+  inner.scale.setScalar(KIT_SCALE);
+  const holder = new THREE.Group();
   holder.add(inner);
   holder.traverse((o) => {
     const m = o as THREE.Mesh;
