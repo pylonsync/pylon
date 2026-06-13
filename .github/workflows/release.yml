@@ -152,7 +152,7 @@ jobs:
           # has rights to publish it. End users invoke via
           # `npm create @pylonsync/pylon@latest` (npm rewrites
           # `@pylonsync/pylon` to `@pylonsync/create-pylon`).
-          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/react-native packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon)
+          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/client packages/react-native packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon)
           REFERENCE_VERSION=""
           for pkg in "${PYLON_PKGS[@]}"; do
             [[ -f "$pkg/package.json" ]] || continue
@@ -250,9 +250,15 @@ jobs:
           done
 
           # Postflight: dry-resolve the published graph by trying to install
-          # @pylonsync/react in a temp dir. If bun can't satisfy the deps,
-          # we just produced another broken release — fail loudly so the
-          # tag can be yanked before users hit it.
+          # the packages the create-pylon templates actually pull in. If bun
+          # can't satisfy the deps, we just produced another broken release —
+          # fail loudly so the tag can be yanked before users hit it.
+          #
+          # @pylonsync/client is listed explicitly: the default `ssr` template
+          # imports it (auth-form / dashboard), but nothing in @pylonsync/react's
+          # own dep graph pulls it in — so a react-only postflight stayed green
+          # while client was unpublished for releases, and every default scaffold
+          # 404'd on `bun install`. Resolving it here closes that blind spot.
           #
           # Retry loop because npm's CDN takes 5-30s to propagate freshly-
           # published versions to all edge nodes, and bun's resolver can
@@ -266,7 +272,7 @@ jobs:
           {
             "name": "pylon-postflight-check",
             "private": true,
-            "dependencies": { "@pylonsync/react": "$REFERENCE_VERSION" }
+            "dependencies": { "@pylonsync/react": "$REFERENCE_VERSION", "@pylonsync/client": "$REFERENCE_VERSION" }
           }
           EOF
             attempt=0

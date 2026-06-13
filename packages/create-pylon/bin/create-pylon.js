@@ -86,8 +86,10 @@ const TEMPLATE_REGISTRY = {
 		platforms: ["web", "ios", "mac", "expo"],
 	},
 	todo: {
-		blurb: "CRUD + drag-reorder + optimistic mutations.",
-		platforms: ["web", "vite", "ios", "mac", "expo"],
+		blurb:
+			"Live, optimistic todo list — guest auth, owner-scoped, one server, no Next.js.",
+		platforms: [],
+		unified: true,
 	},
 	b2b: {
 		blurb: "Multi-tenant SaaS: orgs, members, roles, RBAC policies.",
@@ -163,8 +165,8 @@ ${tmplLines.join("\n")}
 
 Examples:
   npm create @pylonsync/pylon my-app --template ssr         # full-stack SSR, no Next.js
+  npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app
-  npm create @pylonsync/pylon my-app --template todo --platforms web,ios
   npm create @pylonsync/pylon my-app --template b2b --platforms web,mac
   npm create @pylonsync/pylon my-app --template chat --platforms ios,mac,expo
 `);
