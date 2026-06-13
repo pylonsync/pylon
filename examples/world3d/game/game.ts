@@ -266,7 +266,26 @@ export class Game {
     const offShake = this.engine.events.on("shake", ({ strength }) => {
       this.shakeStrength = Math.min(0.6, this.shakeStrength + strength);
     });
-    this.disposeFns.push(offShot, offGrenade, offDestroyed, offShake);
+    // Rocket-jump knockback: every detonation (yours or a peer's)
+    // shoves the local player away from the blast center. Jump +
+    // ground-detonate stacks the impulse on jump velocity and
+    // launches you.
+    const offBoom = this.engine.events.on("explosion", ({ point, radius }) => {
+      if (this.dead) return;
+      const reach = radius * 2.2;
+      const d = new THREE.Vector3().copy(this.player.position).sub(point);
+      const dist = d.length();
+      if (dist >= reach) return;
+      const falloff = 1 - dist / reach;
+      const strength = 16 * falloff;
+      const impulse =
+        dist > 0.05 ? d.multiplyScalar(strength / dist) : d.set(0, strength, 0);
+      // Mostly-lateral blasts still get some lift — feels explosive
+      // and keeps ground friction from eating the shove.
+      impulse.y = Math.max(impulse.y, strength * 0.3);
+      this.player.applyImpulse(impulse);
+    });
+    this.disposeFns.push(offShot, offGrenade, offDestroyed, offShake, offBoom);
 
     // --- Post-processing: render → bloom → output ---
     // Bloom picks up the sun disc, glints, muzzle flash, and explosion

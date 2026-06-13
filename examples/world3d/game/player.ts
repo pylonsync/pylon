@@ -30,6 +30,10 @@ export class Player implements GameSystem {
   controlsEnabled = true;
 
   private readonly velocity = new THREE.Vector3();
+  /** Explosion knockback. Walking OVERWRITES velocity.x/z every frame
+   *  (instant control), so horizontal shove lives here as a decaying
+   *  additive term; vertical rides the ballistic velocity directly. */
+  private readonly kickVel = new THREE.Vector3();
   private readonly tmpForward = new THREE.Vector3();
   private readonly tmpRight = new THREE.Vector3();
   private readonly tmpBack = new THREE.Vector3();
@@ -80,6 +84,15 @@ export class Player implements GameSystem {
     this.recoilPitch += pitchUp;
   }
 
+  /** Explosion knockback — launches off the ground when the impulse
+   *  has lift (rocket-jump). */
+  applyImpulse(impulse: THREE.Vector3) {
+    this.kickVel.x += impulse.x;
+    this.kickVel.z += impulse.z;
+    this.velocity.y += impulse.y;
+    if (impulse.y > 0.5) this.grounded = false;
+  }
+
   /** Horizontal ground speed (m/s) — drives the body walk cycle. */
   get groundSpeed(): number {
     return Math.hypot(this.velocity.x, this.velocity.z);
@@ -90,6 +103,7 @@ export class Player implements GameSystem {
   teleport(to: THREE.Vector3) {
     this.position.copy(to);
     this.velocity.set(0, 0, 0);
+    this.kickVel.set(0, 0, 0);
   }
 
   isKeyDown(code: string): boolean {
@@ -134,18 +148,24 @@ export class Player implements GameSystem {
     const moveX = (-sin * fwd + cos * strafe) * speed;
     const moveZ = (-cos * fwd - sin * strafe) * speed;
 
+    // Knockback decay — slow while airborne so a blast carries you,
+    // fast once you're back on the ground (or dragging through water).
+    const kickDamp = Math.exp(-dt * (this.grounded ? 8 : this.swimming ? 4 : 1.8));
+    this.kickVel.multiplyScalar(kickDamp);
+    if (this.kickVel.lengthSq() < 0.01) this.kickVel.set(0, 0, 0);
+
     if (this.swimming) {
       // --- Swim: float at the surface, damped vertical control ---
-      this.velocity.x = moveX;
-      this.velocity.z = moveZ;
+      this.velocity.x = moveX + this.kickVel.x;
+      this.velocity.z = moveZ + this.kickVel.z;
       const surfaceY = waterEye + Math.sin(ctx.time * 1.6) * 0.08; // gentle bob
       this.velocity.y += (surfaceY - this.position.y) * 6 * dt - this.velocity.y * 3 * dt;
       if (this.keys.has("Space")) this.velocity.y += 4 * dt;
       this.grounded = false;
     } else {
       // --- Walk: instant horizontal control, gravity vertical ---
-      this.velocity.x = moveX;
-      this.velocity.z = moveZ;
+      this.velocity.x = moveX + this.kickVel.x;
+      this.velocity.z = moveZ + this.kickVel.z;
       this.velocity.y -= GRAVITY * dt;
       if (this.grounded && this.keys.has("Space")) {
         this.velocity.y = PLAYER.jumpSpeed;
