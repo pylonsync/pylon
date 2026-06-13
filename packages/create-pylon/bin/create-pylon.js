@@ -82,8 +82,10 @@ const TEMPLATE_REGISTRY = {
 		unified: true,
 	},
 	barebones: {
-		blurb: "Single entity, list + create. The smallest working app.",
-		platforms: ["web", "ios", "mac", "expo"],
+		blurb:
+			"Single entity, live list + optimistic create. The smallest SSR app, one port.",
+		platforms: [],
+		unified: true,
 	},
 	todo: {
 		blurb:
