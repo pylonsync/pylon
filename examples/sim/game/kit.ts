@@ -15,50 +15,54 @@ import { hash2 } from "./prng";
 
 export type BuildingZone = "res" | "com" | "ind";
 
-/** Footprint a building is normalised to fit within (leaves a margin). */
+/**
+ * Uniform scale applied to every kit model (preserves the pack's real
+ * proportions, so bigger structures stay bigger across levels). Tuned so
+ * the widest MegaKit building (~21 m) lands at roughly one cell.
+ */
+const KIT_SCALE = TILE * 0.052;
+
+/** Footprint for the procedural fallback massing. */
 const FOOTPRINT = TILE * 0.82;
 
-/** GLB filenames per (zone, level). Drop matching files in to upgrade. */
-const KIT_FILES: Record<string, string> = {
-  res1: "res_small.glb",
-  res2: "res_mid.glb",
-  res3: "res_tower.glb",
-  com1: "com_small.glb",
-  com2: "com_mid.glb",
-  com3: "com_tower.glb",
-  ind1: "ind_small.glb",
-  ind2: "ind_mid.glb",
-  ind3: "ind_tower.glb",
+/**
+ * The Quaternius MegaKit ships three pre-built structures; we map them
+ * to the three growth levels (small → mid → large) and tint them per
+ * zone so R/C/I read differently while sharing the pack's look. Drop a
+ * `models.json` in to override the level → filename mapping.
+ */
+const LEVEL_FILES: Record<number, string> = {
+  1: "building_small.glb",
+  2: "building_medium.glb",
+  3: "building_large.glb",
 };
 
-/** Friendly slot names accepted in models.json → internal keys. */
-const SLOT_ALIAS: Record<string, string> = {
-  res_small: "res1", res_mid: "res2", res_tower: "res3",
-  com_small: "com1", com_mid: "com2", com_tower: "com3",
-  ind_small: "ind1", ind_mid: "ind2", ind_tower: "ind3",
+/** Subtle per-zone multiply tint over the textured facades. */
+const ZONE_TINT: Record<BuildingZone, number> = {
+  res: 0xf3ddc8, // warm brownstone
+  com: 0xc4d4ea, // cool steel/glass
+  ind: 0xe7d49a, // industrial amber
 };
 
+/** Raw normalised model per level (white). */
+const levelProtos = new Map<number, THREE.Object3D>();
+/** Tinted, cached per (zone, level). */
 const prototypes = new Map<string, THREE.Object3D>();
 
 /**
- * Load whatever GLBs exist under `basePath`. Missing files are skipped
- * silently — those (zone, level)s fall back to procedural massing.
- *
- * An optional `models.json` in the folder remaps slots to filenames, so
- * you can drop the megakit's original-named GLBs in without renaming:
- *   { "res_tower": "SM_Bld_Apartment_03.glb", ... }
- * keyed by the same slots as KIT_FILES (res1 → "res1" or "res_small").
+ * Load the building GLBs under `basePath`. Missing files just leave the
+ * procedural fallback in place. A `models.json` may remap levels:
+ *   { "1": "MyHouse.glb", "2": "...", "3": "..." }
  */
 export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
-  const files = { ...KIT_FILES };
+  const files = { ...LEVEL_FILES };
   try {
     const res = await fetch(basePath + "models.json");
     if (res.ok) {
       const map = (await res.json()) as Record<string, string>;
-      for (const [slot, file] of Object.entries(map)) {
-        // Accept either slot key ("res1") or filename key ("res_small").
-        const key = SLOT_ALIAS[slot] ?? slot;
-        if (key in files) files[key] = file;
+      for (const [lvl, file] of Object.entries(map)) {
+        const n = Number(lvl);
+        if (n >= 1 && n <= 3) files[n] = file;
       }
     }
   } catch {
@@ -67,13 +71,12 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
   const loader = new GLTFLoader();
   await Promise.all(
     Object.entries(files).map(
-      ([key, file]) =>
+      ([lvl, file]) =>
         new Promise<void>((resolve) => {
           loader.load(
             basePath + file,
             (gltf) => {
-              const proto = normalizeToFootprint(gltf.scene);
-              prototypes.set(key, proto);
+              levelProtos.set(Number(lvl), normalizeToFootprint(gltf.scene));
               resolve();
             },
             undefined,
@@ -82,6 +85,32 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
         }),
     ),
   );
+}
+
+/** Build (once) the zone-tinted prototype for a level, cloning
+ *  materials so the tint doesn't bleed across zones. */
+function tintedProto(zone: BuildingZone, lvl: number): THREE.Object3D | null {
+  const key = zone + lvl;
+  const cached = prototypes.get(key);
+  if (cached) return cached;
+  const raw = levelProtos.get(lvl);
+  if (!raw) return null;
+  const tinted = raw.clone(true);
+  const tint = new THREE.Color(ZONE_TINT[zone]);
+  const tintMat = (m: THREE.Material): THREE.Material => {
+    const c = m.clone() as THREE.MeshStandardMaterial;
+    if (c.color) c.color.multiply(tint);
+    return c;
+  };
+  tinted.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.material = Array.isArray(mesh.material)
+      ? mesh.material.map(tintMat)
+      : tintMat(mesh.material);
+  });
+  prototypes.set(key, tinted);
+  return tinted;
 }
 
 /** Scale + recentre a loaded model so its base is at y=0 and it fits. */
@@ -123,7 +152,7 @@ export function makeBuilding(
   gz: number,
 ): THREE.Object3D {
   const lvl = Math.max(1, Math.min(3, Math.round(level)));
-  const proto = prototypes.get(zone + lvl);
+  const proto = tintedProto(zone, lvl);
   const group = new THREE.Group();
   if (proto) {
     const inst = proto.clone(true);

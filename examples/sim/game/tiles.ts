@@ -100,9 +100,14 @@ export class TileMap implements GameSystem {
       if (zoneCells.length) this.lotGroup.add(this.buildLots(zoneCells));
     }
 
-    // --- Buildings: per zone tile with level>0 ---
+    this.syncBuildings();
+  }
+
+  /** (Re)create building meshes to match `this.state`. Buildings whose
+   *  level is unchanged are left alone. */
+  private syncBuildings(): void {
     const wanted = new Set<string>();
-    for (const [key, t] of next) {
+    for (const [key, t] of this.state) {
       if (t.kind === "road" || t.level < 1) continue;
       wanted.add(key);
       const [gx, gz] = key.split(",").map(Number);
@@ -129,6 +134,15 @@ export class TileMap implements GameSystem {
         this.buildings.delete(key);
       }
     }
+  }
+
+  /** Rebuild every building from scratch — called once the GLB kit
+   *  finishes loading so the procedural placeholders are replaced. */
+  refreshBuildings(): void {
+    for (const view of this.buildings.values()) this.buildGroup.remove(view.obj);
+    this.buildings.clear();
+    this.rising.clear();
+    this.syncBuildings();
   }
 
   private buildLots(cells: Array<[string, TileState]>): THREE.Mesh {
