@@ -1,0 +1,11 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Pylon",
+      "description": "Build full-stack realtime apps with Pylon — schema, policies, server functions, server-rendered React (SSR), and deployment.",
+      "skills": ["pylon"]
+    }
+  ]
+}

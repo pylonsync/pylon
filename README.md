@@ -4,6 +4,7 @@ A self-hostable, single-binary backend for web, mobile, and real-time apps.
 
 [![CI](https://github.com/pylonsync/pylon/actions/workflows/ci.yml/badge.svg)](https://github.com/pylonsync/pylon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![skills.sh](https://skills.sh/b/pylonsync/pylon)](https://skills.sh/pylonsync/pylon)
 
 pylon gives you what Convex / Firebase / Supabase do — declarative schema,
 real-time sync, server functions, auth, file storage — but as a single Rust
@@ -22,6 +23,18 @@ pylon dev
 ```
 
 Visit `http://localhost:4321/studio` for the inspector.
+
+## Use with your coding agent
+
+Pylon ships a [skill](skills/pylon/SKILL.md) that teaches Claude Code, Codex,
+or Cursor how to build Pylon apps correctly — schema, policies, server
+functions, SSR, and the gotchas. Add it to your agent with one command:
+
+```sh
+npx skills add pylonsync/pylon
+```
+
+`npm create @pylonsync/pylon@latest` also offers to install it during scaffold.
 
 ## What you get
 

@@ -116,6 +116,15 @@ const flags = {
 	template: takeValue(args, "--template"),
 	platforms: takeValue(args, "--platforms"),
 	skipInstall: args.includes("--skip-install"),
+	// --skill / --no-skill: install the Pylon skill into the new project via
+	// `npx skills add pylonsync/pylon` — the skills.sh CLI detects the coding
+	// agent (Claude Code / Codex / Cursor) and drops the always-current skill
+	// from this repo's skills/pylon/SKILL.md. undefined => prompt (default yes).
+	skill: args.includes("--skill")
+		? true
+		: args.includes("--no-skill")
+			? false
+			: undefined,
 	help: args.includes("--help") || args.includes("-h"),
 };
 
@@ -201,6 +210,16 @@ if (!flags.pm) {
 		.trim()
 		.toLowerCase();
 	flags.pm = ["bun", "pnpm", "yarn", "npm"].includes(choice) ? choice : def;
+}
+if (flags.skill === undefined) {
+	const ans = (
+		await rl.question(
+			"Add the Pylon skill to your coding agent (Claude Code / Codex / Cursor)? [Y/n]: ",
+		)
+	)
+		.trim()
+		.toLowerCase();
+	flags.skill = ans !== "n" && ans !== "no";
 }
 rl.close();
 
@@ -468,6 +487,34 @@ if (!flags.skipInstall) {
 }
 
 // ---------------------------------------------------------------------------
+// Optional: install the Pylon skill into the project's coding agent.
+//
+// `npx skills add pylonsync/pylon` (skills.sh) detects the installed agent
+// (Claude Code / Codex / Cursor) and drops the canonical skill from this
+// repo's skills/pylon/SKILL.md — always current, no stale bundled copy. We
+// only auto-run it when stdin is a TTY: the skills CLI prompts for scope and
+// agent, which would hang a non-interactive scaffold (CI, piped input). When
+// we can't run it, the footer prints the one-liner so the user can opt in.
+// ---------------------------------------------------------------------------
+
+const SKILL_INSTALL_CMD = "npx skills add pylonsync/pylon";
+let skillInstalled = false;
+if (flags.skill && stdin.isTTY) {
+	console.log("\nAdding the Pylon skill to your coding agent...");
+	const { spawnSync } = await import("node:child_process");
+	const result = spawnSync("npx", ["-y", "skills", "add", "pylonsync/pylon"], {
+		cwd: root,
+		stdio: "inherit",
+	});
+	skillInstalled = result.status === 0;
+	if (!skillInstalled) {
+		console.warn(
+			`\nCouldn't add the skill automatically. Run it yourself anytime:\n  ${SKILL_INSTALL_CMD}\n`,
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Final instructions
 // ---------------------------------------------------------------------------
 
@@ -512,6 +559,12 @@ if (platforms.includes("mac"))
 if (platforms.includes("expo"))
 	layoutLines.push("  apps/expo         Expo + React Native");
 
+const skillLine = skillInstalled
+	? "\nPylon skill added to your coding agent (Claude Code / Codex / Cursor).\n"
+	: flags.skill
+		? `\nAdd the Pylon skill to your coding agent:\n  ${SKILL_INSTALL_CMD}\n`
+		: "";
+
 console.log(`
 ✓ Created ${projectName}
 
@@ -522,7 +575,7 @@ ${platformLines.join("\n")}
 
 Layout:
 ${layoutLines.join("\n")}
-
+${skillLine}
 Docs: https://docs.pylonsync.com
 `);
 
