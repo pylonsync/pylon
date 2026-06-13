@@ -83,7 +83,7 @@ export class City {
     // ACES tone mapping + sRGB so the PBR brick/asphalt read with proper
     // contrast instead of muddy browns.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 0.92;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 
@@ -95,14 +95,14 @@ export class City {
     // dark/flat. Without this PBR metals read black.
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.6;
+    this.scene.environmentIntensity = 0.4;
 
     this.camera = new THREE.PerspectiveCamera(50, rect.width / Math.max(1, rect.height), 0.5, 2000);
 
-    // Lights: bright sky fill + a strong warm sun for crisp shadows.
-    const hemi = new THREE.HemisphereLight(0xdcecf6, 0x59614a, 2.0);
+    // Lights: soft sky fill + a warm sun for crisp shadows.
+    const hemi = new THREE.HemisphereLight(0xcfe0ee, 0x55603f, 1.25);
     this.scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(0xfff4e2, 3.2);
+    this.sun = new THREE.DirectionalLight(0xffeed0, 2.4);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 1;

@@ -48,22 +48,49 @@ export function makeFacadeTexture(wall: string): THREE.CanvasTexture {
  * planned map. One big repeating texture under everything.
  */
 export function makeGroundTexture(): THREE.CanvasTexture {
-  const [c, ctx] = canvas(64);
-  // Light grass-green turf so the map reads as buildable land.
-  ctx.fillStyle = "#7c9266";
-  ctx.fillRect(0, 0, 64, 64);
-  // soft mottling
-  for (let i = 0; i < 70; i++) {
-    const g = Math.random() < 0.5 ? 255 : 0;
-    ctx.fillStyle = `rgba(${g},${g},${g},${Math.random() * 0.05})`;
-    ctx.fillRect(Math.random() * 64, Math.random() * 64, 2, 2);
+  const N = 256;
+  const [c, ctx] = canvas(N);
+  // Layered grass: a mid base, broad tonal patches, fine blade noise and
+  // a few dirt flecks so it reads as turf rather than a flat fill. Tiles
+  // seamlessly (everything wraps via modulo).
+  ctx.fillStyle = "#4f6b39";
+  ctx.fillRect(0, 0, N, N);
+
+  const greens = ["#586f3c", "#46612f", "#5f7a42", "#42592c", "#657f47"];
+  // Broad soft patches (mowed-grass variation).
+  for (let i = 0; i < 90; i++) {
+    const r = 18 + Math.random() * 46;
+    const x = Math.random() * N;
+    const y = Math.random() * N;
+    ctx.globalAlpha = 0.18 + Math.random() * 0.2;
+    ctx.fillStyle = greens[(Math.random() * greens.length) | 0];
+    for (let dx = -N; dx <= N; dx += N)
+      for (let dy = -N; dy <= N; dy += N) {
+        ctx.beginPath();
+        ctx.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
   }
-  // Per-cell grid line.
-  ctx.strokeStyle = "rgba(255,255,255,0.12)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, 63, 63);
+  ctx.globalAlpha = 1;
+  // Fine blade noise.
+  for (let i = 0; i < 4200; i++) {
+    const x = Math.random() * N;
+    const y = Math.random() * N;
+    const dark = Math.random() < 0.5;
+    ctx.fillStyle = dark ? "rgba(20,40,16,0.18)" : "rgba(150,180,110,0.16)";
+    ctx.fillRect(x, y, 1, Math.random() < 0.5 ? 1 : 2);
+  }
+  // Sparse dirt flecks.
+  for (let i = 0; i < 70; i++) {
+    ctx.fillStyle = `rgba(120,96,60,${0.1 + Math.random() * 0.18})`;
+    ctx.beginPath();
+    ctx.arc(Math.random() * N, Math.random() * N, 1 + Math.random() * 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
   return tex;
 }

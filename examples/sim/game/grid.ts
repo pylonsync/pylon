@@ -32,7 +32,9 @@ export function cellKey(gx: number, gz: number): string {
 /** Big ground plane with a faint repeating grid texture. */
 export function makeGround(): THREE.Mesh {
   const tex = makeGroundTexture();
-  tex.repeat.set(GRID, GRID);
+  // ~16 m per tile — large enough that the grass variation reads without
+  // an obvious repeat, small enough to keep blade detail.
+  tex.repeat.set(GRID / 4, GRID / 4);
   const geo = new THREE.PlaneGeometry(GRID * TILE, GRID * TILE);
   geo.rotateX(-Math.PI / 2);
   const mat = new THREE.MeshLambertMaterial({ map: tex, color: 0xffffff });
