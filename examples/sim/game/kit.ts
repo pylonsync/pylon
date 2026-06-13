@@ -148,46 +148,23 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
 }
 
 /**
- * Pick + orient a road tile from the 4-neighbour connection flags.
- * Returns a fresh Object3D placed at the origin (caller positions it).
- * Uses the square straight tile oriented N-S or E-W, the cross for
- * 4-ways, the tee for 3-ways and the curve for corners — rotations are
- * calibrated to the MegaKit pieces' default orientation.
+ * One road tile for a cell. Uses the plain MegaKit asphalt tile for
+ * every cell — it's a perfect square that abuts its neighbours, so the
+ * network is seamless and uniform. (The kit's marked junction/curve
+ * pieces are a different 24 m module that doesn't line up with the 6 m
+ * straights, so they're intentionally not used here.) The `_n,e,s,w`
+ * flags are accepted for future marking support.
  */
-export function makeRoadTile(n: boolean, e: boolean, s: boolean, w: boolean): THREE.Object3D | null {
-  const straight = roadProtos.get("straight");
-  if (!straight) return null;
-  const count = (n ? 1 : 0) + (e ? 1 : 0) + (s ? 1 : 0) + (w ? 1 : 0);
+export function makeRoadTile(
+  _n: boolean,
+  _e: boolean,
+  _s: boolean,
+  _w: boolean,
+): THREE.Object3D | null {
+  const proto = roadProtos.get("straight");
+  if (!proto) return null;
   const group = new THREE.Group();
-  let proto = straight;
-  let rotY = 0;
-  const HALF = Math.PI / 2;
-
-  if (count >= 4 && roadProtos.has("cross")) {
-    proto = roadProtos.get("cross")!;
-  } else if (count === 3 && roadProtos.has("tee")) {
-    proto = roadProtos.get("tee")!;
-    // Tee's missing arm (calibrated): rotate so the gap faces the
-    // absent neighbour. Default tee opens N/E/S (gap = W).
-    if (!n) rotY = HALF;
-    else if (!e) rotY = Math.PI;
-    else if (!s) rotY = -HALF;
-    else rotY = 0; // !w
-  } else if (count === 2 && roadProtos.has("curve") && !((n && s) || (e && w))) {
-    proto = roadProtos.get("curve")!;
-    // Curve default connects N+E.
-    if (n && e) rotY = 0;
-    else if (e && s) rotY = -HALF;
-    else if (s && w) rotY = Math.PI;
-    else rotY = HALF; // w && n
-  } else {
-    // Straight (also dead-ends / isolated): lanes run N-S by default.
-    rotY = e || w ? HALF : 0;
-  }
-
-  const inst = proto.clone(true);
-  inst.rotation.y = rotY;
-  group.add(inst);
+  group.add(proto.clone(true));
   return group;
 }
 
@@ -236,9 +213,19 @@ function normalizeModel(scene: THREE.Object3D): THREE.Object3D {
   holder.add(inner);
   holder.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (m.isMesh) {
-      m.castShadow = true;
-      m.receiveShadow = true;
+    if (!m.isMesh) return;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    // The pack authors brick/concrete at metalness=1, which renders dark
+    // and muddy without an env map. Knock metalness down so the facades
+    // read as proper matte masonry (glass/metal trims stay a touch shiny).
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mat of mats) {
+      const std = mat as THREE.MeshStandardMaterial;
+      if (std.isMeshStandardMaterial) {
+        std.metalness = Math.min(std.metalness, 0.1);
+        if (std.roughness < 0.5) std.roughness = 0.85;
+      }
     }
   });
   return holder;

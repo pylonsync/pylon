@@ -5,6 +5,7 @@
  * narrow setter API: setTool / setTiles / setCity / onStats.
  */
 import * as THREE from "three";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { CameraRig } from "./camera";
 import { GRID, TILE, WORLD_HALF } from "./config";
 import { Engine, type TileKind } from "./engine";
@@ -77,17 +78,29 @@ export class City {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.info.autoReset = false;
+    // ACES tone mapping + sRGB so the PBR brick/asphalt read with proper
+    // contrast instead of muddy browns.
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 
-    this.scene.background = new THREE.Color(0x9ec7e0);
-    this.scene.fog = new THREE.Fog(0x9ec7e0, WORLD_HALF * 1.4, WORLD_HALF * 3);
+    this.scene.background = new THREE.Color(0xaed2ea);
+    this.scene.fog = new THREE.Fog(0xaed2ea, WORLD_HALF * 1.5, WORLD_HALF * 3);
+
+    // Image-based lighting: a neutral room env so MeshStandardMaterial
+    // (the GLB brick/glass/asphalt) has reflections and doesn't render
+    // dark/flat. Without this PBR metals read black.
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.6;
 
     this.camera = new THREE.PerspectiveCamera(50, rect.width / Math.max(1, rect.height), 0.5, 2000);
 
-    // Lights: soft sky fill + a low sun for long stylised shadows.
-    const hemi = new THREE.HemisphereLight(0xcfe4f0, 0x3a4a40, 1.0);
+    // Lights: bright sky fill + a strong warm sun for crisp shadows.
+    const hemi = new THREE.HemisphereLight(0xdcecf6, 0x59614a, 2.0);
     this.scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(0xfff2d8, 1.5);
+    this.sun = new THREE.DirectionalLight(0xfff4e2, 3.2);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 1;
