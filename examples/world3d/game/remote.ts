@@ -41,6 +41,8 @@ interface RemoteEntry {
   lastHealth: number;
   /** 0 = standing, 1 = prone; eases in on death, snaps on respawn. */
   deathT: number;
+  /** Small per-corpse sideways roll so bodies don't fall identically. */
+  deathRoll: number;
   disposables: Array<{ dispose(): void }>;
 }
 
@@ -112,6 +114,32 @@ function makeNameSprite(name: string, color: string): { sprite: THREE.Sprite; di
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(2.6, 0.65, 1);
   return { sprite, disposables: [tex, mat] };
+}
+
+/** A character rig's feet sit ~eyeHeight below its group origin. */
+const FALL_PIVOT_H = PLAYER.eyeHeight;
+
+/**
+ * Tip a character rig from standing (t=0) to flat-on-the-ground prone
+ * (t=1). Pivots about the FEET, not the eye-level group origin, so the
+ * body lies on the ground instead of floating at an angle — the
+ * position offsets keep the foot point planted as it rotates back.
+ */
+function poseDeath(group: THREE.Group, t: number, roll: number): void {
+  const tip = t * (Math.PI / 2);
+  group.rotation.set(tip, 0, roll * t);
+  // Feet-pivot keeps the foot planted as the body tips back; the small
+  // lift seats the prone torso's thickness ON the ground rather than
+  // clipping into it.
+  group.position.y = -FALL_PIVOT_H * (1 - Math.cos(tip)) + 0.18 * t;
+  group.position.z = FALL_PIVOT_H * Math.sin(tip);
+}
+
+/** Stable non-negative hash of a row id (for deterministic variety). */
+function hashId(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return Math.abs(h);
 }
 
 export class RemotePlayers implements GameSystem {
@@ -213,6 +241,9 @@ export class RemotePlayers implements GameSystem {
       // splatter on arrival.
       lastHealth: row.health ?? 100,
       deathT: (row.health ?? 100) <= 0 ? 1 : 0,
+      // Deterministic ±0.3 rad roll from the id so two corpses lying
+      // near each other don't look cloned.
+      deathRoll: ((hashId(row.id) % 1000) / 1000 - 0.5) * 0.6,
       disposables,
     };
     this.entries.set(row.id, entry);
@@ -354,16 +385,15 @@ export class RemotePlayers implements GameSystem {
         entry.lastHealth = health;
         entry.healthBar.set(health);
       }
-      // Death pose: ease the body backward to the ground at 0 HP;
-      // snap upright on respawn (the row teleports anyway). The tip
-      // happens INSIDE root so the tag/bar sprites stay overhead.
+      // Death pose: collapse flat onto the ground at 0 HP, snap
+      // upright on respawn (the row teleports anyway). The tip happens
+      // INSIDE root so the name tag + health bar stay overhead.
       if (entry.lastHealth <= 0) {
-        entry.deathT += (1 - entry.deathT) * Math.min(1, ctx.dt * 5);
+        entry.deathT += (1 - entry.deathT) * Math.min(1, ctx.dt * 6);
       } else {
         entry.deathT = 0;
       }
-      entry.character.group.rotation.x = entry.deathT * 1.35;
-      entry.character.group.position.y = -entry.deathT * 1.2;
+      poseDeath(entry.character.group, entry.deathT, entry.deathRoll);
     }
   }
 

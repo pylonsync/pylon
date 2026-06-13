@@ -14,7 +14,7 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { Buildings } from "./buildings";
-import { QUALITY, SEED, WATER_LEVEL, WORLD_HALF, type QualityPreset } from "./config";
+import { PLAYER, QUALITY, SEED, WATER_LEVEL, WORLD_HALF, type QualityPreset } from "./config";
 import { Debris } from "./debris";
 import { Engine } from "./engine";
 import { Net } from "./net";
@@ -594,13 +594,19 @@ export class Game {
       // same convention as remote characters). Hidden in first person.
       this.selfRig.group.visible = this.player.viewMode === "third";
       if (this.selfRig.group.visible) {
-        // Death fall: tip the body backward and lower the (eye-level)
-        // origin so the corpse lies on the ground until respawn.
-        this.selfDeathT += ((this.dead ? 1 : 0) - this.selfDeathT) * Math.min(1, dt * 5);
+        // Death fall: collapse flat onto the ground, pivoting at the
+        // FEET (not the eye-level origin) so the body lies down instead
+        // of floating at an angle. Same math as remote.ts poseDeath,
+        // here applied in world space along the player's facing.
+        this.selfDeathT += ((this.dead ? 1 : 0) - this.selfDeathT) * Math.min(1, dt * 6);
+        const tip = this.selfDeathT * (Math.PI / 2);
+        const back = PLAYER.eyeHeight * Math.sin(tip);
         this.selfRig.group.position.copy(this.player.position);
-        this.selfRig.group.position.y -= this.selfDeathT * 1.2;
-        this.selfRig.group.rotation.y = this.player.yaw;
-        this.selfRig.group.rotation.x = this.selfDeathT * 1.35;
+        this.selfRig.group.position.x += Math.sin(this.player.yaw) * back;
+        this.selfRig.group.position.z += Math.cos(this.player.yaw) * back;
+        this.selfRig.group.position.y -=
+          PLAYER.eyeHeight * (1 - Math.cos(tip)) - 0.18 * this.selfDeathT;
+        this.selfRig.group.rotation.set(tip, this.player.yaw, 0, "YXZ");
         this.selfRig.animate(ctx.time, this.player.groundSpeed);
       }
       if (this.selfRig.group.visible && !this.dead) {
