@@ -16,7 +16,7 @@ import * as THREE from "three";
 import { TILE, ZONE } from "./config";
 import type { Cell, EventBus, FrameCtx, GameSystem, TileKind } from "./engine";
 import { cellCenterX, cellCenterZ, cellKey } from "./grid";
-import { type BuildingZone, makeBuilding } from "./kit";
+import { type BuildingZone, hasRoadKit, makeBuilding, makeRoadTile } from "./kit";
 import { buildRoadMesh } from "./roads";
 
 interface TileState {
@@ -81,11 +81,7 @@ export class TileMap implements GameSystem {
       .join("|");
     if (roadSig !== this.roadSig) {
       this.roadSig = roadSig;
-      this.roadGroup.clear();
-      if (roadCells.length) {
-        const isRoad = (gx: number, gz: number) => next.get(cellKey(gx, gz))?.kind === "road";
-        this.roadGroup.add(buildRoadMesh(roadCells, isRoad));
-      }
+      this.rebuildRoads(roadCells);
     }
 
     // --- Zone lots: rebuild on zone-set change ---
@@ -101,6 +97,29 @@ export class TileMap implements GameSystem {
     }
 
     this.syncBuildings();
+  }
+
+  /** Rebuild the road group: GLB tiles (auto-tiled from the neighbour
+   *  mask) when the road kit is loaded, else one merged procedural mesh. */
+  private rebuildRoads(roadCells: Cell[]): void {
+    this.roadGroup.clear();
+    if (roadCells.length === 0) return;
+    const isRoad = (gx: number, gz: number) => this.state.get(cellKey(gx, gz))?.kind === "road";
+    if (hasRoadKit()) {
+      for (const { gx, gz } of roadCells) {
+        const tile = makeRoadTile(
+          isRoad(gx, gz + 1),
+          isRoad(gx + 1, gz),
+          isRoad(gx, gz - 1),
+          isRoad(gx - 1, gz),
+        );
+        if (!tile) continue;
+        tile.position.set(cellCenterX(gx), 0.02, cellCenterZ(gz));
+        this.roadGroup.add(tile);
+      }
+    } else {
+      this.roadGroup.add(buildRoadMesh(roadCells, isRoad));
+    }
   }
 
   /** (Re)create building meshes to match `this.state`. Buildings whose
@@ -136,13 +155,22 @@ export class TileMap implements GameSystem {
     }
   }
 
-  /** Rebuild every building from scratch — called once the GLB kit
+  /** Rebuild buildings AND roads from scratch — called once the GLB kit
    *  finishes loading so the procedural placeholders are replaced. */
-  refreshBuildings(): void {
+  refreshKit(): void {
     for (const view of this.buildings.values()) this.buildGroup.remove(view.obj);
     this.buildings.clear();
     this.rising.clear();
     this.syncBuildings();
+    // Force the roads to rebuild with GLB tiles.
+    const roadCells: Cell[] = [];
+    for (const [key, t] of this.state) {
+      if (t.kind === "road") {
+        const [gx, gz] = key.split(",").map(Number);
+        roadCells.push({ gx, gz });
+      }
+    }
+    this.rebuildRoads(roadCells);
   }
 
   private buildLots(cells: Array<[string, TileState]>): THREE.Mesh {

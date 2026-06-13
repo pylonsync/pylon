@@ -115,7 +115,7 @@ export class City {
     // Async-load the Quaternius kit; procedural fallback renders until
     // it arrives, then rebuild buildings with the real models.
     preloadKit()
-      .then(() => this.tiles.refreshBuildings())
+      .then(() => this.tiles.refreshKit())
       .catch(() => {});
 
     // Painting interaction (left button).

@@ -49,6 +49,20 @@ const levelProtos = new Map<number, THREE.Object3D>();
 /** Tinted, cached per (zone, level). */
 const prototypes = new Map<string, THREE.Object3D>();
 
+/** Road tile prototypes (filled to the cell), keyed straight/cross/tee/curve. */
+const roadProtos = new Map<string, THREE.Object3D>();
+const ROAD_FILES: Record<string, string> = {
+  straight: "road_straight.glb",
+  cross: "road_cross.glb",
+  tee: "road_tee.glb",
+  curve: "road_curve.glb",
+};
+
+/** Whether the GLB road tiles loaded (else tiles.ts uses procedural roads). */
+export function hasRoadKit(): boolean {
+  return roadProtos.has("straight");
+}
+
 /**
  * Load the building GLBs under `basePath`. Missing files just leave the
  * procedural fallback in place. A `models.json` may remap levels:
@@ -69,22 +83,112 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
     /* no manifest — use defaults */
   }
   const loader = new GLTFLoader();
-  await Promise.all(
-    Object.entries(files).map(
-      ([lvl, file]) =>
-        new Promise<void>((resolve) => {
-          loader.load(
-            basePath + file,
-            (gltf) => {
-              levelProtos.set(Number(lvl), normalizeModel(gltf.scene));
-              resolve();
-            },
-            undefined,
-            () => resolve(), // missing/failed → procedural fallback
-          );
-        }),
+  const loadInto = (
+    file: string,
+    onLoad: (gltf: { scene: THREE.Object3D }) => void,
+  ): Promise<void> =>
+    new Promise<void>((resolve) => {
+      loader.load(
+        basePath + file,
+        (gltf) => {
+          onLoad(gltf);
+          resolve();
+        },
+        undefined,
+        () => resolve(), // missing/failed → fallback
+      );
+    });
+
+  await Promise.all([
+    ...Object.entries(files).map(([lvl, file]) =>
+      loadInto(file, (g) => levelProtos.set(Number(lvl), normalizeModel(g.scene))),
     ),
-  );
+    // Road tiles fill exactly one cell (flat); see makeRoadTile.
+    ...Object.entries(ROAD_FILES).map(([key, file]) =>
+      loadInto(file, (g) => roadProtos.set(key, normalizeToCell(g.scene))),
+    ),
+  ]);
+}
+
+/** Recentre a flat tile so its footprint exactly fills one TILE cell,
+ *  base at y=0. Used for the road pieces. */
+function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
+  scene.updateWorldMatrix(true, true);
+  const box = new THREE.Box3().setFromObject(scene);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  const span = Math.max(size.x, size.z) || 1;
+  const scale = TILE / span;
+  scene.position.set(-center.x, -box.min.y, -center.z);
+  scene.scale.setScalar(1);
+  const inner = new THREE.Group();
+  inner.add(scene);
+  inner.scale.setScalar(scale);
+  const holder = new THREE.Group();
+  holder.add(inner);
+  holder.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.receiveShadow = true;
+    // The pack authors asphalt as metalness=1, which renders dark with
+    // odd specular tints under our env-map-less lighting. Asphalt is a
+    // rough dielectric — force it matte so the grey surface + decals read.
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    for (const mat of mats) {
+      const std = mat as THREE.MeshStandardMaterial;
+      if (std.isMeshStandardMaterial) {
+        std.metalness = 0;
+        std.roughness = 1;
+      }
+    }
+  });
+  return holder;
+}
+
+/**
+ * Pick + orient a road tile from the 4-neighbour connection flags.
+ * Returns a fresh Object3D placed at the origin (caller positions it).
+ * Uses the square straight tile oriented N-S or E-W, the cross for
+ * 4-ways, the tee for 3-ways and the curve for corners — rotations are
+ * calibrated to the MegaKit pieces' default orientation.
+ */
+export function makeRoadTile(n: boolean, e: boolean, s: boolean, w: boolean): THREE.Object3D | null {
+  const straight = roadProtos.get("straight");
+  if (!straight) return null;
+  const count = (n ? 1 : 0) + (e ? 1 : 0) + (s ? 1 : 0) + (w ? 1 : 0);
+  const group = new THREE.Group();
+  let proto = straight;
+  let rotY = 0;
+  const HALF = Math.PI / 2;
+
+  if (count >= 4 && roadProtos.has("cross")) {
+    proto = roadProtos.get("cross")!;
+  } else if (count === 3 && roadProtos.has("tee")) {
+    proto = roadProtos.get("tee")!;
+    // Tee's missing arm (calibrated): rotate so the gap faces the
+    // absent neighbour. Default tee opens N/E/S (gap = W).
+    if (!n) rotY = HALF;
+    else if (!e) rotY = Math.PI;
+    else if (!s) rotY = -HALF;
+    else rotY = 0; // !w
+  } else if (count === 2 && roadProtos.has("curve") && !((n && s) || (e && w))) {
+    proto = roadProtos.get("curve")!;
+    // Curve default connects N+E.
+    if (n && e) rotY = 0;
+    else if (e && s) rotY = -HALF;
+    else if (s && w) rotY = Math.PI;
+    else rotY = HALF; // w && n
+  } else {
+    // Straight (also dead-ends / isolated): lanes run N-S by default.
+    rotY = e || w ? HALF : 0;
+  }
+
+  const inst = proto.clone(true);
+  inst.rotation.y = rotY;
+  group.add(inst);
+  return group;
 }
 
 /** Build (once) the zone-tinted prototype for a level, cloning
