@@ -31,11 +31,16 @@ export interface AvatarRow {
 
 interface RemoteEntry {
   character: Character;
+  /** Carries position/heading; the character tips over inside it on
+   *  death while the name tag + health bar sprites stay upright. */
+  root: THREE.Group;
   cur: { x: number; y: number; z: number; heading: number; pitch: number };
   target: { x: number; y: number; z: number; heading: number; pitch: number };
   healthBar: HealthBar;
   /** Last synced health — a drop between frames triggers blood VFX. */
   lastHealth: number;
+  /** 0 = standing, 1 = prone; eases in on death, snaps on respawn. */
+  deathT: number;
   disposables: Array<{ dispose(): void }>;
 }
 
@@ -182,27 +187,32 @@ export class RemotePlayers implements GameSystem {
     const character = buildCharacter(row.color);
     const disposables: Array<{ dispose(): void }> = [character];
 
+    const root = new THREE.Group();
+    root.add(character.group);
+
     const tag = makeNameSprite(row.name, row.color);
     tag.sprite.position.y = 0.62;
-    character.group.add(tag.sprite);
+    root.add(tag.sprite);
     disposables.push(...tag.disposables);
 
     const healthBar = new HealthBar();
     healthBar.sprite.position.y = 0.42;
-    character.group.add(healthBar.sprite);
+    root.add(healthBar.sprite);
     disposables.push(healthBar);
 
-    character.group.position.set(row.x, row.y, row.z);
-    this.group.add(character.group);
+    root.position.set(row.x, row.y, row.z);
+    this.group.add(root);
 
     const entry: RemoteEntry = {
       character,
+      root,
       cur: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
       target: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
       healthBar,
       // Seed from the row so a player FIRST SEEN at low health doesn't
       // splatter on arrival.
       lastHealth: row.health ?? 100,
+      deathT: (row.health ?? 100) <= 0 ? 1 : 0,
       disposables,
     };
     this.entries.set(row.id, entry);
@@ -219,6 +229,7 @@ export class RemotePlayers implements GameSystem {
     let best: PlayerHit | null = null;
     const RADIUS = 0.5;
     for (const [id, entry] of this.entries) {
+      if (entry.lastHealth <= 0) continue; // corpses don't soak bullets
       const cx = entry.cur.x;
       const cz = entry.cur.z;
       const yLo = entry.cur.y - 1.62;
@@ -263,6 +274,7 @@ export class RemotePlayers implements GameSystem {
   playersInRadius(center: THREE.Vector3, radius: number): Array<{ avatarId: string; dist: number }> {
     const out: Array<{ avatarId: string; dist: number }> = [];
     for (const [id, entry] of this.entries) {
+      if (entry.lastHealth <= 0) continue; // already down — no splash
       const d = Math.hypot(
         entry.cur.x - center.x,
         entry.cur.y - 0.8 - center.y, // body center, not eye
@@ -276,7 +288,7 @@ export class RemotePlayers implements GameSystem {
   private removeEntry(id: string) {
     const entry = this.entries.get(id);
     if (!entry) return;
-    this.group.remove(entry.character.group);
+    this.group.remove(entry.root);
     for (const d of entry.disposables) d.dispose();
     this.entries.delete(id);
   }
@@ -322,8 +334,8 @@ export class RemotePlayers implements GameSystem {
       c.heading += dh * lerp;
       c.pitch += (t.pitch - c.pitch) * lerp;
 
-      entry.character.group.position.set(c.x, c.y, c.z);
-      entry.character.group.rotation.y = c.heading;
+      entry.root.position.set(c.x, c.y, c.z);
+      entry.root.rotation.y = c.heading;
       entry.character.aimPivot.rotation.x = c.pitch;
       // Interpolated velocity drives the walk cycle.
       const speed = ctx.dt > 0 ? Math.hypot(c.x - prevX, c.z - prevZ) / ctx.dt : 0;
@@ -342,6 +354,16 @@ export class RemotePlayers implements GameSystem {
         entry.lastHealth = health;
         entry.healthBar.set(health);
       }
+      // Death pose: ease the body backward to the ground at 0 HP;
+      // snap upright on respawn (the row teleports anyway). The tip
+      // happens INSIDE root so the tag/bar sprites stay overhead.
+      if (entry.lastHealth <= 0) {
+        entry.deathT += (1 - entry.deathT) * Math.min(1, ctx.dt * 5);
+      } else {
+        entry.deathT = 0;
+      }
+      entry.character.group.rotation.x = entry.deathT * 1.35;
+      entry.character.group.position.y = -entry.deathT * 1.2;
     }
   }
 

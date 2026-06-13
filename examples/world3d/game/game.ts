@@ -72,6 +72,9 @@ export interface GameStats {
   /** Combat state for the HUD. */
   health: number;
   dead: boolean;
+  /** Seconds until respawn (ceil), 0 while alive — drives the
+   *  death-overlay countdown. */
+  respawnIn: number;
   /** Monotonic counter — bumps every time the player takes damage, so
    *  the HUD can flash without diffing health values. */
   damageFlash: number;
@@ -109,6 +112,9 @@ export class Game {
   private selfHealth = 100;
   private dead = false;
   private respawnAt = 0;
+  /** 0 = standing, 1 = prone — eases the third-person body to the
+   *  ground on death; snapped back to 0 on respawn (teleport). */
+  private selfDeathT = 0;
   private damageFlash = 0;
   private readonly spawnPool: THREE.Vector3[] = [];
   private readonly aimTarget = new THREE.Vector3();
@@ -435,12 +441,13 @@ export class Game {
     this.player.controlsEnabled = false;
     this.weapon.enabled = false;
     this.engine.events.emit("shake", { strength: 0.5 });
-    // Respawn handled in the frame loop 2.5 s from now.
-    this.respawnAt = performance.now() + 2500;
+    // Respawn handled in the frame loop 3 s from now.
+    this.respawnAt = performance.now() + 3000;
   }
 
   private finishRespawn() {
     this.dead = false;
+    this.selfDeathT = 0;
     const spot =
       this.spawnPool[Math.floor(Math.random() * this.spawnPool.length)] ?? this.spawnPoint;
     this.player.teleport(spot);
@@ -568,9 +575,16 @@ export class Game {
       // same convention as remote characters). Hidden in first person.
       this.selfRig.group.visible = this.player.viewMode === "third";
       if (this.selfRig.group.visible) {
+        // Death fall: tip the body backward and lower the (eye-level)
+        // origin so the corpse lies on the ground until respawn.
+        this.selfDeathT += ((this.dead ? 1 : 0) - this.selfDeathT) * Math.min(1, dt * 5);
         this.selfRig.group.position.copy(this.player.position);
+        this.selfRig.group.position.y -= this.selfDeathT * 1.2;
         this.selfRig.group.rotation.y = this.player.yaw;
+        this.selfRig.group.rotation.x = this.selfDeathT * 1.35;
         this.selfRig.animate(ctx.time, this.player.groundSpeed);
+      }
+      if (this.selfRig.group.visible && !this.dead) {
         // Converge the rifle on the CROSSHAIR target, not a parallel
         // line — kills the shoulder-cam parallax where the gun looked
         // offset from where shots land. Computed in the rig's local
@@ -640,6 +654,7 @@ export class Game {
           remotes: this.remote.minimapDots(),
           health: this.selfHealth,
           dead: this.dead,
+          respawnIn: this.dead ? Math.max(0, Math.ceil((this.respawnAt - now) / 1000)) : 0,
           damageFlash: this.damageFlash,
           ...netStats,
         });

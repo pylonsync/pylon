@@ -236,14 +236,17 @@ export default function IslandPage() {
       {/* Red vignette pulse on incoming damage */}
       {stats && <DamageFlash trigger={stats.damageFlash} />}
 
-      {/* Death overlay */}
+      {/* Death overlay: countdown to respawn */}
       {stats?.dead && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center bg-red-950/40">
           <div className="text-4xl font-bold uppercase tracking-[0.25em] text-red-200 drop-shadow-lg">
             Eliminated
           </div>
-          <div className="mt-3 font-mono text-sm tracking-widest text-red-200/70">
-            respawning…
+          <div className="mt-4 font-mono text-8xl font-bold tabular-nums text-white drop-shadow-lg">
+            {stats.respawnIn}
+          </div>
+          <div className="mt-2 font-mono text-sm uppercase tracking-[0.3em] text-red-200/70">
+            respawning
           </div>
         </div>
       )}
