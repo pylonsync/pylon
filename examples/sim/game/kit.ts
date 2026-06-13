@@ -147,24 +147,47 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
   return holder;
 }
 
+const laneMat = new THREE.MeshBasicMaterial({ color: 0xe8c34a });
+const dashGeo = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.34).rotateX(-Math.PI / 2);
+
 /**
- * One road tile for a cell. Uses the plain MegaKit asphalt tile for
- * every cell — it's a perfect square that abuts its neighbours, so the
- * network is seamless and uniform. (The kit's marked junction/curve
- * pieces are a different 24 m module that doesn't line up with the 6 m
- * straights, so they're intentionally not used here.) The `_n,e,s,w`
- * flags are accepted for future marking support.
+ * One road tile for a cell — the MegaKit's clean asphalt road piece
+ * (square, abuts its neighbours seamlessly) with a generated dashed
+ * centre-line laid toward each connected neighbour, so straights, tees
+ * and crossings all get continuous markings. (We use the plain asphalt
+ * + our own markings because the kit's marked tile bakes red curb
+ * decals, and its junction pieces are a 24 m module that doesn't align
+ * with the 6 m straights.)
  */
 export function makeRoadTile(
-  _n: boolean,
-  _e: boolean,
-  _s: boolean,
-  _w: boolean,
+  n: boolean,
+  e: boolean,
+  s: boolean,
+  w: boolean,
 ): THREE.Object3D | null {
   const proto = roadProtos.get("straight");
   if (!proto) return null;
   const group = new THREE.Group();
   group.add(proto.clone(true));
+
+  // Centre-line dashes toward each connection (half a cell each).
+  const y = 0.04;
+  const off = TILE * 0.25;
+  const addDash = (x: number, z: number, horizontal: boolean) => {
+    const dash = new THREE.Mesh(dashGeo, laneMat);
+    dash.position.set(x, y, z);
+    if (horizontal) dash.rotation.y = Math.PI / 2;
+    group.add(dash);
+  };
+  const conn = (n ? 1 : 0) + (e ? 1 : 0) + (s ? 1 : 0) + (w ? 1 : 0);
+  if (conn === 0) {
+    addDash(0, 0, false);
+  } else {
+    if (n) addDash(0, off, false);
+    if (s) addDash(0, -off, false);
+    if (e) addDash(off, 0, true);
+    if (w) addDash(-off, 0, true);
+  }
   return group;
 }
 
