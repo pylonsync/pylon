@@ -13,6 +13,7 @@ import { cellCenterX, cellCenterZ, inBounds, makeBorder, makeCursor, makeGround,
 import { preloadKit } from "./kit";
 import { Net } from "./net";
 import { TileMap } from "./tiles";
+import { preloadTrees, Vegetation } from "./vegetation";
 
 export type Tool = "road" | "res" | "com" | "ind" | "bulldoze" | "pan";
 
@@ -47,6 +48,7 @@ export class City {
   private readonly rig: CameraRig;
   private readonly tiles: TileMap;
   private readonly net: Net;
+  private readonly vegetation: Vegetation;
   private readonly sun: THREE.DirectionalLight;
   private readonly cursor: THREE.Mesh;
 
@@ -123,12 +125,18 @@ export class City {
     this.rig = this.engine.add(new CameraRig(this.camera, this.renderer.domElement));
     this.tiles = this.engine.add(new TileMap(this.engine.events));
     this.net = this.engine.add(new Net(this.engine.events));
+    this.vegetation = this.engine.add(new Vegetation());
     this.scene.add(this.tiles.group);
+    this.scene.add(this.vegetation.group);
 
     // Async-load the Quaternius kit; procedural fallback renders until
     // it arrives, then rebuild buildings with the real models.
     preloadKit()
       .then(() => this.tiles.refreshKit())
+      .catch(() => {});
+    // Trees scatter once loaded; rescatter when the built area changes.
+    preloadTrees()
+      .then(() => this.rescatterTrees())
       .catch(() => {});
 
     // Painting interaction (left button).
@@ -158,6 +166,15 @@ export class City {
 
   setTiles(rows: Array<{ gx: number; gz: number; kind: string; level: number }>): void {
     this.tiles.setTiles(rows);
+    this.rescatterTrees();
+  }
+
+  /** Keep the forest clear of the built area (no-op if unchanged). */
+  private rescatterTrees(): void {
+    this.vegetation.scatter(
+      this.tiles.occupiedCells(),
+      (gx, gz) => this.tiles.isRoadAt(gx, gz),
+    );
   }
 
   setCity(row: CityRow | null): void {

@@ -55,6 +55,15 @@ export class TileMap implements GameSystem {
     return this.state.get(cellKey(gx, gz))?.kind ?? null;
   }
 
+  /** Every built cell (road or zone) — vegetation keeps clear of these. */
+  occupiedCells(): Set<string> {
+    return new Set(this.state.keys());
+  }
+
+  isRoadAt(gx: number, gz: number): boolean {
+    return this.state.get(cellKey(gx, gz))?.kind === "road";
+  }
+
   get tileCount(): number {
     return this.state.size;
   }
