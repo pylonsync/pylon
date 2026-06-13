@@ -98,8 +98,10 @@ const TEMPLATE_REGISTRY = {
 		platforms: ["web", "mac"],
 	},
 	consumer: {
-		blurb: "Social feed: profiles, posts, likes, follows.",
-		platforms: ["web", "ios", "mac", "expo"],
+		blurb:
+			"Social feed — live posts + likes, public-read, owner-write. One SSR app.",
+		platforms: [],
+		unified: true,
 	},
 	chat: {
 		blurb: "Realtime messaging: rooms, presence, live message feed.",
