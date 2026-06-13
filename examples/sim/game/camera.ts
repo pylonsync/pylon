@@ -7,8 +7,8 @@ import * as THREE from "three";
 import { WORLD_HALF } from "./config";
 import type { FrameCtx, GameSystem } from "./engine";
 
-const MIN_DIST = 18;
-const MAX_DIST = 150;
+const MIN_DIST = 16;
+const MAX_DIST = 460;
 const POLAR = THREE.MathUtils.degToRad(52); // tilt from vertical
 
 export class CameraRig implements GameSystem {

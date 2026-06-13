@@ -7,11 +7,16 @@
 import type { TileKind } from "./engine";
 
 /** Grid is GRID×GRID cells, centred on the origin. */
-export const GRID = 64;
+export const GRID = 128;
 /** World size of one cell, in metres. */
 export const TILE = 4;
 /** Half the world extent (for camera clamps). */
 export const WORLD_HALF = (GRID * TILE) / 2;
+
+/** Sea level. Terrain below this is water (rivers, lakes, ocean). */
+export const WATER_LEVEL = 0;
+/** Seed for the deterministic heightfield. */
+export const TERRAIN_SEED = 0x5eed;
 
 /** Max building growth stage for a zone tile. */
 export const MAX_LEVEL = 3;

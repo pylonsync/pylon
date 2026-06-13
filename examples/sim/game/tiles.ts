@@ -18,6 +18,7 @@ import type { Cell, EventBus, FrameCtx, GameSystem, TileKind } from "./engine";
 import { cellCenterX, cellCenterZ, cellKey } from "./grid";
 import { type BuildingZone, hasRoadKit, makeBuilding, makeRoadTile } from "./kit";
 import { buildRoadMesh } from "./roads";
+import { heightAt } from "./terrain";
 
 interface TileState {
   kind: TileKind;
@@ -123,7 +124,9 @@ export class TileMap implements GameSystem {
           isRoad(gx - 1, gz),
         );
         if (!tile) continue;
-        tile.position.set(cellCenterX(gx), 0.02, cellCenterZ(gz));
+        const cx = cellCenterX(gx);
+        const cz = cellCenterZ(gz);
+        tile.position.set(cx, heightAt(cx, cz) + 0.04, cz);
         this.roadGroup.add(tile);
       }
     } else {
@@ -143,7 +146,9 @@ export class TileMap implements GameSystem {
       if (!existing || existing.level !== t.level) {
         if (existing) this.buildGroup.remove(existing.obj);
         const obj = makeBuilding(t.kind as BuildingZone, t.level, gx, gz);
-        obj.position.set(cellCenterX(gx), 0, cellCenterZ(gz));
+        const cx = cellCenterX(gx);
+        const cz = cellCenterZ(gz);
+        obj.position.set(cx, heightAt(cx, cz), cz);
         obj.scale.y = 0.04;
         this.buildGroup.add(obj);
         const view: BuildingView = { level: t.level, obj, riseT: 0 };
@@ -197,9 +202,10 @@ export class TileMap implements GameSystem {
         (hex & 0xff) / 255,
       ];
       const s = TILE * 0.46;
+      const y = heightAt(cx, cz) + LOT_Y;
       const v = [
-        cx - s, LOT_Y, cz - s, cx + s, LOT_Y, cz - s, cx + s, LOT_Y, cz + s,
-        cx - s, LOT_Y, cz - s, cx + s, LOT_Y, cz + s, cx - s, LOT_Y, cz + s,
+        cx - s, y, cz - s, cx + s, y, cz - s, cx + s, y, cz + s,
+        cx - s, y, cz - s, cx + s, y, cz + s, cx - s, y, cz + s,
       ];
       pos.push(...v);
       for (let i = 0; i < 6; i++) col.push(c[0], c[1], c[2]);

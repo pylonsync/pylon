@@ -12,7 +12,7 @@ import { mutation, v } from "@pylonsync/functions";
  *
  * Costs mirror game/config.ts (functions can't import it).
  */
-const GRID = 64;
+const GRID = 128;
 const COST: Record<string, number> = { road: 10, res: 20, com: 30, ind: 25 };
 
 export default mutation({

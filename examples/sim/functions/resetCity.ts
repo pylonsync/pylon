@@ -13,7 +13,7 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string }> {
     const k = gx + "," + gz;
     if (!cells.has(k)) cells.set(k, { gx, gz, kind });
   };
-  const C = 32;
+  const C = 64;
   for (let i = -6; i <= 6; i++) {
     set(C + i, C, "road");
     set(C, C + i, "road");

@@ -12,10 +12,11 @@
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { GRID, TILE } from "./config";
+import { GRID, TILE, WATER_LEVEL } from "./config";
 import type { GameSystem } from "./engine";
 import { cellCenterX, cellCenterZ, cellKey } from "./grid";
 import { hash2 } from "./prng";
+import { heightAt, slopeAt } from "./terrain";
 
 const TREE_FILES = [
   "Tree_1.glb",
@@ -150,11 +151,14 @@ export class Vegetation implements GameSystem {
     const tmpC = new THREE.Color();
 
     const place = (wx: number, wz: number, seed: number) => {
+      // No trees in water or on cliffs.
+      const ground = heightAt(wx, wz);
+      if (ground < WATER_LEVEL + 0.4 || slopeAt(wx, wz) > 1.3 || ground > 90) return;
       const ti = Math.floor(hash2(seed, 1, 9) * templates.length) % templates.length;
       const tpl = templates[ti];
       const h = 4.5 + hash2(seed, 2, 9) * 5.5; // 4.5–10 m
       const sxz = h * (0.7 + hash2(seed, 5, 9) * 0.3);
-      dummy.position.set(wx, 0, wz);
+      dummy.position.set(wx, ground, wz);
       dummy.rotation.set(0, hash2(seed, 3, 9) * Math.PI * 2, 0);
       dummy.scale.set(sxz, h, sxz);
       dummy.updateMatrix();

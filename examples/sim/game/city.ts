@@ -9,9 +9,11 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import { CameraRig } from "./camera";
 import { GRID, TILE, WORLD_HALF } from "./config";
 import { Engine, type TileKind } from "./engine";
-import { cellCenterX, cellCenterZ, inBounds, makeBorder, makeCursor, makeGround, worldToCell } from "./grid";
+import { cellCenterX, cellCenterZ, inBounds, makeCursor, worldToCell } from "./grid";
 import { preloadKit } from "./kit";
 import { Net } from "./net";
+import { Sky } from "./sky";
+import { buildTerrainMesh, buildWater, heightAt, isBuildableCell } from "./terrain";
 import { TileMap } from "./tiles";
 import { preloadTrees, Vegetation } from "./vegetation";
 
@@ -49,7 +51,8 @@ export class City {
   private readonly tiles: TileMap;
   private readonly net: Net;
   private readonly vegetation: Vegetation;
-  private readonly sun: THREE.DirectionalLight;
+  private readonly sky: Sky;
+  private readonly terrain: THREE.Mesh;
   private readonly cursor: THREE.Mesh;
 
   private readonly raycaster = new THREE.Raycaster();
@@ -88,36 +91,24 @@ export class City {
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0xaed2ea);
-    this.scene.fog = new THREE.Fog(0xaed2ea, WORLD_HALF * 1.5, WORLD_HALF * 3);
 
     // Image-based lighting: a neutral room env so MeshStandardMaterial
     // (the GLB brick/glass/asphalt) has reflections and doesn't render
-    // dark/flat. Without this PBR metals read black.
+    // dark/flat. The Sky scales environmentIntensity over the day.
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.4;
 
-    this.camera = new THREE.PerspectiveCamera(50, rect.width / Math.max(1, rect.height), 0.5, 2000);
+    this.camera = new THREE.PerspectiveCamera(50, rect.width / Math.max(1, rect.height), 0.5, 4000);
 
-    // Lights: soft sky fill + a warm sun for crisp shadows.
-    const hemi = new THREE.HemisphereLight(0xcfe0ee, 0x55603f, 1.25);
-    this.scene.add(hemi);
-    this.sun = new THREE.DirectionalLight(0xffeed0, 2.4);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.camera.near = 1;
-    this.sun.shadow.camera.far = 260;
-    const s = 70; // shadow frustum half-size, follows the camera target
-    this.sun.shadow.camera.left = -s;
-    this.sun.shadow.camera.right = s;
-    this.sun.shadow.camera.top = s;
-    this.sun.shadow.camera.bottom = -s;
-    this.sun.shadow.bias = -0.0004;
-    this.scene.add(this.sun);
-    this.scene.add(this.sun.target);
+    // Sky owns all lighting: sun + moon + hemisphere, a gradient sky
+    // dome, fog, and the day/night cycle. Its sun casts the shadows.
+    this.sky = new Sky(this.scene);
 
-    this.scene.add(makeGround());
-    this.scene.add(makeBorder());
+    // 3-D terrain (heightfield with mountains/valleys/river/lake) + water.
+    this.terrain = buildTerrainMesh();
+    this.scene.add(this.terrain);
+    this.scene.add(buildWater());
+
     this.cursor = makeCursor();
     this.scene.add(this.cursor);
 
@@ -192,7 +183,12 @@ export class City {
     this.ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.ndc, this.camera);
-    if (!this.raycaster.ray.intersectPlane(this.groundPlane, this.hit)) {
+    // Hit the real terrain surface (falls back to the sea-level plane
+    // where the ray misses land, e.g. over water).
+    const hits = this.raycaster.intersectObject(this.terrain, false);
+    if (hits.length > 0) {
+      this.hit.copy(hits[0].point);
+    } else if (!this.raycaster.ray.intersectPlane(this.groundPlane, this.hit)) {
       this.hovered = null;
       this.cursor.visible = false;
       return;
@@ -204,12 +200,15 @@ export class City {
       return;
     }
     this.hovered = { gx, gz };
-    this.cursor.position.set(cellCenterX(gx), 0.04, cellCenterZ(gz));
-    this.cursor.visible = true;
+    const cx = cellCenterX(gx);
+    const cz = cellCenterZ(gz);
+    this.cursor.position.set(cx, heightAt(cx, cz) + 0.15, cz);
     const occupied = this.tiles.kindAt(gx, gz) !== null;
-    const valid = this.tool === "bulldoze" ? occupied : this.tool === "pan" ? false : !occupied;
+    const buildable = isBuildableCell(cx, cz);
+    const valid =
+      this.tool === "bulldoze" ? occupied : this.tool === "pan" ? false : !occupied && buildable;
     (this.cursor.material as THREE.MeshBasicMaterial).color.setHex(
-      this.tool === "bulldoze" ? 0xff6b5a : valid ? 0x8effa0 : 0xff6b5a,
+      valid ? 0x8effa0 : 0xff6b5a,
     );
     this.cursor.visible = this.tool !== "pan";
   }
@@ -223,7 +222,7 @@ export class City {
     const occupied = this.tiles.kindAt(gx, gz) !== null;
     if (this.tool === "bulldoze") {
       if (occupied) this.engine.events.emit("tilesBulldozed", { cells: [{ gx, gz }] });
-    } else if (!occupied) {
+    } else if (!occupied && isBuildableCell(cellCenterX(gx), cellCenterZ(gz))) {
       this.engine.events.emit("tilesPainted", { kind: this.tool as TileKind, cells: [{ gx, gz }] });
     }
   }
@@ -256,13 +255,12 @@ export class City {
       const dt = (now - this.lastFrameAt) / 1000;
       this.lastFrameAt = now;
 
-      this.engine.tick(dt, this.camera);
+      const ctx = this.engine.tick(dt, this.camera);
 
-      // Keep the sun's shadow frustum over the camera focus for crisp
-      // local shadows on a large map.
-      const t = this.rig.target;
-      this.sun.position.set(t.x + 60, 120, t.z + 40);
-      this.sun.target.position.set(t.x, 0, t.z);
+      // Advance the day/night cycle; the sky keeps the sun + its shadow
+      // frustum over the camera focus for crisp shadows on the big map.
+      this.sky.focus.copy(this.rig.target);
+      this.sky.update(ctx);
 
       this.renderer.info.reset();
       this.renderer.render(this.scene, this.camera);
