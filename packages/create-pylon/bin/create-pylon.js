@@ -104,8 +104,10 @@ const TEMPLATE_REGISTRY = {
 		unified: true,
 	},
 	chat: {
-		blurb: "Realtime messaging: rooms, presence, live message feed.",
-		platforms: ["web", "ios", "mac", "expo"],
+		blurb:
+			"Realtime chat — a live shared room, optimistic send. One SSR app, one port.",
+		platforms: [],
+		unified: true,
 	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
