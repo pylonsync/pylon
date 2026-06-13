@@ -1,0 +1,175 @@
+{
+  "manifest_version": 1,
+  "name": "sim",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Tile",
+      "fields": [
+        {
+          "name": "gx",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "gz",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "level",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_cell",
+          "fields": [
+            "gx",
+            "gz"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "City",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "funds",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "population",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "jobs",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "happiness",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "tick",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "nextTickAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_key",
+          "fields": [
+            "key"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "tile_shared",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "false",
+      "allowDelete": "auth.userId != null",
+      "entity": "Tile"
+    },
+    {
+      "name": "city_server_only",
+      "allowRead": "auth.userId != null",
+      "allowInsert": "false",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "City"
+    }
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
+}

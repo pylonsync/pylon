@@ -1,0 +1,25 @@
+{
+  "name": "sim-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sdk": "workspace:*",
+    "@tailwindcss/cli": "^4.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.3.0",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/three": "^0.180.0",
+    "typescript": "^5.6.0"
+  }
+}
