@@ -74,14 +74,17 @@ export function useQuery<T = Row>(
   entity: string,
   options?: QueryOptions
 ): UseQueryReturn<T> {
-  // `loading` is true only while we genuinely don't know yet — i.e.,
-  // the engine hasn't drained IndexedDB into the in-memory store. Once
-  // hydrated, an empty list is a real empty (not "still fetching"), so
-  // refreshes with cached data don't flash "Loading…" before the rows
-  // render. The engine's `isHydrated()` exposes a synchronous gate that
-  // flips true after `loadAllEntities()` settles.
+  // `loading` is true only while we genuinely don't know yet — i.e., the
+  // engine doesn't yet have a SERVER-confirmed view. It gates on
+  // `isInitialSyncSettled()`, NOT `isHydrated()`: the latter flips true the
+  // instant IndexedDB loads, which on a cold/empty cache (first visit, or
+  // right after an org switch wipes the replica) is immediate and EMPTY — so
+  // gating on it drops `loading` while the rows are still en route from the
+  // server, flashing the empty state for the seconds until the snapshot lands.
+  // `isInitialSyncSettled()` stays pending until the first pull settles (or
+  // the cache already had rows), so callers render a skeleton instead.
   const loading = useRef<boolean>(
-    !sync.isHydrated() && sync.store.list(entity).length === 0,
+    !sync.isInitialSyncSettled() && sync.store.list(entity).length === 0,
   );
   const error = useRef<Error | null>(null);
   const optionsKey = JSON.stringify(options || {});
@@ -112,14 +115,13 @@ export function useQuery<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { rows: filtered as T[], sig };
     }
-    // Loading is false the moment hydration finishes — even when the
-    // disk replica is empty (a real "no rows yet" state, not "still
-    // fetching"). The previous gate only flipped when rows arrived,
-    // so an entity with zero cached rows stayed in loading=true
-    // forever until a server pull / WS event populated it. After:
-    // hydration completion fires store.notify() → getSnapshot re-runs
-    // → loading goes false immediately, the empty state renders.
-    if (loading.current && (rows.length > 0 || sync.isHydrated())) {
+    // Drop loading when rows arrive OR the initial sync settles (first server
+    // pull done / cache had rows / fallback deadline). Gating on the settled
+    // signal — not bare hydration — is what stops the empty-state flash: a
+    // cold cache keeps loading=true until the pull confirms, then an empty
+    // result is a real "no rows" and the empty state renders. No flash, and
+    // (thanks to the fallback) no infinite spinner either.
+    if (loading.current && (rows.length > 0 || sync.isInitialSyncSettled())) {
       loading.current = false;
     }
     return snapshotCache.current.rows;
@@ -167,11 +169,12 @@ export function useQueryOne<T = Row>(
   entity: string,
   id: string
 ): UseQueryOneReturn<T> {
-  // Same hydration-aware loading semantics as useQuery — see the
-  // comment there. Without this, a refreshed page flashes "Loading…"
-  // for the row even when it's already in IndexedDB.
+  // Same initial-sync-aware loading semantics as useQuery — see the comment
+  // there. Gates on isInitialSyncSettled() (server-confirmed) so a cold load
+  // shows a skeleton rather than flashing "not found" before the pull lands,
+  // and a refreshed page doesn't flash "Loading…" when the row is cached.
   const loading = useRef<boolean>(
-    !sync.isHydrated() && sync.store.get(entity, id) === null,
+    !sync.isInitialSyncSettled() && sync.store.get(entity, id) === null,
   );
   const error = useRef<Error | null>(null);
 
@@ -197,11 +200,11 @@ export function useQueryOne<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { row: (row as T) ?? null, sig };
     }
-    // Mirror useQuery: loading flips false on hydration completion
-    // even when the row is missing (not "still fetching" — genuinely
-    // not present yet). Without the isHydrated() check, a missing
-    // row stuck loading=true forever.
-    if (loading.current && (row !== null || sync.isHydrated())) {
+    // Mirror useQuery: loading flips false once the row arrives OR the initial
+    // sync settles (server-confirmed). Gating on isInitialSyncSettled() — not
+    // bare hydration — keeps a cold load in the skeleton state until the pull
+    // confirms, so a row that exists server-side doesn't flash "not found".
+    if (loading.current && (row !== null || sync.isInitialSyncSettled())) {
       loading.current = false;
     }
     return snapshotCache.current.row;

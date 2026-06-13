@@ -218,6 +218,51 @@ export class SyncEngine {
   }
 
   /**
+   * True once the engine has a *server-confirmed* initial view: the first
+   * pull (snapshot) settled, OR the IndexedDB cache already held rows, OR a
+   * fallback deadline elapsed so we never pin forever. This is what
+   * `useQuery`'s `loading` waits on — NOT `isHydrated()`. The distinction
+   * matters: `isHydrated()` flips true the instant the local cache loads,
+   * which on a cold/empty cache (first visit, or right after an org switch
+   * wipes the replica) is immediate and EMPTY — so a `loading` gated on it
+   * drops to false while the projects/rows are still en route from the
+   * server, and the UI flashes its empty state for the ~seconds until the
+   * pull lands. Gating on this signal keeps `loading` true through that
+   * window so callers can show a skeleton instead.
+   */
+  private _initialSyncSettled = false;
+  isInitialSyncSettled(): boolean {
+    return this._initialSyncSettled;
+  }
+
+  private _initialSyncFallback: ReturnType<typeof setTimeout> | null = null;
+
+  /** Flip `_initialSyncSettled` true (idempotent) + notify so `useQuery`
+   *  re-reads and drops its loading state. */
+  private markInitialSyncSettled(): void {
+    if (this._initialSyncFallback !== null) {
+      clearTimeout(this._initialSyncFallback);
+      this._initialSyncFallback = null;
+    }
+    if (this._initialSyncSettled) return;
+    this._initialSyncSettled = true;
+    this.store.notify();
+  }
+
+  /** Safety net so `loading` never pins: settle after a deadline even if no
+   *  pull lands (offline, or a multi-tab follower of an empty entity that
+   *  never receives a broadcast). The real pull settles it far sooner in the
+   *  normal case. Re-armable — a replica wipe (org switch / token flip) resets
+   *  the signal and re-arms this. */
+  private armInitialSyncFallback(): void {
+    if (this._initialSyncFallback !== null) clearTimeout(this._initialSyncFallback);
+    this._initialSyncFallback = setTimeout(() => {
+      this._initialSyncFallback = null;
+      this.markInitialSyncSettled();
+    }, 12_000);
+  }
+
+  /**
    * True when the engine drained at least one row OR a saved cursor
    * out of IndexedDB during `start()`. Distinguishes a returning user
    * (cached replica may contain rows the server has since deleted) from
@@ -522,6 +567,9 @@ export class SyncEngine {
     this.running = true;
     this.setConnectionStatus("connecting");
     warnIfMisconfigured(this.config.baseUrl);
+    // Arm the loading-settle safety net before any async work, so a multi-tab
+    // follower (which never pulls) or an offline start can't pin loading.
+    this.armInitialSyncFallback();
 
     // Load persisted data if available.
     const shouldPersist = this.config.persist !== false && typeof indexedDB !== "undefined";
@@ -575,9 +623,17 @@ export class SyncEngine {
         // no changes (replica already at cursor), subscribers stay stuck on
         // their initial empty snapshot until the first WS event arrives.
         this._hydrated = true;
-        if (hydrated) this.store.notify();
-        else this.store.notify(); // notify even on empty cache so useQuery
-        // sees `isHydrated()` flip and can drop its initial loading state.
+        if (hydrated) {
+          this.store.notify();
+          // Cache already held rows: we have a usable view now, so settle the
+          // initial-sync signal immediately — a returning user sees data on
+          // frame one; the pull below just refreshes it. (An EMPTY cache does
+          // NOT settle here — loading stays true until the pull confirms,
+          // which is the whole point: no empty-state flash before first sync.)
+          this.markInitialSyncSettled();
+        } else {
+          this.store.notify();
+        }
 
         // Apply the cached cursor BEFORE pull so the first pull is a
         // delta against where we left off, not a full re-snapshot.
@@ -705,7 +761,9 @@ export class SyncEngine {
       void this.push();
     }
 
-    // Pull from server, then connect real-time transport.
+    // Pull from server, then connect real-time transport. `pull()` settles the
+    // initial-sync signal on completion (leader path), so useQuery's loading
+    // drops here on the normal fast path and the start() fallback is cancelled.
     await this.pull();
 
     // Save cursor after pull. Fire-and-forget on bootstrap — the
@@ -1260,6 +1318,13 @@ export class SyncEngine {
     const wipeMutations = opts.wipeMutations === true;
     this.cursor = { last_seq: 0 };
     this.store.clearAll();
+    // The replica was just wiped and will re-pull from 0 (org switch, identity
+    // flip, or a 410 cursor reset). Re-enter "loading" until that re-pull lands
+    // rows — otherwise switching to another org flashes an empty list for the
+    // seconds the snapshot takes. Re-arm the fallback so it can't pin; the
+    // arriving rows (populated org) or the deadline (empty org) re-settle it.
+    this._initialSyncSettled = false;
+    this.armInitialSyncFallback();
     // Disk is about to be wiped + re-pulled from 0, so any prior
     // persist degradation is moot — start the durability invariant
     // fresh. (If the fresh snapshot also fails to persist, enqueueApply
@@ -1386,7 +1451,13 @@ export class SyncEngine {
    *  recurses into `pullInner` directly to avoid self-deadlock on the
    *  queue. */
   async pull(): Promise<void> {
-    return this.opQueue.enqueue("pull", () => this.pullInner());
+    await this.opQueue.enqueue("pull", () => this.pullInner());
+    // A completed leader pull is a server-confirmed view — settle the
+    // initial-sync signal so `useQuery`'s loading drops (cold start, and the
+    // re-sync after a replica wipe / org switch). Followers no-op in
+    // pullInner and settle via the leader's broadcasts or the fallback, so we
+    // gate on leadership here to avoid an empty-state flash on a follower.
+    if (this.isMultiTabLeader) this.markInitialSyncSettled();
   }
 
   private async pullInner(): Promise<void> {
