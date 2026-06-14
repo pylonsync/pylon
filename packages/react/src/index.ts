@@ -159,9 +159,29 @@ let _baseUrl = "http://localhost:4321";
 let _baseUrlConfigured = false;
 let _appName = "default";
 
-/** Current effective base URL. Used by hooks (useRoom, useShard) that share
- *  the client config but don't have access to the module-private state. */
+/** Current effective base URL. Used by hooks (useRoom, useShard) and the
+ *  @pylonsync/client auth helpers (createOrg, passwordRegister, createInvite,
+ *  …) that share the client config but don't have access to the module-private
+ *  state.
+ *
+ *  When NOT explicitly configured, default to the page origin in a browser
+ *  instead of the `http://localhost:4321` dev constant. A unified SSR/embedded
+ *  app serves its API same-origin, so the static default was a footgun: every
+ *  auth/org call fired at `localhost:4321` — broken on any non-4321 dev port
+ *  AND in production (it would hit the engineer's dev port, not the app's
+ *  domain). `init()`/`createSyncEngine` already resolve `window.location.origin`
+ *  for the sync engine; this brings the auth helpers to the same origin so the
+ *  two never disagree. An explicit `configureClient({ baseUrl })` still wins
+ *  (separate-origin API setups), and SSR/node (no `window`) keeps the dev
+ *  default (server-side calls use same-process paths anyway). */
 export function getBaseUrl(): string {
+  if (
+    !_baseUrlConfigured &&
+    typeof window !== "undefined" &&
+    window.location?.origin
+  ) {
+    return window.location.origin;
+  }
   return _baseUrl;
 }
 
