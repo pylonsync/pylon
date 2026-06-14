@@ -157,17 +157,36 @@ export function buildTerrainMesh(): THREE.Mesh {
   return mesh;
 }
 
-/** Semi-transparent water plane at sea level. */
+/** Reflective water plane at sea level, depth-tinted at the shore. */
 export function buildWater(): THREE.Mesh {
   const size = GRID * TILE * 1.5;
-  const geo = new THREE.PlaneGeometry(size, size, 1, 1);
+  const geo = new THREE.PlaneGeometry(size, size, 160, 160);
   geo.rotateX(-Math.PI / 2);
+
+  // Depth tint: pale teal where the terrain almost reaches the waterline
+  // (shallows), deepening to blue where it drops away — the shelving
+  // coastline CS water has, instead of one flat slab. The shallows also
+  // let the sandy bottom show through the (translucent) surface.
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const colors = new Float32Array(pos.count * 3);
+  const shallow = new THREE.Color(0x73b6c6);
+  const deep = new THREE.Color(0x21566f);
+  const tmp = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const depth = WATER_LEVEL - heightAt(pos.getX(i), pos.getZ(i));
+    tmp.copy(shallow).lerp(deep, smoothstep(0, 10, depth));
+    colors[i * 3] = tmp.r;
+    colors[i * 3 + 1] = tmp.g;
+    colors[i * 3 + 2] = tmp.b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
   const mat = new THREE.MeshStandardMaterial({
-    color: 0x2f6d8c,
+    vertexColors: true,
     transparent: true,
-    opacity: 0.82,
-    roughness: 0.12,
-    metalness: 0.2,
+    opacity: 0.85,
+    roughness: 0.08,
+    metalness: 0.15,
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = WATER_LEVEL - 0.05;
