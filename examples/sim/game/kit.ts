@@ -28,14 +28,14 @@ const FOOTPRINT = TILE * 0.82;
  */
 const BUILDING_SLOTS: Record<string, { files: string[]; fp: number }> = {
   res1: { files: ["House1.glb", "House2.glb"], fp: 0.6 },
-  res2: { files: ["Building1_Large.glb", "Building2_Small.glb", "House2.glb"], fp: 0.9 },
-  res3: { files: ["building_medium.glb", "building_large.glb"], fp: 0.95 },
-  com1: { files: ["Building2_Small.glb", "House2.glb"], fp: 0.66 },
-  com2: { files: ["Building2_Large.glb", "Building4.glb"], fp: 0.9 },
-  com3: { files: ["building_large.glb", "building_medium.glb"], fp: 0.98 },
-  ind1: { files: ["Building3_Small.glb", "Building4.glb"], fp: 0.72 },
-  ind2: { files: ["Building4.glb", "Building3_Big.glb"], fp: 0.88 },
-  ind3: { files: ["Building3_Big.glb", "building_large.glb"], fp: 0.96 },
+  res2: { files: ["Building1_Large.glb", "Building2_Small.glb", "House2.glb", "building_small.glb"], fp: 0.9 },
+  res3: { files: ["building_medium.glb", "building_large.glb", "Building1_Large.glb"], fp: 0.95 },
+  com1: { files: ["Building2_Small.glb", "House2.glb", "building_small.glb"], fp: 0.66 },
+  com2: { files: ["Building2_Large.glb", "Building4.glb", "building_medium.glb"], fp: 0.9 },
+  com3: { files: ["building_large.glb", "building_medium.glb", "Building2_Large.glb"], fp: 0.98 },
+  ind1: { files: ["Building3_Small.glb", "Building4.glb", "building_small.glb"], fp: 0.72 },
+  ind2: { files: ["Building4.glb", "Building3_Big.glb", "Building2_Large.glb"], fp: 0.88 },
+  ind3: { files: ["Building3_Big.glb", "building_large.glb", "building_medium.glb"], fp: 0.96 },
 };
 
 /**
