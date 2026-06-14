@@ -133,13 +133,15 @@ export class Sky implements GameSystem {
 
     // --- Lights ---
     this.sun.color.copy(sunCol);
-    this.sun.intensity = day * 2.6;
-    this.moon.intensity = night * 0.5;
+    this.sun.intensity = day * 2.9;
+    this.moon.intensity = night * 0.45;
     this.moon.color.set(0x9fb4d8);
-    this.hemi.intensity = 0.35 + day * 0.95;
+    // Lean on the sky env for ambient; keep the hemisphere as a gentle
+    // fill so the scene isn't a flat wash.
+    this.hemi.intensity = 0.22 + day * 0.5;
     this.hemi.color.copy(lerpCol(col(0x32405a), col(0xcfe0ee), day));
     this.hemi.groundColor.copy(lerpCol(col(0x1a2018), col(0x55603f), day));
-    this.scene.environmentIntensity = 0.12 + day * 0.32;
+    this.scene.environmentIntensity = 0.18 + day * 0.55;
 
     // Fog tracks the horizon so distance fades into the sky.
     if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.copy(horizon);

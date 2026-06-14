@@ -5,11 +5,11 @@
  * narrow setter API: setTool / setTiles / setCity / onStats.
  */
 import * as THREE from "three";
-import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { CameraRig } from "./camera";
 import { GRID, TILE, WORLD_HALF } from "./config";
 import { Engine, type TileKind } from "./engine";
 import { cellCenterX, cellCenterZ, inBounds, makeCursor, worldToCell } from "./grid";
+import { makeSkyEnvTexture } from "./textures";
 import { preloadKit } from "./kit";
 import { Net } from "./net";
 import { Sky } from "./sky";
@@ -94,11 +94,13 @@ export class City {
 
     this.scene.background = new THREE.Color(0xaed2ea);
 
-    // Image-based lighting: a neutral room env so MeshStandardMaterial
-    // (the GLB brick/glass/asphalt) has reflections and doesn't render
-    // dark/flat. The Sky scales environmentIntensity over the day.
+    // Image-based lighting from a sky gradient: cool ambient from above,
+    // warm/green bounce from the ground — natural outdoor light rather
+    // than a flat studio. The Sky scales environmentIntensity over the day.
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    const skyEnv = makeSkyEnvTexture();
+    this.scene.environment = pmrem.fromEquirectangular(skyEnv).texture;
+    skyEnv.dispose();
 
     this.camera = new THREE.PerspectiveCamera(50, rect.width / Math.max(1, rect.height), 0.5, 4000);
 

@@ -26,8 +26,8 @@ const CAR_FILES = [
   "SportsCar2.glb",
 ];
 
-const CAR_LENGTH = 3.6; // metres along travel
-const LANE = TILE * 0.16; // right-of-centre offset
+const CAR_LENGTH = 2.6; // metres along travel
+const LANE = TILE * 0.15; // right-of-centre offset
 
 /** Colour the named car materials (the pack ships them grey). */
 const CAR_PALETTE: Array<[RegExp, number]> = [

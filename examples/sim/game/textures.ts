@@ -44,6 +44,35 @@ export function makeFacadeTexture(wall: string): THREE.CanvasTexture {
 }
 
 /**
+ * An equirectangular sky gradient for image-based lighting: deep blue
+ * zenith → pale horizon → greenish ground bounce. PMREM'd into the
+ * scene environment, this gives outdoor materials natural directional
+ * ambient (cool from the sky, warm/green from the ground) instead of a
+ * flat studio look.
+ */
+export function makeSkyEnvTexture(): THREE.CanvasTexture {
+  const w = 16;
+  const h = 256;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0.0, "#3f74c8"); // zenith
+  g.addColorStop(0.4, "#9cc0e4");
+  g.addColorStop(0.49, "#dfeaf2"); // horizon haze
+  g.addColorStop(0.5, "#cdd2c4"); // horizon line
+  g.addColorStop(0.62, "#8f9d77"); // ground near
+  g.addColorStop(1.0, "#5d6a48"); // ground far
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+  const tex = new THREE.CanvasTexture(c);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
  * Faint grid for the ground plane so empty land still reads as a
  * planned map. One big repeating texture under everything.
  */
