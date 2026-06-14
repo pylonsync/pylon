@@ -18,17 +18,22 @@ function canvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
  * into a tangent-space normal. Scrolled over time it shimmers the surface
  * without any vertex animation (the GPU perturbs the normals).
  */
-export function makeWaterNormal(size = 128): THREE.DataTexture {
+export function makeWaterNormal(size = 256): THREE.DataTexture {
   const data = new Uint8Array(size * size * 4);
   const k = (2 * Math.PI) / size;
+  // Many high, mutually-incommensurate frequencies in mixed directions →
+  // fine, irregular ripples that don't read as a coarse tiling diamond grid.
   const wave = (x: number, z: number): number =>
-    Math.sin(k * (3 * x + 2 * z)) +
-    0.7 * Math.sin(k * (1 * x - 5 * z)) +
-    0.4 * Math.sin(k * (7 * x + 4 * z));
+    Math.sin(k * (11 * x + 7 * z)) +
+    0.8 * Math.sin(k * (6 * x - 17 * z)) +
+    0.6 * Math.sin(k * (23 * x + 5 * z)) +
+    0.5 * Math.sin(k * (4 * x + 27 * z)) +
+    0.4 * Math.sin(k * (31 * x - 13 * z));
+  const amp = 0.35; // gentle gradient → subtle normals
   for (let z = 0; z < size; z++) {
     for (let x = 0; x < size; x++) {
-      const dx = wave((x + 1) % size, z) - wave((x - 1 + size) % size, z);
-      const dz = wave(x, (z + 1) % size) - wave(x, (z - 1 + size) % size);
+      const dx = (wave((x + 1) % size, z) - wave((x - 1 + size) % size, z)) * amp;
+      const dz = (wave(x, (z + 1) % size) - wave(x, (z - 1 + size) % size)) * amp;
       const i = (z * size + x) * 4;
       data[i] = Math.max(0, Math.min(255, (-dx * 0.5 + 0.5) * 255));
       data[i + 1] = Math.max(0, Math.min(255, (-dz * 0.5 + 0.5) * 255));
@@ -38,6 +43,9 @@ export function makeWaterNormal(size = 128): THREE.DataTexture {
   }
   const tex = new THREE.DataTexture(data, size, size);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
   tex.needsUpdate = true;
   return tex;
 }

@@ -181,18 +181,18 @@ export function buildWater(): THREE.Mesh {
   }
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-  // Scrolling wave normal map: ripples that catch the sun glint (low
-  // roughness already reflects the sky env). Animated by City via offset.
-  const normal = makeWaterNormal(128);
-  normal.repeat.set(size / 22, size / 22);
+  // Scrolling wave normal map: fine, subtle ripples that catch the sun glint
+  // (low roughness already reflects the sky env). Animated by City via offset.
+  const normal = makeWaterNormal(256);
+  normal.repeat.set(size / 16, size / 16);
   const mat = new THREE.MeshStandardMaterial({
     vertexColors: true,
     transparent: true,
     opacity: 0.85,
-    roughness: 0.08,
+    roughness: 0.12,
     metalness: 0.15,
     normalMap: normal,
-    normalScale: new THREE.Vector2(0.4, 0.4),
+    normalScale: new THREE.Vector2(0.14, 0.14),
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = WATER_LEVEL - 0.05;
