@@ -93,6 +93,7 @@ export class City {
   private readonly people: People;
   private readonly sky: Sky;
   private readonly terrain: THREE.Mesh;
+  private readonly water: THREE.Mesh;
   private readonly cursor: THREE.Mesh;
   private readonly composer: EffectComposer;
   private readonly grade: ShaderPass;
@@ -153,7 +154,8 @@ export class City {
     // 3-D terrain (heightfield with mountains/valleys/river/lake) + water.
     this.terrain = buildTerrainMesh();
     this.scene.add(this.terrain);
-    this.scene.add(buildWater());
+    this.water = buildWater();
+    this.scene.add(this.water);
 
     this.cursor = makeCursor();
     this.scene.add(this.cursor);
@@ -364,6 +366,13 @@ export class City {
       // frustum over the camera focus for crisp shadows on the big map.
       this.sky.focus.copy(this.rig.target);
       this.sky.update(ctx);
+
+      // Scroll the water ripples (two crossing directions for a live surface).
+      const wn = (this.water.material as THREE.MeshStandardMaterial).normalMap;
+      if (wn) {
+        wn.offset.x = (wn.offset.x + dt * 0.012) % 1;
+        wn.offset.y = (wn.offset.y + dt * 0.008) % 1;
+      }
 
       this.renderer.info.reset();
       this.composer.render();

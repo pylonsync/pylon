@@ -13,6 +13,36 @@ function canvas(size: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
 }
 
 /**
+ * A tileable wave normal map for the water: a sum of a few directional
+ * sine ripples (integer frequencies so it wraps seamlessly), differenced
+ * into a tangent-space normal. Scrolled over time it shimmers the surface
+ * without any vertex animation (the GPU perturbs the normals).
+ */
+export function makeWaterNormal(size = 128): THREE.DataTexture {
+  const data = new Uint8Array(size * size * 4);
+  const k = (2 * Math.PI) / size;
+  const wave = (x: number, z: number): number =>
+    Math.sin(k * (3 * x + 2 * z)) +
+    0.7 * Math.sin(k * (1 * x - 5 * z)) +
+    0.4 * Math.sin(k * (7 * x + 4 * z));
+  for (let z = 0; z < size; z++) {
+    for (let x = 0; x < size; x++) {
+      const dx = wave((x + 1) % size, z) - wave((x - 1 + size) % size, z);
+      const dz = wave(x, (z + 1) % size) - wave(x, (z - 1 + size) % size);
+      const i = (z * size + x) * 4;
+      data[i] = Math.max(0, Math.min(255, (-dx * 0.5 + 0.5) * 255));
+      data[i + 1] = Math.max(0, Math.min(255, (-dz * 0.5 + 0.5) * 255));
+      data[i + 2] = 255; // tangent-space up
+      data[i + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+/**
  * A tileable building facade: rows of lit/unlit windows over a tinted
  * wall. `warm` lights some windows so towers read as occupied at dusk.
  */

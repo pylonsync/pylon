@@ -10,7 +10,7 @@
 import * as THREE from "three";
 import { GRID, TILE, TERRAIN_SEED, WATER_LEVEL, WORLD_HALF } from "./config";
 import { hash2 } from "./prng";
-import { makeGroundTexture } from "./textures";
+import { makeGroundTexture, makeWaterNormal } from "./textures";
 
 const smoothstep = (a: number, b: number, x: number): number => {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
@@ -181,12 +181,18 @@ export function buildWater(): THREE.Mesh {
   }
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
+  // Scrolling wave normal map: ripples that catch the sun glint (low
+  // roughness already reflects the sky env). Animated by City via offset.
+  const normal = makeWaterNormal(128);
+  normal.repeat.set(size / 22, size / 22);
   const mat = new THREE.MeshStandardMaterial({
     vertexColors: true,
     transparent: true,
     opacity: 0.85,
     roughness: 0.08,
     metalness: 0.15,
+    normalMap: normal,
+    normalScale: new THREE.Vector2(0.4, 0.4),
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = WATER_LEVEL - 0.05;
