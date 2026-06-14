@@ -379,9 +379,20 @@ function varyBuildingColor(
       // Office glazing ships as a near-black panel (#434343), which is what
       // makes the towers read as dark blocks. Make it a light reflective
       // blue curtain wall — the glass towers a CS downtown is built from.
+      // A faint constant emissive reads as a sky reflection by day and as a
+      // lit curtain wall at night (no per-frame work; day sun washes it out).
       std.color.setHex(0xa9c4d8);
       std.metalness = 0.45;
       std.roughness = 0.18;
+      std.emissive = new THREE.Color(0x86a6c6);
+      std.emissiveIntensity = 0.14;
+    } else if (name.includes("interior")) {
+      // The office "fake interior" panels behind the glass — make them emit
+      // their own texture so rooms glow warm at night, lighting the downtown
+      // skyline the way a CS night does. Subtle enough to vanish by day.
+      std.emissive = new THREE.Color(0xffce92);
+      std.emissiveMap = std.map ?? null;
+      std.emissiveIntensity = 0.34;
     } else if (std.map) {
       // Textured brick / asphalt roof — its tint multiplies a dark map, so
       // BRIGHTEN it (>1) or tall facades + flat roofs read as black from
