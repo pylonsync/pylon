@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, useRouter } from "@pylonsync/react";
 import { useAuth, OrganizationSwitcher } from "@pylonsync/client";
 import {
   LayoutDashboard,
@@ -44,6 +44,7 @@ export function DashboardShell({
   orgName?: string;
   children: React.ReactNode;
 }) {
+  const router = useRouter();
   return (
     <div className="flex min-h-screen bg-white text-zinc-900">
       <aside className="hidden w-60 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50/60 md:flex">
@@ -57,13 +58,13 @@ export function DashboardShell({
         </div>
 
         <div className="px-3 py-3">
-          {/* Every view's data (projects, members, settings) is resolved
-              server-side for the active tenant, so switching orgs does a full
-              navigation to re-render the dashboard for the new workspace —
-              otherwise the page would keep showing the previous org's data. */}
+          {/* Every view's data is resolved server-side for the active tenant,
+              so switching orgs re-renders the dashboard for the new workspace.
+              A soft client navigation (router.push) re-fetches the SSR page —
+              all data updates — without the full-reload white flash. */}
           <OrganizationSwitcher
             initialActiveName={orgName}
-            onSwitched={() => window.location.assign("/dashboard")}
+            onSwitched={() => router.push("/dashboard")}
           />
         </div>
 
