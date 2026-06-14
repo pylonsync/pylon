@@ -26,16 +26,16 @@ const FOOTPRINT = TILE * 0.82;
  * the tall MegaKit brownstones at level 3. `fp` is the fraction of a
  * cell the footprint fills. Drop a models.json in to override.
  */
-const BUILDING_SLOTS: Record<string, { file: string; fp: number }> = {
-  res1: { file: "House1.glb", fp: 0.6 },
-  res2: { file: "Building1_Large.glb", fp: 0.92 },
-  res3: { file: "building_medium.glb", fp: 0.95 },
-  com1: { file: "Building2_Small.glb", fp: 0.64 },
-  com2: { file: "Building2_Large.glb", fp: 0.9 },
-  com3: { file: "building_large.glb", fp: 0.98 },
-  ind1: { file: "Building3_Small.glb", fp: 0.7 },
-  ind2: { file: "Building4.glb", fp: 0.88 },
-  ind3: { file: "Building3_Big.glb", fp: 0.96 },
+const BUILDING_SLOTS: Record<string, { files: string[]; fp: number }> = {
+  res1: { files: ["House1.glb", "House2.glb"], fp: 0.6 },
+  res2: { files: ["Building1_Large.glb", "Building2_Small.glb", "House2.glb"], fp: 0.9 },
+  res3: { files: ["building_medium.glb", "building_large.glb"], fp: 0.95 },
+  com1: { files: ["Building2_Small.glb", "House2.glb"], fp: 0.66 },
+  com2: { files: ["Building2_Large.glb", "Building4.glb"], fp: 0.9 },
+  com3: { files: ["building_large.glb", "building_medium.glb"], fp: 0.98 },
+  ind1: { files: ["Building3_Small.glb", "Building4.glb"], fp: 0.72 },
+  ind2: { files: ["Building4.glb", "Building3_Big.glb"], fp: 0.88 },
+  ind3: { files: ["Building3_Big.glb", "building_large.glb"], fp: 0.96 },
 };
 
 /**
@@ -60,8 +60,8 @@ function paletteColor(name: string): number | null {
   return null;
 }
 
-/** Normalised + coloured prototype per (zone, level) slot key. */
-const prototypes = new Map<string, THREE.Object3D>();
+/** Normalised + coloured prototype variants per (zone, level) slot key. */
+const prototypes = new Map<string, THREE.Object3D[]>();
 
 /** Road tile prototypes (filled to the cell), keyed straight/cross/tee/curve. */
 const roadProtos = new Map<string, THREE.Object3D>();
@@ -87,9 +87,9 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
   try {
     const res = await fetch(basePath + "models.json");
     if (res.ok) {
-      const map = (await res.json()) as Record<string, string>;
-      for (const [slot, file] of Object.entries(map)) {
-        if (slots[slot]) slots[slot].file = file;
+      const map = (await res.json()) as Record<string, string | string[]>;
+      for (const [slot, files] of Object.entries(map)) {
+        if (slots[slot]) slots[slot].files = Array.isArray(files) ? files : [files];
       }
     }
   } catch {
@@ -119,9 +119,17 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
     });
 
   await Promise.all([
-    ...Object.entries(slots).map(([key, { file, fp }]) =>
-      loadInto(file, (g) => prototypes.set(key, normalizeToFootprint(g.scene, fp))),
-    ),
+    // Each slot loads all its variants in order; prototypes[slot] is the
+    // variant array (makeBuilding picks one deterministically per cell).
+    ...Object.entries(slots).flatMap(([key, { files, fp }]) => {
+      prototypes.set(key, []);
+      return files.map((file, i) =>
+        loadInto(file, (g) => {
+          const arr = prototypes.get(key)!;
+          arr[i] = normalizeToFootprint(g.scene, fp);
+        }),
+      );
+    }),
     // Road tiles fill exactly one cell (flat); see makeRoadTile.
     ...Object.entries(ROAD_FILES).map(([key, file]) =>
       loadInto(file, (g) => roadProtos.set(key, normalizeToCell(g.scene))),
@@ -280,7 +288,10 @@ export function makeBuilding(
     faceRad !== undefined
       ? faceRad + Math.PI
       : (Math.floor(hash2(gx, gz, 7) * 4) * Math.PI) / 2;
-  const proto = prototypes.get(zone + lvl);
+  const variants = (prototypes.get(zone + lvl) ?? []).filter(Boolean);
+  const proto = variants.length
+    ? variants[Math.floor(hash2(gx, gz, 5) * variants.length) % variants.length]
+    : undefined;
   const group = new THREE.Group();
   if (proto) {
     const inst = proto.clone(true);

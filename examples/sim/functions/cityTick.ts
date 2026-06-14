@@ -71,14 +71,27 @@ export default mutation({
     const targetFor = (kind: string) =>
       kind === "res" ? resTarget : kind === "com" ? comTarget : indTarget;
 
-    // Grow each road-served zone one step toward its target.
+    // Per-cell density character: most residential lots stay low (single
+    // houses), some become mid-rise, a few become towers — so the city
+    // reads as a varied neighbourhood (mostly houses + the odd highrise)
+    // rather than a uniform wall of max-level blocks. Commercial/
+    // industrial lean denser. Deterministic from the cell.
+    const cellCap = (gx: number, gz: number, kind: string): number => {
+      let h = Math.abs(Math.sin(gx * 92.41 + gz * 41.17) * 24634.17);
+      h -= Math.floor(h);
+      if (kind === "res") return h < 0.62 ? 1 : h < 0.88 ? 2 : 3;
+      return h < 0.3 ? 1 : h < 0.7 ? 2 : 3;
+    };
+
+    // Grow each road-served zone one step toward its (capped) target.
     const nowIso = new Date(now).toISOString();
     let grown = 0;
     for (const t of tiles) {
       if (t.kind === "road") continue;
       if (!served(t.gx as number, t.gz as number)) continue;
       const lvl = Math.max(0, Math.min(MAX_LEVEL, Math.round((t.level as number) ?? 0)));
-      const target = Math.min(MAX_LEVEL, targetFor(t.kind as string));
+      const cap = cellCap(t.gx as number, t.gz as number, t.kind as string);
+      const target = Math.min(MAX_LEVEL, targetFor(t.kind as string), cap);
       if (lvl < target) {
         // unsafe: `level` is server-owned (Tile update policy is false).
         await ctx.db.unsafe.update("Tile", t.id as string, {

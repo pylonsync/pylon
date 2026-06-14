@@ -5,6 +5,12 @@
  * narrow setter API: setTool / setTiles / setCity / onStats.
  */
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { SSAOPass } from "three/examples/jsm/postprocessing/SSAOPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { CameraRig } from "./camera";
 import { GRID, TILE, WORLD_HALF } from "./config";
 import { Engine, type TileKind } from "./engine";
@@ -41,6 +47,35 @@ export interface CityStats {
   mutPerSec: number;
 }
 
+/** Final colour grade: gentle warmth, saturation and contrast for the
+ *  sunny, vivid Cities-Skylines look. */
+const COLOR_GRADE = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    saturation: { value: 1.07 },
+    warmth: { value: 0.012 },
+    contrast: { value: 1.04 },
+    lift: { value: 0.008 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float saturation, warmth, contrast, lift;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      c.rgb += vec3(warmth * 0.6, warmth * 0.45, -warmth * 0.4); // gentle warm
+      float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb = mix(vec3(l), c.rgb, saturation);             // saturate
+      c.rgb = (c.rgb - 0.5) * contrast + 0.5 + lift;       // contrast + lift
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a);
+    }
+  `,
+};
+
 export class City {
   readonly spawn = new THREE.Vector3(0, 0, 0);
 
@@ -56,6 +91,8 @@ export class City {
   private readonly sky: Sky;
   private readonly terrain: THREE.Mesh;
   private readonly cursor: THREE.Mesh;
+  private readonly composer: EffectComposer;
+  private readonly grade: ShaderPass;
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -116,7 +153,26 @@ export class City {
     this.cursor = makeCursor();
     this.scene.add(this.cursor);
 
-    // Engine systems (order = update order).
+    // --- Post-processing: ambient occlusion + bloom + colour grade ---
+    // This is what gives the scene a "game" look rather than a raw
+    // three.js render: AO for contact shadows/depth, a soft sunny bloom,
+    // and a warm, saturated grade.
+    const w = rect.width;
+    const h = rect.height;
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    const ssao = new SSAOPass(this.scene, this.camera, w, h);
+    ssao.kernelRadius = 7;
+    ssao.minDistance = 0.0015;
+    ssao.maxDistance = 0.05;
+    this.composer.addPass(ssao);
+    const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.26, 0.7, 0.85);
+    this.composer.addPass(bloom);
+    this.grade = new ShaderPass(COLOR_GRADE);
+    this.composer.addPass(this.grade);
+    this.composer.addPass(new OutputPass());
+
+    // Engine systems (update order).
     this.rig = this.engine.add(new CameraRig(this.camera, this.renderer.domElement));
     this.tiles = this.engine.add(new TileMap(this.engine.events));
     this.net = this.engine.add(new Net(this.engine.events));
@@ -149,6 +205,7 @@ export class City {
     const resize = () => {
       const r = container.getBoundingClientRect();
       this.renderer.setSize(r.width, r.height, false);
+      this.composer.setSize(r.width, r.height);
       this.camera.aspect = r.width / Math.max(1, r.height);
       this.camera.updateProjectionMatrix();
     };
@@ -274,7 +331,7 @@ export class City {
       this.sky.update(ctx);
 
       this.renderer.info.reset();
-      this.renderer.render(this.scene, this.camera);
+      this.composer.render();
 
       // FPS (smoothed) + stats at 4 Hz.
       this.fpsAccum += dt;

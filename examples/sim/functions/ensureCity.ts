@@ -42,7 +42,7 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
       h -= Math.floor(h);
       if (h < 0.3) continue; // some empty lots
       const kind = h < 0.76 ? "res" : h < 0.9 ? "com" : "ind";
-      set(gx, gz, kind, h < 0.55 ? 1 : 2);
+      set(gx, gz, kind, h < 0.72 ? 1 : 2);
     }
   }
   return [...cells.values()];
