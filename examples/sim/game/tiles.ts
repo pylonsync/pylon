@@ -66,6 +66,29 @@ function makeFountain(): THREE.Object3D {
   return g;
 }
 
+// --- Parking-lot props ---
+const CARPARK_PAD_GEO = new THREE.PlaneGeometry(TILE * 0.94, TILE * 0.94).rotateX(-Math.PI / 2);
+const CARPARK_PAD_MAT = new THREE.MeshStandardMaterial({ color: 0x46474b, roughness: 1 });
+const CARPARK_LINE_GEO = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.62).rotateX(-Math.PI / 2);
+const CARPARK_LINE_MAT = new THREE.MeshBasicMaterial({ color: 0xd7d4c8 });
+const CAR_BODY_GEO = new THREE.BoxGeometry(0.9, 0.45, 1.9).translate(0, 0.28, 0);
+const CAR_CABIN_GEO = new THREE.BoxGeometry(0.82, 0.38, 1.0).translate(0, 0.66, -0.05);
+const CAR_CABIN_MAT = new THREE.MeshStandardMaterial({ color: 0x2a3038, roughness: 0.4, metalness: 0.2 });
+const CAR_COLORS = [0x9a3b3b, 0x35507c, 0x5a5e66, 0xb0b3b8, 0x3a6b4a, 0xc7a23a, 0xe2e2e2];
+
+/** A small two-box parked car in the given body colour. */
+function makeParkedCar(color: number): THREE.Object3D {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(
+    CAR_BODY_GEO,
+    new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.15, flatShading: true }),
+  );
+  body.castShadow = true;
+  const cabin = new THREE.Mesh(CAR_CABIN_GEO, CAR_CABIN_MAT);
+  g.add(body, cabin);
+  return g;
+}
+
 /** A simple flat-shaded ornamental tree (trunk + low-poly canopy). */
 function makeParkTree(scale: number): THREE.Object3D {
   const g = new THREE.Group();
@@ -87,6 +110,7 @@ export class TileMap implements GameSystem {
   private readonly lotGroup = new THREE.Group();
   private readonly buildGroup = new THREE.Group();
   private readonly parkGroup = new THREE.Group();
+  private readonly carparkGroup = new THREE.Group();
 
   private state = new Map<string, TileState>();
   private buildings = new Map<string, BuildingView>();
@@ -94,9 +118,16 @@ export class TileMap implements GameSystem {
   private roadSig = "";
   private lotSig = "";
   private parkSig = "";
+  private carparkSig = "";
 
   constructor(private readonly events: EventBus) {
-    this.group.add(this.roadGroup, this.lotGroup, this.buildGroup, this.parkGroup);
+    this.group.add(
+      this.roadGroup,
+      this.lotGroup,
+      this.buildGroup,
+      this.parkGroup,
+      this.carparkGroup,
+    );
   }
 
   /** Current kind at a cell (for placement validation / cursor). */
@@ -181,7 +212,59 @@ export class TileMap implements GameSystem {
       this.buildParks(parkCells);
     }
 
+    // --- Parking lots: seeded paved lots with bay lines + a few parked cars. ---
+    const carparkCells: Cell[] = [];
+    for (const [key, t] of next) {
+      if (t.kind !== "carpark") continue;
+      const [gx, gz] = key.split(",").map(Number);
+      carparkCells.push({ gx, gz });
+    }
+    const carparkSig = carparkCells.map((c) => c.gx + ":" + c.gz).sort().join("|");
+    if (carparkSig !== this.carparkSig) {
+      this.carparkSig = carparkSig;
+      this.buildCarparks(carparkCells);
+    }
+
     this.syncBuildings();
+  }
+
+  /** (Re)build parking lots: an asphalt pad with white bay lines and a few
+   *  parked cars. Deterministic from the cell. */
+  private buildCarparks(cells: Cell[]): void {
+    this.carparkGroup.clear();
+    for (const { gx, gz } of cells) {
+      const cx = cellCenterX(gx);
+      const cz = cellCenterZ(gz);
+      const base = heightAt(cx, cz);
+      const lot = new THREE.Group();
+
+      const pad = new THREE.Mesh(CARPARK_PAD_GEO, CARPARK_PAD_MAT);
+      pad.position.set(cx, base + 0.05, cz);
+      pad.receiveShadow = true;
+      lot.add(pad);
+
+      // Bay lines: short white bars across the lot.
+      for (let i = -2; i <= 2; i++) {
+        const line = new THREE.Mesh(CARPARK_LINE_GEO, CARPARK_LINE_MAT);
+        line.position.set(cx + i * TILE * 0.18, base + 0.06, cz);
+        lot.add(line);
+      }
+
+      // A few parked cars (deterministic count/colour/placement).
+      let h = Math.abs(Math.sin((gx * 17.3 + gz * 5.1) * 11.7));
+      h -= Math.floor(h);
+      const n = 2 + Math.floor(h * 2); // 2-3 cars
+      for (let i = 0; i < n; i++) {
+        let c = Math.abs(Math.sin((gx * 3.1 + gz * 9.7 + i) * 27.3));
+        c -= Math.floor(c);
+        const car = makeParkedCar(CAR_COLORS[(c * CAR_COLORS.length) | 0]);
+        const slot = (i - (n - 1) / 2) * TILE * 0.27;
+        car.position.set(cx + slot, base + 0.06, cz - TILE * 0.12);
+        lot.add(car);
+      }
+
+      this.carparkGroup.add(lot);
+    }
   }
 
   /** (Re)build the seeded parks: a manicured lawn pad, a central stone
@@ -255,7 +338,8 @@ export class TileMap implements GameSystem {
   private syncBuildings(): void {
     const wanted = new Set<string>();
     for (const [key, t] of this.state) {
-      if (t.kind === "road" || t.kind === "park" || t.level < 1) continue;
+      if (t.kind === "road" || t.kind === "park" || t.kind === "carpark" || t.level < 1)
+        continue;
       wanted.add(key);
       const [gx, gz] = key.split(",").map(Number);
       const existing = this.buildings.get(key);

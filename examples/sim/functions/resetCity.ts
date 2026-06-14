@@ -39,7 +39,9 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
       if (!adj) continue;
       const h = rnd(gx, gz);
       if (h > density) {
-        if (rnd(gx * 3 + 1, gz * 3 + 1) < 0.4) set(gx, gz, "park", 1);
+        const open = rnd(gx * 3 + 1, gz * 3 + 1);
+        if (open < 0.3) set(gx, gz, "park", 1);
+        else if (open < 0.5) set(gx, gz, "carpark", 1);
         continue;
       }
       const k = rnd(gx * 7 + 1, gz * 13 + 1);

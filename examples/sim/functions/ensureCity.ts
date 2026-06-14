@@ -51,9 +51,11 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
       if (!adj) continue; // interior → trees
       const h = rnd(gx, gz);
       if (h > density) {
-        // Open lot: now and then a pocket park (greenspace + fountain),
-        // otherwise left for trees. Parks are road-served public space.
-        if (rnd(gx * 3 + 1, gz * 3 + 1) < 0.4) set(gx, gz, "park", 1);
+        // Open lot: a pocket park (greenspace + fountain), a small parking
+        // lot, or left for trees. All are road-served.
+        const open = rnd(gx * 3 + 1, gz * 3 + 1);
+        if (open < 0.3) set(gx, gz, "park", 1);
+        else if (open < 0.5) set(gx, gz, "carpark", 1);
         continue;
       }
       const k = rnd(gx * 7 + 1, gz * 13 + 1);
