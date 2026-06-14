@@ -46,7 +46,7 @@ export default function RootLayout({ children, auth }: LayoutProps) {
             stylesheet link is injected here automatically. */}
       </head>
       <body className="flex min-h-screen flex-col bg-background text-foreground antialiased">
-        <header className="sticky top-0 z-30 border-b border-zinc-200/70 bg-white/80 backdrop-blur">
+        <header className="sticky top-0 z-30 bg-white/80 backdrop-blur">
           <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
             <div className="flex items-center gap-8">
               <Link href="/" className="flex items-center gap-2">
