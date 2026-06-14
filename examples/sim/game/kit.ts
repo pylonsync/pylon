@@ -193,6 +193,12 @@ const sidewalkMat = new THREE.MeshStandardMaterial({
 const swGeoNS = new THREE.BoxGeometry(TILE, SW_H, SW_W); // runs along x (N/S edges)
 const swGeoEW = new THREE.BoxGeometry(SW_W, SW_H, TILE); // runs along z (E/W edges)
 
+// Zebra crossing stripes — unlit white bars laid on the approaches of a
+// junction. Two bar geometries (one per road axis) shared across all tiles.
+const crosswalkMat = new THREE.MeshBasicMaterial({ color: 0xece9df });
+const cwBarX = new THREE.PlaneGeometry(TILE * 0.46, TILE * 0.05).rotateX(-Math.PI / 2); // long in x
+const cwBarZ = new THREE.PlaneGeometry(TILE * 0.05, TILE * 0.46).rotateX(-Math.PI / 2); // long in z
+
 /**
  * One road tile for a cell — the MegaKit's clean asphalt road piece
  * (square, abuts its neighbours seamlessly) with a generated dashed
@@ -230,6 +236,24 @@ export function makeRoadTile(
     if (s) addDash(0, -off, false);
     if (e) addDash(off, 0, true);
     if (w) addDash(-off, 0, true);
+  }
+
+  // Zebra crossings at junctions (tee or cross): a few bars on each
+  // connected approach, near that edge, perpendicular to its road.
+  if (conn >= 3) {
+    const cwY = 0.045;
+    const addBar = (geo: THREE.PlaneGeometry, x: number, z: number) => {
+      const bar = new THREE.Mesh(geo, crosswalkMat);
+      bar.position.set(x, cwY, z);
+      group.add(bar);
+    };
+    for (let i = 0; i < 3; i++) {
+      const d = TILE * (0.27 + i * 0.07);
+      if (n) addBar(cwBarX, 0, d);
+      if (s) addBar(cwBarX, 0, -d);
+      if (e) addBar(cwBarZ, d, 0);
+      if (w) addBar(cwBarZ, -d, 0);
+    }
   }
 
   // Kerb every edge that faces a non-road cell (north = +z, east = +x).
