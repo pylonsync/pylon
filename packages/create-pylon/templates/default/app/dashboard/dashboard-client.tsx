@@ -5,10 +5,13 @@ import { db, callFn } from "@pylonsync/react";
 import {
   createInvite,
   deleteOrg,
+  listInvites,
   listOrgMembers,
   renameOrg,
+  revokeInvite,
   useAuth,
   type OrgMember,
+  type PendingInvite,
 } from "@pylonsync/client";
 import { Button } from "@/components/ui/button";
 
@@ -283,12 +286,16 @@ function MembersList({
 }) {
   const canManage = isManager(role);
   const [members, setMembers] = useState<OrgMember[] | null>(null);
+  const [invites, setInvites] = useState<PendingInvite[] | null>(null);
   const [email, setEmail] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
 
   async function load() {
     setMembers(await listOrgMembers(orgId));
+    // Pending invites are admin-gated server-side; only fetch when we'd be
+    // allowed to see them (avoids a guaranteed 403 for plain members).
+    if (canManage) setInvites(await listInvites(orgId));
   }
   useEffect(() => {
     void load();
@@ -313,7 +320,17 @@ function MembersList({
     }
   }
 
+  async function revoke(inviteId: string) {
+    setInvites((prev) => prev?.filter((i) => i.id !== inviteId) ?? null);
+    try {
+      await revokeInvite(orgId, inviteId);
+    } finally {
+      void load();
+    }
+  }
+
   return (
+    <div className="space-y-6">
     <Card title="Members" action={members ? <Count n={members.length} /> : null}>
       {canManage && (
         <form onSubmit={invite} className="flex items-center gap-2">
@@ -382,7 +399,59 @@ function MembersList({
         </p>
       )}
     </Card>
+
+    {canManage && invites && invites.length > 0 && (
+      <Card
+        title="Pending invitations"
+        action={
+          <span className="text-[13px] text-zinc-400">
+            {invites.length} pending
+          </span>
+        }
+      >
+        <ul className="divide-y divide-zinc-100">
+          {invites.map((inv) => (
+            <li key={inv.id} className="flex items-center gap-3 py-2.5">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-zinc-300 text-zinc-400">
+                <MailIcon />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-zinc-900">
+                  {inv.email}
+                </div>
+                <div className="text-xs text-zinc-500">
+                  Invited · expires {formatDate(unixToIso(inv.expires_at))}
+                </div>
+              </div>
+              <RoleBadge role={inv.role} />
+              <button
+                type="button"
+                onClick={() => revoke(inv.id)}
+                className="text-[13px] font-medium text-zinc-400 transition-colors hover:text-red-600"
+              >
+                Revoke
+              </button>
+            </li>
+          ))}
+        </ul>
+      </Card>
+    )}
+    </div>
   );
+}
+
+function MailIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 7 9 6 9-6" />
+    </svg>
+  );
+}
+
+// PendingInvite.expires_at is unix SECONDS; formatDate() wants an ISO string.
+function unixToIso(sec: number) {
+  return new Date(sec * 1000).toISOString();
 }
 
 function Count({ n }: { n: number }) {
