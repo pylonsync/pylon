@@ -9,7 +9,6 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
-import { SSAOPass } from "three/examples/jsm/postprocessing/SSAOPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { CameraRig } from "./camera";
 import { GRID, TILE, WORLD_HALF } from "./config";
@@ -167,11 +166,11 @@ export class City {
     const h = rect.height;
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    const ssao = new SSAOPass(this.scene, this.camera, w, h);
-    ssao.kernelRadius = 7;
-    ssao.minDistance = 0.0015;
-    ssao.maxDistance = 0.05;
-    this.composer.addPass(ssao);
+    // NB: no SSAO. It re-rendered the whole scene's depth + normals every
+    // frame — two extra full-scene passes (~2x the triangle throughput) — and
+    // tanked the framerate on a ~13M-triangle scene. The directional sun
+    // shadows + bloom + grade carry the depth read; the AO wasn't worth ~half
+    // the GPU budget.
     const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.26, 0.7, 0.85);
     this.composer.addPass(bloom);
     this.grade = new ShaderPass(COLOR_GRADE);

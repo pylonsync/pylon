@@ -87,7 +87,7 @@ export class Sky implements GameSystem {
 
     this.sun = new THREE.DirectionalLight(0xffeed0, 2.4);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.mapSize.set(1536, 1536);
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 600;
     const s = 90;
