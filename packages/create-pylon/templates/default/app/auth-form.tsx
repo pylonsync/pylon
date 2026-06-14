@@ -2,7 +2,6 @@
 
 import React, { useState } from "react";
 import { passwordLogin, passwordRegister, ApiError } from "@pylonsync/client";
-import { Button } from "@/components/ui/button";
 
 // The email/password form, shared by /login and /signup. It calls the built-in
 // auth API directly — `passwordLogin` / `passwordRegister` (from
@@ -13,10 +12,8 @@ import { Button } from "@/components/ui/button";
 // page load hands that cookie to the SSR runtime (which resolves auth and
 // renders the dashboard server-side) and to the sync engine (which
 // authenticates with the same cookie via `credentials: include`). Because the
-// cookie is HttpOnly it can never be read by JavaScript, so there is no
-// session token sitting in `localStorage` for an XSS to lift. (Cross-origin or
-// native clients, which can't rely on the cookie, use the token-based path via
-// `persistSession` instead — not needed here, same origin.)
+// cookie is HttpOnly it can never be read by JavaScript, so there is no session
+// token sitting in `localStorage` for an XSS to lift.
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -73,16 +70,25 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         onChange={setPassword}
         required
         autoComplete={mode === "login" ? "current-password" : "new-password"}
-        placeholder={mode === "signup" ? "at least 8 characters" : undefined}
+        placeholder={mode === "signup" ? "at least 10 characters" : undefined}
+        hint={
+          mode === "signup"
+            ? "At least 10 characters. Common or breached passwords are rejected."
+            : undefined
+        }
       />
       {error ? (
-        <p className="rounded-md border border-red-600/30 bg-red-600/10 px-3 py-2 text-sm text-red-700">
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] leading-snug text-red-700">
           {error}
         </p>
       ) : null}
-      <Button type="submit" disabled={pending} className="w-full">
+      <button
+        type="submit"
+        disabled={pending}
+        className="inline-flex h-10 w-full items-center justify-center rounded-full bg-zinc-900 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-60"
+      >
         {pending ? "…" : mode === "login" ? "Sign in" : "Create account"}
-      </Button>
+      </button>
     </form>
   );
 }
@@ -95,6 +101,7 @@ function Field({
   required,
   autoComplete,
   placeholder,
+  hint,
 }: {
   label: string;
   value: string;
@@ -103,10 +110,11 @@ function Field({
   required?: boolean;
   autoComplete?: string;
   placeholder?: string;
+  hint?: string;
 }) {
   return (
     <label className="block space-y-1.5">
-      <span className="text-sm font-medium">{label}</span>
+      <span className="text-[13px] font-medium text-zinc-700">{label}</span>
       <input
         type={type}
         value={value}
@@ -114,8 +122,9 @@ function Field({
         required={required}
         autoComplete={autoComplete}
         placeholder={placeholder}
-        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
       />
+      {hint ? <span className="block text-[12px] text-zinc-400">{hint}</span> : null}
     </label>
   );
 }
@@ -130,7 +139,9 @@ function messageFor(err: unknown): string {
       case "USER_EXISTS":
         return "That email is already in use — sign in instead.";
       case "WEAK_PASSWORD":
-        return "Pick a stronger password (at least 8 characters).";
+        return "Pick a longer password — at least 10 characters.";
+      case "PWNED_PASSWORD":
+        return "That password has appeared in a known data breach. Choose a different one.";
       case "RATE_LIMITED":
         return "Too many attempts — try again in a minute.";
       default:

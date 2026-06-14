@@ -6,6 +6,10 @@
    markup elsewhere. */
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../components/**/*.{tsx,ts,jsx,js}";
+@source "../lib/**/*.{tsx,ts,jsx,js}";
+/* @pylonsync/client ships raw .tsx (OrganizationSwitcher, etc.) with Tailwind
+   classes — scan it too or its dropdowns/menus render unstyled. */
+@source "../node_modules/@pylonsync/client/**/*.{tsx,ts,jsx,js}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
