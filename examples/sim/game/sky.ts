@@ -136,14 +136,16 @@ export class Sky implements GameSystem {
     // --- Lights ---
     this.sun.color.copy(sunCol);
     this.sun.intensity = day * 2.9;
-    this.moon.intensity = night * 0.45;
+    this.moon.intensity = night * 0.6;
     this.moon.color.set(0x9fb4d8);
     // Lean on the sky env for ambient; keep the hemisphere as a gentle
-    // fill so the scene isn't a flat wash.
-    this.hemi.intensity = 0.22 + day * 0.5;
+    // fill so the scene isn't a flat wash. The night FLOORs are lifted a
+    // little (a CS night has an ambient city glow, not pitch black) while
+    // the day values stay identical — the daytime look is unchanged.
+    this.hemi.intensity = 0.3 + day * 0.42;
     this.hemi.color.copy(lerpCol(col(0x32405a), col(0xcfe0ee), day));
     this.hemi.groundColor.copy(lerpCol(col(0x1a2018), col(0x55603f), day));
-    this.scene.environmentIntensity = 0.18 + day * 0.55;
+    this.scene.environmentIntensity = 0.26 + day * 0.47;
 
     // Haze sits a touch brighter than the horizon so the far hills read
     // as atmospheric depth rather than vanishing into a flat band.
