@@ -16,7 +16,7 @@ import * as THREE from "three";
 import { TILE, ZONE } from "./config";
 import type { Cell, EventBus, FrameCtx, GameSystem, TileKind } from "./engine";
 import { cellCenterX, cellCenterZ, cellKey } from "./grid";
-import { type BuildingZone, hasRoadKit, makeBuilding, makeRoadTile } from "./kit";
+import { type BuildingZone, hasRoadKit, makeAvenueTile, makeBuilding, makeRoadTile } from "./kit";
 import { buildRoadMesh } from "./roads";
 import { heightAt } from "./terrain";
 
@@ -141,14 +141,15 @@ export class TileMap implements GameSystem {
   }
 
   isRoadAt(gx: number, gz: number): boolean {
-    return this.state.get(cellKey(gx, gz))?.kind === "road";
+    const k = this.state.get(cellKey(gx, gz))?.kind;
+    return k === "road" || k === "avenue";
   }
 
-  /** All road cells (for the traffic graph). */
+  /** All road cells incl. avenues (for the traffic/people/lamp graph). */
   roadCells(): Array<{ gx: number; gz: number }> {
     const out: Array<{ gx: number; gz: number }> = [];
     for (const [key, t] of this.state) {
-      if (t.kind !== "road") continue;
+      if (t.kind !== "road" && t.kind !== "avenue") continue;
       const [gx, gz] = key.split(",").map(Number);
       out.push({ gx, gz });
     }
@@ -167,10 +168,10 @@ export class TileMap implements GameSystem {
     }
     this.state = next;
 
-    // --- Roads: rebuild only if the road set changed ---
+    // --- Roads (incl. avenues): rebuild only if the road set changed ---
     const roadCells: Cell[] = [];
     for (const [key, t] of next) {
-      if (t.kind === "road") {
+      if (t.kind === "road" || t.kind === "avenue") {
         const [gx, gz] = key.split(",").map(Number);
         roadCells.push({ gx, gz });
       }
@@ -187,7 +188,10 @@ export class TileMap implements GameSystem {
     // --- Zone lots: a bright zone tint on tiles that are zoned but not
     //     yet built. Rebuilds when a tile is zoned OR develops (the
     //     tint vanishes once a building rises). ---
-    const zoneCells = [...next.entries()].filter(([, t]) => t.kind !== "road" && t.level < 1);
+    const zoneCells = [...next.entries()].filter(
+      ([, t]) =>
+        (t.kind === "res" || t.kind === "com" || t.kind === "ind") && t.level < 1,
+    );
     const lotSig = zoneCells
       .map(([k, t]) => k + t.kind)
       .sort()
@@ -313,15 +317,18 @@ export class TileMap implements GameSystem {
   private rebuildRoads(roadCells: Cell[]): void {
     this.roadGroup.clear();
     if (roadCells.length === 0) return;
-    const isRoad = (gx: number, gz: number) => this.state.get(cellKey(gx, gz))?.kind === "road";
+    const isRoad = (gx: number, gz: number) => {
+      const k = this.state.get(cellKey(gx, gz))?.kind;
+      return k === "road" || k === "avenue";
+    };
     if (hasRoadKit()) {
       for (const { gx, gz } of roadCells) {
-        const tile = makeRoadTile(
-          isRoad(gx, gz + 1),
-          isRoad(gx + 1, gz),
-          isRoad(gx, gz - 1),
-          isRoad(gx - 1, gz),
-        );
+        const n = isRoad(gx, gz + 1);
+        const e = isRoad(gx + 1, gz);
+        const s = isRoad(gx, gz - 1);
+        const w = isRoad(gx - 1, gz);
+        const avenue = this.state.get(cellKey(gx, gz))?.kind === "avenue";
+        const tile = avenue ? makeAvenueTile(n, e, s, w) : makeRoadTile(n, e, s, w);
         if (!tile) continue;
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
@@ -385,7 +392,7 @@ export class TileMap implements GameSystem {
     // Force the roads to rebuild with GLB tiles.
     const roadCells: Cell[] = [];
     for (const [key, t] of this.state) {
-      if (t.kind === "road") {
+      if (t.kind === "road" || t.kind === "avenue") {
         const [gx, gz] = key.split(",").map(Number);
         roadCells.push({ gx, gz });
       }

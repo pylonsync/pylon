@@ -199,6 +199,18 @@ const crosswalkMat = new THREE.MeshBasicMaterial({ color: 0xece9df });
 const cwBarX = new THREE.PlaneGeometry(TILE * 0.46, TILE * 0.05).rotateX(-Math.PI / 2); // long in x
 const cwBarZ = new THREE.PlaneGeometry(TILE * 0.05, TILE * 0.46).rotateX(-Math.PI / 2); // long in z
 
+// Avenue median — a raised planted strip down the centre of an arterial's
+// through-cells (a low grass kerb + a hedge), so major roads read as divided
+// boulevards. Two geometries (one per road axis), shared across tiles.
+const MEDIAN_W = TILE * 0.16;
+const MEDIAN_H = 0.18;
+const medianMat = new THREE.MeshStandardMaterial({ color: 0x5f8a44, roughness: 1 });
+const medianGeoNS = new THREE.BoxGeometry(MEDIAN_W, MEDIAN_H, TILE); // along z (N/S avenue)
+const medianGeoEW = new THREE.BoxGeometry(TILE, MEDIAN_H, MEDIAN_W); // along x (E/W avenue)
+const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x46732f, roughness: 1, flatShading: true });
+const hedgeGeoNS = new THREE.BoxGeometry(MEDIAN_W * 0.7, 0.34, TILE * 0.82).translate(0, MEDIAN_H + 0.17, 0);
+const hedgeGeoEW = new THREE.BoxGeometry(TILE * 0.82, 0.34, MEDIAN_W * 0.7).translate(0, MEDIAN_H + 0.17, 0);
+
 /**
  * One road tile for a cell — the MegaKit's clean asphalt road piece
  * (square, abuts its neighbours seamlessly) with a generated dashed
@@ -274,6 +286,35 @@ export function makeRoadTile(
   if (!w) addWalk(swGeoEW, -edge, 0);
 
   return group;
+}
+
+/**
+ * A major arterial tile: a normal road tile (markings, kerbs, crosswalks)
+ * plus a planted median down the centre of a straight through-cell, so
+ * avenues read as divided boulevards distinct from the side streets.
+ * Junctions get no median (the intersection stays open).
+ */
+export function makeAvenueTile(
+  n: boolean,
+  e: boolean,
+  s: boolean,
+  w: boolean,
+): THREE.Object3D | null {
+  const tile = makeRoadTile(n, e, s, w);
+  if (!tile) return null;
+  const throughNS = n && s && !e && !w;
+  const throughEW = e && w && !n && !s;
+  if (throughNS || throughEW) {
+    const median = new THREE.Mesh(throughNS ? medianGeoNS : medianGeoEW, medianMat);
+    median.position.set(0, MEDIAN_H / 2, 0);
+    median.castShadow = true;
+    median.receiveShadow = true;
+    tile.add(median);
+    const hedge = new THREE.Mesh(throughNS ? hedgeGeoNS : hedgeGeoEW, hedgeMat);
+    hedge.castShadow = true;
+    tile.add(hedge);
+  }
+  return tile;
 }
 
 /**

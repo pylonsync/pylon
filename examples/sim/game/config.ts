@@ -24,6 +24,7 @@ export const MAX_LEVEL = 3;
 /** Per-tile placement cost (charged from the shared treasury). */
 export const COST: Record<TileKind, number> = {
   road: 10,
+  avenue: 14,
   res: 20,
   com: 30,
   ind: 25,

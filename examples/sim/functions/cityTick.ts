@@ -47,7 +47,7 @@ export default mutation({
     const tiles = await ctx.db.list("Tile");
     const roadSet = new Set<string>();
     for (const t of tiles) {
-      if (t.kind === "road") roadSet.add(`${t.gx},${t.gz}`);
+      if (t.kind === "road" || t.kind === "avenue") roadSet.add(`${t.gx},${t.gz}`);
     }
     const served = (gx: number, gz: number) =>
       roadSet.has(`${gx + 1},${gz}`) ||

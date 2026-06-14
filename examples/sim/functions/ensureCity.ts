@@ -40,10 +40,15 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
   const density = 0.82 + rnd(5, 5) * 0.13; // fraction of road-served lots built
   const isRoad = (gx: number, gz: number) =>
     (gx - C) % spacing === 0 || (gz - C) % spacing === 0;
+  // Every third grid line is a major arterial (avenue); the rest are streets,
+  // so boulevards stay the minority — a clear hierarchy.
+  const av = spacing * 3;
+  const isAvenue = (gx: number, gz: number) =>
+    (gx - C) % av === 0 || (gz - C) % av === 0;
   for (let gx = C - R; gx <= C + R; gx++) {
     for (let gz = C - R; gz <= C + R; gz++) {
       if (isRoad(gx, gz)) {
-        set(gx, gz, "road", 0);
+        set(gx, gz, isAvenue(gx, gz) ? "avenue" : "road", 0);
         continue;
       }
       const adj =
