@@ -14,5 +14,5 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["app.ts", "app/**/*", "components/**/*", "lib/**/*"]
+  "include": ["app.ts", "app/**/*", "components/**/*", "lib/**/*", "functions/**/*"]
 }
