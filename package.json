@@ -20,7 +20,8 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "check": "turbo check",
-    "lint": "turbo lint"
+    "lint": "turbo lint",
+    "template:dev": "node packages/create-pylon/dev.mjs"
   },
   "overrides": {
     "@types/react": "^19.2.0",
