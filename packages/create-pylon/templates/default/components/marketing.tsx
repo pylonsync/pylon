@@ -150,15 +150,29 @@ export function Shot({ url, label }: { url: string; label: string }) {
   );
 }
 
-export function Portrait() {
+// Square media slot for a testimonial portrait. Renders the person's initials
+// on a soft gradient so it looks intentional out of the box — drop in a real
+// photo (an <img> here) when you have one.
+export function Portrait({ name }: { name?: string }) {
+  const initials = name
+    ? name
+        .split(/\s+/)
+        .map((w) => w[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : null;
   return (
-    <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100">
-      <div className="flex flex-col items-center gap-2 text-zinc-400">
-        <span className="flex size-12 items-center justify-center rounded-full border-2 border-dashed border-zinc-300 text-xl">
+    <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-100 to-zinc-200/80">
+      {initials ? (
+        <span className="select-none text-5xl font-semibold tracking-tight text-zinc-400">
+          {initials}
+        </span>
+      ) : (
+        <span className="flex size-12 items-center justify-center rounded-full border-2 border-dashed border-zinc-300 text-xl text-zinc-400">
           ◐
         </span>
-        <p className="text-xs">Portrait placeholder</p>
-      </div>
+      )}
     </div>
   );
 }
@@ -188,7 +202,6 @@ export function Terminal() {
           <p className="font-semibold">Run complete</p>
           <p className="mt-1 text-zinc-400">
             2 steps ran in 240ms — 1 notification sent, 3 subtasks closed.
-            [placeholder]
           </p>
         </div>
         <p className="text-zinc-500">▸ Trigger · on every status change</p>

@@ -1,7 +1,7 @@
 // Single source of truth for the marketing "products". The nav dropdown, the
 // homepage feature sections, and the /products/[slug] pages all read from here,
-// so a product is defined once. Add an entry and it shows up everywhere. All
-// placeholder copy — rename these to your real product modules.
+// so a product is defined once. Add an entry and it shows up everywhere.
+// Fictional demo copy — rename these to your real product modules.
 
 export type ProductFeature = { title: string; body: string };
 

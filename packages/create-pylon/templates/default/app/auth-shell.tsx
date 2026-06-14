@@ -54,10 +54,12 @@ export function AuthShell({
             plan, build, and ship without the busywork.
           </blockquote>
           <div className="mt-8 flex items-center gap-3">
-            <span className="size-10 rounded-full bg-zinc-200" />
+            <span className="flex size-10 items-center justify-center rounded-full bg-zinc-200 text-[13px] font-semibold text-zinc-500">
+              MC
+            </span>
             <div className="leading-tight">
               <div className="text-sm font-semibold text-zinc-900">
-                Placeholder Name
+                Maya Chen
               </div>
               <div className="text-[13px] text-zinc-500">
                 Head of Product, Northwind

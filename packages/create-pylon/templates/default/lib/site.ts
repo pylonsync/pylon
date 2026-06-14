@@ -1,6 +1,7 @@
 // Content for the rest of the marketing site — solutions, resources, company,
 // and comparison pages. Each collection drives a dynamic route AND the footer
-// columns, so the links and the pages can never drift. All placeholder copy.
+// columns, so the links and the pages can never drift. Fictional demo copy —
+// swap it for your own.
 
 export type ContentSection = { title: string; body: string };
 
@@ -74,7 +75,7 @@ export const RESOURCES: SitePage[] = [
     navLabel: "Docs",
     eyebrow: "Resources",
     title: "Documentation.",
-    summary: "Everything you need to set up Acme and get your team productive. [Placeholder — point this at your real docs.]",
+    summary: "Everything you need to set up Acme and get your team productive.",
     sections: [
       { title: "Getting started", body: "Create a workspace, invite your team, and ship your first project." },
       { title: "Guides", body: "Deep dives on projects, tasks, docs, automations, and analytics." },
@@ -86,7 +87,7 @@ export const RESOURCES: SitePage[] = [
     navLabel: "Guides",
     eyebrow: "Resources",
     title: "Guides and playbooks.",
-    summary: "Practical walkthroughs for getting the most out of Acme. [Placeholder content.]",
+    summary: "Practical walkthroughs for getting the most out of Acme.",
     sections: [
       { title: "Run a sprint", body: "Plan, track, and review a two-week cycle in Acme." },
       { title: "Automate intake", body: "Route incoming work to the right team automatically." },
@@ -98,7 +99,7 @@ export const RESOURCES: SitePage[] = [
     navLabel: "Changelog",
     eyebrow: "Resources",
     title: "What's new.",
-    summary: "Every improvement we ship, in one place. [Placeholder entries.]",
+    summary: "Every improvement we ship, in one place.",
     sections: [
       { title: "This week", body: "Faster search, a redesigned task list, and new automation triggers." },
       { title: "Last week", body: "Timeline view for projects and CSV export for analytics." },
@@ -110,7 +111,7 @@ export const RESOURCES: SitePage[] = [
     navLabel: "API reference",
     eyebrow: "Resources",
     title: "API reference.",
-    summary: "A typed REST API and webhooks for everything in Acme. [Placeholder — link your reference here.]",
+    summary: "A typed REST API and webhooks for everything in Acme.",
     sections: [
       { title: "Authentication", body: "API keys scoped to a workspace, revocable at any time." },
       { title: "Resources", body: "Projects, tasks, docs, and automations, all over the same API." },
@@ -122,7 +123,7 @@ export const RESOURCES: SitePage[] = [
     navLabel: "Status",
     eyebrow: "Resources",
     title: "System status.",
-    summary: "Live status for every Acme service. [Placeholder — wire this to your status provider.]",
+    summary: "Live status for every Acme service.",
     sections: [
       { title: "API", body: "Operational — 99.99% over the last 90 days." },
       { title: "Web app", body: "Operational — no incidents this week." },
@@ -137,7 +138,7 @@ export const COMPANY: SitePage[] = [
     navLabel: "About",
     eyebrow: "Company",
     title: "About Acme.",
-    summary: "We build the workspace we always wanted: fast, focused, and a pleasure to use. [Placeholder.]",
+    summary: "We build the workspace we always wanted: fast, focused, and a pleasure to use.",
     sections: [
       { title: "Our mission", body: "Help teams do their best work without fighting their tools." },
       { title: "How we work", body: "Small team, weekly releases, every decision close to the user." },
@@ -149,7 +150,7 @@ export const COMPANY: SitePage[] = [
     navLabel: "Blog",
     eyebrow: "Company",
     title: "The Acme blog.",
-    summary: "Notes on building Acme, and on building product in general. [Placeholder posts.]",
+    summary: "Notes on building Acme, and on building product in general.",
     sections: [
       { title: "Why one tool beats ten", body: "The hidden cost of stitching your stack together." },
       { title: "Shipping weekly", body: "How a small team keeps a steady release cadence." },
@@ -161,7 +162,7 @@ export const COMPANY: SitePage[] = [
     navLabel: "Careers",
     eyebrow: "Company",
     title: "Work at Acme.",
-    summary: "We are a small team that ships a lot. If that sounds good, come build with us. [Placeholder roles.]",
+    summary: "We are a small team that ships a lot. If that sounds good, come build with us.",
     sections: [
       { title: "Engineering", body: "Full-stack engineers who care about craft and speed." },
       { title: "Design", body: "Product designers who sweat the details." },
@@ -173,7 +174,7 @@ export const COMPANY: SitePage[] = [
     navLabel: "Contact",
     eyebrow: "Company",
     title: "Get in touch.",
-    summary: "Questions, feedback, or just want to say hi? We would love to hear from you. [Placeholder.]",
+    summary: "Questions, feedback, or just want to say hi? We would love to hear from you.",
     sections: [
       { title: "Sales", body: "Talk through whether Acme is a fit for your team." },
       { title: "Support", body: "Get help from a human, usually within a few hours." },
@@ -185,7 +186,7 @@ export const COMPANY: SitePage[] = [
     navLabel: "Privacy",
     eyebrow: "Company",
     title: "Privacy.",
-    summary: "How Acme handles your data, in plain language. [Placeholder — replace with your real policy.]",
+    summary: "How Acme handles your data, in plain language.",
     sections: [
       { title: "What we collect", body: "Only what we need to run the product and support you." },
       { title: "How we use it", body: "To operate Acme — never sold, never rented." },

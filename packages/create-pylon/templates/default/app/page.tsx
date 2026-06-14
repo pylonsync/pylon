@@ -74,7 +74,7 @@ export default function LandingPage({ auth }: PageProps) {
               <div
                 key={name}
                 className="flex items-center gap-2 text-zinc-400"
-                title="Logo placeholder"
+                title={name}
               >
                 <span className="size-5 rounded bg-zinc-200" />
                 <span className="text-[13px] font-semibold uppercase tracking-wide">
@@ -109,7 +109,7 @@ export default function LandingPage({ auth }: PageProps) {
       <Divider />
       <section className={`${WRAP} py-20`}>
         <div className="grid items-center gap-12 lg:grid-cols-[0.8fr_1.2fr]">
-          <Portrait />
+          <Portrait name="Maya Chen" />
           <figure>
             <div className="font-serif text-4xl leading-none text-brand">
               &ldquo;
@@ -120,7 +120,7 @@ export default function LandingPage({ auth }: PageProps) {
               the same direction.
             </blockquote>
             <figcaption className="mt-8 border-t border-zinc-200/70 pt-6">
-              <div className="text-sm font-semibold">Placeholder Name</div>
+              <div className="text-sm font-semibold">Maya Chen</div>
               <div className="text-sm text-zinc-500">
                 Head of Product, Northwind
               </div>
@@ -254,7 +254,9 @@ export default function LandingPage({ auth }: PageProps) {
                 &ldquo;{q.quote}&rdquo;
               </blockquote>
               <figcaption className="mt-6 flex items-center gap-3">
-                <span className="size-8 rounded-full bg-zinc-200" />
+                <span className="flex size-8 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-500">
+                  {initials(q.name)}
+                </span>
                 <div className="leading-tight">
                   <div className="text-[13px] font-semibold">{q.name}</div>
                   <div className="text-[12px] text-zinc-500">{q.role}</div>
@@ -465,8 +467,19 @@ function ProductSection({
   );
 }
 
+// Initials for the testimonial avatars, so the cards look finished without a
+// real photo. Drop in an <img> when you have one.
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
 /* ---------------------------------------------------------------- */
-/* Homepage-specific content (all placeholder — swap for your own)  */
+/* Homepage-specific content — fictional demo copy; swap for yours.  */
 /* ---------------------------------------------------------------- */
 
 const OUTCOMES = [
@@ -524,19 +537,19 @@ const QUOTES = [
   {
     quote:
       "We finally have one source of truth for the work. The whole team can see what is happening without a status meeting.",
-    name: "Placeholder Name",
+    name: "Daniel Reyes",
     role: "Founder, Globex",
   },
   {
     quote:
       "Acme noticeably improved how we plan. Instead of piecing together five tools, we have one hub for everything.",
-    name: "Placeholder Name",
+    name: "Priya Sharma",
     role: "Founder, OpenLane",
   },
   {
     quote:
       "Ever since we added Acme, people actually feel heard. It has helped us build a loyal community of users.",
-    name: "Placeholder Name",
+    name: "Marcus Bell",
     role: "Cofounder, Initech",
   },
 ];
@@ -623,18 +636,18 @@ const TEAM = [
 const FAQ = [
   {
     q: "Is Acme a fit for my team?",
-    a: "Acme works for any team that plans and ships work together — product, design, engineering, or ops. [Placeholder answer.]",
+    a: "Acme works for any team that plans and ships work together — product, design, engineering, or ops.",
   },
   {
     q: "What about migrating from another tool?",
-    a: "Import your existing projects and pick up where you left off. [Placeholder answer.]",
+    a: "Import your existing projects and pick up where you left off.",
   },
   {
     q: "Is there an API or a way to script this?",
-    a: "Yes — every action in Acme is available over a typed API and an MCP server. [Placeholder answer.]",
+    a: "Yes — every action in Acme is available over a typed API and an MCP server.",
   },
   {
     q: "Do you offer SSO?",
-    a: "SSO and audit logging are included on the Business plan. [Placeholder answer.]",
+    a: "SSO and audit logging are included on the Business plan.",
   },
 ];
