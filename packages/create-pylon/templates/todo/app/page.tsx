@@ -9,7 +9,7 @@ import { TodoApp } from "./todo-app";
 export const metadata: Metadata = {
   title: "__APP_NAME__ — a live Pylon todo",
   description:
-    "A server-rendered todo list with live, optimistic, per-user sync — one binary, one port. Open two tabs and watch them stay in sync.",
+    "A server-rendered todo list with live, optimistic, per-user sync. Open two tabs and watch them stay in sync.",
 };
 
 // `app/page.tsx` → `/`. The heading and intro are server-rendered (view

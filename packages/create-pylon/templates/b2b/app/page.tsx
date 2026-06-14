@@ -16,7 +16,7 @@ import {
 export const metadata: Metadata = {
   title: "__APP_NAME__ — full-stack Pylon app",
   description:
-    "A server-rendered homepage, email/password auth, and a live client dashboard over one synced backend — one binary, one port.",
+    "A server-rendered homepage, email/password auth, and a live client dashboard over one synced backend.",
 };
 
 // `app/page.tsx` → `/`. This page is server-rendered: view source and the copy
@@ -31,7 +31,7 @@ export default function IndexPage({ auth }: PageProps) {
     <div className="space-y-12">
       <section className="space-y-5">
         <span className="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground">
-          Server-rendered · authenticated · synced · one port
+          Server-rendered · authenticated · synced
         </span>
         <h1 className="text-4xl font-semibold tracking-tight">
           Full-stack apps, one binary.

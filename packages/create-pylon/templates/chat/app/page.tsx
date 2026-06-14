@@ -5,7 +5,7 @@ import { ChatRoom } from "./chat-client";
 export const metadata: Metadata = {
   title: "__APP_NAME__ — realtime chat on Pylon",
   description:
-    "A live chat room over one Pylon backend — one binary, one port. Open two tabs and watch messages sync instantly.",
+    "A live chat room over one Pylon backend. Open two tabs and watch messages sync instantly.",
 };
 
 // `app/page.tsx` → `/`. The header is server-rendered; `<ChatRoom>` is a client

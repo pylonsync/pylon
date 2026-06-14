@@ -63,7 +63,7 @@ export default function RootLayout({ children, auth }: LayoutProps) {
         </header>
         <main className="mx-auto max-w-3xl px-4 py-10">{children}</main>
         <footer className="border-t py-6 text-center text-xs text-muted-foreground">
-          Rendered by Pylon · one server, one port
+          Rendered by Pylon
         </footer>
       </body>
     </html>

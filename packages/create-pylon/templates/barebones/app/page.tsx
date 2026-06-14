@@ -5,7 +5,7 @@ import { ItemList } from "./items-client";
 export const metadata: Metadata = {
   title: "__APP_NAME__ — a minimal Pylon app",
   description:
-    "One entity, a live list, and an optimistic create — server-rendered over one Pylon backend, one binary, one port.",
+    "One entity, a live list, and an optimistic create — server-rendered over one Pylon backend.",
 };
 
 // `app/page.tsx` → `/`. The heading is server-rendered; the list is a client

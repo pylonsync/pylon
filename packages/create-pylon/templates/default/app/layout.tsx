@@ -67,8 +67,7 @@ export default function RootLayout({ children, auth }: LayoutProps) {
                 className="font-medium text-foreground hover:underline"
               >
                 Pylon
-              </a>{" "}
-              · one binary, one port
+              </a>
             </span>
           </div>
         </footer>

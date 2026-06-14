@@ -5,7 +5,7 @@ import { Feed } from "./feed-client";
 export const metadata: Metadata = {
   title: "__APP_NAME__ — a live social feed on Pylon",
   description:
-    "A public feed with optimistic posts and likes, server-rendered over one Pylon backend. One binary, one port. Open two tabs and watch it sync.",
+    "A public feed with optimistic posts and likes, server-rendered over one Pylon backend. Open two tabs and watch it sync.",
 };
 
 // `app/page.tsx` → `/`. The intro is server-rendered; `<Feed>` is a client
