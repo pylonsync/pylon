@@ -3,14 +3,23 @@
 import React from "react";
 import { Link } from "@pylonsync/react";
 import { useAuth, OrganizationSwitcher } from "@pylonsync/client";
+import {
+  LayoutDashboard,
+  FolderKanban,
+  Users,
+  Settings as SettingsIcon,
+  LogOut,
+  ExternalLink,
+  type LucideIcon,
+} from "lucide-react";
 
 type NavKey = "overview" | "projects" | "members" | "settings";
 
-const NAV: { key: NavKey; label: string; href: string; icon: string }[] = [
-  { key: "overview", label: "Overview", href: "/dashboard", icon: "▦" },
-  { key: "projects", label: "Projects", href: "/dashboard/projects", icon: "▤" },
-  { key: "members", label: "Members", href: "/dashboard/members", icon: "◍" },
-  { key: "settings", label: "Settings", href: "/dashboard/settings", icon: "⚙" },
+const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
+  { key: "overview", label: "Overview", href: "/dashboard", Icon: LayoutDashboard },
+  { key: "projects", label: "Projects", href: "/dashboard/projects", Icon: FolderKanban },
+  { key: "members", label: "Members", href: "/dashboard/members", Icon: Users },
+  { key: "settings", label: "Settings", href: "/dashboard/settings", Icon: SettingsIcon },
 ];
 
 // Dashboard chrome: a fixed sidebar (logo, workspace switcher, nav) plus a top
@@ -22,11 +31,15 @@ export function DashboardShell({
   active,
   title,
   userEmail,
+  orgName,
   children,
 }: {
   active: NavKey;
   title: string;
   userEmail: string;
+  // Active org name, resolved on the server, so the workspace switcher renders
+  // the real name on first paint instead of flashing in after hydration.
+  orgName?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -42,27 +55,40 @@ export function DashboardShell({
         </div>
 
         <div className="px-3 py-3">
-          <OrganizationSwitcher />
+          {/* Every view's data (projects, members, settings) is resolved
+              server-side for the active tenant, so switching orgs does a full
+              navigation to re-render the dashboard for the new workspace —
+              otherwise the page would keep showing the previous org's data. */}
+          <OrganizationSwitcher
+            initialActiveName={orgName}
+            onSwitched={() => window.location.assign("/dashboard")}
+          />
         </div>
 
         <nav className="flex-1 space-y-0.5 px-3">
-          {NAV.map((n) => (
-            <Link
-              key={n.key}
-              href={n.href}
-              className={
-                "flex items-center gap-2.5 rounded-md px-3 py-2 text-[13.5px] font-medium transition-colors " +
-                (active === n.key
-                  ? "bg-zinc-900 text-white"
-                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900")
-              }
-            >
-              <span className="w-4 text-center text-[12px] opacity-80">
-                {n.icon}
-              </span>
-              {n.label}
-            </Link>
-          ))}
+          {NAV.map((n) => {
+            const isActive = active === n.key;
+            return (
+              <Link
+                key={n.key}
+                href={n.href}
+                className={
+                  "flex items-center gap-2.5 rounded-md px-3 py-2 text-[13.5px] font-medium transition-colors " +
+                  (isActive
+                    ? "bg-zinc-900 text-white"
+                    : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900")
+                }
+              >
+                <n.Icon
+                  className={
+                    "size-[17px] " + (isActive ? "text-white" : "text-zinc-400")
+                  }
+                  strokeWidth={2}
+                />
+                {n.label}
+              </Link>
+            );
+          })}
         </nav>
       </aside>
 
@@ -102,15 +128,17 @@ function UserMenu({ email }: { email: string }) {
         </div>
         <a
           href="/"
-          className="block px-3 py-2 text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
+          className="flex items-center gap-2 px-3 py-2 text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
         >
+          <ExternalLink className="size-4 text-zinc-400" strokeWidth={2} />
           View site
         </a>
         <button
           type="button"
           onClick={onSignOut}
-          className="block w-full px-3 py-2 text-left text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
         >
+          <LogOut className="size-4 text-zinc-400" strokeWidth={2} />
           Sign out
         </button>
       </div>

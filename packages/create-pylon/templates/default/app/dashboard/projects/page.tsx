@@ -20,9 +20,17 @@ export default function ProjectsPage({
     return null;
   }
   const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
+  const org = auth.tenant_id
+    ? use(serverData.get<{ name?: string }>("Org", auth.tenant_id))
+    : null;
   const projects = use(serverData.list<Project>("Project"));
   return (
-    <DashboardShell active="projects" title="Projects" userEmail={me?.email ?? ""}>
+    <DashboardShell
+      active="projects"
+      title="Projects"
+      userEmail={me?.email ?? ""}
+      orgName={org?.name}
+    >
       <Projects tenantId={auth.tenant_id} initial={projects} />
     </DashboardShell>
   );

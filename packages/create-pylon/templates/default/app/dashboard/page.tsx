@@ -1,7 +1,7 @@
 import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
 import { DashboardShell } from "@/components/dashboard-shell";
-import { Overview, type Project } from "./dashboard-client";
+import { Overview, type Project, type OrgMemberRow } from "./dashboard-client";
 
 export const metadata: Metadata = {
   title: "Dashboard — Acme",
@@ -24,14 +24,25 @@ export default function DashboardPage({
     return null;
   }
   const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
+  const org = auth.tenant_id
+    ? use(serverData.get<{ name?: string }>("Org", auth.tenant_id))
+    : null;
   const projects = use(serverData.list<Project>("Project"));
-  const members = use(serverData.list("OrgMember"));
+  const members = use(serverData.list<OrgMemberRow>("OrgMember"));
+  // The OrgMember read policy returns this user's memberships across every org,
+  // so scope the count to the active workspace.
+  const memberCount = members.filter((m) => m.orgId === auth.tenant_id).length;
   return (
-    <DashboardShell active="overview" title="Overview" userEmail={me?.email ?? ""}>
+    <DashboardShell
+      active="overview"
+      title="Overview"
+      userEmail={me?.email ?? ""}
+      orgName={org?.name}
+    >
       <Overview
         tenantId={auth.tenant_id}
         projects={projects}
-        memberCount={members.length}
+        memberCount={memberCount}
       />
     </DashboardShell>
   );
